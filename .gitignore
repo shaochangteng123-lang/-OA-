@@ -1,0 +1,31 @@
+﻿# 渚濊禆
+node_modules/
+package-lock.json
+
+# 鏋勫缓浜х墿
+dist/
+*.log
+
+# 鐜鍙橀噺
+.env
+.env.local
+.env.production
+
+# 鏁版嵁鏂囦欢
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 澶囦唤
+backup/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 绯荤粺鏂囦欢
+.DS_Store
+Thumbs.db

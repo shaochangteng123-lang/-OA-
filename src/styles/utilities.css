@@ -1,0 +1,402 @@
+/* ========================================================================
+   Utility Classes
+   YULI Design System 工具类
+   ======================================================================== */
+
+/* ========== 页面基础布局 ========== */
+
+.yl-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--yl-gap-lg);
+}
+
+.yl-page-container {
+  max-width: 1920px;
+  margin: 0 auto;
+  padding: var(--yl-padding-lg);
+  background: var(--yl-bg-page);
+  min-height: calc(100vh - 64px);
+}
+
+.yl-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--yl-margin-lg);
+}
+
+.yl-page-title {
+  display: flex;
+  align-items: center;
+  gap: var(--yl-gap-sm);
+}
+
+.yl-page-title h1 {
+  font-size: var(--yl-font-size-h1);
+  font-weight: var(--yl-font-weight-semibold);
+  color: var(--yl-text-primary);
+  margin: 0;
+}
+
+.yl-page-actions {
+  display: flex;
+  gap: var(--yl-gap-sm);
+  align-items: center;
+}
+
+.yl-page-body {
+  background: transparent;
+}
+
+/* ========== 卡片样式 ========== */
+
+.yl-card {
+  border: 1px solid var(--yl-border-light);
+  border-radius: var(--yl-radius-base);
+  padding: var(--yl-padding-lg);
+  background: var(--yl-bg-container);
+  box-shadow: var(--yl-shadow-base);
+  transition: all var(--yl-transition-fast) var(--yl-ease-out);
+}
+
+.yl-card:hover {
+  border-color: var(--yl-primary-light-5);
+  transform: translateY(-2px);
+  box-shadow: var(--yl-shadow-medium);
+}
+
+.yl-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: var(--yl-font-weight-semibold);
+  color: var(--yl-text-primary);
+}
+
+.yl-card-actions {
+  display: flex;
+  gap: var(--yl-gap-sm);
+}
+
+/* ========== 网格布局 ========== */
+
+.yl-grid {
+  display: grid;
+  gap: var(--yl-gap-lg);
+}
+
+.yl-grid-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.yl-grid-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.yl-grid-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.yl-grid-auto {
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+
+/* ========== 文本样式 ========== */
+
+.yl-text-primary {
+  color: var(--yl-text-primary);
+}
+
+.yl-text-regular {
+  color: var(--yl-text-regular);
+}
+
+.yl-text-secondary {
+  color: var(--yl-text-secondary);
+}
+
+.yl-text-placeholder {
+  color: var(--yl-text-placeholder);
+}
+
+.yl-text-disabled {
+  color: var(--yl-text-disabled);
+}
+
+.yl-text-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.yl-text-ellipsis-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.yl-text-ellipsis-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+/* ========== 间距工具类 ========== */
+
+.yl-mt-xs { margin-top: var(--yl-margin-xs); }
+.yl-mt-sm { margin-top: var(--yl-margin-sm); }
+.yl-mt-md { margin-top: var(--yl-margin-md); }
+.yl-mt-lg { margin-top: var(--yl-margin-lg); }
+.yl-mt-xl { margin-top: var(--yl-margin-xl); }
+
+.yl-mb-xs { margin-bottom: var(--yl-margin-xs); }
+.yl-mb-sm { margin-bottom: var(--yl-margin-sm); }
+.yl-mb-md { margin-bottom: var(--yl-margin-md); }
+.yl-mb-lg { margin-bottom: var(--yl-margin-lg); }
+.yl-mb-xl { margin-bottom: var(--yl-margin-xl); }
+
+.yl-pt-xs { padding-top: var(--yl-padding-xs); }
+.yl-pt-sm { padding-top: var(--yl-padding-sm); }
+.yl-pt-md { padding-top: var(--yl-padding-md); }
+.yl-pt-lg { padding-top: var(--yl-padding-lg); }
+.yl-pt-xl { padding-top: var(--yl-padding-xl); }
+
+.yl-pb-xs { padding-bottom: var(--yl-padding-xs); }
+.yl-pb-sm { padding-bottom: var(--yl-padding-sm); }
+.yl-pb-md { padding-bottom: var(--yl-padding-md); }
+.yl-pb-lg { padding-bottom: var(--yl-padding-lg); }
+.yl-pb-xl { padding-bottom: var(--yl-padding-xl); }
+
+/* ========== Flexbox 工具类 ========== */
+
+.yl-flex {
+  display: flex;
+}
+
+.yl-flex-column {
+  display: flex;
+  flex-direction: column;
+}
+
+.yl-flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.yl-flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.yl-flex-gap-xs { gap: var(--yl-gap-xs); }
+.yl-flex-gap-sm { gap: var(--yl-gap-sm); }
+.yl-flex-gap-md { gap: var(--yl-gap-md); }
+.yl-flex-gap-lg { gap: var(--yl-gap-lg); }
+
+/* ========== 加载状态 ========== */
+
+.yl-loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--yl-gap-sm);
+  padding: var(--yl-padding-xl) 0;
+  color: var(--yl-text-secondary);
+}
+
+/* ========== 空状态 ========== */
+
+.yl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--yl-padding-2xl);
+  color: var(--yl-text-secondary);
+}
+
+.yl-empty-icon {
+  font-size: 64px;
+  color: var(--yl-text-placeholder);
+  margin-bottom: var(--yl-margin-md);
+}
+
+.yl-empty-text {
+  color: var(--yl-text-secondary);
+  font-size: var(--yl-font-size-base);
+}
+
+/* ========== 分隔线样式 ========== */
+
+.yl-section-divider {
+  margin: var(--yl-margin-xl) 0;
+  border: none;
+  border-top: 1px solid var(--yl-border-lighter);
+}
+
+/* ========== 表单提示 ========== */
+
+.yl-form-tip {
+  font-size: var(--yl-font-size-small);
+  color: var(--yl-text-placeholder);
+  line-height: 1.5;
+  margin-top: var(--yl-margin-xs);
+}
+
+/* ========== 统计信息 ========== */
+
+.yl-stats-card {
+  margin-bottom: var(--yl-margin-lg);
+  border: 1px solid var(--yl-border-light);
+}
+
+.yl-stats-container {
+  display: flex;
+  align-items: center;
+  gap: var(--yl-gap-lg);
+}
+
+.yl-stat-item {
+  display: flex;
+  align-items: center;
+  gap: var(--yl-gap-xs);
+}
+
+.yl-stat-value {
+  font-size: var(--yl-font-size-h3);
+  font-weight: var(--yl-font-weight-semibold);
+  color: var(--yl-primary);
+}
+
+/* ========== 信息框样式 ========== */
+
+.yl-info-box {
+  background-color: var(--yl-bg-hover);
+  border-radius: var(--yl-radius-sm);
+  padding: var(--yl-padding-md);
+  margin-top: var(--yl-margin-md);
+}
+
+.yl-info-item {
+  display: flex;
+  align-items: center;
+  gap: var(--yl-gap-xs);
+  margin-bottom: var(--yl-margin-xs);
+}
+
+.yl-info-item:last-child {
+  margin-bottom: 0;
+}
+
+/* ========== 电话号码样式 ========== */
+
+.yl-phone {
+  color: var(--yl-text-secondary);
+  font-family: var(--yl-font-family-mono);
+  margin-left: var(--yl-margin-xs);
+}
+
+/* ========== 用户信息 ========== */
+
+.yl-user-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--yl-gap-sm);
+}
+
+.yl-user-name {
+  font-weight: var(--yl-font-weight-medium);
+  color: var(--yl-text-primary);
+}
+
+/* ========== 动画类 ========== */
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--yl-transition-base) var(--yl-ease-in-out),
+              transform var(--yl-transition-base) var(--yl-ease-out);
+}
+
+.fade-enter-from {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(-20px);
+}
+
+.slide-up-enter-active,
+.slide-up-leave-active {
+  transition: all var(--yl-transition-base) var(--yl-ease-out);
+}
+
+.slide-up-enter-from {
+  transform: translateY(20px);
+  opacity: 0;
+}
+
+.slide-up-leave-to {
+  transform: translateY(-20px);
+  opacity: 0;
+}
+
+/* ========== 无障碍 ========== */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+:focus-visible {
+  outline: 2px solid var(--yl-primary);
+  outline-offset: 2px;
+  border-radius: var(--yl-radius-sm);
+}
+
+/* ========== 响应式工具类 ========== */
+
+@media (max-width: 768px) {
+  .yl-page-container {
+    padding: var(--yl-padding-md);
+  }
+
+  .yl-page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--yl-gap-md);
+  }
+
+  .yl-grid-2,
+  .yl-grid-3,
+  .yl-grid-4 {
+    grid-template-columns: 1fr;
+  }
+
+  .yl-flex-between {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--yl-gap-md);
+  }
+}
+
+@media (max-width: 1024px) {
+  .yl-grid-3,
+  .yl-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

@@ -1,0 +1,94 @@
+# ============================================
+# YuliLog 工作日志系统 - Docker Compose 配置
+# ============================================
+# 适用于移动硬盘多PC协同开发的生产环境
+# ============================================
+# 使用方法：
+#   首次启动：docker compose up -d --build
+#   后续启动：docker compose up -d
+#   查看日志：docker compose logs -f
+#   停止服务：docker compose down
+#   重新构建：docker compose build --no-cache
+# ============================================
+
+services:
+  yulilog:
+    # 容器名称
+    container_name: yulilog-app
+
+    # 构建配置
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 构建参数（可选）
+      args:
+        - NODE_ENV=production
+        # 使用官方镜像
+        - NODE_IMAGE=node:20-alpine
+
+    # 镜像名称（便于管理）
+    image: yulilog:latest
+
+    # 端口映射
+    ports:
+      - "${HOST_PORT:-8899}:8899"
+
+    # 环境变量文件
+    env_file:
+      - .env.production
+
+    # 环境变量（覆盖/补充）
+    environment:
+      - NODE_ENV=production
+      - PORT=8899
+      - DATABASE_PATH=/app/data/worklog.db
+      - TZ=Asia/Shanghai
+
+    # 数据持久化
+    volumes:
+      # SQLite 数据库持久化（相对路径，适配移动硬盘）
+      - ./data:/app/data
+
+    # 重启策略
+    restart: unless-stopped
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8899/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        labels: "service"
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # 安全配置
+    security_opt:
+      - no-new-privileges:true
+
+    # 只读根文件系统（数据目录除外）
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+
+# 网络配置
+networks:
+  default:
+    name: yulilog-network
+    driver: bridge

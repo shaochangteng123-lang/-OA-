@@ -1,0 +1,31 @@
+/* Sidebar Theme Styles */
+/* 侧边栏主题样式 */
+
+.sidebar {
+  background-color: var(--el-bg-color);
+  transition: all 0.3s ease;
+}
+
+.sidebar-menu {
+  border-right: 1px solid var(--el-border-color-light);
+}
+
+.sidebar-menu .el-menu-item {
+  transition: all 0.3s ease;
+}
+
+.sidebar-menu .el-menu-item:hover {
+  background-color: var(--el-fill-color-light);
+}
+
+.sidebar-menu .el-menu-item.is-active {
+  background-color: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 500;
+}
+
+/* Dark mode adjustments */
+html.dark .sidebar {
+  background-color: var(--el-bg-color);
+  border-right: 1px solid var(--el-border-color);
+}

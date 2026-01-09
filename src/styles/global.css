@@ -1,0 +1,400 @@
+/* ========================================================================
+   YuliLog 工作日志系统全局样式
+   YULI Design System
+   ======================================================================== */
+
+/* 导入 YULI 设计系统 */
+@import './variables.css';
+@import './element-overrides.css';
+@import './utilities.css';
+
+/* ========== 全局重置 ========== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--yl-font-family);
+  font-size: var(--yl-font-size-base);
+  line-height: var(--yl-line-height-base);
+  color: var(--yl-text-regular);
+  background: var(--yl-bg-page);
+  min-height: 100vh;
+}
+
+/* ========== 滚动条美化 ========== */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: var(--yl-radius-sm);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: var(--yl-radius-pill);
+  transition: background var(--yl-transition-fast);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* Firefox 滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+}
+
+/* ========== 选择文本样式 ========== */
+
+::selection {
+  background-color: var(--yl-primary-light-5);
+  color: white;
+}
+
+::-moz-selection {
+  background-color: var(--yl-primary-light-5);
+  color: white;
+}
+
+/* ========== 基础排版 ========== */
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: var(--yl-font-weight-semibold);
+  color: var(--yl-text-primary);
+  line-height: var(--yl-line-height-tight);
+}
+
+h1 {
+  font-size: var(--yl-font-size-h1);
+  margin-bottom: var(--yl-margin-lg);
+}
+
+h2 {
+  font-size: var(--yl-font-size-h2);
+  margin-bottom: var(--yl-margin-md);
+}
+
+h3 {
+  font-size: var(--yl-font-size-h3);
+  margin-bottom: var(--yl-margin-sm);
+}
+
+h4 {
+  font-size: var(--yl-font-size-h4);
+  margin-bottom: var(--yl-margin-sm);
+}
+
+p {
+  margin-bottom: var(--yl-margin-md);
+  line-height: var(--yl-line-height-base);
+}
+
+a {
+  color: var(--yl-primary);
+  text-decoration: none;
+  transition: color var(--yl-transition-fast);
+}
+
+a:hover {
+  color: var(--yl-primary-light-1);
+}
+
+a:active {
+  color: var(--yl-primary-dark-1);
+}
+
+code {
+  font-family: var(--yl-font-family-mono);
+  padding: 2px 6px;
+  border-radius: var(--yl-radius-sm);
+  background-color: var(--yl-bg-hover);
+  color: var(--yl-danger);
+  font-size: 0.9em;
+}
+
+pre {
+  font-family: var(--yl-font-family-mono);
+  padding: var(--yl-padding-md);
+  border-radius: var(--yl-radius-base);
+  background-color: var(--yl-bg-hover);
+  overflow-x: auto;
+  margin-bottom: var(--yl-margin-md);
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--yl-border-lighter);
+  margin: var(--yl-margin-lg) 0;
+}
+
+/* ========== 标签颜色增强 ========== */
+
+.el-tag--primary {
+  background-color: var(--yl-primary-light-9);
+  color: var(--yl-primary);
+  border-color: var(--yl-primary-light-7);
+}
+
+.el-tag--success {
+  background-color: var(--yl-success-light-9);
+  color: var(--yl-success);
+  border-color: var(--yl-success-light-3);
+}
+
+.el-tag--warning {
+  background-color: var(--yl-warning-light-9);
+  color: var(--yl-warning);
+  border-color: var(--yl-warning-light-3);
+}
+
+.el-tag--danger {
+  background-color: var(--yl-danger-light-9);
+  color: var(--yl-danger);
+  border-color: var(--yl-danger-light-3);
+}
+
+.el-tag--info {
+  background-color: var(--yl-info-light-9);
+  color: var(--yl-info);
+  border-color: var(--yl-info-light-3);
+}
+
+/* ========== 通用卡片样式 ========== */
+
+.card-hover {
+  transition: all var(--yl-transition-fast) var(--yl-ease-out);
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--yl-shadow-medium);
+}
+
+/* ========== Loading 样式增强 ========== */
+
+.el-loading-mask {
+  background-color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(4px);
+}
+
+/* ========== Message/Notification 样式 ========== */
+
+.el-message {
+  min-width: 320px;
+  border-radius: var(--yl-radius-base);
+  box-shadow: var(--yl-shadow-medium);
+}
+
+.el-notification {
+  border-radius: var(--yl-radius-base);
+  box-shadow: var(--yl-shadow-heavy);
+}
+
+/* ========== 表单增强 ========== */
+
+.el-form--label-top .el-form-item__label {
+  margin-bottom: var(--yl-margin-xs);
+}
+
+.el-form-item {
+  margin-bottom: var(--yl-margin-lg);
+}
+
+.el-form-item__error {
+  font-size: var(--yl-font-size-small);
+  padding-top: var(--yl-padding-xs);
+}
+
+/* ========== 表格增强 ========== */
+
+.el-table--striped .el-table__body tr.el-table__row--striped {
+  background-color: var(--yl-bg-hover);
+}
+
+.el-table .cell {
+  padding: var(--yl-padding-sm) 0;
+}
+
+/* ========== 下拉菜单增强 ========== */
+
+.el-popper {
+  border-radius: var(--yl-radius-base);
+}
+
+.el-select-dropdown {
+  border-radius: var(--yl-radius-base);
+  box-shadow: var(--yl-shadow-medium);
+}
+
+.el-select-dropdown__item {
+  transition: all var(--yl-transition-fast);
+}
+
+.el-select-dropdown__item.hover {
+  background-color: var(--yl-bg-hover);
+}
+
+/* ========== 日期选择器增强 ========== */
+
+.el-date-table td.today .el-date-table-cell__text {
+  color: var(--yl-primary);
+  font-weight: var(--yl-font-weight-semibold);
+}
+
+.el-date-table td.in-range .el-date-table-cell {
+  background-color: var(--yl-primary-light-9);
+}
+
+.el-date-table td.start-date .el-date-table-cell,
+.el-date-table td.end-date .el-date-table-cell {
+  background-color: var(--yl-primary);
+  color: white;
+}
+
+/* ========== Drawer 抽屉增强 ========== */
+
+.el-drawer {
+  backdrop-filter: blur(4px);
+}
+
+.el-drawer__header {
+  margin-bottom: 0;
+  padding-bottom: var(--yl-padding-lg);
+  border-bottom: 1px solid var(--yl-border-light);
+}
+
+/* ========== 响应式调整 ========== */
+
+@media (max-width: 1024px) {
+  html {
+    font-size: 13px;
+  }
+
+  .el-dialog {
+    width: 90% !important;
+    margin-top: 5vh !important;
+  }
+}
+
+@media (max-width: 768px) {
+  html {
+    font-size: 12px;
+  }
+
+  .el-dialog {
+    width: 95% !important;
+    margin: 0 auto !important;
+  }
+
+  .el-drawer {
+    width: 90% !important;
+  }
+
+  .el-message-box {
+    width: 90% !important;
+  }
+}
+
+/* ========== 打印样式 ========== */
+
+@media print {
+  body {
+    background: white;
+  }
+
+  .el-header,
+  .el-aside,
+  .el-button,
+  .el-pagination {
+    display: none !important;
+  }
+
+  .el-card {
+    box-shadow: none;
+    border: 1px solid #ddd;
+  }
+}
+
+/* ========== 深色模式支持 (预留) ========== */
+
+@media (prefers-color-scheme: dark) {
+  /* 未来可以在这里添加深色模式样式 */
+}
+
+/* ========== 动画关键帧 ========== */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn var(--yl-transition-base) var(--yl-ease-out);
+}
+
+.animate-slide-in {
+  animation: slideIn var(--yl-transition-base) var(--yl-ease-out);
+}
+
+.animate-scale-in {
+  animation: scaleIn var(--yl-transition-base) var(--yl-ease-out);
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}

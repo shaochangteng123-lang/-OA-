@@ -1,0 +1,233 @@
+/* ========================================================================
+   YULI Design System - CSS Variables
+   YuliLog 工作日志管理系统设计规范
+   ======================================================================== */
+
+:root {
+  /* ========== 色彩系统 ========== */
+
+  /* 主色 - 商务蓝 */
+  --yl-primary: #2c5aa0;
+  --yl-primary-light-1: #3d6bb0;
+  --yl-primary-light-2: #4e7cc0;
+  --yl-primary-light-3: #5f8dd0;
+  --yl-primary-light-5: #81aee0;
+  --yl-primary-light-7: #a3cfe0;
+  --yl-primary-light-9: #e8f3f8;
+  --yl-primary-dark-1: #254b88;
+  --yl-primary-dark-2: #1e3c70;
+
+  /* 辅助色 */
+  --yl-success: #52a566;
+  --yl-success-light-3: #73b683;
+  --yl-success-light-9: #e8f5eb;
+  --yl-warning: #d9944e;
+  --yl-warning-light-3: #e3a86e;
+  --yl-warning-light-9: #faf3eb;
+  --yl-danger: #c9524d;
+  --yl-danger-light-3: #d76e69;
+  --yl-danger-light-9: #fceeed;
+  --yl-info: #6b7785;
+  --yl-info-light-3: #8690a0;
+  --yl-info-light-9: #eff1f4;
+
+  /* 文本色 */
+  --yl-text-primary: #1a1a1a;
+  --yl-text-regular: #3d3d3d;
+  --yl-text-secondary: #6b6b6b;
+  --yl-text-placeholder: #a8a8a8;
+  --yl-text-disabled: #c5c5c5;
+
+  /* 边框色 */
+  --yl-border-base: #dcdfe6;
+  --yl-border-light: #e8eaed;
+  --yl-border-lighter: #f0f1f3;
+  --yl-border-extra-light: #f7f8f9;
+
+  /* 背景色 */
+  --yl-bg-page: #f5f6f8;
+  --yl-bg-container: #ffffff;
+  --yl-bg-overlay: rgba(0, 0, 0, 0.6);
+  --yl-bg-hover: #f7f8fa;
+  --yl-bg-active: #eef0f3;
+
+  /* ========== 字体系统 ========== */
+
+  --yl-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+                    "Helvetica Neue", Arial, sans-serif;
+  --yl-font-family-mono: "SF Mono", Monaco, "Cascadia Code",
+                         "Roboto Mono", Consolas, "Courier New", monospace;
+
+  /* 字号 */
+  --yl-font-size-extra-small: 12px;
+  --yl-font-size-small: 13px;
+  --yl-font-size-base: 14px;
+  --yl-font-size-large: 16px;
+  --yl-font-size-extra-large: 18px;
+  --yl-font-size-h4: 16px;
+  --yl-font-size-h3: 18px;
+  --yl-font-size-h2: 20px;
+  --yl-font-size-h1: 24px;
+
+  /* 字重 */
+  --yl-font-weight-regular: 400;
+  --yl-font-weight-medium: 500;
+  --yl-font-weight-semibold: 600;
+  --yl-font-weight-bold: 700;
+
+  /* 行高 */
+  --yl-line-height-tight: 1.4;
+  --yl-line-height-base: 1.6;
+  --yl-line-height-loose: 1.8;
+
+  /* 字间距 */
+  --yl-letter-spacing-base: 0;
+  --yl-letter-spacing-wide: 0.05em;
+
+  /* ========== 间距系统 ========== */
+
+  --yl-spacing-base: 8px;
+  --yl-padding-xs: 4px;
+  --yl-padding-sm: 8px;
+  --yl-padding-md: 16px;
+  --yl-padding-lg: 24px;
+  --yl-padding-xl: 32px;
+  --yl-padding-2xl: 48px;
+  --yl-margin-xs: 4px;
+  --yl-margin-sm: 8px;
+  --yl-margin-md: 16px;
+  --yl-margin-lg: 24px;
+  --yl-margin-xl: 32px;
+  --yl-margin-2xl: 48px;
+  --yl-gap-xs: 4px;
+  --yl-gap-sm: 8px;
+  --yl-gap-md: 16px;
+  --yl-gap-lg: 24px;
+  --yl-gap-xl: 32px;
+
+  /* ========== 圆角系统 ========== */
+
+  --yl-radius-none: 0;
+  --yl-radius-sm: 4px;
+  --yl-radius-base: 8px;
+  --yl-radius-lg: 12px;
+  --yl-radius-xl: 16px;
+  --yl-radius-2xl: 24px;
+  --yl-radius-round: 50%;
+  --yl-radius-pill: 9999px;
+
+  /* ========== 阴影系统 ========== */
+
+  --yl-shadow-light: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --yl-shadow-base: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --yl-shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.12);
+  --yl-shadow-heavy: 0 8px 32px rgba(0, 0, 0, 0.16);
+  --yl-shadow-floating: 0 6px 24px rgba(44, 90, 160, 0.15);
+  --yl-shadow-inset: inset 0 1px 3px rgba(0, 0, 0, 0.05);
+
+  /* ========== 动画系统 ========== */
+
+  --yl-transition-fast: 150ms;
+  --yl-transition-base: 250ms;
+  --yl-transition-slow: 400ms;
+  --yl-ease-in: cubic-bezier(0.55, 0.055, 0.675, 0.19);
+  --yl-ease-out: cubic-bezier(0.215, 0.61, 0.355, 1);
+  --yl-ease-in-out: cubic-bezier(0.645, 0.045, 0.355, 1);
+  --yl-ease-bounce: cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+  /* ========== 断点系统 ========== */
+
+  --yl-breakpoint-xs: 480px;
+  --yl-breakpoint-sm: 768px;
+  --yl-breakpoint-md: 1024px;
+  --yl-breakpoint-lg: 1440px;
+  --yl-breakpoint-xl: 1920px;
+
+  /* ========== 图标尺寸 ========== */
+
+  --yl-icon-size-xs: 12px;
+  --yl-icon-size-sm: 14px;
+  --yl-icon-size-base: 16px;
+  --yl-icon-size-lg: 20px;
+  --yl-icon-size-xl: 24px;
+}
+
+/* ========== Element Plus 主题覆盖 ========== */
+
+:root {
+  --el-color-primary: var(--yl-primary);
+  --el-color-primary-light-3: var(--yl-primary-light-3);
+  --el-color-primary-light-5: var(--yl-primary-light-5);
+  --el-color-primary-light-7: var(--yl-primary-light-7);
+  --el-color-primary-light-9: var(--yl-primary-light-9);
+  --el-color-primary-dark-2: var(--yl-primary-dark-1);
+
+  --el-color-success: var(--yl-success);
+  --el-color-success-light-3: var(--yl-success-light-3);
+  --el-color-success-light-9: var(--yl-success-light-9);
+
+  --el-color-warning: var(--yl-warning);
+  --el-color-warning-light-3: var(--yl-warning-light-3);
+  --el-color-warning-light-9: var(--yl-warning-light-9);
+
+  --el-color-danger: var(--yl-danger);
+  --el-color-danger-light-3: var(--yl-danger-light-3);
+  --el-color-danger-light-9: var(--yl-danger-light-9);
+
+  --el-color-info: var(--yl-info);
+  --el-color-info-light-3: var(--yl-info-light-3);
+  --el-color-info-light-9: var(--yl-info-light-9);
+
+  --el-text-color-primary: var(--yl-text-primary);
+  --el-text-color-regular: var(--yl-text-regular);
+  --el-text-color-secondary: var(--yl-text-secondary);
+  --el-text-color-placeholder: var(--yl-text-placeholder);
+  --el-text-color-disabled: var(--yl-text-disabled);
+
+  --el-border-color: var(--yl-border-base);
+  --el-border-color-light: var(--yl-border-light);
+  --el-border-color-lighter: var(--yl-border-lighter);
+  --el-border-color-extra-light: var(--yl-border-extra-light);
+
+  --el-bg-color: var(--yl-bg-container);
+  --el-bg-color-page: var(--yl-bg-page);
+  --el-bg-color-overlay: var(--yl-bg-overlay);
+
+  --el-border-radius-base: var(--yl-radius-sm);
+  --el-border-radius-small: var(--yl-radius-sm);
+  --el-border-radius-round: var(--yl-radius-pill);
+  --el-border-radius-circle: var(--yl-radius-round);
+
+  --el-font-size-base: var(--yl-font-size-base);
+  --el-font-size-small: var(--yl-font-size-small);
+  --el-font-size-large: var(--yl-font-size-large);
+  --el-font-size-extra-small: var(--yl-font-size-extra-small);
+
+  --el-transition-duration: var(--yl-transition-base);
+  --el-transition-duration-fast: var(--yl-transition-fast);
+
+  --el-box-shadow-light: var(--yl-shadow-light);
+  --el-box-shadow: var(--yl-shadow-base);
+  --el-box-shadow-dark: var(--yl-shadow-medium);
+}
+
+/* ========== 响应式字号调整 ========== */
+
+@media (max-width: 1024px) {
+  :root {
+    --yl-font-size-base: 13px;
+    --yl-font-size-h1: 22px;
+    --yl-font-size-h2: 18px;
+    --yl-font-size-h3: 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  :root {
+    --yl-font-size-base: 12px;
+    --yl-font-size-h1: 20px;
+    --yl-font-size-h2: 16px;
+    --yl-font-size-h3: 14px;
+  }
+}
