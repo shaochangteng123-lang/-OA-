@@ -1,23 +1,24 @@
-﻿# 渚濊禆
+# 依赖
 node_modules/
 package-lock.json
 
-# 鏋勫缓浜х墿
+# 构建产物
 dist/
 *.log
 
-# 鐜鍙橀噺
+# 环境变量
 .env
 .env.local
 .env.production
+.env.*.local
 
-# 鏁版嵁鏂囦欢
+# 数据库文件
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 
-# 澶囦唤
+# 备份
 backup/
 
 # IDE
@@ -25,7 +26,32 @@ backup/
 .idea/
 *.swp
 *.swo
+*.sublime-project
+*.sublime-workspace
 
-# 绯荤粺鏂囦欢
+# 系统文件
 .DS_Store
 Thumbs.db
+*.tmp
+*.temp# 缓存
+.vite-cache/
+.cache/
+*.cache# 测试覆盖率
+coverage/
+.nyc_output/
+
+# Docker
+.dockerignore
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*# 临时文件
+tmp/
+temp/
+*.bak
+*.backup# 配置文件（敏感信息）
+*.local.json
+.claude/

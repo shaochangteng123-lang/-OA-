@@ -172,7 +172,8 @@ router.put('/events/:id', requireAuth, (req, res) => {
     db.prepare(`
       UPDATE calendar_events
       SET title = ?, description = ?, start_time = ?, end_time = ?, all_day = ?,
-          location = ?, color = ?, reminder_minutes = ?, recurrence_rule = ?, updated_at = ?
+          location = ?, color = ?, reminder_minutes = ?, recurrence_rule = ?,
+          updated_at = ?
       WHERE id = ? AND user_id = ?
     `).run(
       title,

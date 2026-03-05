@@ -18,6 +18,9 @@ export interface CalendarEvent {
   createdAt?: string
   updatedAt?: string
 
+  // 提醒设置
+  reminderMinutes?: number | null // 提醒提前分钟数
+
   // 重复规则
   recurrenceRule?: string // RRule 格式
   recurrenceException?: string[] // 例外日期

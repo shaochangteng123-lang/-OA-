@@ -17,5 +17,5 @@
     }
   },
   "include": ["server/**/*.ts"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "server/create-user-*.ts", "server/update-user-*.ts"]
 }

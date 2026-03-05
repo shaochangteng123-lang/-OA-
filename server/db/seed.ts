@@ -13,26 +13,9 @@ export function seedDatabase() {
 
   const now = new Date().toISOString()
 
-  // 1. 插入默认超级管理员���用于开发测试）
-  const adminId = nanoid()
-  db.prepare(`
-    INSERT INTO users (id, feishu_open_id, feishu_union_id, name, email, avatar_url, role, status, created_at, updated_at, last_login_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    adminId,
-    'mock_test_user_fixed_id',
-    'mock_union_id',
-    '系统管理员',
-    'admin@example.com',
-    '',
-    'super_admin',
-    'active',
-    now,
-    now,
-    now
-  )
-
-  console.log('👤 已创建默认超级管理员')
+  // 1. 不再自动插入默认管理员
+  // 请使用 npm run create:admin 命令创建管理员账号
+  console.log('ℹ️  跳过默认管理员创建（请使用 npm run create:admin 创建）')
 
   // 2. 插入政府部门数据
   const departments = [
@@ -84,7 +67,7 @@ export function seedDatabase() {
     { name: '水土保持方案审批', type: '行政许可', level: 2, duration: 20 },
     { name: '节能评估审查', type: '行政确认', level: 2, duration: 15 },
     { name: '地震安全性评价审查', type: '行政确认', level: 2, duration: 20 },
-    { name: '防洪评价审批', type: '行政许可', level: 2, duration: 25 },
+    { name: '防洪评价审批', type: '行��许可', level: 2, duration: 25 },
     { name: '河道管理范围内建设项目审批', type: '行政许可', level: 2, duration: 15 },
     { name: '占用林地审批', type: '行政许可', level: 2, duration: 30 },
     { name: '绿化工程设计方案审查', type: '行政确认', level: 2, duration: 15 },

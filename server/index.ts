@@ -3,9 +3,11 @@ import express from 'express'
 import cors from 'cors'
 import session from 'express-session'
 import path from 'path'
+import fs from 'fs'
 import { fileURLToPath } from 'url'
 import { initDatabase } from './db/index.js'
 import { seedDatabase } from './db/seed.js'
+import { initNotionClient } from './services/notion.js'
 import betterSqlite3SessionStore from 'better-sqlite3-session-store'
 import Database from 'better-sqlite3'
 
@@ -22,6 +24,10 @@ import departmentsRoutes from './routes/departments.js'
 import draftsRoutes from './routes/drafts.js'
 import userPreferencesRoutes from './routes/user-preferences.js'
 import holidaysRoutes from './routes/holidays.js'
+import reimbursementRoutes from './routes/reimbursement.js'
+import approvalRoutes from './routes/approval.js'
+import employeesRoutes from './routes/employees.js'
+import probationRoutes from './routes/probation.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -34,6 +40,10 @@ const NODE_ENV = process.env.NODE_ENV || 'development'
 console.log('Initializing database...')
 initDatabase()
 seedDatabase()
+
+// Initialize Notion client
+console.log('Initializing Notion client...')
+initNotionClient()
 
 // Configure session store
 const SqliteStore = betterSqlite3SessionStore(session)
@@ -50,6 +60,13 @@ app.use(
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 
+// 静态文件服务 - 用于访问上传的发票文件
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
+
+// Cookie 配置：针对开发环境和无痕模式优化
+const isProduction = NODE_ENV === 'production'
+const isLocalhost = process.env.FRONTEND_URL?.includes('localhost') || !process.env.FRONTEND_URL
+
 app.use(
   session({
     store: new SqliteStore({
@@ -63,11 +80,16 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      // Only require HTTPS in production when not on localhost
-      secure: NODE_ENV === 'production' && !process.env.FRONTEND_URL?.includes('localhost'),
+      // 开发环境或 localhost：不使用 secure，允许 HTTP
+      // 生产环境且非 localhost：使用 secure，要求 HTTPS
+      secure: isProduction && !isLocalhost,
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
-      sameSite: 'lax', // Allows cookie to be sent on redirects from external sites (like Feishu)
+      // 开发环境使用 'lax' 以支持无痕模式
+      // 生产环境使用 'lax' 以支持飞书 OAuth 重定向
+      sameSite: 'lax' as const,
+      // 开发环境：设置域名以支持无痕模式
+      ...(isLocalhost && !isProduction ? { domain: undefined } : {}),
     },
   })
 )
@@ -85,6 +107,10 @@ app.use('/api/departments', departmentsRoutes)
 app.use('/api/drafts', draftsRoutes)
 app.use('/api/user-preferences', userPreferencesRoutes)
 app.use('/api/holidays', holidaysRoutes)
+app.use('/api/reimbursement', reimbursementRoutes)
+app.use('/api/approval', approvalRoutes)
+app.use('/api/employees', employeesRoutes)
+app.use('/api/probation', probationRoutes)
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -94,6 +120,34 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     environment: NODE_ENV,
   })
+})
+
+// Video download endpoint
+app.get('/api/videos/:filename', (req, res) => {
+  const filename = req.params.filename
+  // 防止路径遍历攻击
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ success: false, message: 'Invalid filename' })
+  }
+  
+  // 在开发环境和生产环境中都支持
+  const videosPath = NODE_ENV === 'production' 
+    ? path.join(__dirname, '..', '..', 'videos')  // 生产环境: /app/dist/server -> /app/videos
+    : path.join(process.cwd(), 'videos')  // 开发环境: 项目根目录/videos
+  
+  const filePath = path.join(videosPath, filename)
+  
+  // 检查文件是否存在
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ success: false, message: 'Video not found' })
+  }
+  
+  // 设置下载头
+  res.setHeader('Content-Type', 'video/mp4')
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+  
+  // 发送文件
+  res.sendFile(path.resolve(filePath))
 })
 
 // Serve static files in production

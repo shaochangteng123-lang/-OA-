@@ -13,18 +13,48 @@
 
       <div class="login-content">
         <h2 class="login-title">欢迎登录</h2>
-        <p class="login-subtitle">使用飞书账号登录</p>
+        <p class="login-subtitle">请使用账号密码登录</p>
 
-        <el-button
-          type="primary"
-          size="large"
-          :loading="loading"
-          class="login-button"
-          @click="handleFeishuLogin"
+        <el-form
+          ref="loginFormRef"
+          :model="loginForm"
+          :rules="loginRules"
+          label-width="0"
+          @submit.prevent="handleLogin"
         >
-          <el-icon class="button-icon"><Connection /></el-icon>
-          <span>飞书登录</span>
-        </el-button>
+          <el-form-item prop="username">
+            <el-input
+              v-model="loginForm.username"
+              placeholder="用户名"
+              size="large"
+              :prefix-icon="User"
+              autocomplete="username"
+            />
+          </el-form-item>
+
+          <el-form-item prop="password">
+            <el-input
+              v-model="loginForm.password"
+              type="password"
+              placeholder="密码"
+              size="large"
+              :prefix-icon="Lock"
+              show-password
+              autocomplete="current-password"
+              @keyup.enter="handleLogin"
+            />
+          </el-form-item>
+
+          <el-button
+            type="primary"
+            size="large"
+            :loading="loading"
+            class="login-button"
+            @click="handleLogin"
+          >
+            登录
+          </el-button>
+        </el-form>
 
         <div v-if="error" class="error-message">
           <el-alert :title="error" type="error" :closable="false" />
@@ -45,18 +75,72 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { Connection } from '@element-plus/icons-vue'
+import { User, Lock } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { api } from '@/utils/api'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 
+const loginFormRef = ref<FormInstance>()
 const loading = ref(false)
 const error = ref('')
+
+// 登录表单
+const loginForm = reactive({
+  username: '',
+  password: '',
+})
+
+// 表单验证规则
+const loginRules: FormRules = {
+  username: [
+    { required: true, message: '请输入用户名', trigger: 'blur' },
+    { min: 3, message: '用户名至少3个字符', trigger: 'blur' },
+  ],
+  password: [
+    { required: true, message: '请输入密码', trigger: 'blur' },
+    { min: 6, message: '密码至少6个字符', trigger: 'blur' },
+  ],
+}
+
+// 账号密码登录
+async function handleLogin() {
+  if (!loginFormRef.value) return
+
+  try {
+    await loginFormRef.value.validate()
+  } catch {
+    return
+  }
+
+  try {
+    loading.value = true
+    error.value = ''
+
+    const response = await api.post('/api/auth/login', {
+      username: loginForm.username,
+      password: loginForm.password,
+    })
+
+    if (response.data.success) {
+      ElMessage.success('登录成功')
+      await authStore.checkSession()
+      const redirect = (route.query.redirect as string) || '/'
+      router.push(redirect)
+    }
+  } catch (err: any) {
+    error.value = err.response?.data?.message || '登录失败，请检查用户名和密码'
+    ElMessage.error(error.value)
+  } finally {
+    loading.value = false
+  }
+}
 
 // 检查是否已登录
 onMounted(async () => {
@@ -77,32 +161,6 @@ onMounted(async () => {
     router.push(redirect)
   }
 })
-
-// 飞书登录
-function handleFeishuLogin() {
-  try {
-    loading.value = true
-    error.value = ''
-
-    // 构建飞书OAuth登录URL
-    const state = Math.random().toString(36).substring(7)
-
-    // 保存state到sessionStorage用于验证
-    sessionStorage.setItem('feishu_oauth_state', state)
-
-    // 跳转到飞书授权页面
-    const feishuAuthUrl = `/api/auth/login?redirect=${encodeURIComponent(
-      (route.query.redirect as string) || '/'
-    )}`
-
-    window.location.href = feishuAuthUrl
-  } catch (err) {
-    loading.value = false
-    error.value = '登录失败，请重试'
-    console.error('飞书登录失败:', err)
-    ElMessage.error('登录失败，请重试')
-  }
-}
 </script>
 
 <style scoped>
@@ -192,14 +250,11 @@ function handleFeishuLogin() {
   border-radius: 8px;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   border: none;
+  margin-top: 8px;
 }
 
 .login-button:hover {
   background: linear-gradient(135deg, #5568d3 0%, #65408b 100%);
-}
-
-.button-icon {
-  margin-right: 8px;
 }
 
 .error-message {
@@ -293,5 +348,15 @@ function handleFeishuLogin() {
   .login-content {
     padding: 30px 20px;
   }
+}
+
+/* 表单样式调整 */
+:deep(.el-input__wrapper) {
+  border-radius: 8px;
+  height: 48px;
+}
+
+:deep(.el-form-item) {
+  margin-bottom: 20px;
 }
 </style>

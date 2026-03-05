@@ -135,8 +135,11 @@ onMounted(() => loadBlocks())
 </script>
 
 <style scoped>
+/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .blocks-container {
-  height: 100%;
+  height: calc(100vh - 60px);
+  margin: -24px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;

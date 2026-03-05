@@ -1,7 +1,9 @@
 import express from 'express'
 import { db } from '../db/index.js'
-import { requireAuth } from '../middleware/auth.js'
+import { nanoid } from 'nanoid'
+import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import type { UserRow, UserActivityRow } from '../types/database.js'
+import { hashPassword, validatePasswordStrength, validateUsername } from '../utils/password.js'
 
 const router = express.Router()
 
@@ -78,6 +80,7 @@ router.get('/', requireAuth, (req, res) => {
     // 转换数据格式，移除敏感信息
     const result = users.map((user) => ({
       id: user.id,
+      username: user.username,
       name: user.name,
       email: user.email,
       mobile: user.mobile,
@@ -86,6 +89,10 @@ router.get('/', requireAuth, (req, res) => {
       status: user.status,
       department: user.department,
       position: user.position,
+      bankAccountName: user.bank_account_name,
+      bankAccountPhone: user.bank_account_phone,
+      bankName: user.bank_name,
+      bankAccountNumber: user.bank_account_number,
       createdAt: user.created_at,
       updatedAt: user.updated_at,
       lastLoginAt: user.last_login_at,
@@ -107,7 +114,7 @@ router.get('/', requireAuth, (req, res) => {
 // 更新用户信息
 router.post('/', requireAuth, (req, res) => {
   try {
-    const { id, role, status, department, position } = req.body
+    const { id, username, name, role, status, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
     const now = new Date().toISOString()
 
     if (!id) {
@@ -117,7 +124,7 @@ router.post('/', requireAuth, (req, res) => {
       })
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id)
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined
 
     if (!user) {
       return res.status(404).json({
@@ -126,13 +133,62 @@ router.post('/', requireAuth, (req, res) => {
       })
     }
 
+    // 如果要修改用户名，验证格式并检查是否重复
+    if (username && username !== user.username) {
+      const usernameValidation = validateUsername(username)
+      if (!usernameValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          message: usernameValidation.message,
+        })
+      }
+
+      const existingUser = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, id)
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: '用户名已被使用',
+        })
+      }
+    }
+
+    // 验证银行卡信息格式（如果提供）
+    if (bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: '收款人手机号格式不正确',
+      })
+    }
+
+    if (bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: '银行卡号格式不正确（16-19位数字）',
+      })
+    }
+
     db.prepare(
       `
       UPDATE users
-      SET role = ?, status = ?, department = ?, position = ?, updated_at = ?
+      SET username = ?, name = ?, role = ?, status = ?, department = ?, position = ?,
+          bank_account_name = ?, bank_account_phone = ?, bank_name = ?, bank_account_number = ?,
+          updated_at = ?
       WHERE id = ?
     `
-    ).run(role, status, department || null, position || null, now, id)
+    ).run(
+      username || user.username,
+      name || user.name,
+      role,
+      status,
+      department || null,
+      position || null,
+      bankAccountName || user.bank_account_name || null,
+      bankAccountPhone || user.bank_account_phone || null,
+      bankName || user.bank_name || null,
+      bankAccountNumber || user.bank_account_number || null,
+      now,
+      id
+    )
 
     res.json({
       success: true,
@@ -182,6 +238,269 @@ router.get('/activities', requireAuth, (req, res) => {
     res.status(500).json({
       success: false,
       message: '获取用户活动失败',
+    })
+  }
+})
+
+// 创建新用户（管理员可用）
+router.post('/create', requireAdmin, async (req, res) => {
+  try {
+    const { username, password, email, mobile, role, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
+
+    // 验证必填字段
+    if (!username || !password || !mobile || !department || !position) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名、密码、手机号、部门、职位为必填项',
+      })
+    }
+
+    // 验证银行信息必填
+    if (!bankAccountName || !bankAccountPhone || !bankName || !bankAccountNumber) {
+      return res.status(400).json({
+        success: false,
+        message: '收款人姓名、手机号、开户行、银行卡号为必填项',
+      })
+    }
+
+    // 验证密码强度
+    const passwordValidation = validatePasswordStrength(password)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordValidation.message,
+      })
+    }
+
+    // 验证手机号格式（必须11位）
+    if (!/^1[3-9]\d{9}$/.test(mobile)) {
+      return res.status(400).json({
+        success: false,
+        message: '手机号格式不正确',
+      })
+    }
+
+    // 验证收款人手机号格式
+    if (!/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: '收款人手机号格式不正确',
+      })
+    }
+
+    // 验证银行卡号格式（16-19位数字）
+    if (!/^\d{16,19}$/.test(bankAccountNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: '银行卡号格式不正确（16-19位数字）',
+      })
+    }
+
+    // 验证邮箱格式（如果提供）
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: '邮箱格式不正确',
+      })
+    }
+
+    // 检查用户名是否已存在
+    const existingUser = db.prepare('SELECT id FROM users WHERE username = ?').get(username)
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: '用户名已存在',
+      })
+    }
+
+    // 检查手机号是否已存在
+    const existingMobile = db.prepare('SELECT id FROM users WHERE mobile = ?').get(mobile)
+    if (existingMobile) {
+      return res.status(400).json({
+        success: false,
+        message: '手机号已被使用',
+      })
+    }
+
+    // 验证角色
+    const validRoles = ['admin', 'user', 'guest']
+    if (role && !validRoles.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: '无效的角色，可选值：admin, user, guest',
+      })
+    }
+
+    // 创建用户（用户名即为显示名称）
+    const userId = nanoid()
+    const passwordHash = await hashPassword(password)
+    const now = new Date().toISOString()
+
+    db.prepare(`
+      INSERT INTO users (id, username, password_hash, name, email, mobile, role, status, department, position, bank_account_name, bank_account_phone, bank_name, bank_account_number, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      userId,
+      username,
+      passwordHash,
+      username, // name 使用 username 的值
+      email || null,
+      mobile,
+      role || 'user',
+      department,
+      position,
+      bankAccountName,
+      bankAccountPhone,
+      bankName,
+      bankAccountNumber,
+      now,
+      now
+    )
+
+    console.log('✅ 创建用户成功:', { userId, username, role: role || 'user' })
+
+    res.json({
+      success: true,
+      data: {
+        id: userId,
+        username,
+        name: username,
+        email,
+        mobile,
+        role: role || 'user',
+      },
+      message: '用户创建成功',
+    })
+  } catch (error) {
+    console.error('❌ 创建用户失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '创建用户失败',
+    })
+  }
+})
+
+// 删除用户（管理员可用）
+router.delete('/:id', requireAdmin, (req, res) => {
+  try {
+    const { id } = req.params
+    const currentUserId = req.session?.userId
+
+    // 不能删除自己
+    if (id === currentUserId) {
+      return res.status(400).json({
+        success: false,
+        message: '不能删除当前登录的账号',
+      })
+    }
+
+    // 检查用户是否存在
+    const user = db.prepare('SELECT id, name, role FROM users WHERE id = ?').get(id) as { id: string; name: string; role: string } | undefined
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在',
+      })
+    }
+
+    // 不能删除超级管理员
+    if (user.role === 'super_admin') {
+      return res.status(400).json({
+        success: false,
+        message: '不能删除超级管理员账号',
+      })
+    }
+
+    // 使用事务删除用户及其关联数据
+    const deleteTransaction = db.transaction(() => {
+      // 删除用户的关联数据
+      db.prepare('DELETE FROM user_preferences WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM user_activities WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM drafts WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM calendar_events WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM worklogs WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM projects WHERE user_id = ?').run(id)
+      db.prepare('DELETE FROM reimbursements WHERE user_id = ?').run(id)
+
+      // 删除审批相关数据
+      // 先获取该用户作为申请人的审批实例ID
+      const approvalInstances = db.prepare('SELECT id FROM approval_instances WHERE applicant_id = ?').all(id) as Array<{ id: string }>
+      for (const instance of approvalInstances) {
+        db.prepare('DELETE FROM approval_records WHERE instance_id = ?').run(instance.id)
+      }
+      db.prepare('DELETE FROM approval_instances WHERE applicant_id = ?').run(id)
+
+      // 删除该用户作为审批人的记录
+      db.prepare('DELETE FROM approval_records WHERE approver_id = ?').run(id)
+
+      // 最后删除用户
+      db.prepare('DELETE FROM users WHERE id = ?').run(id)
+    })
+
+    deleteTransaction()
+
+    console.log('✅ 删除用户成功:', { userId: id, userName: user.name })
+
+    res.json({
+      success: true,
+      message: '用户删除成功',
+    })
+  } catch (error) {
+    console.error('❌ 删除用户失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '删除用户失败',
+    })
+  }
+})
+
+// 重置用户密码（管理员可用）
+router.post('/:id/reset-password', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { newPassword } = req.body
+
+    // 验证密码
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入新密码',
+      })
+    }
+
+    const passwordValidation = validatePasswordStrength(newPassword)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordValidation.message,
+      })
+    }
+
+    // 检查用户是否存在
+    const user = db.prepare('SELECT id, name FROM users WHERE id = ?').get(id) as { id: string; name: string } | undefined
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在',
+      })
+    }
+
+    // 更新密码
+    const passwordHash = await hashPassword(newPassword)
+    const now = new Date().toISOString()
+    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(passwordHash, now, id)
+
+    console.log('✅ 重置密码成功:', { userId: id, userName: user.name })
+
+    res.json({
+      success: true,
+      message: '密码重置成功',
+    })
+  } catch (error) {
+    console.error('❌ 重置密码失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '重置密码失败',
     })
   }
 })

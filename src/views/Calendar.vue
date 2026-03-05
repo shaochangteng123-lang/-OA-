@@ -467,14 +467,15 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-/* 优化模块35：日历容器高度填满可用空间
-   计算：100vh - 60px(顶栏) - 24px(上padding) - 24px(下padding) = 100vh - 108px
-   注：MainLayout.vue 中 .app-main 有 margin-top: 60px 和 padding: 24px */
+/* 日历容器高度填满可用空间
+   计算：100vh - 60px(顶栏) = 100vh - 60px
+   使用负 margin 抵消 MainLayout 的 padding */
 .calendar-container {
   display: flex;
-  height: calc(100vh - 108px);
+  height: calc(100vh - 60px);
   overflow: hidden;
   position: relative;
+  margin: -24px;
 }
 
 /* 左栏侧边栏（优化模块22：背景改为白色） */

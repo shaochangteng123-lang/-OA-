@@ -1,159 +1,68 @@
+/**
+ * 认证路由
+ * 账号密码登录系统
+ */
+
 import { Router } from 'express'
 import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import type { User } from '../types/database.js'
-import { getAccessTokenByCode, getUserInfo } from '../services/feishu.js'
-import { readFileSync } from 'fs'
-import { join } from 'path'
+import { verifyPassword, hashPassword, validatePasswordStrength } from '../utils/password.js'
+import { requireAuth } from '../middleware/auth.js'
 
 const router = Router()
 
-// 加载管理员配置
-function loadAdminConfig() {
+// 账号密码登录
+router.post('/login', async (req, res) => {
   try {
-    const configPath = join(process.cwd(), 'server', 'config', 'admins.json')
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'))
-    return {
-      superAdmins: (config.superAdmins || []).map((admin: { name: string }) => admin.name),
-      admins: (config.admins || []).map((admin: { name: string }) => admin.name),
-    }
-  } catch (error) {
-    console.error('❌ 加载管理员配置失败:', error)
-    return { superAdmins: [], admins: [] }
-  }
-}
+    const { username, password } = req.body
 
-// 根据用户名确定角色
-function determineUserRole(userName: string): string {
-  const adminConfig = loadAdminConfig()
-  
-  if (adminConfig.superAdmins.includes(userName)) {
-    return 'super_admin'
-  }
-  if (adminConfig.admins.includes(userName)) {
-    return 'admin'
-  }
-  return 'user'
-}
-
-// 飞书登录
-router.get('/login', (req, res) => {
-  const { redirect } = req.query
-  const redirectUri = process.env.FEISHU_REDIRECT_URI || ''
-
-  console.log('🔐 飞书登录请求:', {
-    appId: process.env.FEISHU_APP_ID,
-    redirectUri,
-    state: redirect || '/'
-  })
-
-  // 构建飞书OAuth URL - redirect_uri 不编码,直接使用
-  const feishuAuthUrl = `https://open.feishu.cn/open-apis/authen/v1/index?app_id=${process.env.FEISHU_APP_ID}&redirect_uri=${redirectUri}&state=${redirect || '/'}`
-
-  console.log('🔗 重定向到飞书:', feishuAuthUrl)
-  res.redirect(feishuAuthUrl)
-})
-
-// 飞书回调
-router.get('/callback', async (req, res) => {
-  try {
-    const { code, state } = req.query
-    console.log('🔐 登录回调:', { code: !!code, state })
-
-    if (!code) {
-      console.error('❌ 缺少授权码')
-      return res.redirect('/?error=no_code')
+    // 验证输入
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入用户名和密码',
+      })
     }
 
-    // 使用code换取access_token
-    let accessToken: string
-    try {
-      accessToken = await getAccessTokenByCode(code as string)
-      console.log('✅ 获取访问令牌成功')
-    } catch (error) {
-      console.error('❌ 获取访问令牌失败:', error)
-      return res.redirect('/?error=token_failed')
+    // 查找用户
+    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as User | undefined
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: '用户名或密码错误',
+      })
     }
 
-    // 获取用户信息
-    let feishuUser: { open_id: string; union_id: string; name: string; email: string; avatar_url: string }
-    try {
-      feishuUser = await getUserInfo(accessToken)
-      console.log('✅ 获取用户信息成功:', feishuUser.name)
-    } catch (error) {
-      console.error('❌ 获取用户信息失败:', error)
-      return res.redirect('/?error=user_info_failed')
+    // 检查用户状态
+    if (user.status !== 'active') {
+      return res.status(403).json({
+        success: false,
+        message: '账号已被禁用，请联系管理员',
+      })
     }
 
-    // 确定用户角色
-    const userRole = determineUserRole(feishuUser.name)
-    console.log(`👤 用户角色: ${userRole}`)
+    // 检查是否设置了密码
+    if (!user.password_hash) {
+      return res.status(401).json({
+        success: false,
+        message: '账号未设置密码，请联系管理员重置密码',
+      })
+    }
 
-    // 查找或创建用户
-    let user = db.prepare('SELECT * FROM users WHERE feishu_open_id = ?').get(feishuUser.open_id) as User | undefined
+    // 验证密码
+    const isPasswordValid = await verifyPassword(password, user.password_hash)
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: '用户名或密码错误',
+      })
+    }
+
+    // 更新最后登录时间
     const now = new Date().toISOString()
-
-    if (!user) {
-      const userId = nanoid()
-      console.log('👤 创建新用户:', feishuUser.name)
-
-      db.prepare(`
-        INSERT INTO users (id, feishu_open_id, feishu_union_id, name, email, avatar_url, role, status, created_at, updated_at, last_login_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        userId,
-        feishuUser.open_id,
-        feishuUser.union_id,
-        feishuUser.name,
-        feishuUser.email,
-        feishuUser.avatar_url,
-        userRole,
-        'active',
-        now,
-        now,
-        now
-      )
-
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as User | undefined
-    } else {
-      console.log('👤 用户已存在:', user.name)
-      
-      // 更新用户信息和角色（根据配置文件）
-      const adminConfig = loadAdminConfig()
-      let newRole = userRole
-      
-      // 如果配置文件中的角色有变化，更新角色
-      if (adminConfig.superAdmins.includes(feishuUser.name) && user.role !== 'super_admin') {
-        newRole = 'super_admin'
-      } else if (adminConfig.admins.includes(feishuUser.name) && user.role !== 'admin') {
-        newRole = 'admin'
-      } else if (!adminConfig.superAdmins.includes(feishuUser.name) && !adminConfig.admins.includes(feishuUser.name) && user.role !== 'user') {
-        newRole = 'user'
-      }
-
-      // 更新用户信息
-      db.prepare(`
-        UPDATE users 
-        SET name = ?, email = ?, avatar_url = ?, role = ?, updated_at = ?, last_login_at = ?
-        WHERE id = ?
-      `).run(
-        feishuUser.name,
-        feishuUser.email,
-        feishuUser.avatar_url,
-        newRole,
-        now,
-        now,
-        user.id
-      )
-
-      // 重新获取用户信息
-      user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as User | undefined
-    }
-
-    if (!user) {
-      console.error('❌ 用户创建失败')
-      return res.status(500).json({ success: false, message: '用户创建失败' })
-    }
+    db.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(now, now, user.id)
 
     // 设置session
     if (req.session) {
@@ -167,26 +76,114 @@ router.get('/callback', async (req, res) => {
         role: user.role,
       }
 
-      // 强制保存 session
+      // 保存session
       await new Promise<void>((resolve, reject) => {
         req.session.save((err) => {
           if (err) {
             console.error('❌ Session 保存失败:', err)
             reject(err)
           } else {
-            console.log('✅ Session 已保存:', { userId: user?.id, userName: user?.name })
+            console.log('✅ 登录成功:', { userId: user.id, userName: user.name, role: user.role })
             resolve()
           }
         })
       })
     }
 
-    const redirectUrl = (state as string) || '/'
-    console.log('🔄 重定向到:', redirectUrl)
-    res.redirect(redirectUrl)
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          avatar_url: user.avatar_url,
+          role: user.role,
+        },
+      },
+      message: '登录成功',
+    })
   } catch (error) {
-    console.error('❌ 登录回调失败:', error)
-    res.redirect('/?error=callback_failed')
+    console.error('❌ 登录失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '登录失败，请稍后重试',
+    })
+  }
+})
+
+// 修改密码
+router.post('/change-password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body
+    const userId = req.session?.userId
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: '未登录',
+      })
+    }
+
+    // 验证输入
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: '请输入当前密码和新密码',
+      })
+    }
+
+    // 验证新密码强度
+    const passwordValidation = validatePasswordStrength(newPassword)
+    if (!passwordValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        message: passwordValidation.message,
+      })
+    }
+
+    // 获取用户
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as User | undefined
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在',
+      })
+    }
+
+    // 验证当前密码
+    if (!user.password_hash) {
+      return res.status(400).json({
+        success: false,
+        message: '账号未设置密码',
+      })
+    }
+
+    const isCurrentPasswordValid = await verifyPassword(currentPassword, user.password_hash)
+    if (!isCurrentPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: '当前密码错误',
+      })
+    }
+
+    // 更新密码
+    const newPasswordHash = await hashPassword(newPassword)
+    const now = new Date().toISOString()
+    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(newPasswordHash, now, userId)
+
+    console.log('✅ 密码修改成功:', { userId, userName: user.name })
+
+    res.json({
+      success: true,
+      message: '密码修改成功',
+    })
+  } catch (error) {
+    console.error('❌ 修改密码失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '修改密码失败，请稍后重试',
+    })
   }
 })
 

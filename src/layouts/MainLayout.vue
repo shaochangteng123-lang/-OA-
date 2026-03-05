@@ -17,9 +17,9 @@
       <!-- 导航菜单 -->
       <el-scrollbar class="sidebar-menu-scrollbar">
         <nav class="sidebar-menu">
-          <!-- 工作区 -->
+          <!-- 办公区 -->
           <SidebarGroup
-            title="工作区"
+            title="办公区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
           >
@@ -46,6 +46,96 @@
             />
           </SidebarGroup>
 
+          <!-- 财务区 -->
+          <SidebarGroup
+            title="财务区"
+            :title-collapsed="!groupTitlesVisible"
+            :sidebar-collapsed="sidebarCollapsed"
+          >
+            <SidebarMenuItem
+              path="/basic-reimbursement"
+              label="基础报销"
+              :icon="Money"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="基础报销"
+            />
+            <SidebarMenuItem
+              path="/large-reimbursement"
+              label="大额报销"
+              :icon="Wallet"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="大额报销"
+            />
+            <SidebarMenuItem
+              path="/business-reimbursement"
+              label="商务报销"
+              :icon="Briefcase"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="商务报销"
+            />
+            <SidebarMenuItem
+              path="/reimbursement-statistics"
+              label="报销统计"
+              :icon="DataAnalysis"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="报销统计"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin"
+              path="/approval"
+              label="审批中心"
+              :icon="Stamp"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="审批中心"
+              :badge="pendingApprovalCount > 0 ? pendingApprovalCount : undefined"
+              badge-type="danger"
+            />
+          </SidebarGroup>
+
+          <!-- 人力资源 -->
+          <SidebarGroup
+            title="人力资源"
+            :title-collapsed="!groupTitlesVisible"
+            :sidebar-collapsed="sidebarCollapsed"
+          >
+            <SidebarMenuItem
+              path="/onboarding"
+              label="入职"
+              :icon="Promotion"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="入职"
+            />
+            <SidebarMenuItem
+              path="/probation"
+              label="转正"
+              :icon="UserFilled"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="转正"
+            />
+            <SidebarMenuItem
+              path="/resignation"
+              label="离职"
+              :icon="SwitchButton"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="离职"
+            />
+            <SidebarMenuItem
+              path="/leave"
+              label="请假"
+              :icon="Clock"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="请假"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin"
+              path="/employee-data"
+              label="员工数据"
+              :icon="List"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="员工数据"
+            />
+          </SidebarGroup>
+
           <!-- 项目区 -->
           <SidebarGroup
             title="项目区"
@@ -58,6 +148,27 @@
               :icon="FolderOpened"
               :collapsed="sidebarCollapsed"
               tooltip-content="项目管理"
+            />
+            <SidebarMenuItem
+              path="/project-initiation"
+              label="项目立项"
+              :icon="DocumentAdd"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="项目立项"
+            />
+            <SidebarMenuItem
+              path="/project-progress"
+              label="项目进度"
+              :icon="DataAnalysis"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="项目进度"
+            />
+            <SidebarMenuItem
+              path="/project-archive"
+              label="项目封存"
+              :icon="Box"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="项目封存"
             />
             <SidebarMenuItem
               path="/presets"
@@ -97,6 +208,14 @@
           >
             <SidebarMenuItem
               v-if="isAdmin"
+              path="/users"
+              label="用户管理"
+              :icon="UserFilled"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="用户管理"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin"
               path="/system-settings"
               label="系统设置"
               :icon="Setting"
@@ -104,11 +223,11 @@
               tooltip-content="系统设置"
             />
             <SidebarMenuItem
-              path="/user-settings"
-              label="用户设置"
+              path="/settings"
+              label="个人设置"
               :icon="User"
               :collapsed="sidebarCollapsed"
-              tooltip-content="用户设置"
+              tooltip-content="个人设置"
             />
           </SidebarGroup>
         </nav>
@@ -141,6 +260,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { api } from '@/utils/api'
 import { ElMessage } from 'element-plus'
 import {
   Calendar,
@@ -153,6 +273,19 @@ import {
   Setting,
   OfficeBuilding,
   Notebook,
+  DataAnalysis,
+  DocumentAdd,
+  Box,
+  Money,
+  Wallet,
+  Briefcase,
+  UserFilled,
+  Promotion,
+  SwitchButton,
+  List,
+  Clock,
+  Stamp,
+  Checked,
 } from '@element-plus/icons-vue'
 import SidebarHeader from './components/SidebarHeader.vue'
 import SidebarMenuItem from './components/SidebarMenuItem.vue'
@@ -170,9 +303,17 @@ const isPinned = ref(false)
 const groupTitlesVisible = ref(false) // 分组标题独立控制
 let collapseTimer: number | null = null
 
+// 待审批数量
+const pendingApprovalCount = ref(0)
+
 // 是否是管理员
 const isAdmin = computed(() => {
   return authStore.user?.role === 'super_admin' || authStore.user?.role === 'admin'
+})
+
+// 是否是超级管理员
+const isSuperAdmin = computed(() => {
+  return authStore.user?.role === 'super_admin'
 })
 
 // 页面标题
@@ -181,11 +322,26 @@ const pageTitle = computed(() => {
     '/': '今日日志',
     '/history': '历史日志',
     '/calendar': '日历',
+    '/basic-reimbursement': '基础报销',
+    '/large-reimbursement': '大额报销',
+    '/business-reimbursement': '商务报销',
+    '/reimbursement-statistics': '报销统计',
+    '/onboarding': '入职',
+    '/probation': '转正',
+    '/resignation': '离职',
+    '/employee-data': '员工数据',
+    '/leave': '请假',
     '/projects': '项目管理',
+    '/project-initiation': '项目立项',
+    '/project-progress': '项目进度',
+    '/project-archive': '项目封存',
     '/presets': '预设方案',
     '/blocks': '预设板块',
     '/events': '事件库',
     '/departments': '部门管理',
+    '/users': '用户管理',
+    '/settings': '个人设置',
+    '/approval': '审批中心',
     '/system-settings': '系统设置',
     '/user-settings': '用户设置',
   }
@@ -226,7 +382,7 @@ const handleLogout = async () => {
 
 // 处理设置
 const handleSettings = () => {
-  router.push('/user-settings')
+  router.push('/settings')
 }
 
 // 处理主题切换
@@ -277,7 +433,24 @@ onMounted(() => {
   // 如果锁定，则展开；否则折叠
   sidebarCollapsed.value = !isPinned.value
   groupTitlesVisible.value = isPinned.value
+
+  // 如果是管理员，获取待审批数量
+  if (isAdmin.value) {
+    loadPendingApprovalCount()
+  }
 })
+
+// 获取待审批数量
+async function loadPendingApprovalCount() {
+  try {
+    const res = await api.get('/api/approval/statistics')
+    if (res.data.success) {
+      pendingApprovalCount.value = res.data.data.pendingCount || 0
+    }
+  } catch {
+    // 静默失败，不影响页面加载
+  }
+}
 
 onUnmounted(() => {
   // 清理定时器

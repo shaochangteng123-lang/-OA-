@@ -275,7 +275,9 @@ async function handleSaveEdit() {
 .color-label-panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 0 0 auto;
+  min-height: 200px;
+  max-height: 400px;
 }
 
 /* 面板标题 */
@@ -308,7 +310,9 @@ async function handleSaveEdit() {
 .label-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px;
+  min-height: 0;
 }
 
 /* 优化模块26：标签项包装器 */

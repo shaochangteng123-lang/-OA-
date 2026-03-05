@@ -27,6 +27,7 @@ export default defineConfig({
   base: '/',
   cacheDir: '.vite-cache',
   server: {
+    host: true,
     port: 8899,
     watch: {
       ignored: ['**/CLAUDE.md', '**/node_modules/**', '**/dist/**'],
@@ -35,6 +36,9 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,
+        cookieDomainRewrite: 'localhost',
+        secure: false,
+        ws: true,
       },
     },
   },

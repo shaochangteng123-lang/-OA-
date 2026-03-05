@@ -4,10 +4,18 @@
 
 export interface User {
   id: string
+  username?: string
   name: string
   email: string
+  mobile?: string
   avatarUrl: string | null
   role: UserRole
+  status: 'active' | 'inactive'
+  department?: string
+  position?: string
+  lastLoginAt?: string
+  createdAt?: string
+  updatedAt?: string
 }
 
 export type UserRole = 'super_admin' | 'admin' | 'user' | 'guest'
@@ -73,6 +81,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_presets',
     'manage_presets',
     'view_users',
+    'manage_users',
     'view_calendar',
     'manage_calendar',
     'view_blocks',
@@ -231,3 +240,32 @@ export interface PresetBlockRef {
 // ==================== Element Plus 相关 ====================
 
 export type ElementPlusTagType = 'success' | 'info' | 'warning' | 'danger' | 'primary'
+
+// ==================== 员工基础信息相关 ====================
+
+export interface EmployeeProfile {
+  id: string
+  userId?: string
+  employeeNo?: string
+  name: string
+  gender?: 'male' | 'female' | 'other'
+  birthDate?: string
+  idNumber?: string
+  nativePlace?: string
+  ethnicity?: string
+  maritalStatus?: 'single' | 'married' | 'divorced' | 'widowed'
+  education?: string
+  school?: string
+  major?: string
+  mobile?: string
+  email?: string
+  emergencyContact?: string
+  emergencyPhone?: string
+  address?: string
+  hireDate?: string
+  department?: string
+  position?: string
+  status: 'draft' | 'submitted'
+  createdAt: string
+  updatedAt: string
+}

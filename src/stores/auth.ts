@@ -3,9 +3,17 @@ import { ref, computed } from 'vue'
 import { User, Permission, ROLE_PERMISSIONS } from '@/types'
 import { api } from '@/utils/api'
 
+// 员工信息状态类型
+type ProfileStatus = 'none' | 'draft' | 'submitted'
+
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const isLoggedIn = computed(() => !!user.value)
+
+  // 员工信息状态
+  const profileStatus = ref<ProfileStatus>('none')
+  // 是否已完成入职信息填写（已提交状态）
+  const hasCompletedOnboarding = computed(() => profileStatus.value === 'submitted')
 
   // 检查会话
   async function checkSession() {
@@ -13,6 +21,8 @@ export const useAuthStore = defineStore('auth', () => {
       const response = await api.get('/api/auth/user')
       if (response.data.success && response.data.data) {
         user.value = response.data.data
+        // 检查会话成功后，获取员工信息状态
+        await fetchProfileStatus()
         return true
       }
       return false
@@ -24,6 +34,22 @@ export const useAuthStore = defineStore('auth', () => {
         console.error('检查会话失败:', error)
       }
       return false
+    }
+  }
+
+  // 获取员工信息状态
+  async function fetchProfileStatus() {
+    try {
+      const response = await api.get('/api/employees/my-profile')
+      if (response.data.success && response.data.data) {
+        profileStatus.value = response.data.data.status || 'draft'
+      } else {
+        // 没有员工信息记录
+        profileStatus.value = 'none'
+      }
+    } catch (error) {
+      console.error('获取员工信息状态失败:', error)
+      profileStatus.value = 'none'
     }
   }
 
@@ -58,7 +84,10 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     user,
     isLoggedIn,
+    profileStatus,
+    hasCompletedOnboarding,
     checkSession,
+    fetchProfileStatus,
     logout,
     hasPermission,
     hasAnyPermission,

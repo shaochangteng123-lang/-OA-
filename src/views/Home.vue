@@ -566,11 +566,13 @@ async function handleSave() {
 <style scoped>
 /* ========== 今日日志编辑器 - Notion风格 ========== */
 
+/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .today-log-container {
   display: flex;
-  height: calc(100vh - 64px);
+  height: calc(100vh - 60px);
   background: #ffffff;
   overflow: hidden;
+  margin: -24px;
 }
 
 /* ========== 编辑器主区域 ========== */

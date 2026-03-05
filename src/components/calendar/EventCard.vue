@@ -3,12 +3,14 @@
     class="event-card"
     :class="{ past: isPast, 'all-day': event.allDay }"
     :style="cardStyle"
-    @click="$emit('click', event)"
+    @click="handleClick"
   >
     <div class="event-time" v-if="!event.allDay && showTime">
       {{ formatTime(event.startTime) }}
     </div>
-    <div class="event-title">{{ event.title || '(无标题)' }}</div>
+    <div class="event-title">
+      {{ event.title || '(无标题)' }}
+    </div>
     <div class="event-location" v-if="event.location">
       <el-icon><Location /></el-icon>
       {{ event.location }}
@@ -32,9 +34,14 @@ const props = withDefaults(defineProps<Props>(), {
   showTime: true,
 })
 
-defineEmits<{
+const emit = defineEmits<{
   click: [event: CalendarEvent]
 }>()
+
+// 点击处理
+function handleClick() {
+  emit('click', props.event)
+}
 
 // 是否已过期
 const isPast = computed(() => isEventPast(props.event))
@@ -147,4 +154,5 @@ function formatTime(timeStr: string): string {
 .event-location .el-icon {
   font-size: 10px;
 }
+
 </style>

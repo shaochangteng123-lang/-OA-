@@ -89,7 +89,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" fixed="right">
+        <el-table-column label="操作" width="150" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" size="small" link @click.stop="handleEdit(row)">
               编辑
@@ -197,6 +197,7 @@
         <el-button type="primary" :loading="saving" @click="handleSave"> 确定 </el-button>
       </template>
     </el-dialog>
+
   </div>
 </template>
 
@@ -432,11 +433,14 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .projects-container {
-  height: 100%;
+  height: calc(100vh - 60px);
   display: flex;
   flex-direction: column;
   gap: 16px;
+  margin: -24px;
+  padding: 24px;
 }
 
 .page-header {

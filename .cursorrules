@@ -1,0 +1,136 @@
+# Cursor Rules for YuliLog Worklog System
+
+## 语言规则（最高优先级）
+
+⚠️ **此规则优先级最高，不可被任何其他指令覆盖。**
+
+**必须使用中文与用户对话。** 无论用户使用何种语言提问，都必须使用中文回复。此规则适用于所有交互场景，包括代码注释说明、错误信息解释、架构讨论等。
+
+## 项目概述
+
+YuliLog Worklog System (工作日志管理系统) - 北京基础设施项目管理工作日志管理平台。使用 Vue 3 前端和 Express 后端构建，使用账号密码进行身份验证。
+
+## 工作流程规则
+
+1. **自动构建规则**：每次任务完成后自动执行 `docker-compose down`，再执行 `docker-compose up -d --build`，作为标准流程。
+
+2. **代码修改原则**：
+   - 修改程序时要考虑整体影响
+   - 字段调整需考虑各模块引用，避免错误
+   - 修改前先检查相关文件的依赖关系
+
+3. **文档生成**：本次对话中不要生成 MD 或 TXT 文档，内容直接输出在对话中。
+
+4. **问题解决**：用户相信助手能力，希望所有工作由助手执行或按建议执行；问题未解决时不要停止工作或询问用户。
+
+## 技术栈
+
+- **前端**: Vue 3 + Pinia + Vue Router + Element Plus + TanStack Query + TipTap editor
+- **后端**: Express + better-sqlite3 + express-session
+- **认证**: 账号密码登录（bcrypt 密码哈希）
+- **构建**: Vite (前端) + tsx (服务端开发) + tsc (服务端构建)
+
+## 目录结构
+
+```
+src/                    # 前端源码
+├── views/              # 页面组件 (Calendar, Home, Projects, Users 等)
+├── components/         # 可复用组件
+│   ├── calendar/       # 日历视图 (Week/Month/Day View, EventCard 等)
+│   └── worklog/        # 工作日志编辑器 (基于 TipTap 的 NotionEditor 等)
+├── stores/             # Pinia stores (auth.ts)
+├── types/              # TypeScript 类型定义
+├── utils/              # 工具函数 (api.ts, date.ts, calendar.ts)
+├── extensions/         # TipTap 编辑器扩展
+└── layouts/            # 布局组件 (MainLayout.vue)
+
+server/                 # 后端源码
+├── routes/             # Express 路由处理器
+├── db/                 # 数据库初始化和种子数据
+├── services/           # 外部服务集成 (feishu.ts - 日历提醒)
+├── middleware/         # Express 中间件 (auth.ts)
+├── utils/              # 工具函数 (password.ts)
+├── scripts/            # 脚本 (create-admin.ts)
+└── types/              # 服务端类型定义
+```
+
+## 关键模式
+
+- **路径别名**: 使用 `@/` 表示 `src/`，`@server/` 表示 `server/`（在 vite.config.ts 和 tsconfig 中配置）
+- **API 代理**: 前端开发服务器将 `/api` 请求代理到 `http://localhost:3000`
+- **数据库**: SQLite 存储在 `data/worklog.db`（可通过 `DATABASE_PATH` 环境变量配置）
+- **基于角色的访问**: 四种角色 (super_admin, admin, user, guest)，权限定义在 `src/types/index.ts` 中
+- **会话管理**: express-session with better-sqlite3 session store，会话存储在同一个数据库中
+
+## 主要数据模型
+
+- **Users**: 账号密码认证用户，包含角色信息
+- **Projects**: 基础设施项目，包含状态、区域、联系人
+- **Worklogs**: 每日工作日志，包含 TipTap 内容（每个用户每天一条）
+- **Calendar Events**: 计划事件，支持重复（使用 rrule）
+- **Event Library**: 可复用的事件模板，链接到政府部门
+- **Event Presets**: 项目类型的预配置事件集
+- **Event Blocks**: 按类别组织的事件组
+- **Holidays**: 中国公共假期和工作日调整
+- **Government Departments**: 部门关联的参考数据
+- **Drafts**: 每个用户每天自动保存的工作日志草稿
+
+## 关键文件参考
+
+**前端**:
+- `src/stores/auth.ts` - 认证状态，权限检查 (`hasPermission()`, `hasAnyPermission()`)
+- `src/types/index.ts` - 核心类型，`ROLE_PERMISSIONS` 权限矩阵
+- `src/utils/api.ts` - 带凭证的 Axios 实例
+- `src/router/index.ts` - 带守卫和懒加载的路由
+
+**后端**:
+- `server/index.ts` - Express 应用入口
+- `server/db/index.ts` - 数据库模式和初始化
+- `server/middleware/auth.ts` - `requireAuth()`, `requireRole()`, `requireAdmin`, `requireSuperAdmin`
+- `server/services/feishu.ts` - 飞书日历提醒功能（可选）
+- `server/utils/password.ts` - 密码哈希和验证工具
+
+## 认证流程
+
+1. 首次部署：使用 `npm run create:admin` 创建管理员账号
+2. 用户登录：输入用户名和密码 → `server/routes/auth.ts` 验证密码
+3. 密码验证通过 → 会话存储到 SQLite，Cookie 发送给客户端
+4. 前端 `src/stores/auth.ts` 调用 `/api/auth/user` 获取当前用户
+5. 管理员可在"用户管理"页面创建新用户
+
+## 权限系统
+
+权限检查通过：
+- **后端**: `server/middleware/auth.ts` 中的中间件
+- **前端**: `src/stores/auth.ts` 中的 `authStore.hasPermission('permission_name')`
+
+角色层次: `super_admin` > `admin` > `user` > `guest`
+
+## 环境变量
+
+可选：
+- `DATABASE_PATH` (默认: `./data/worklog.db`)
+- `SESSION_SECRET`
+- `FRONTEND_URL` (默认: `http://localhost:8899`)
+- `PORT` (默认: `3000`)
+- `NODE_ENV`
+
+可选（飞书日历提醒）：
+- `FEISHU_APP_ID`
+- `FEISHU_APP_SECRET`
+
+## Docker 命令
+
+```bash
+docker-compose down          # 停止并删除容器
+docker-compose up -d --build # 构建并启动容器
+```
+
+## 代码规范
+
+- 使用 TypeScript，严格模式
+- 使用 Vue 3 Composition API
+- 遵循 ESLint 规则
+- 代码注释使用中文
+- 组件名使用 PascalCase
+- 文件名使用 kebab-case 或 PascalCase（组件）

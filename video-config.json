@@ -1,0 +1,51 @@
+{
+  "scenes": [
+    {
+      "type": "text",
+      "text": "今天我要讲一个\n超级搞笑的故事",
+      "bg_color": "#FF6B6B",
+      "text_color": "#FFFFFF",
+      "font_size": 80,
+      "duration": 3.0,
+      "subtitle": "准备好了吗？",
+      "subtitle_position": "bottom"
+    },
+    {
+      "type": "text",
+      "text": "从前有个人\n他叫小明",
+      "bg_color": "#4ECDC4",
+      "text_color": "#FFFFFF",
+      "font_size": 80,
+      "duration": 2.5
+    },
+    {
+      "type": "text",
+      "text": "他每天都要\n做一件很搞笑的事",
+      "bg_color": "#FFE66D",
+      "text_color": "#000000",
+      "font_size": 80,
+      "duration": 3.0
+    },
+    {
+      "type": "text",
+      "text": "结果...",
+      "bg_color": "#000000",
+      "text_color": "#FFFFFF",
+      "font_size": 100,
+      "duration": 1.5
+    },
+    {
+      "type": "text",
+      "text": "他把自己逗笑了！\n哈哈哈哈",
+      "bg_color": "#FF6B6B",
+      "text_color": "#FFFFFF",
+      "font_size": 90,
+      "duration": 3.0,
+      "subtitle": "记得点赞关注哦！",
+      "subtitle_position": "bottom"
+    }
+  ],
+  "bg_music": "",
+  "output_filename": "funny_video.mp4",
+  "fps": 30
+}

@@ -22,8 +22,8 @@ export function initDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
-      feishu_open_id TEXT UNIQUE,
-      feishu_union_id TEXT,
+      username TEXT UNIQUE,
+      password_hash TEXT,
       name TEXT NOT NULL,
       email TEXT,
       mobile TEXT,
@@ -38,8 +38,45 @@ export function initDatabase() {
     )
   `)
 
+  // 添加 username 字段（如果表已存在但没有该字段）
+  // 注意：SQLite 不支持直接添加 UNIQUE 列，先添加普通列，再通过索引保证唯一性
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN username TEXT`)
+  } catch (error: any) {
+    if (!error.message?.includes('duplicate column name')) {
+      console.warn('添加username字段时出错:', error.message)
+    }
+  }
+
+  // 添加 password_hash 字段（如果表已存在但没有该字段）
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN password_hash TEXT`)
+  } catch (error: any) {
+    if (!error.message?.includes('duplicate column name')) {
+      console.warn('添加password_hash字段时出错:', error.message)
+    }
+  }
+
+  // 添加收款人信息字段（银行卡信息）
+  const bankFields = [
+    { name: 'bank_account_name', type: 'TEXT' },      // 收款人姓名
+    { name: 'bank_account_phone', type: 'TEXT' },     // 收款人手机号
+    { name: 'bank_name', type: 'TEXT' },              // 开户行
+    { name: 'bank_account_number', type: 'TEXT' },    // 银行卡号
+  ]
+
+  for (const field of bankFields) {
+    try {
+      db.exec(`ALTER TABLE users ADD COLUMN ${field.name} ${field.type}`)
+    } catch (error: any) {
+      if (!error.message?.includes('duplicate column name')) {
+        console.warn(`添加${field.name}字段时出错:`, error.message)
+      }
+    }
+  }
+
   db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_users_feishu_open_id ON users(feishu_open_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
   `)
@@ -82,12 +119,23 @@ export function initDatabase() {
       overall_content TEXT,
       projects_json TEXT,
       user_id TEXT NOT NULL,
+      notion_page_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id),
       UNIQUE(date, user_id)
     )
   `)
+
+  // 添加notion_page_id字段（如果表已存在但没有该字段）
+  try {
+    db.exec(`ALTER TABLE worklogs ADD COLUMN notion_page_id TEXT`)
+  } catch (error: any) {
+    // 字段已存在，忽略错误
+    if (!error.message?.includes('duplicate column name')) {
+      console.warn('添加notion_page_id字段时出错:', error.message)
+    }
+  }
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_worklogs_user_id ON worklogs(user_id);
@@ -292,6 +340,333 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_holidays_date ON holidays(date);
     CREATE INDEX IF NOT EXISTS idx_holidays_year ON holidays(year);
     CREATE INDEX IF NOT EXISTS idx_holidays_type ON holidays(type);
+  `)
+
+  // 14. reimbursements 表 - 报销单主表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reimbursements (
+      id TEXT PRIMARY KEY,
+      type TEXT NOT NULL CHECK(type IN ('basic', 'large', 'business')),
+      title TEXT NOT NULL,
+      total_amount REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paying', 'payment_uploaded', 'completed', 'rejected')),
+      description TEXT,
+      business_type TEXT,
+      client TEXT,
+      user_id TEXT NOT NULL,
+      applicant_name TEXT NOT NULL,
+      submit_time TEXT,
+      approve_time TEXT,
+      approver TEXT,
+      reject_reason TEXT,
+      pay_time TEXT,
+      payment_upload_time TEXT,
+      completed_time TEXT,
+      payment_proof_path TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `)
+
+  // 添加 category 字段（如果不存在）
+  try {
+    db.exec(`ALTER TABLE reimbursements ADD COLUMN category TEXT`)
+    console.log('✅ 成功添加 category 字段到 reimbursements 表')
+  } catch (error: any) {
+    // 如果字段已存在，忽略错误
+    if (!error.message.includes('duplicate column name')) {
+      console.error('❌ 添加 category 字段失败:', error)
+    }
+  }
+
+  // 添加财务流程相关字段（如果不存在）
+  const newColumns = [
+    { name: 'pay_time', type: 'TEXT' },
+    { name: 'payment_upload_time', type: 'TEXT' },
+    { name: 'completed_time', type: 'TEXT' },
+    { name: 'payment_proof_path', type: 'TEXT' },
+    { name: 'receipt_confirmed_by', type: 'TEXT' },
+    { name: 'is_deleted', type: 'INTEGER DEFAULT 0' },  // 软删除标记：0=未删除，1=已删除
+    { name: 'deleted_at', type: 'TEXT' },               // 删除时间
+  ]
+
+  for (const column of newColumns) {
+    try {
+      db.exec(`ALTER TABLE reimbursements ADD COLUMN ${column.name} ${column.type}`)
+      console.log(`✅ 成功添加 ${column.name} 字段到 reimbursements 表`)
+    } catch (error: any) {
+      // 如果字段已存在，忽略错误
+      if (!error.message.includes('duplicate column name')) {
+        console.error(`❌ 添加 ${column.name} 字段失败:`, error)
+      }
+    }
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_user_id ON reimbursements(user_id);
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_type ON reimbursements(type);
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_status ON reimbursements(status);
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_submit_time ON reimbursements(submit_time);
+  `)
+
+  // 15. reimbursement_invoices 表 - 发票明细表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reimbursement_invoices (
+      id TEXT PRIMARY KEY,
+      reimbursement_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      invoice_date TEXT NOT NULL,
+      invoice_number TEXT,
+      file_path TEXT NOT NULL,
+      seller TEXT,
+      buyer TEXT,
+      tax_amount REAL,
+      invoice_code TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (reimbursement_id) REFERENCES reimbursements(id) ON DELETE CASCADE
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_reimbursement_id ON reimbursement_invoices(reimbursement_id);
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_invoice_number ON reimbursement_invoices(invoice_number);
+  `)
+
+  // 16. approval_flows 表 - 审批流程配置表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_flows (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      steps_json TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_approval_flows_type ON approval_flows(type);
+    CREATE INDEX IF NOT EXISTS idx_approval_flows_is_active ON approval_flows(is_active);
+  `)
+
+  // 17. approval_instances 表 - 审批实例表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_instances (
+      id TEXT PRIMARY KEY,
+      flow_id TEXT,
+      type TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      applicant_id TEXT NOT NULL,
+      current_step INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'pending',
+      submit_time TEXT NOT NULL,
+      complete_time TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (flow_id) REFERENCES approval_flows(id),
+      FOREIGN KEY (applicant_id) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_approval_instances_type ON approval_instances(type);
+    CREATE INDEX IF NOT EXISTS idx_approval_instances_status ON approval_instances(status);
+    CREATE INDEX IF NOT EXISTS idx_approval_instances_applicant ON approval_instances(applicant_id);
+    CREATE INDEX IF NOT EXISTS idx_approval_instances_target ON approval_instances(target_id, target_type);
+  `)
+
+  // 18. approval_records 表 - 审批记录表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS approval_records (
+      id TEXT PRIMARY KEY,
+      instance_id TEXT NOT NULL,
+      step INTEGER NOT NULL,
+      approver_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      comment TEXT,
+      action_time TEXT NOT NULL,
+      FOREIGN KEY (instance_id) REFERENCES approval_instances(id),
+      FOREIGN KEY (approver_id) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id);
+    CREATE INDEX IF NOT EXISTS idx_approval_records_approver ON approval_records(approver_id);
+  `)
+
+  // 19. employee_profiles 表 - 员工基础信息表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_profiles (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      employee_no TEXT,
+      name TEXT NOT NULL,
+      gender TEXT CHECK(gender IN ('male', 'female', 'other')),
+      birth_date TEXT,
+      id_number TEXT,
+      native_place TEXT,
+      ethnicity TEXT,
+      marital_status TEXT CHECK(marital_status IN ('single', 'married', 'divorced', 'widowed')),
+      education TEXT,
+      school TEXT,
+      major TEXT,
+      mobile TEXT,
+      email TEXT,
+      emergency_contact TEXT,
+      emergency_phone TEXT,
+      address TEXT,
+      hire_date TEXT,
+      department TEXT,
+      position TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_employee_profiles_user_id ON employee_profiles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_employee_profiles_employee_no ON employee_profiles(employee_no);
+    CREATE INDEX IF NOT EXISTS idx_employee_profiles_status ON employee_profiles(status);
+    CREATE INDEX IF NOT EXISTS idx_employee_profiles_department ON employee_profiles(department);
+  `)
+
+  // 添加收款信息字段到 employee_profiles 表（如果不存在）
+  const employeeBankFields = [
+    { name: 'bank_account_name', type: 'TEXT' },      // 收款人姓名
+    { name: 'bank_account_phone', type: 'TEXT' },     // 收款人手机号
+    { name: 'bank_name', type: 'TEXT' },              // 开户行
+    { name: 'bank_account_number', type: 'TEXT' },    // 银行卡号
+  ]
+
+  for (const field of employeeBankFields) {
+    try {
+      db.exec(`ALTER TABLE employee_profiles ADD COLUMN ${field.name} ${field.type}`)
+      console.log(`✅ 成功添加 ${field.name} 字段到 employee_profiles 表`)
+    } catch (error: any) {
+      if (!error.message?.includes('duplicate column name')) {
+        console.warn(`添加 ${field.name} 字段时出错:`, error.message)
+      }
+    }
+  }
+
+  // 添加 employment_status 字段（员工在职状态：在职、实习期、已离职、休假中）
+  try {
+    db.exec(`ALTER TABLE employee_profiles ADD COLUMN employment_status TEXT DEFAULT 'active'`)
+    console.log('✅ 成功添加 employment_status 字段到 employee_profiles 表')
+  } catch (error: any) {
+    if (!error.message?.includes('duplicate column name')) {
+      console.warn('添加 employment_status 字段时出错:', error.message)
+    }
+  }
+
+  // 20. employee_documents 表 - 员工人事档案文件表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_documents (
+      id TEXT PRIMARY KEY,
+      employee_id TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL,
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (employee_id) REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_employee_documents_employee_id ON employee_documents(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_employee_documents_document_type ON employee_documents(document_type);
+  `)
+
+  // 21. probation_confirmations 表 - 转正申请表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS probation_confirmations (
+      id TEXT PRIMARY KEY,
+      employee_id TEXT NOT NULL,
+      hire_date TEXT NOT NULL,
+      probation_end_date TEXT NOT NULL,
+      status TEXT DEFAULT 'pending',
+      submit_time TEXT,
+      approve_time TEXT,
+      approver_id TEXT,
+      approver_comment TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (employee_id) REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (approver_id) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_probation_confirmations_employee_id ON probation_confirmations(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_probation_confirmations_status ON probation_confirmations(status);
+  `)
+
+  // 22. probation_documents 表 - 转正文件表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS probation_documents (
+      id TEXT PRIMARY KEY,
+      confirmation_id TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL,
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (confirmation_id) REFERENCES probation_confirmations(id) ON DELETE CASCADE,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_probation_documents_confirmation_id ON probation_documents(confirmation_id);
+  `)
+
+  // 23. probation_templates 表 - 转正文件模板表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS probation_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL,
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (uploaded_by) REFERENCES users(id)
+    )
+  `)
+
+  // 24. onboarding_templates 表 - 入职文件模板表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS onboarding_templates (
+      id TEXT PRIMARY KEY,
+      file_type TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL,
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_onboarding_templates_file_type ON onboarding_templates(file_type);
   `)
 
   console.log('✅ 数据库表初始化完成')

@@ -489,20 +489,26 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .project-detail-container {
-  min-height: 100%;
+  height: calc(100vh - 60px);
+  margin: -24px;
+  padding: 0;
+  background: #fff;
+  overflow: auto;
 }
 
 .detail-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
 }
 
 .page-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid #e4e7ed;
 }
 
 .header-actions {
@@ -514,6 +520,15 @@ onMounted(() => {
 .task-card,
 .history-card {
   background: #fff;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+
+.info-card :deep(.el-card__body),
+.task-card :deep(.el-card__body),
+.history-card :deep(.el-card__body) {
+  padding: 16px 24px;
 }
 
 .card-header {
