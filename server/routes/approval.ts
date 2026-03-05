@@ -636,13 +636,17 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
     }
 
     if (startDate) {
-      whereClause += ' AND DATE(r.created_at) >= ?'
-      params.push(startDate)
+      // 将日期转换为报销月份格式 YYYY-MM
+      const startMonth = startDate.substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND r.reimbursement_month >= ?'
+      params.push(startMonth)
     }
 
     if (endDate) {
-      whereClause += ' AND DATE(r.created_at) <= ?'
-      params.push(endDate)
+      // 将日期转换为报销月份格式 YYYY-MM
+      const endMonth = endDate.substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND r.reimbursement_month <= ?'
+      params.push(endMonth)
     }
 
     const reimbursements = db.prepare(`
@@ -697,6 +701,7 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
         completedTime: r.completed_time,
         paymentProofPath: r.payment_proof_path,
         receiptConfirmedBy: r.receipt_confirmed_by,
+        reimbursementMonth: r.reimbursement_month,
         createdAt: r.created_at,
         userId: r.user_id,
       })),

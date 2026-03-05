@@ -51,7 +51,7 @@
     <div class="invoice-total" :class="{ 'amount-warning': showAmountWarning }">
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
-      <span v-if="showDeduction && totalDeductedAmountNumber > 0" class="deducted-info">
+      <span v-if="showDeduction && hasTransportFuelInvoices" class="deducted-info">
         （核减：-¥{{ totalDeductedAmount }}）
       </span>
       <span v-if="warningText" class="amount-tip">
@@ -60,16 +60,16 @@
     </div>
 
     <!-- 核减提示信息 -->
-    <div v-if="showDeduction && hasDeductedInvoices" class="deduction-notice">
+    <div v-if="showDeduction && hasTransportFuelInvoices" class="deduction-notice">
       <div class="notice-detail-list">
         <div class="notice-detail-row">
-          <span class="detail-text">本次运输/汽油类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
+          <span class="detail-text">本次运输/交通/汽油/柴油类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
         </div>
         <div class="notice-detail-row">
-          <span class="detail-text">本月累计运输/汽油类金额：¥{{ transportFuelSubtotal.toFixed(2) }}<span class="detail-limit">（月度上限 ¥1500.00）</span></span>
+          <span class="detail-text">本月累计运输/交通/汽油/柴油类金额：¥{{ (monthlyUsedQuota + transportFuelSubtotal).toFixed(2) }}<span class="detail-limit">（月度上限 ¥1500.00）</span></span>
         </div>
         <div class="notice-detail-row deduction-row">
-          <span class="detail-text">核减金额（超出部分不予报销）：<span class="deducted-highlight">-¥{{ totalDeductedAmount }}</span></span>
+          <span class="detail-text">核减金额（超出部分不作为报销）：<span class="deducted-highlight">-¥{{ totalDeductedAmount }}</span></span>
         </div>
         <div class="notice-detail-row actual-row">
           <span class="detail-text">实际报销金额：<span class="actual-highlight">¥{{ transportFuelActual.toFixed(2) }}</span></span>
@@ -117,12 +117,14 @@ const props = withDefaults(defineProps<{
   amountThreshold?: number
   showThresholdWarning?: boolean
   showDeduction?: boolean  // 是否显示核减金额列（仅基础报销显示）
+  monthlyUsedQuota?: number  // 当月已使用的运输/交通/汽油/柴油类发票额度
 }>(), {
   readonly: false,
   themeColor: '#409eff',
   amountThreshold: 0,
   showThresholdWarning: false,
   showDeduction: false,
+  monthlyUsedQuota: 0,
 })
 
 // Emits
@@ -134,7 +136,7 @@ const emit = defineEmits<{
 const totalAmountNumber = computed(() => {
   // 将所有金额转换为分（整数），避免浮点数精度问题
   const totalCents = props.invoiceList.reduce((acc, item) => {
-    const amount = item.actualAmount || item.amount || 0
+    const amount = item.amount || 0  // 使用原始金额，不使用actualAmount
     const amountInCents = Math.round(amount * 100)
     return acc + amountInCents
   }, 0)
@@ -163,9 +165,15 @@ const totalDeductedAmount = computed(() => {
   return totalDeductedAmountNumber.value.toFixed(2)
 })
 
-// 是否有核减的发票
-const hasDeductedInvoices = computed(() => {
-  return props.invoiceList.some(item => item.deductedAmount && item.deductedAmount > 0)
+// 是否有运输/交通/汽油/柴油类发票
+const hasTransportFuelInvoices = computed(() => {
+  return props.invoiceList.some(item => {
+    const category = item.category?.toLowerCase() || ''
+    return category.includes('运输') ||
+      category.includes('交通') ||
+      category.includes('汽油') ||
+      category.includes('柴油')
+  })
 })
 
 // 运输服务/汽油类发票小计（原始金额）
@@ -174,6 +182,7 @@ const transportFuelSubtotal = computed(() => {
     const category = item.category?.toLowerCase() || ''
     const isTransportOrFuel =
       category.includes('运输') ||
+      category.includes('交通') ||
       category.includes('汽油') ||
       category.includes('柴油')
     if (isTransportOrFuel) {
@@ -184,10 +193,35 @@ const transportFuelSubtotal = computed(() => {
   return totalCents / 100
 })
 
-// 运输服务/汽油类发票实际报销金额
+// 实际报销金额（所有发票）
 const transportFuelActual = computed(() => {
-  if (transportFuelSubtotal.value <= 1500) return transportFuelSubtotal.value
-  return 1500
+  // 计算运输/交通/汽油/柴油类发票的实际报销金额
+  const remainingQuota = Math.max(0, 1500 - props.monthlyUsedQuota)
+  let transportFuelActualAmount = 0
+
+  if (transportFuelSubtotal.value <= remainingQuota) {
+    transportFuelActualAmount = transportFuelSubtotal.value
+  } else {
+    transportFuelActualAmount = remainingQuota
+  }
+
+  // 计算其他类别发票的总金额（不受限额限制）
+  const otherCategoriesTotal = props.invoiceList.reduce((acc, item) => {
+    const category = item.category?.toLowerCase() || ''
+    const isTransportOrFuel =
+      category.includes('运输') ||
+      category.includes('交通') ||
+      category.includes('汽油') ||
+      category.includes('柴油')
+
+    if (!isTransportOrFuel) {
+      return acc + Math.round(item.amount * 100)
+    }
+    return acc
+  }, 0) / 100
+
+  // 返回运输类实际报销金额 + 其他类别总金额
+  return transportFuelActualAmount + otherCategoriesTotal
 })
 
 // 是否显示金额警告

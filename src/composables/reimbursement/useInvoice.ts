@@ -52,10 +52,12 @@ export function useInvoice() {
   const fileList = ref<any[]>([])
   // 发票ID计数器
   let invoiceIdCounter = 0
+  // 当月已使用的运输/交通/汽油/柴油类发票额度（从后端获取）
+  const monthlyUsedQuota = ref<number>(0)
 
-  // 计算总金额（使用实际报销金额）
+  // 计算总金额（所有发票金额的总和，不考虑核减）
   const totalAmount = computed(() => {
-    return invoiceList.value.reduce((sum, item) => sum + (item.actualAmount || item.amount || 0), 0)
+    return invoiceList.value.reduce((sum, item) => sum + (item.amount || 0), 0)
   })
 
   // 计算总核减金额
@@ -150,12 +152,32 @@ export function useInvoice() {
           return
         }
 
-        // 校验重复
+        // 校验重复（本地）
         const duplicateResult = validateInvoiceDuplicate(invoiceNumber, invoiceNumbers.value)
         if (!duplicateResult.valid) {
           ElMessage.warning(duplicateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
+        }
+
+        // 校验重复（数据库全局查重）
+        if (invoiceNumber) {
+          try {
+            const dupRes = await fetch('/api/reimbursement/check-invoice-duplicate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ invoiceNumber }),
+              credentials: 'include',
+            })
+            const dupData = await dupRes.json()
+            if (dupData.success && dupData.data?.duplicate) {
+              ElMessage.warning(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
+              removeFromFileList(file.uid, fileListParam)
+              return
+            }
+          } catch (e) {
+            console.warn('发票全局查重请求失败:', e)
+          }
         }
 
         // 校验日期
@@ -220,8 +242,27 @@ export function useInvoice() {
   }
 
   /**
+   * 获取当月运输/交通/汽油/柴油类发票已使用额度
+   */
+  async function fetchMonthlyUsedQuota(): Promise<void> {
+    try {
+      const response = await fetch('/api/reimbursement/transport-fuel-quota', {
+        credentials: 'include',
+      })
+      const result = await response.json()
+      if (result.success) {
+        monthlyUsedQuota.value = result.data.usedAmount || 0
+      }
+    } catch (error) {
+      console.error('获取月度额度失败:', error)
+      monthlyUsedQuota.value = 0
+    }
+  }
+
+  /**
    * 重新计算核减金额
    * 对于基础报销，运输服务、汽油、柴油类发票合计限额1500元
+   * 需要考虑当月已使用的额度（跨报销单累计）
    */
   function recalculateDeductions(): void {
     // 找出所有运输服务、汽油、柴油类发票
@@ -229,7 +270,7 @@ export function useInvoice() {
       const category = inv.category?.toLowerCase() || ''
       return (
         category.includes('运输') ||
-        category.includes('运输服务') ||
+        category.includes('交通') ||
         category.includes('汽油') ||
         category.includes('柴油') ||
         category.includes('transport') ||
@@ -244,29 +285,43 @@ export function useInvoice() {
       0
     )
 
-    // 如果总金额超过1500，需要核减
-    if (totalTransportAndFuelAmount > 1500) {
-      // 使用整数（分）计算，避免浮点精度问题
-      const totalAmountCents = Math.round(totalTransportAndFuelAmount * 100)
-      const totalDeductionCents = totalAmountCents - 150000
-      let allocatedDeductionCents = 0
+    // 计算剩余可用额度 = 1500 - 当月已使用额度
+    const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota.value)
 
-      transportAndFuelInvoices.forEach((inv, index) => {
-        if (index === transportAndFuelInvoices.length - 1) {
-          // 最后一张发票承担剩余核减，确保总核减精确
-          const deductionCents = totalDeductionCents - allocatedDeductionCents
-          inv.deductedAmount = deductionCents / 100
-          inv.actualAmount = inv.amount - inv.deductedAmount
+    // 如果当月已使用额度 >= 1500，本次上传的所有运输/交通/汽油/柴油类发票全部核减
+    if (monthlyUsedQuota.value >= 1500) {
+      transportAndFuelInvoices.forEach(inv => {
+        inv.deductedAmount = inv.amount
+        inv.actualAmount = 0
+      })
+    } else if (totalTransportAndFuelAmount > remainingQuota) {
+      // 如果本次上传的发票总额超过剩余额度，使用"先到先得"逻辑
+      let accumulatedAmount = 0
+
+      transportAndFuelInvoices.forEach(inv => {
+        const invAmountCents = Math.round(inv.amount * 100)
+        const accumulatedCents = Math.round(accumulatedAmount * 100)
+        const remainingQuotaCents = Math.round(remainingQuota * 100) - accumulatedCents
+
+        if (remainingQuotaCents <= 0) {
+          // 已经超过额度，这张发票完全不予报销
+          inv.deductedAmount = inv.amount
+          inv.actualAmount = 0
+        } else if (invAmountCents <= remainingQuotaCents) {
+          // 这张发票可以全额报销
+          inv.deductedAmount = 0
+          inv.actualAmount = inv.amount
+          accumulatedAmount += inv.amount
         } else {
-          const proportion = inv.amount / totalTransportAndFuelAmount
-          const deductionCents = Math.round(totalDeductionCents * proportion)
-          allocatedDeductionCents += deductionCents
-          inv.deductedAmount = deductionCents / 100
-          inv.actualAmount = inv.amount - inv.deductedAmount
+          // 这张发票部分报销
+          const actualAmountCents = remainingQuotaCents
+          inv.actualAmount = actualAmountCents / 100
+          inv.deductedAmount = inv.amount - inv.actualAmount
+          accumulatedAmount = remainingQuota // 已达上限
         }
       })
     } else {
-      // 如果不超过1500，清除核减
+      // 如果不超过剩余额度，清除核减
       transportAndFuelInvoices.forEach(inv => {
         inv.deductedAmount = 0
         inv.actualAmount = inv.amount
@@ -278,7 +333,7 @@ export function useInvoice() {
       const category = inv.category?.toLowerCase() || ''
       return !(
         category.includes('运输') ||
-        category.includes('运输服务') ||
+        category.includes('交通') ||
         category.includes('汽油') ||
         category.includes('柴油') ||
         category.includes('transport') ||
@@ -410,6 +465,7 @@ export function useInvoice() {
     totalAmount,
     totalDeductedAmount,
     invoiceNumbers,
+    monthlyUsedQuota,
 
     // 方法
     formatDateToChinese,
@@ -422,5 +478,6 @@ export function useInvoice() {
     loadInvoices,
     clearInvoices,
     getInvoicesForSubmit,
+    fetchMonthlyUsedQuota,
   }
 }

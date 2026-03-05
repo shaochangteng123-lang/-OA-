@@ -113,19 +113,23 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
 
   // 1. 提取金额（价税合计）- 改进的匹配模式
   const amountPatterns = [
-    // 最高优先级：匹配 "价税合计" 区域内的金额（支持换行和空格，最多100个字符）
-    // 例如：价税合计（大写）捌佰伍拾贰圆整（小写）¥852.00
-    /价税合计[\s\S]{0,100}?[¥￥]\s*([\d,]+\.\d{2})/,
-    
+    // 最高优先级：匹配大写金额后面紧跟的小写金额（支持换行和制表符）
+    // 例如：捌佰伍拾贰圆整 ¥852.00 或 贰佰肆拾玖圆整 \t¥249.00
+    // 这个模式优先级最高，因为大写金额后面的小写金额最准确
+    /[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\t\n]*[¥￥]\s*([\d,]+\.\d{2})/,
+
+    // 匹配 "价税合计" 后面的大写金额和小写金额（但要确保匹配的是大写金额后的小写金额）
+    // 例如：价税合计（大写） （小写）... ¥11.00 壹拾壹圆整
+    /价\s*税\s*合\s*计[\s\S]{0,200}?[¥￥]\s*([\d,]+\.\d{2})\s*[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]/,
+
+    // 匹配 "价税合计" 区域内的金额（支持换行和空格）
+    /价\s*税\s*合\s*计[\s\S]{0,150}?[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥]?\s*([\d,]+\.\d{2})/,
+
     // 匹配 "（小写）" 后面的金额（支持中英文括号）
-    /[（(]小写[）)][：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
-    
-    // 匹配大写金额后面紧跟的小写金额（支持换行）
-    // 例如：捌佰伍拾贰圆整 ¥852.00
-    /[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\n]*[¥￥]\s*([\d,]+\.\d{2})/,
-    
-    // 匹配 "合计" 后面的金额
-    /合\s*计[：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
+    /[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥]?\s*([\d,]+\.\d{2})/,
+
+    // 匹配 "合计" 后面的金额（但排除价税合计）
+    /(?<!价\s*税\s*)合\s*计[：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
   ]
 
   for (const pattern of amountPatterns) {
@@ -135,7 +139,8 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
       const parsedAmount = parseFloat(amountStr)
       if (parsedAmount > 0) {
         result.amount = parsedAmount
-        console.log('💰 提取到金额:', result.amount, '来源:', match[0].substring(0, 50))
+        console.log('💰 提取到金额:', result.amount, '来源:', match[0].substring(0, 80))
+        console.log('💰 完整匹配内容:', match[0])
         break
       }
     }
@@ -176,10 +181,12 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
 
   // 3. 提取发票号码 - 改进的匹配模式
   const invoiceNumberPatterns = [
-    // 最高优先级：匹配 "开票人:" 前面的长数字（发票号码通常在这个位置）
+    // 最高优先级：匹配 "发票号码：" 后面的数字（支持换行和空格，20位数字）
+    /发票号码[：:\s]*[\r\n]*\s*(\d{20})/,
+    // 匹配 "发票号码：" 后面的数字（支持换行和空格，8-24位数字）
+    /发票号码[：:\s]*[\r\n]*\s*(\d{8,24})/,
+    // 匹配 "开票人:" 前面的长数字（发票号码通常在这个位置）
     /开票人[：:][^\d]*(\d{20,24})/,
-    // 匹配 "发票号码：" 后面的数字（可能有很多换行）
-    /发票号码[：:\s\n]*(\d{8,24})/,
     // 匹配 "No." 后面的数字
     /No\.\s*(\d{8,24})/i,
   ]
@@ -193,7 +200,16 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     }
   }
 
-  // 如果没有找到，尝试查找独立的8-12位数字（但要排除日期和金额）
+  // 如果没有找到，尝试查找独立的20位数字（发票号码通常是20位）
+  if (!result.invoiceNumber) {
+    const longNumbers = text.match(/\b\d{20}\b/g)
+    if (longNumbers && longNumbers.length > 0) {
+      result.invoiceNumber = longNumbers[0]
+      console.log('🔢 提取到发票号码（20位独立数字）:', result.invoiceNumber)
+    }
+  }
+
+  // 如果还没有找到，尝试查找独立的8-12位数字（但要排除日期和金额）
   if (!result.invoiceNumber) {
     const allNumbers = text.match(/\b\d{8,12}\b/g)
     if (allNumbers) {

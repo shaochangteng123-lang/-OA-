@@ -6,6 +6,7 @@ import path from 'path'
 import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
+import { calculateReimbursementMonth } from '../utils/reimbursement.js'
 
 const router = Router()
 
@@ -148,6 +149,109 @@ async function recognizeInvoice(filePath: string): Promise<{
     }
   }
 }
+
+/**
+ * 检查发票号码是否已存在（全局查重）
+ * POST /api/reimbursement/check-invoice-duplicate
+ */
+router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
+  try {
+    const { invoiceNumber } = req.body
+
+    if (!invoiceNumber) {
+      return res.json({ success: true, data: { duplicate: false } })
+    }
+
+    const { db } = await import('../db/index.js')
+
+    // 查询数据库中是否已存在该发票号码（排除已删除和已拒绝的报销单）
+    const existing = db.prepare(`
+      SELECT ri.invoice_number, r.id as reimbursement_id, r.title, r.status, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.invoice_number = ? AND r.status NOT IN ('rejected', 'deleted')
+      LIMIT 1
+    `).get(invoiceNumber) as any
+
+    if (existing) {
+      return res.json({
+        success: true,
+        data: {
+          duplicate: true,
+          message: `${invoiceNumber}此发票${existing.applicant_name}已上传，请勿重复上传`,
+        },
+      })
+    }
+
+    res.json({ success: true, data: { duplicate: false } })
+  } catch (error) {
+    console.error('发票查重失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '发票查重失败',
+    })
+  }
+})
+
+/**
+ * 查询用户当月运输/交通/汽油/柴油类发票已使用额度
+ * GET /api/reimbursement/transport-fuel-quota
+ */
+router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.user?.id
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: '未登录',
+      })
+    }
+
+    const { db } = await import('../db/index.js')
+
+    // 获取当前报销月份(使用与创建报销单相同的逻辑)
+    const now = new Date()
+    const { calculateReimbursementMonth } = await import('../utils/reimbursement.js')
+    const currentReimbursementMonth = calculateReimbursementMonth(now, 'basic')
+
+    // 查询当前报销月份所有已提交(非草稿、非拒绝)的基础报销单中的运输/交通/汽油/柴油类发票
+    const result = db.prepare(`
+      SELECT COALESCE(SUM(ri.amount), 0) as used_amount
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE r.user_id = ?
+        AND r.type = 'basic'
+        AND r.status NOT IN ('draft', 'rejected')
+        AND r.reimbursement_month = ?
+        AND (
+          LOWER(ri.category) LIKE '%运输%'
+          OR LOWER(ri.category) LIKE '%交通%'
+          OR LOWER(ri.category) LIKE '%汽油%'
+          OR LOWER(ri.category) LIKE '%柴油%'
+        )
+    `).get(userId, currentReimbursementMonth) as { used_amount: number }
+
+    const usedAmount = result?.used_amount || 0
+    const remainingQuota = Math.max(0, 1500 - usedAmount)
+
+    res.json({
+      success: true,
+      data: {
+        usedAmount,
+        remainingQuota,
+        totalQuota: 1500,
+        reimbursementMonth: currentReimbursementMonth,
+      },
+    })
+  } catch (error) {
+    console.error('查询运输/汽油类发票额度失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '查询额度失败',
+    })
+  }
+})
 
 /**
  * 上传发票并进行OCR识别
@@ -452,13 +556,17 @@ router.get('/records', requireAuth, async (req, res) => {
     }
 
     if (startDate) {
-      whereClause += ' AND DATE(submit_time) >= ?'
-      params.push(startDate)
+      // 将日期转换为报销月份格式 YYYY-MM
+      const startMonth = (startDate as string).substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND reimbursement_month >= ?'
+      params.push(startMonth)
     }
 
     if (endDate) {
-      whereClause += ' AND DATE(submit_time) <= ?'
-      params.push(endDate)
+      // 将日期转换为报销月份格式 YYYY-MM
+      const endMonth = (endDate as string).substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND reimbursement_month <= ?'
+      params.push(endMonth)
     }
 
     // 查询总数
@@ -480,6 +588,7 @@ router.get('/records', requireAuth, async (req, res) => {
         completed_time as completedTime,
         payment_proof_path as paymentProofPath,
         receipt_confirmed_by as receiptConfirmedBy,
+        reimbursement_month as reimbursementMonth,
         created_at as createTime
       FROM reimbursements
       ${whereClause}
@@ -555,8 +664,8 @@ router.post('/create', requireAuth, async (req, res) => {
     // 导入数据库
     const { db } = await import('../db/index.js')
 
-    // 计算总金额
-    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.amount || 0), 0)
+    // 计算总金额（使用实际报销金额，即扣除核减后的金额）
+    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.actualAmount || inv.amount || 0), 0)
 
     // 生成报销单ID
     const now = new Date()
@@ -566,13 +675,16 @@ router.post('/create', requireAuth, async (req, res) => {
 
     const timestamp = now.toISOString()
 
+    // 计算报销月份（只有基础报销使用特殊规则）
+    const reimbursementMonth = calculateReimbursementMonth(now, type)
+
     // 插入报销单主记录
     const insertReimbursement = db.prepare(`
       INSERT INTO reimbursements (
         id, type, category, title, total_amount, status, description,
         business_type, client, user_id, applicant_name,
-        submit_time, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        submit_time, reimbursement_month, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     insertReimbursement.run(
@@ -588,6 +700,7 @@ router.post('/create', requireAuth, async (req, res) => {
       userId,
       userName,
       timestamp,
+      reimbursementMonth,
       timestamp,
       timestamp
     )
@@ -596,8 +709,8 @@ router.post('/create', requireAuth, async (req, res) => {
     const insertInvoice = db.prepare(`
       INSERT INTO reimbursement_invoices (
         id, reimbursement_id, amount, invoice_date, invoice_number,
-        file_path, seller, buyer, tax_amount, invoice_code, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     for (const invoice of invoices) {
@@ -613,6 +726,8 @@ router.post('/create', requireAuth, async (req, res) => {
         invoice.buyer || null,
         invoice.taxAmount || 0,
         invoice.invoiceCode || null,
+        invoice.category || null,
+        invoice.deductedAmount || 0,
         timestamp
       )
     }
@@ -1485,8 +1600,8 @@ router.put('/:id', requireAuth, async (req, res) => {
       })
     }
 
-    // 计算总金额
-    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.amount || 0), 0)
+    // 计算总金额（使用实际报销金额，即扣除核减后的金额）
+    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.actualAmount || inv.amount || 0), 0)
 
     const timestamp = new Date().toISOString()
 
@@ -1518,8 +1633,8 @@ router.put('/:id', requireAuth, async (req, res) => {
     const insertInvoice = db.prepare(`
       INSERT INTO reimbursement_invoices (
         id, reimbursement_id, amount, invoice_date, invoice_number,
-        file_path, seller, buyer, tax_amount, invoice_code, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     for (const invoice of invoices) {
@@ -1535,6 +1650,8 @@ router.put('/:id', requireAuth, async (req, res) => {
         invoice.buyer || null,
         invoice.taxAmount || 0,
         invoice.invoiceCode || null,
+        invoice.category || null,
+        invoice.deductedAmount || 0,
         timestamp
       )
     }
