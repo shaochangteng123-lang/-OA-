@@ -1,0 +1,345 @@
+/**
+ * 本地 OCR 服务
+ * 使用 pdf-parse 提取 PDF 文本，然后使用正则表达式识别发票信息
+ * 数据完全在本地处理，保证数据安全
+ */
+
+import fs from 'fs'
+import path from 'path'
+import { PDFDocument } from 'pdf-lib'
+
+// 动态导入 pdf-parse
+let PDFParseClass: any = null
+
+async function getPdfParse() {
+  if (!PDFParseClass) {
+    const module = await import('pdf-parse')
+    PDFParseClass = module.PDFParse
+  }
+  return PDFParseClass
+}
+
+/**
+ * 发票识别结果接口
+ */
+export interface InvoiceOcrResult {
+  amount: number
+  date: string
+  invoiceNumber?: string
+  seller?: string
+  buyer?: string
+  taxAmount?: number
+  invoiceCode?: string
+  type?: string // 报销类型（从项目名称提取）
+  isValidInvoice: boolean
+}
+
+/**
+ * 将 PDF 第一页转换为图片
+ */
+async function pdfToImage(pdfPath: string): Promise<Buffer> {
+  try {
+    // 读取 PDF 文件
+    const pdfBytes = fs.readFileSync(pdfPath)
+    const pdfDoc = await PDFDocument.load(pdfBytes)
+
+    // 获取第一页
+    const pages = pdfDoc.getPages()
+    if (pages.length === 0) {
+      throw new Error('PDF 文件没有页面')
+    }
+
+    // 注意：pdf-lib 不支持直接渲染为图片
+    // 这里我们需要使用其他方法
+    // 暂时返回 PDF 原始数据，后续可以集成 pdf2pic 或其他库
+    console.log('⚠️  PDF 转图片功能需要额外配置，当前使用文本提取')
+
+    // 尝试从 PDF 提取文本
+    const textContent = await extractTextFromPdf(pdfPath)
+
+    // 创建一个简单的图片缓冲区（用于 OCR）
+    // 实际上我们会直接使用提取的文本
+    return Buffer.from(textContent)
+  } catch (error) {
+    console.error('PDF 转图片失败:', error)
+    throw error
+  }
+}
+
+/**
+ * 从 PDF 提取文本（用于电子发票）
+ */
+async function extractTextFromPdf(pdfPath: string): Promise<string> {
+  try {
+    const dataBuffer = fs.readFileSync(pdfPath)
+    const PDFParseClass = await getPdfParse()
+    const parser = new PDFParseClass({ data: dataBuffer })
+    const result = await parser.getText()
+
+    console.log('📄 PDF 文本提取成功')
+    console.log('📝 提取的文本长度:', result.text.length)
+    console.log('📝 文本预览:', result.text.substring(0, 200))
+
+    return result.text
+  } catch (error) {
+    console.error('PDF 文本提取失败:', error)
+    return ''
+  }
+}
+
+/**
+ * 使用正则表达式从文本中提取发票信息
+ */
+function parseInvoiceText(text: string): InvoiceOcrResult {
+  console.log('🔍 开始解析发票文本...')
+  console.log('📝 文本长度:', text.length)
+  console.log('📝 完整文本内容:')
+  console.log('=' .repeat(80))
+  console.log(text)
+  console.log('='.repeat(80))
+
+  // 初始化结果
+  const result: InvoiceOcrResult = {
+    amount: 0,
+    date: '',
+    invoiceNumber: '',
+    seller: '',
+    buyer: '',
+    taxAmount: 0,
+    invoiceCode: '',
+    type: '',
+    isValidInvoice: false,
+  }
+
+  // 1. 提取金额（价税合计）- 改进的匹配模式
+  const amountPatterns = [
+    // 最高优先级：匹配 "价税合计" 区域内的金额（支持换行和空格，最多100个字符）
+    // 例如：价税合计（大写）捌佰伍拾贰圆整（小写）¥852.00
+    /价税合计[\s\S]{0,100}?[¥￥]\s*([\d,]+\.\d{2})/,
+    
+    // 匹配 "（小写）" 后面的金额（支持中英文括号）
+    /[（(]小写[）)][：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
+    
+    // 匹配大写金额后面紧跟的小写金额（支持换行）
+    // 例如：捌佰伍拾贰圆整 ¥852.00
+    /[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\n]*[¥￥]\s*([\d,]+\.\d{2})/,
+    
+    // 匹配 "合计" 后面的金额
+    /合\s*计[：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
+  ]
+
+  for (const pattern of amountPatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      const amountStr = match[1].replace(/,/g, '')
+      const parsedAmount = parseFloat(amountStr)
+      if (parsedAmount > 0) {
+        result.amount = parsedAmount
+        console.log('💰 提取到金额:', result.amount, '来源:', match[0].substring(0, 50))
+        break
+      }
+    }
+  }
+
+  // 2. 提取日期 - 改进的匹配模式
+  const datePatterns = [
+    // 最高优先级：匹配 "开票日期：" 后面的日期（可能有换行）
+    /开票日期[：:\s]*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/,
+    /开票日期[：:\s]*(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})/,
+    // 匹配 "日期" 后面的日期
+    /日期[：:\s]*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/,
+    /日期[：:\s]*(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})/,
+    // 匹配独立的日期格式（带年月日）
+    /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/,
+    /(\d{4})[年\-/](\d{1,2})[月\-/](\d{1,2})[日]?/,
+  ]
+
+  for (const pattern of datePatterns) {
+    const match = text.match(pattern)
+    if (match) {
+      const year = match[1]
+      const month = match[2].padStart(2, '0')
+      const day = match[3].padStart(2, '0')
+
+      // 验证日期合理性
+      const yearNum = parseInt(year)
+      const monthNum = parseInt(month)
+      const dayNum = parseInt(day)
+
+      if (yearNum >= 2000 && yearNum <= 2030 && monthNum >= 1 && monthNum <= 12 && dayNum >= 1 && dayNum <= 31) {
+        result.date = `${year}-${month}-${day}`
+        console.log('📅 提取到日期:', result.date, '来源:', match[0])
+        break
+      }
+    }
+  }
+
+  // 3. 提取发票号码 - 改进的匹配模式
+  const invoiceNumberPatterns = [
+    // 最高优先级：匹配 "开票人:" 前面的长数字（发票号码通常在这个位置）
+    /开票人[：:][^\d]*(\d{20,24})/,
+    // 匹配 "发票号码：" 后面的数字（可能有很多换行）
+    /发票号码[：:\s\n]*(\d{8,24})/,
+    // 匹配 "No." 后面的数字
+    /No\.\s*(\d{8,24})/i,
+  ]
+
+  for (const pattern of invoiceNumberPatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      result.invoiceNumber = match[1]
+      console.log('🔢 提取到发票号码:', result.invoiceNumber, '来源:', match[0])
+      break
+    }
+  }
+
+  // 如果没有找到，尝试查找独立的8-12位数字（但要排除日期和金额）
+  if (!result.invoiceNumber) {
+    const allNumbers = text.match(/\b\d{8,12}\b/g)
+    if (allNumbers) {
+      for (const num of allNumbers) {
+        // 排除日期格式（YYYYMMDD）
+        if (num.length === 8) {
+          const year = parseInt(num.substring(0, 4))
+          const month = parseInt(num.substring(4, 6))
+          const day = parseInt(num.substring(6, 8))
+          if (year >= 2000 && year <= 2030 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            continue // 这是日期，跳过
+          }
+        }
+        // 排除金额（包含小数点的数字）
+        if (text.includes(num + '.')) {
+          continue
+        }
+        result.invoiceNumber = num
+        console.log('🔢 提取到发票号码（独立数字）:', result.invoiceNumber)
+        break
+      }
+    }
+  }
+
+  // 4. 提取发票代码
+  const invoiceCodePatterns = [
+    /发票代码[：:\s]*(\d{10,12})/,
+    /代码[：:\s]*(\d{10,12})/,
+  ]
+
+  for (const pattern of invoiceCodePatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      result.invoiceCode = match[1]
+      console.log('🔢 提取到发票代码:', result.invoiceCode)
+      break
+    }
+  }
+
+  // 5. 提取销售方名称
+  const sellerPatterns = [
+    /销售方[：:\s]*名称[：:\s]*([^\n\r]+)/,
+    /销售方[：:\s]*([^\n\r]+)/,
+    /卖方[：:\s]*([^\n\r]+)/,
+  ]
+
+  for (const pattern of sellerPatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      result.seller = match[1].trim()
+      console.log('🏢 提取到销售方:', result.seller)
+      break
+    }
+  }
+
+  // 6. 提取购买方名称
+  const buyerPatterns = [
+    /购买方[：:\s]*名称[：:\s]*([^\n\r]+)/,
+    /购买方[：:\s]*([^\n\r]+)/,
+    /买方[：:\s]*([^\n\r]+)/,
+  ]
+
+  for (const pattern of buyerPatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      result.buyer = match[1].trim()
+      console.log('👤 提取到购买方:', result.buyer)
+      break
+    }
+  }
+
+  // 7. 提取税额
+  const taxPatterns = [
+    /税额[：:\s]*[¥￥]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/,
+    /税金[：:\s]*[¥￥]?\s*(\d+(?:,\d{3})*(?:\.\d{2})?)/,
+  ]
+
+  for (const pattern of taxPatterns) {
+    const match = text.match(pattern)
+    if (match && match[1]) {
+      const taxStr = match[1].replace(/,/g, '')
+      result.taxAmount = parseFloat(taxStr)
+      console.log('💵 提取到税额:', result.taxAmount)
+      break
+    }
+  }
+
+  // 8. 提取报销类型（从项目名称中提取）
+  // 格式：*保险服务*附加公共场所 -> 提取 "保险服务"
+  const typePattern = /\*([^*]+)\*/
+  const typeMatch = text.match(typePattern)
+  if (typeMatch && typeMatch[1]) {
+    result.type = typeMatch[1].trim()
+    console.log('📋 提取到报销类型:', result.type)
+  }
+
+  // 判断是否为有效发票（至少要有金额）
+  result.isValidInvoice = result.amount > 0
+
+  console.log('✅ 发票解析完成:', {
+    amount: result.amount,
+    date: result.date,
+    invoiceNumber: result.invoiceNumber,
+    type: result.type,
+    isValid: result.isValidInvoice,
+  })
+
+  return result
+}
+
+/**
+ * 本地 OCR 识别发票
+ * @param filePath PDF 文件路径
+ * @returns 发票识别结果
+ */
+export async function recognizeInvoiceLocally(filePath: string): Promise<InvoiceOcrResult> {
+  console.log('🔍 开始本地 OCR 识别...')
+  console.log('📄 文件路径:', filePath)
+
+  try {
+    // 检查文件是否存在
+    if (!fs.existsSync(filePath)) {
+      throw new Error('文件不存在')
+    }
+
+    // 从 PDF 提取文本
+    console.log('📄 正在提取 PDF 文本...')
+    const text = await extractTextFromPdf(filePath)
+
+    if (!text || text.trim().length === 0) {
+      console.warn('⚠️  PDF 文本提取为空，可能是扫描件或图片 PDF')
+      throw new Error('无法从 PDF 提取文本，请确保上传的是电子发票')
+    }
+
+    // 解析文本提取发票信息
+    const result = parseInvoiceText(text)
+
+    // 如果没有提取到关键信息，返回提示
+    if (result.amount === 0) {
+      console.warn('⚠️  未能识别到发票金额')
+      result.isValidInvoice = false
+    }
+
+    return result
+  } catch (error) {
+    console.error('❌ 本地 OCR 识别失败:', error)
+    throw error
+  }
+}

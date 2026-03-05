@@ -22,6 +22,8 @@
             title="办公区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
+            group-key="office"
+            v-model:expanded="groupStates.office.expanded"
           >
             <SidebarMenuItem
               path="/calendar"
@@ -51,6 +53,8 @@
             title="财务区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
+            group-key="finance"
+            v-model:expanded="groupStates.finance.expanded"
           >
             <SidebarMenuItem
               path="/basic-reimbursement"
@@ -92,11 +96,13 @@
             />
           </SidebarGroup>
 
-          <!-- 人力资源 -->
+          <!-- 人力资源区 -->
           <SidebarGroup
-            title="人力资源"
+            title="人力资源区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
+            group-key="hr"
+            v-model:expanded="groupStates.hr.expanded"
           >
             <SidebarMenuItem
               path="/onboarding"
@@ -141,6 +147,8 @@
             title="项目区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
+            group-key="project"
+            v-model:expanded="groupStates.project.expanded"
           >
             <SidebarMenuItem
               path="/projects"
@@ -205,6 +213,8 @@
             title="系统区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
+            group-key="system"
+            v-model:expanded="groupStates.system.expanded"
           >
             <SidebarMenuItem
               v-if="isAdmin"
@@ -257,7 +267,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/utils/api'
@@ -303,6 +313,19 @@ const isPinned = ref(false)
 const groupTitlesVisible = ref(false) // 分组标题独立控制
 let collapseTimer: number | null = null
 
+// 分组折叠状态管理
+interface GroupState {
+  expanded: boolean
+}
+
+const groupStates = reactive<Record<string, GroupState>>({
+  office: { expanded: false },
+  finance: { expanded: false },
+  hr: { expanded: false },
+  project: { expanded: false },
+  system: { expanded: false },
+})
+
 // 待审批数量
 const pendingApprovalCount = ref(0)
 
@@ -323,8 +346,11 @@ const pageTitle = computed(() => {
     '/history': '历史日志',
     '/calendar': '日历',
     '/basic-reimbursement': '基础报销',
+    '/basic-reimbursement/create': '新建基础报销单',
     '/large-reimbursement': '大额报销',
+    '/large-reimbursement/create': '新建大额报销单',
     '/business-reimbursement': '商务报销',
+    '/business-reimbursement/create': '新建商务报销单',
     '/reimbursement-statistics': '报销统计',
     '/onboarding': '入职',
     '/probation': '转正',
@@ -372,6 +398,8 @@ const toggleSidebar = () => {
 // 处理退出登录
 const handleLogout = async () => {
   try {
+    // 清除侧边栏锁定状态，确保下次登录时侧边栏是折叠的
+    localStorage.removeItem('sidebar-pinned')
     await authStore.logout()
     router.push('/login')
     ElMessage.success('已退出登录')
@@ -424,13 +452,11 @@ const handleMouseLeave = () => {
 
 // 组件挂载
 onMounted(() => {
-  // 从 localStorage 读取锁定状态
+  // 从 localStorage 读取锁定状态，如果没有保存过，默认为 false（不锁定）
   const savedPinned = localStorage.getItem('sidebar-pinned')
-  if (savedPinned !== null) {
-    isPinned.value = savedPinned === 'true'
-  }
+  isPinned.value = savedPinned === 'true'
 
-  // 如果锁定，则展开；否则折叠
+  // 根据锁定状态设置侧边栏：锁定时展开，不锁定时折叠
   sidebarCollapsed.value = !isPinned.value
   groupTitlesVisible.value = isPinned.value
 
@@ -464,7 +490,7 @@ onUnmounted(() => {
 <style scoped>
 .app-layout {
   min-height: 100vh;
-  background-color: #f5f5f5;
+  background-color: #ffffff;
   position: relative;
 }
 
@@ -516,8 +542,9 @@ onUnmounted(() => {
   margin-left: 64px;
   min-height: calc(100vh - 60px);
   overflow: auto;
-  background-color: #f5f5f5;
-  padding: 24px;
+  background-color: #ffffff;
+  padding: 24px 45px;
+  max-width: none;
   transition: margin-left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   /* 优化模块34：隐藏滚动条但保持滚动功能 */
   scrollbar-width: none; /* Firefox */

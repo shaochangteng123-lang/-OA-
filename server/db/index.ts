@@ -433,6 +433,23 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_invoice_number ON reimbursement_invoices(invoice_number);
   `)
 
+  // 添加 category 和 deducted_amount 字段到 reimbursement_invoices 表
+  const invoiceColumns = [
+    { name: 'category', type: 'TEXT' },           // 发票类型（运输服务、汽油等）
+    { name: 'deducted_amount', type: 'REAL DEFAULT 0' },  // 核减金额
+  ]
+
+  for (const column of invoiceColumns) {
+    try {
+      db.exec(`ALTER TABLE reimbursement_invoices ADD COLUMN ${column.name} ${column.type}`)
+      console.log(`✅ 成功添加 ${column.name} 字段到 reimbursement_invoices 表`)
+    } catch (error: any) {
+      if (!error.message.includes('duplicate column name')) {
+        console.error(`❌ 添加 ${column.name} 字段失败:`, error)
+      }
+    }
+  }
+
   // 16. approval_flows 表 - 审批流程配置表
   db.exec(`
     CREATE TABLE IF NOT EXISTS approval_flows (
@@ -449,6 +466,27 @@ export function initDatabase() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_approval_flows_type ON approval_flows(type);
     CREATE INDEX IF NOT EXISTS idx_approval_flows_is_active ON approval_flows(is_active);
+  `)
+
+  // 16.5. reimbursement_deductions 表 - 核减金额统计表（基础报销专用）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reimbursement_deductions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      month INTEGER NOT NULL,
+      deducted_amount REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      UNIQUE(user_id, year, month)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_deductions_user_id ON reimbursement_deductions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_deductions_year ON reimbursement_deductions(year);
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_deductions_year_month ON reimbursement_deductions(year, month);
   `)
 
   // 17. approval_instances 表 - 审批实例表

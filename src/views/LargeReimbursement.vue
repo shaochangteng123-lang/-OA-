@@ -854,4 +854,20 @@ onMounted(() => {
   height: 70vh;
   border: none;
 }
+
+/* 新建报销单弹窗样式 */
+.create-step-content {
+  padding: 20px 0;
+  min-height: 300px;
+}
+
+.create-form {
+  max-width: 100%;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
 </style>

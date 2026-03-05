@@ -17,8 +17,11 @@ export interface InvoiceItem {
   amount: number
   invoiceDate: string
   invoiceNumber: string
+  category?: string // 报销类型
   filePath: string
   fileUid: string | number
+  deductedAmount?: number // 核减金额
+  actualAmount?: number // 实际报销金额
 }
 
 // OCR 识别结果
@@ -26,6 +29,7 @@ export interface OcrResult {
   amount: number
   date: string
   invoiceNumber: string
+  type?: string // 报销类型
 }
 
 // 上传响应
@@ -41,7 +45,7 @@ export interface UploadResponse {
 /**
  * 发票管理 composable
  */
-export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
+export function useInvoice() {
   // 发票明细列表
   const invoiceList = ref<InvoiceItem[]>([])
   // 文件列表（用于 el-upload）
@@ -49,9 +53,14 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
   // 发票ID计数器
   let invoiceIdCounter = 0
 
-  // 计算总金额
+  // 计算总金额（使用实际报销金额）
   const totalAmount = computed(() => {
-    return invoiceList.value.reduce((sum, item) => sum + (item.amount || 0), 0)
+    return invoiceList.value.reduce((sum, item) => sum + (item.actualAmount || item.amount || 0), 0)
+  })
+
+  // 计算总核减金额
+  const totalDeductedAmount = computed(() => {
+    return invoiceList.value.reduce((sum, item) => sum + (item.deductedAmount || 0), 0)
   })
 
   // 获取所有发票号码（用于重复校验）
@@ -84,13 +93,6 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
   }
 
   /**
-   * 处理文件超出限制
-   */
-  function handleExceed(): void {
-    ElMessage.warning(`最多只能上传${maxFiles}个发票文件`)
-  }
-
-  /**
    * 处理文件变化 - 上传并OCR识别
    */
   async function handleFileChange(file: any, fileListParam: any[]): Promise<void> {
@@ -117,7 +119,7 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
 
     // 调用后端API进行发票OCR识别
     try {
-      ElMessage.info('正在识别发票信息...')
+      ElMessage.info(`正在识别发票 ${file.name}...`)
 
       const uploadFormData = new FormData()
       uploadFormData.append('invoice', file.raw)
@@ -132,7 +134,7 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
       const result: UploadResponse = await response.json()
 
       if (result.success && result.data?.ocrResult) {
-        const { amount, date, invoiceNumber } = result.data.ocrResult
+        const { amount, date, invoiceNumber, type } = result.data.ocrResult
 
         // 检查是否为模拟数据
         const isMockData = invoiceNumber && invoiceNumber.toString().startsWith('MOCK-')
@@ -169,21 +171,22 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
           amount: amount || 0,
           invoiceDate: date || '',
           invoiceNumber: invoiceNumber || '',
+          category: type || '', // 添加报销类型
           filePath: result.data.filePath || '',
           fileUid: file.uid,
         })
 
-        ElMessage.success('发票识别成功！已添加到发票明细')
+        ElMessage.success(`${file.name} 识别成功！`)
 
         // 保存文件路径供后续提交使用
         file.serverPath = result.data.filePath
       } else {
-        ElMessage.error(result.message || '发票识别失败')
+        ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error) {
       console.error('发票识别失败:', error)
-      ElMessage.error('发票识别失败，请重新上传')
+      ElMessage.error(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
     }
   }
@@ -201,11 +204,92 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
   /**
    * 添加发票
    */
-  function addInvoice(invoice: Omit<InvoiceItem, 'id'>): void {
+  function addInvoice(invoice: Omit<InvoiceItem, 'id' | 'deductedAmount' | 'actualAmount'>): void {
     invoiceIdCounter++
+
+    // 先不计算核减，添加到列表后统一计算
     invoiceList.value.push({
       id: invoiceIdCounter,
       ...invoice,
+      deductedAmount: 0,
+      actualAmount: invoice.amount,
+    })
+
+    // 重新计算所有发票的核减金额
+    recalculateDeductions()
+  }
+
+  /**
+   * 重新计算核减金额
+   * 对于基础报销，运输服务、汽油、柴油类发票合计限额1500元
+   */
+  function recalculateDeductions(): void {
+    // 找出所有运输服务、汽油、柴油类发票
+    const transportAndFuelInvoices = invoiceList.value.filter(inv => {
+      const category = inv.category?.toLowerCase() || ''
+      return (
+        category.includes('运输') ||
+        category.includes('运输服务') ||
+        category.includes('汽油') ||
+        category.includes('柴油') ||
+        category.includes('transport') ||
+        category.includes('gas') ||
+        category.includes('diesel')
+      )
+    })
+
+    // 计算这些发票的总金额
+    const totalTransportAndFuelAmount = transportAndFuelInvoices.reduce(
+      (sum, inv) => sum + inv.amount,
+      0
+    )
+
+    // 如果总金额超过1500，需要核减
+    if (totalTransportAndFuelAmount > 1500) {
+      // 使用整数（分）计算，避免浮点精度问题
+      const totalAmountCents = Math.round(totalTransportAndFuelAmount * 100)
+      const totalDeductionCents = totalAmountCents - 150000
+      let allocatedDeductionCents = 0
+
+      transportAndFuelInvoices.forEach((inv, index) => {
+        if (index === transportAndFuelInvoices.length - 1) {
+          // 最后一张发票承担剩余核减，确保总核减精确
+          const deductionCents = totalDeductionCents - allocatedDeductionCents
+          inv.deductedAmount = deductionCents / 100
+          inv.actualAmount = inv.amount - inv.deductedAmount
+        } else {
+          const proportion = inv.amount / totalTransportAndFuelAmount
+          const deductionCents = Math.round(totalDeductionCents * proportion)
+          allocatedDeductionCents += deductionCents
+          inv.deductedAmount = deductionCents / 100
+          inv.actualAmount = inv.amount - inv.deductedAmount
+        }
+      })
+    } else {
+      // 如果不超过1500，清除核减
+      transportAndFuelInvoices.forEach(inv => {
+        inv.deductedAmount = 0
+        inv.actualAmount = inv.amount
+      })
+    }
+
+    // 其他类型的发票不核减
+    const otherInvoices = invoiceList.value.filter(inv => {
+      const category = inv.category?.toLowerCase() || ''
+      return !(
+        category.includes('运输') ||
+        category.includes('运输服务') ||
+        category.includes('汽油') ||
+        category.includes('柴油') ||
+        category.includes('transport') ||
+        category.includes('gas') ||
+        category.includes('diesel')
+      )
+    })
+
+    otherInvoices.forEach(inv => {
+      inv.deductedAmount = 0
+      inv.actualAmount = inv.amount
     })
   }
 
@@ -222,6 +306,8 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
     const invoiceIndex = invoiceList.value.findIndex(inv => inv.fileUid === fileUid)
     if (invoiceIndex > -1) {
       invoiceList.value.splice(invoiceIndex, 1)
+      // 重新计算核减金额
+      recalculateDeductions()
     }
   }
 
@@ -240,6 +326,8 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
       const invoiceIndex = invoiceList.value.findIndex(inv => inv.id === invoiceId)
       if (invoiceIndex > -1) {
         invoiceList.value.splice(invoiceIndex, 1)
+        // 重新计算核减金额
+        recalculateDeductions()
       }
     }
   }
@@ -251,6 +339,8 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
     const invoiceIndex = invoiceList.value.findIndex(inv => inv.fileUid === file.uid)
     if (invoiceIndex > -1) {
       invoiceList.value.splice(invoiceIndex, 1)
+      // 重新计算核减金额
+      recalculateDeductions()
     }
   }
 
@@ -306,7 +396,10 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
       amount: inv.amount,
       invoiceDate: inv.invoiceDate,
       invoiceNumber: inv.invoiceNumber,
+      category: inv.category,
       filePath: inv.filePath,
+      deductedAmount: inv.deductedAmount || 0,
+      actualAmount: inv.actualAmount || inv.amount,
     }))
   }
 
@@ -315,12 +408,12 @@ export function useInvoice(maxFiles: number = UPLOAD_CONFIG.BASIC_MAX_FILES) {
     invoiceList,
     fileList,
     totalAmount,
+    totalDeductedAmount,
     invoiceNumbers,
 
     // 方法
     formatDateToChinese,
     beforeUpload,
-    handleExceed,
     handleFileChange,
     deleteInvoiceByFile,
     deleteInvoiceById,

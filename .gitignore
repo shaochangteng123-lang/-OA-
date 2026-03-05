@@ -52,6 +52,11 @@ yarn-error.log*# 临时文件
 tmp/
 temp/
 *.bak
-*.backup# 配置文件（敏感信息）
+*.bak2
+*.bak3
+*.backup
+
+# 上传的文件
+uploads/invoices/*.pdf# 配置文件（敏感信息）
 *.local.json
 .claude/

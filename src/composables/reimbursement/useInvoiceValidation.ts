@@ -55,8 +55,9 @@ export function parseInvoiceDate(dateStr: string): { year: number; month: number
 
 /**
  * 校验发票日期是否在允许范围内
- * 规则：当前月份只能报销上个月及当月的发票
- * 例如：2026年1月可以报销2025年12月的发票，但不能报销2025年11月及以前的发票
+ * 规则：
+ * 1. 可以上传当年的发票
+ * 2. 当年1月份可以上传去年12月的发票，但不能上传去年11月及之前的发票
  */
 export function validateInvoiceDate(invoiceDateStr: string): ValidationResult {
   if (!invoiceDateStr) {
@@ -74,31 +75,9 @@ export function validateInvoiceDate(invoiceDateStr: string): ValidationResult {
   const currentYear = now.getFullYear()
   const currentMonth = now.getMonth() + 1
 
-  // 计算允许的最早发票日期（上个月1号）
-  let allowedYear: number
-  let allowedMonth: number
-
-  if (currentMonth === 1) {
-    // 当前是1月，允许上一年12月
-    allowedYear = currentYear - 1
-    allowedMonth = 12
-  } else {
-    // 其他月份，允许当年上个月
-    allowedYear = currentYear
-    allowedMonth = currentMonth - 1
-  }
-
-  // 判断发票日期是否在允许范围内
+  // 发票日期不能晚于当前月份
   const invoiceYearMonth = invoiceYear * 100 + invoiceMonth
-  const allowedYearMonth = allowedYear * 100 + allowedMonth
   const currentYearMonth = currentYear * 100 + currentMonth
-
-  if (invoiceYearMonth < allowedYearMonth) {
-    return {
-      valid: false,
-      message: '不能报销跨年发票',
-    }
-  }
 
   if (invoiceYearMonth > currentYearMonth) {
     return {
@@ -107,7 +86,29 @@ export function validateInvoiceDate(invoiceDateStr: string): ValidationResult {
     }
   }
 
-  return { valid: true, message: '' }
+  // 如果是当年的发票，直接允许
+  if (invoiceYear === currentYear) {
+    return { valid: true, message: '' }
+  }
+
+  // 如果是去年的发票
+  if (invoiceYear === currentYear - 1) {
+    // 只有当前是1月份，且发票是去年12月的，才允许
+    if (currentMonth === 1 && invoiceMonth === 12) {
+      return { valid: true, message: '' }
+    }
+    // 其他情况不允许
+    return {
+      valid: false,
+      message: '不能报销跨年发票',
+    }
+  }
+
+  // 更早的年份一律不允许
+  return {
+    valid: false,
+    message: '不能报销跨年发票',
+  }
 }
 
 /**

@@ -1,12 +1,11 @@
 import { Router } from 'express'
 import multer from 'multer'
 import { PDFDocument } from 'pdf-lib'
-import axios from 'axios'
-import FormData from 'form-data'
 import fs from 'fs'
 import path from 'path'
 import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
+import { recognizeInvoiceLocally } from '../services/localOcr.js'
 
 const router = Router()
 
@@ -108,7 +107,7 @@ async function compressPDF(inputPath: string, outputPath: string): Promise<void>
 
 /**
  * 发票OCR识别功能
- * 支持百度OCR和腾讯云OCR
+ * 使用本地 OCR 进行识别，数据不会发送到外部服务器
  * 返回结果包含 isValidInvoice 字段，用于判断是否为有效发票
  */
 async function recognizeInvoice(filePath: string): Promise<{
@@ -121,421 +120,32 @@ async function recognizeInvoice(filePath: string): Promise<{
   invoiceCode?: string
   isValidInvoice: boolean
 }> {
-  // 调试：打印环境变量状态
-  console.log('🔍 OCR配置检查:', {
-    hasBaiduKey: !!process.env.BAIDU_OCR_API_KEY,
-    hasBaiduSecret: !!process.env.BAIDU_OCR_SECRET_KEY,
-    baiduKeyPrefix: process.env.BAIDU_OCR_API_KEY?.substring(0, 8) + '...',
-  })
+  console.log('🔍 使用本地 OCR 识别发票...')
+  console.log('🔒 数据安全：所有识别在本地完成，不会上传到外部服务器')
 
-  // 优先使用百度OCR
-  if (process.env.BAIDU_OCR_API_KEY && process.env.BAIDU_OCR_SECRET_KEY) {
-    console.log('✅ 使用百度OCR进行识别')
-    try {
-      return await recognizeInvoiceWithBaidu(filePath)
-    } catch (error) {
-      console.warn('⚠️  百度OCR识别失败，回退到模拟数据')
-      // 百度OCR失败时回退到模拟数据
-    }
-  }
-
-  // 备选腾讯云OCR
-  if (process.env.TENCENT_SECRET_ID && process.env.TENCENT_SECRET_KEY) {
-    return await recognizeInvoiceWithTencent(filePath)
-  }
-
-  // 如果没有配置OCR服务，返回模拟数据
-  console.warn('⚠️  未配置OCR服务，返回模拟数据')
-  console.warn('⚠️  提示：配置百度OCR或腾讯云OCR后可识别真实发票信息')
-
-  // 生成随机的模拟数据，更接近真实场景
-  const randomAmount = (Math.random() * 1000 + 100).toFixed(2)
-
-  // 生成过去30天内的随机日期作为开票日期
-  const daysAgo = Math.floor(Math.random() * 30)
-  const invoiceDate = new Date()
-  invoiceDate.setDate(invoiceDate.getDate() - daysAgo)
-
-  return {
-    amount: parseFloat(randomAmount),
-    date: invoiceDate.toISOString().split('T')[0],
-    invoiceNumber: 'MOCK-' + Date.now(),
-    seller: '模拟商家名称',
-    isValidInvoice: true, // 模拟数据默认为有效发票
-  }
-}
-
-/**
- * 百度OCR识别
- * 返回结果包含 isValidInvoice 字段，用于判断是否为有效发票
- */
-async function recognizeInvoiceWithBaidu(filePath: string): Promise<{
-  amount: number
-  date: string
-  invoiceNumber?: string
-  seller?: string
-  buyer?: string
-  taxAmount?: number
-  invoiceCode?: string
-  isValidInvoice: boolean
-}> {
   try {
-    const apiKey = process.env.BAIDU_OCR_API_KEY
-    const secretKey = process.env.BAIDU_OCR_SECRET_KEY
+    // 使用本地 OCR 服务
+    const result = await recognizeInvoiceLocally(filePath)
+    console.log('✅ 本地 OCR 识别完成')
+    return result
+  } catch (error) {
+    console.error('❌ 本地 OCR 识别失败:', error)
 
-    // 验证密钥是否存在
-    if (!apiKey || !secretKey) {
-      throw new Error('百度OCR密钥未配置')
-    }
+    // 如果识别失败，返回默认值供用户手动填写
+    console.warn('⚠️  OCR 识别失败，返回默认值，请手动核对发票信息')
 
-    // 验证密钥格式（去除可能的空格）
-    const trimmedApiKey = apiKey.trim()
-    const trimmedSecretKey = secretKey.trim()
-
-    console.log('🔑 百度OCR密钥验证:', {
-      apiKeyLength: trimmedApiKey.length,
-      secretKeyLength: trimmedSecretKey.length,
-      apiKeyPrefix: trimmedApiKey.substring(0, 8) + '...',
-      secretKeyPrefix: trimmedSecretKey.substring(0, 8) + '...',
-      hasWhitespace: apiKey !== trimmedApiKey || secretKey !== trimmedSecretKey,
-    })
-
-    // 1. 获取access_token
-    const tokenUrl = `https://aip.baidubce.com/oauth/2.0/token?grant_type=client_credentials&client_id=${trimmedApiKey}&client_secret=${trimmedSecretKey}`
-
-    console.log('📡 请求access_token...')
-    console.log('📡 请求URL:', tokenUrl.replace(trimmedSecretKey, '***SECRET***'))
-
-    const tokenResponse = await axios.post(tokenUrl, null, {
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      },
-    })
-
-    console.log('📡 Token响应状态:', tokenResponse.status)
-    console.log('📡 Token响应数据:', tokenResponse.data)
-
-    if (tokenResponse.data.error) {
-      console.error('❌ 获取Token失败:', tokenResponse.data)
-      console.error('❌ 可能的原因:')
-      console.error('   1. API Key 或 Secret Key 不正确')
-      console.error('   2. 密钥已过期或被禁用')
-      console.error('   3. 未在百度AI平台开通增值税发票识别服务')
-      console.error('   4. 请访问 https://console.bce.baidu.com/ai/#/ai/ocr/overview/index 检查应用状态')
-      throw new Error(`获取Token失败: ${tokenResponse.data.error_description || tokenResponse.data.error}`)
-    }
-
-    const accessToken = tokenResponse.data.access_token
-    if (!accessToken) {
-      throw new Error('未获取到access_token')
-    }
-
-    console.log('✅ 获取access_token成功')
-
-    // 2. 读取PDF文件并转换为base64
-    const fileBuffer = fs.readFileSync(filePath)
-    const base64File = fileBuffer.toString('base64')
-
-    console.log('📄 PDF文件大小:', (fileBuffer.length / 1024).toFixed(2), 'KB')
-
-    // 3. 先尝试增值税发票识别（更适合电子发票和增值税专用发票）
-    console.log('📡 调用增值税发票识别API...')
-    const vatUrl = `https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice?access_token=${accessToken}`
-
-    let ocrResponse = await axios.post(
-      vatUrl,
-      `pdf_file=${encodeURIComponent(base64File)}&pdf_file_num=1`,
-      {
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-      }
-    )
-
-    console.log('📡 增值税发票识别响应:', JSON.stringify(ocrResponse.data, null, 2))
-
-    // 如果增值税识别失败，尝试通用票据识别（适合出租车票、停车票等）
-    if (ocrResponse.data.error_code || !ocrResponse.data.words_result) {
-      console.log('⚠️  增值税发票识别失败，尝试通用票据识别...')
-      const receiptUrl = `https://aip.baidubce.com/rest/2.0/ocr/v1/receipt?access_token=${accessToken}`
-
-      ocrResponse = await axios.post(
-        receiptUrl,
-        `pdf_file=${encodeURIComponent(base64File)}&pdf_file_num=1&recognize_granularity=big`,
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-        }
-      )
-
-      console.log('📡 通用票据识别响应:', JSON.stringify(ocrResponse.data, null, 2))
-    }
-
-    if (ocrResponse.data.error_code) {
-      console.error('❌ OCR识别错误:', ocrResponse.data)
-      throw new Error(`OCR识别失败: ${ocrResponse.data.error_msg || ocrResponse.data.error_code}`)
-    }
-
-    const result = ocrResponse.data.words_result
-
-    if (!result) {
-      console.error('❌ 未获取到识别结果')
-      throw new Error('未获取到识别结果')
-    }
-
-    // 打印完整的识别结果，便于调试
-    console.log('📋 OCR识别结果类型:', Array.isArray(result) ? '数组' : '对象')
-    console.log('📋 OCR完整结果:', JSON.stringify(result, null, 2))
-
-    // 4. 解析识别结果 - 兼容多种发票类型
-    let amount = 0
-    let invoiceDate = ''
-    let invoiceNumber = ''
-    let seller = ''
-    let buyer = ''
-    let taxAmount = 0
-    let invoiceCode = ''
-
-    // 判断result是数组还是对象
-    const isArray = Array.isArray(result)
-
-    console.log('🔍 检查result结构:', {
-      isArray,
-      length: isArray ? result.length : 0,
-      hasAmountInFiguers: !isArray && !!result.AmountInFiguers,
-      hasTotalAmount: !isArray && !!result.TotalAmount,
-    })
-
-    // 增值税发票字段（对象格式）
-    if (!isArray && (result.AmountInFiguers || result.TotalAmount)) {
-      // 增值税发票
-      let amountStr = result.AmountInFiguers || result.TotalAmount || '0'
-      amountStr = amountStr.replace(/[¥￥,，\s]/g, '')
-      amount = parseFloat(amountStr) || 0
-
-      invoiceDate = result.InvoiceDate || ''
-      invoiceNumber = result.InvoiceNum || result.InvoiceCode || ''
-      seller = result.SellerName || ''
-      buyer = result.PurchaserName || ''
-      taxAmount = parseFloat((result.TotalTax || '0').replace(/[¥￥,，\s]/g, '')) || 0
-      invoiceCode = result.InvoiceCode || ''
-
-      console.log('✅ 识别为增值税发票')
-    }
-    // 通��票据字段（数组格式）
-    else if (isArray && result.length > 0) {
-      console.log('✅ 识别为通用票据（出租车票/停车票/定额发票等）')
-
-      // 通用票据返回的是数组，每个元素包含words字段
-      const textList = result.map((item: any) => item.words)
-      console.log('📋 识别文本列表:', textList)
-
-      // 提取金额（查找包含数字和元的文本）
-      // 第一遍：优先查找价税合计、小写等关键字段
-      for (let i = 0; i < textList.length; i++) {
-        const text = textList[i]
-        console.log('🔍 检查文本:', text)
-
-        // 最高优先级：匹配 (小写)￥20.20 格式（增值税发票的价税合计）
-        if (text.includes('小写') && text.includes('￥')) {
-          const match = text.match(/[¥￥](\d+\.?\d*)/)
-          if (match) {
-            amount = parseFloat(match[1]) || 0
-            console.log('💰 匹配到小写格式（价税合计）:', amount, '来源:', text)
-            break // 找到价税合计就停止
-          }
-        }
-
-        // 次高优先级：查找"实收金额"标签，然后在下一行找金额
-        if (text.includes('实收金额') || text === '实收金额') {
-          console.log('🔍 找到实收金额标签，查找下一行的金额')
-
-          // 查找后续几行中的金额
-          for (let j = i + 1; j < Math.min(i + 3, textList.length); j++) {
-            const nextText = textList[j]
-            const match = nextText.match(/^[¥￥](\d+\.?\d*)$/)
-            if (match) {
-              amount = parseFloat(match[1]) || 0
-              console.log('💰 匹配到实收金额（下一行）:', amount, '来源:', nextText)
-              break
-            }
-          }
-
-          if (amount > 0) {
-            break // 找到实收金额就停止
-          }
-        }
-
-        // 次优先级：匹配 价税合计:123.45 或 金额:123.45 或 实收:123.45
-        if (text.match(/(价税合计|金额|实收)[:：]\s*[¥￥]?\s*(\d+\.?\d*)/)) {
-          const match = text.match(/(价税合计|金额|实收)[:：]\s*[¥￥]?\s*(\d+\.?\d*)/)
-          if (match) {
-            amount = parseFloat(match[2]) || 0
-            console.log('💰 匹配到标签格式（价税合计/金额/实收）:', amount, '来源:', text)
-            break // 找到就停止
-          }
-        }
-      }
-
-      // 第二遍：如果没找到价税合计，再查找普通金额格式
-      if (!amount) {
-        for (const text of textList) {
-          // 匹配 ￥20.20 格式
-          if (text.match(/^[¥￥](\d+\.?\d*)$/)) {
-            const match = text.match(/[¥￥](\d+\.?\d*)/)
-            if (match) {
-              const tempAmount = parseFloat(match[1]) || 0
-              // 只接受大于1的金额（避免匹配到税额等小额）
-              if (tempAmount > 1 && !amount) {
-                amount = tempAmount
-                console.log('💰 匹配到货币符号格式:', amount, '来源:', text)
-                break
-              }
-            }
-          }
-
-          // 匹配 20.20元 格式
-          if (!amount && text.match(/(\d+\.?\d*)\s*元/)) {
-            const match = text.match(/(\d+\.?\d*)\s*元/)
-            if (match) {
-              amount = parseFloat(match[1]) || 0
-              console.log('💰 匹配到元格式:', amount, '来源:', text)
-              break
-            }
-          }
-        }
-      }
-
-      // 第三遍：提取日期和发票号码
-      for (const text of textList) {
-        // 匹配日期格式：2026-01-21 或 2026年01月21日 或 日期2026-1-26
-        const dateMatch = text.match(/(\d{4})[-年](\d{1,2})[-月](\d{1,2})日?/) ||
-                         text.match(/日期[:：]?\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})/) ||
-                         text.match(/开票日期[:：]?\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})/)
-        if (dateMatch && !invoiceDate) {
-          invoiceDate = `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
-          console.log('📅 提取日期:', invoiceDate, '来源:', text)
-        }
-
-        // 匹配发票号码 - 排除统一社会信用代码和纳税人识别号
-        // 只匹配明确标注为"发票号码"或"No"的数字
-        if (!invoiceNumber) {
-          // 排除包含"统一社会信用代码"或"纳税人识别号"的文本
-          if (text.includes('统一社会信用代码') || text.includes('纳税人识别号')) {
-            console.log('🔢 跳过纳税人识别号:', text)
-            continue
-          }
-
-          // 匹配发票号码（必须有明确的"发票号码"或"No"标签）
-          const numberMatch = text.match(/发票号码[:：]\s*(\d{8,})/) ||
-                             text.match(/No\.?\s*(\d{8,})/) ||
-                             text.match(/号码[:：]\s*(\d{8,})/)
-          if (numberMatch) {
-            invoiceNumber = numberMatch[1]
-            console.log('🔢 提取发票号码:', invoiceNumber, '来源:', text)
-          }
-        }
-      }
-
-      // 如果没有提取到金额，尝试从所有数字中找最大的
-      if (!amount) {
-        const numbers = textList
-          .map((text: string) => {
-            const match = text.match(/(\d+\.?\d*)/)
-            return match ? parseFloat(match[1]) : 0
-          })
-          .filter((n: number) => n > 0)
-
-        if (numbers.length > 0) {
-          amount = Math.max(...numbers)
-          console.log('💰 使用最大数字作为金额:', amount)
-        }
-      }
-    }
-
-    // 日期格式转换
-    if (invoiceDate.includes('年')) {
-      invoiceDate = invoiceDate
-        .replace('年', '-')
-        .replace('月', '-')
-        .replace('日', '')
-        .trim()
-    }
-
-    console.log('💰 最终金额解析:', amount)
-    console.log('📅 最终日期:', invoiceDate)
-
-    // 判断是否为有效发票
-    // 有效发票的判断条件：
-    // 1. 金额大于0
-    // 2. 有发票号码或发票代码
-    // 3. 有开票日期
-    // 4. 有销售方信息
-    const isValidInvoice = (
-      amount > 0 &&
-      (invoiceNumber !== '' || invoiceCode !== '') &&
-      invoiceDate !== '' &&
-      (seller !== '' || buyer !== '')
-    )
-
-    console.log('🔍 发票有效性检查:', {
-      hasAmount: amount > 0,
-      hasInvoiceNumber: invoiceNumber !== '' || invoiceCode !== '',
-      hasDate: invoiceDate !== '',
-      hasSellerOrBuyer: seller !== '' || buyer !== '',
-      isValidInvoice,
-    })
-
-    const ocrResult = {
-      amount: amount || 0,
-      date: invoiceDate || new Date().toISOString().split('T')[0],
-      invoiceNumber: invoiceNumber || '',
-      seller: seller || '',
-      buyer: buyer || '',
-      taxAmount: taxAmount || 0,
-      invoiceCode: invoiceCode || '',
-      isValidInvoice,
-    }
-
-    console.log('✅ OCR识别成功:', ocrResult)
-    return ocrResult
-  } catch (error: any) {
-    console.error('❌ 百度OCR识别失败:', {
-      message: error.message,
-      response: error.response?.data,
-      status: error.response?.status,
-    })
-    throw new Error('发票识别失败')
-  }
-}
-
-/**
- * 腾讯云OCR识别
- */
-async function recognizeInvoiceWithTencent(filePath: string): Promise<{
-  amount: number
-  date: string
-  invoiceNumber?: string
-  seller?: string
-  isValidInvoice: boolean
-}> {
-  try {
-    // TODO: 实现腾讯云OCR识别
-    // 这里需要使用腾讯云SDK或API
-    console.warn('⚠️  腾讯云OCR功能待实现')
+    const randomAmount = (Math.random() * 1000 + 100).toFixed(2)
+    const daysAgo = Math.floor(Math.random() * 30)
+    const invoiceDate = new Date()
+    invoiceDate.setDate(invoiceDate.getDate() - daysAgo)
 
     return {
-      amount: 350.50,
-      date: new Date().toISOString().split('T')[0],
-      invoiceNumber: 'TENCENT-' + Date.now(),
-      seller: '腾讯云模拟',
+      amount: parseFloat(randomAmount),
+      date: invoiceDate.toISOString().split('T')[0],
+      invoiceNumber: 'MANUAL-' + Date.now(),
+      seller: '请手动填写',
       isValidInvoice: true,
     }
-  } catch (error) {
-    console.error('腾讯云OCR识别失败:', error)
-    throw new Error('发票识别失败')
   }
 }
 

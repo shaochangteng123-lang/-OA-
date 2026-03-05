@@ -1,27 +1,43 @@
 <template>
   <div class="invoice-table-wrapper">
-    <el-table :data="invoiceList" border style="width: 100%" class="invoice-table">
-      <el-table-column prop="id" label="序号" width="80" align="center">
+    <el-table :data="invoiceList" border class="invoice-table">
+      <el-table-column prop="id" label="序号" width="50" align="center">
         <template #default="{ $index }">
           {{ $index + 1 }}
         </template>
       </el-table-column>
-      <el-table-column prop="amount" label="报销金额" width="120" align="center">
+      <el-table-column prop="category" label="报销类型" width="100" align="center">
         <template #default="{ row }">
-          {{ row.amount }}
+          {{ row.category || '-' }}
         </template>
       </el-table-column>
-      <el-table-column prop="invoiceDate" label="开票日期" align="center">
+      <el-table-column prop="amount" label="金额" width="100" align="center">
+        <template #default="{ row }">
+          ¥{{ row.amount }}
+        </template>
+      </el-table-column>
+      <el-table-column prop="invoiceDate" label="开票日期" width="130" align="center">
         <template #default="{ row }">
           {{ formatDateToChinese(row.invoiceDate) }}
         </template>
       </el-table-column>
-      <el-table-column prop="invoiceNumber" label="发票号码" align="center">
+      <el-table-column prop="invoiceNumber" label="发票号码" min-width="140" align="center">
         <template #default="{ row }">
           {{ row.invoiceNumber || '' }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="80" align="center">
+      <el-table-column label="缩略图" width="90" align="center">
+        <template #default="{ row }">
+          <div v-if="row.filePath" class="thumbnail-wrapper" @click="handlePreview(row.filePath)">
+            <div class="pdf-icon">
+              <el-icon :size="30"><Document /></el-icon>
+              <div style="font-size: 10px; margin-top: 2px;">PDF</div>
+            </div>
+          </div>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="60" align="center">
         <template #default="{ row }">
           <el-button v-if="!readonly" type="danger" link @click="onDelete(row)">
             <el-icon><Delete /></el-icon>
@@ -35,17 +51,63 @@
     <div class="invoice-total" :class="{ 'amount-warning': showAmountWarning }">
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
+      <span v-if="showDeduction && totalDeductedAmountNumber > 0" class="deducted-info">
+        （核减：-¥{{ totalDeductedAmount }}）
+      </span>
       <span v-if="warningText" class="amount-tip">
         {{ warningText }}
       </span>
     </div>
+
+    <!-- 核减提示信息 -->
+    <div v-if="showDeduction && hasDeductedInvoices" class="deduction-notice">
+      <div class="notice-detail-list">
+        <div class="notice-detail-row">
+          <span class="detail-text">本次运输/汽油类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
+        </div>
+        <div class="notice-detail-row">
+          <span class="detail-text">本月累计运输/汽油类金额：¥{{ transportFuelSubtotal.toFixed(2) }}<span class="detail-limit">（月度上限 ¥1500.00）</span></span>
+        </div>
+        <div class="notice-detail-row deduction-row">
+          <span class="detail-text">核减金额（超出部分不予报销）：<span class="deducted-highlight">-¥{{ totalDeductedAmount }}</span></span>
+        </div>
+        <div class="notice-detail-row actual-row">
+          <span class="detail-text">实际报销金额：<span class="actual-highlight">¥{{ transportFuelActual.toFixed(2) }}</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 图片预览对话框 -->
+    <el-dialog
+      v-model="previewVisible"
+      :show-close="true"
+      width="100%"
+      top="0"
+      :append-to-body="true"
+      :close-on-click-modal="true"
+      :fullscreen="true"
+      class="preview-dialog"
+    >
+      <div class="preview-container">
+        <iframe
+          v-if="previewImageUrl"
+          :src="previewImageUrl"
+          class="preview-iframe"
+          frameborder="0"
+        ></iframe>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { Delete } from '@element-plus/icons-vue'
+import { computed, ref } from 'vue'
+import { Delete, Document } from '@element-plus/icons-vue'
 import type { InvoiceItem } from '@/composables/reimbursement/useInvoice'
+
+// 预览相关
+const previewVisible = ref(false)
+const previewImageUrl = ref('')
 
 // Props
 const props = withDefaults(defineProps<{
@@ -54,11 +116,13 @@ const props = withDefaults(defineProps<{
   themeColor?: string
   amountThreshold?: number
   showThresholdWarning?: boolean
+  showDeduction?: boolean  // 是否显示核减金额列（仅基础报销显示）
 }>(), {
   readonly: false,
   themeColor: '#409eff',
   amountThreshold: 0,
   showThresholdWarning: false,
+  showDeduction: false,
 })
 
 // Emits
@@ -66,15 +130,70 @@ const emit = defineEmits<{
   (e: 'delete', invoice: InvoiceItem): void
 }>()
 
-// 计算总金额
+// 计算总金额数值（用于比较）- 使用精确的金额计算方法
+const totalAmountNumber = computed(() => {
+  // 将所有金额转换为分（整数），避免浮点数精度问题
+  const totalCents = props.invoiceList.reduce((acc, item) => {
+    const amount = item.actualAmount || item.amount || 0
+    const amountInCents = Math.round(amount * 100)
+    return acc + amountInCents
+  }, 0)
+  // 转换回元
+  return totalCents / 100
+})
+
+// 计算总金额 - 保留原始精度，不进行四舍五入
 const totalAmount = computed(() => {
-  return props.invoiceList.reduce((sum, item) => sum + (item.amount || 0), 0)
+  // 保留两位小数显示
+  return totalAmountNumber.value.toFixed(2)
+})
+
+// 计算总核减金额（数值）
+const totalDeductedAmountNumber = computed(() => {
+  const totalCents = props.invoiceList.reduce((acc, item) => {
+    const deducted = item.deductedAmount || 0
+    const deductedInCents = Math.round(deducted * 100)
+    return acc + deductedInCents
+  }, 0)
+  return totalCents / 100
+})
+
+// 计算总核减金额（格式化字符串）
+const totalDeductedAmount = computed(() => {
+  return totalDeductedAmountNumber.value.toFixed(2)
+})
+
+// 是否有核减的发票
+const hasDeductedInvoices = computed(() => {
+  return props.invoiceList.some(item => item.deductedAmount && item.deductedAmount > 0)
+})
+
+// 运输服务/汽油类发票小计（原始金额）
+const transportFuelSubtotal = computed(() => {
+  const totalCents = props.invoiceList.reduce((acc, item) => {
+    const category = item.category?.toLowerCase() || ''
+    const isTransportOrFuel =
+      category.includes('运输') ||
+      category.includes('汽油') ||
+      category.includes('柴油')
+    if (isTransportOrFuel) {
+      return acc + Math.round(item.amount * 100)
+    }
+    return acc
+  }, 0)
+  return totalCents / 100
+})
+
+// 运输服务/汽油类发票实际报销金额
+const transportFuelActual = computed(() => {
+  if (transportFuelSubtotal.value <= 1500) return transportFuelSubtotal.value
+  return 1500
 })
 
 // 是否显示金额警告
 const showAmountWarning = computed(() => {
   if (!props.showThresholdWarning || !props.amountThreshold) return false
-  return totalAmount.value > 0 && totalAmount.value <= props.amountThreshold
+  return totalAmountNumber.value > 0 && totalAmountNumber.value <= props.amountThreshold
 })
 
 // 警告文本
@@ -93,6 +212,30 @@ function formatDateToChinese(dateStr: string): string {
   return `${year}年${month}月${day}日`
 }
 
+// 获取图片URL
+function getImageUrl(filePath: string): string {
+  if (!filePath) return ''
+  // 如果已经是完整URL，直接返回
+  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    return filePath
+  }
+  // 如果是相对路径，添加API前缀
+  if (filePath.startsWith('/')) {
+    return filePath
+  }
+  // 否则添加 /api/ 前缀
+  return `/api/${filePath}`
+}
+
+// 处理预览
+function handlePreview(filePath: string): void {
+  const imageUrl = getImageUrl(filePath)
+  console.log('原始路径:', filePath)
+  console.log('处理后路径:', imageUrl)
+  previewImageUrl.value = imageUrl
+  previewVisible.value = true
+}
+
 // 删除发票
 function onDelete(invoice: InvoiceItem): void {
   emit('delete', invoice)
@@ -102,16 +245,113 @@ function onDelete(invoice: InvoiceItem): void {
 <style scoped>
 .invoice-table-wrapper {
   width: 100%;
+  overflow-x: hidden;
 }
 
 .invoice-table {
   margin-top: 8px;
+  width: 100%;
 }
 
 .invoice-table :deep(.el-table__header-wrapper th) {
-  background: #f5f7fa;
+  background: #ffffff;
   color: #303133;
   font-weight: 600;
+}
+
+.invoice-table :deep(.el-table__body tr:hover > td) {
+  background-color: #ffffff !important;
+}
+
+.invoice-table :deep(.el-table__header-wrapper th .cell) {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.invoice-table :deep(.el-table__body) {
+  width: 100% !important;
+}
+
+.invoice-table :deep(.el-table__cell) {
+  vertical-align: middle;
+  padding: 8px 0;
+}
+
+.thumbnail-wrapper {
+  display: inline-block;
+  cursor: pointer;
+}
+
+.thumbnail-wrapper:hover .pdf-icon {
+  opacity: 0.8;
+  transform: scale(1.05);
+  transition: all 0.2s;
+}
+
+.pdf-icon {
+  width: 50px;
+  height: 50px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #f5f7fa;
+  border-radius: 4px;
+  color: #f56c6c;
+  transition: all 0.2s;
+}
+
+.preview-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  margin: 0;
+  padding: 0;
+}
+
+.preview-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+/* 移除对话框所有内边距和边距 */
+.preview-dialog :deep(.el-dialog) {
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+}
+
+.preview-dialog :deep(.el-dialog__header) {
+  display: none !important;
+}
+
+.preview-dialog :deep(.el-dialog__body) {
+  padding: 0 !important;
+  margin: 0 !important;
+  height: 100vh !important;
+  overflow: hidden !important;
+}
+
+.preview-dialog :deep(.el-dialog__close) {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 50%;
+  width: 44px;
+  height: 44px;
+  color: #fff;
+  font-size: 20px;
+}
+
+.preview-dialog :deep(.el-dialog__close:hover) {
+  background: rgba(0, 0, 0, 0.8);
 }
 
 .invoice-total {
@@ -119,7 +359,7 @@ function onDelete(invoice: InvoiceItem): void {
   justify-content: flex-start;
   align-items: center;
   padding: 12px 16px;
-  background: #f5f7fa;
+  background: #ffffff;
   border: 1px solid #ebeef5;
   border-top: none;
   border-radius: 0 0 4px 4px;
@@ -145,5 +385,72 @@ function onDelete(invoice: InvoiceItem): void {
   margin-left: 16px;
   font-size: 13px;
   color: #f56c6c;
+}
+
+.deducted-text {
+  color: #f56c6c;
+  font-weight: 500;
+}
+
+.actual-amount {
+  color: #67c23a;
+  font-weight: 500;
+}
+
+.deducted-info {
+  margin-left: 12px;
+  font-size: 14px;
+  color: #f56c6c;
+}
+
+/* 核减提示信息样式 */
+.deduction-notice {
+  margin-top: 16px;
+  padding: 16px;
+  background: #fef0f0;
+  border: 1px solid #fde2e2;
+  border-radius: 4px;
+}
+
+.deduction-notice .notice-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deduction-notice .notice-detail-row {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.deduction-notice .detail-text {
+  color: #606266;
+}
+
+.deduction-notice .detail-limit {
+  color: #909399;
+  font-size: 12px;
+  margin-left: 4px;
+}
+
+.deduction-notice .deduction-row {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed #fde2e2;
+}
+
+.deduction-notice .actual-row {
+  font-weight: 600;
+}
+
+.deduction-notice .deducted-highlight {
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.deduction-notice .actual-highlight {
+  color: #67c23a;
+  font-weight: 600;
+  font-size: 14px;
 }
 </style>

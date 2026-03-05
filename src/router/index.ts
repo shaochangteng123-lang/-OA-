@@ -41,7 +41,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: '/basic-reimbursement/create',
         name: 'BasicReimbursementCreate',
-        component: () => import('@/views/BasicReimbursementDetail.vue'),
+        component: () => import('@/views/BasicReimbursementCreate.vue'),
         meta: { title: '新建报销单' },
       },
       {
@@ -59,7 +59,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: '/large-reimbursement/create',
         name: 'LargeReimbursementCreate',
-        component: () => import('@/views/LargeReimbursementDetail.vue'),
+        component: () => import('@/views/LargeReimbursementCreate.vue'),
         meta: { title: '新建大额报销单' },
       },
       {
@@ -77,7 +77,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: '/business-reimbursement/create',
         name: 'BusinessReimbursementCreate',
-        component: () => import('@/views/BusinessReimbursementDetail.vue'),
+        component: () => import('@/views/BusinessReimbursementCreate.vue'),
         meta: { title: '新建商务报销单' },
       },
       {
