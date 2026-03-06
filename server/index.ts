@@ -25,6 +25,7 @@ import draftsRoutes from './routes/drafts.js'
 import userPreferencesRoutes from './routes/user-preferences.js'
 import holidaysRoutes from './routes/holidays.js'
 import reimbursementRoutes from './routes/reimbursement.js'
+import reimbursementScopeRoutes from './routes/reimbursement-scope.js'
 import approvalRoutes from './routes/approval.js'
 import employeesRoutes from './routes/employees.js'
 import probationRoutes from './routes/probation.js'
@@ -108,6 +109,7 @@ app.use('/api/drafts', draftsRoutes)
 app.use('/api/user-preferences', userPreferencesRoutes)
 app.use('/api/holidays', holidaysRoutes)
 app.use('/api/reimbursement', reimbursementRoutes)
+app.use('/api/reimbursement-scope', reimbursementScopeRoutes)
 app.use('/api/approval', approvalRoutes)
 app.use('/api/employees', employeesRoutes)
 app.use('/api/probation', probationRoutes)

@@ -465,12 +465,12 @@ router.get('/processed', requireAdmin, (req, res) => {
 // 注意：此路由必须放在 /:id 路由之前，否则会被 /:id 路由拦截
 router.get('/employees', requireAdmin, (req, res) => {
   try {
-    // 排除系统管理员（super_admin 和 admin 角色）
+    // 排除系统管理员账号（super_admin 角色）
     const employees = db.prepare(`
       SELECT id, name, username, department, position
       FROM users
       WHERE status = 'active'
-      AND role NOT IN ('super_admin', 'admin')
+      AND role != 'super_admin'
       ORDER BY name ASC
     `).all() as Array<{ id: string; name: string; username: string; department: string | null; position: string | null }>
 
@@ -615,7 +615,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
 // 获取全部报销记录（支持筛选）
 router.get('/all-reimbursements', requireAdmin, (req, res) => {
   try {
-    const { status, type, userId, startDate, endDate } = req.query
+    const { status, type, userId, reimbursementScope, startDate, endDate } = req.query
 
     let whereClause = 'WHERE 1=1'
     const params: any[] = []
@@ -625,9 +625,13 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
       params.push(status)
     }
 
+    // 类型支持多选（逗号分隔）
     if (type) {
-      whereClause += ' AND r.type = ?'
-      params.push(type)
+      const types = String(type).split(',').filter(t => t.trim())
+      if (types.length > 0) {
+        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
+        params.push(...types)
+      }
     }
 
     if (userId) {
@@ -635,16 +639,25 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
       params.push(userId)
     }
 
+    // 所属区域支持多选（逗号分隔）
+    if (reimbursementScope) {
+      const scopes = String(reimbursementScope).split(',').filter(s => s.trim())
+      if (scopes.length > 0) {
+        whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
+        params.push(...scopes)
+      }
+    }
+
     if (startDate) {
       // 将日期转换为报销月份格式 YYYY-MM
-      const startMonth = startDate.substring(0, 7) // 取 YYYY-MM 部分
+      const startMonth = String(startDate).substring(0, 7) // 取 YYYY-MM 部分
       whereClause += ' AND r.reimbursement_month >= ?'
       params.push(startMonth)
     }
 
     if (endDate) {
       // 将日期转换为报销月份格式 YYYY-MM
-      const endMonth = endDate.substring(0, 7) // 取 YYYY-MM 部分
+      const endMonth = String(endDate).substring(0, 7) // 取 YYYY-MM 部分
       whereClause += ' AND r.reimbursement_month <= ?'
       params.push(endMonth)
     }
@@ -702,6 +715,7 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
         paymentProofPath: r.payment_proof_path,
         receiptConfirmedBy: r.receipt_confirmed_by,
         reimbursementMonth: r.reimbursement_month,
+        reimbursementScope: r.reimbursement_scope, // 添加所属区域字段
         createdAt: r.created_at,
         userId: r.user_id,
       })),
@@ -826,6 +840,175 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
     res.status(500).json({
       success: false,
       message: '导出月度报销数据失败',
+    })
+  }
+})
+
+// 核减金额查询（必须在 /:id 之前定义，否则会被通配路由拦截）
+router.get('/deduction-query', requireAdmin, (req, res) => {
+  try {
+    const { dateType, startDate, endDate, userId, month, year } = req.query as {
+      dateType?: string
+      startDate?: string
+      endDate?: string
+      userId?: string
+      month?: string
+      year?: string
+    }
+
+    // 兼容旧参数：如果没有提供 startDate / endDate，但有 month/year，则按原逻辑转换
+    let finalStartDate = startDate
+    let finalEndDate = endDate
+
+    if (!finalStartDate || !finalEndDate) {
+      if (dateType === 'month' && month) {
+        const [y, m] = String(month).split('-')
+        finalStartDate = `${y}-${m}-01`
+        const lastDay = new Date(parseInt(y), parseInt(m), 0).getDate()
+        finalEndDate = `${y}-${m}-${String(lastDay).padStart(2, '0')}`
+      } else if (dateType === 'year' && year) {
+        finalStartDate = `${year}-01-01`
+        finalEndDate = `${year}-12-31`
+      }
+    }
+
+    if (!dateType || !finalStartDate || !finalEndDate) {
+      return res.status(400).json({
+        success: false,
+        message: '请提供查询参数',
+      })
+    }
+
+    let startDateStr: string
+    let endDateStr: string
+    let period: string
+
+    startDateStr = finalStartDate
+    endDateStr = finalEndDate
+
+    // 生成 period 文本，用于前端显示
+    const [startY, startM, startD] = startDateStr.split('-')
+    const [endY, endM, endD] = endDateStr.split('-')
+
+    if (dateType === 'year') {
+      if (startY === endY) {
+        period = `${startY}年`
+      } else {
+        period = `${startY}年 - ${endY}年`
+      }
+    } else if (dateType === 'month') {
+      const startMonthText = `${startY}年${parseInt(startM, 10)}月`
+      const endMonthText = `${endY}年${parseInt(endM, 10)}月`
+      period = startMonthText === endMonthText ? startMonthText : `${startMonthText} - ${endMonthText}`
+    } else {
+      period = `${startDateStr} 至 ${endDateStr}`
+    }
+
+    // 查询核减记录（核减金额 > 0 的报销单）
+    let whereSql = `
+      SELECT
+        r.id,
+        r.type,
+        r.title,
+        r.original_amount,
+        r.total_amount,
+        r.deduction_amount,
+        r.deduction_reason,
+        r.submit_time,
+        r.user_id,
+        u.name as user_name,
+        u.department as user_department
+      FROM reimbursements r
+      LEFT JOIN users u ON r.user_id = u.id
+      WHERE r.deduction_amount > 0
+        AND r.created_at >= ?
+        AND r.created_at <= ?
+        AND r.status IN ('approved', 'paying', 'payment_uploaded', 'completed')
+    `
+
+    const params: any[] = [
+      `${startDateStr}T00:00:00.000Z`,
+      `${endDateStr}T23:59:59.999Z`,
+    ]
+
+    if (userId) {
+      whereSql += ' AND r.user_id = ?'
+      params.push(userId)
+    }
+
+    whereSql += ' ORDER BY u.name ASC, r.created_at DESC'
+
+    const deductions = db.prepare(whereSql).all(...params) as Array<any>
+
+    // 类型映射
+    const typeMap: Record<string, string> = {
+      basic: '基础报销',
+      large: '大额报销',
+      business: '商务报销',
+    }
+
+    // 按员工分组统计
+    const employeeMap: Record<string, {
+      userId: string
+      name: string
+      department: string | null
+      deductionAmount: number
+      deductionCount: number
+      details: Array<any>
+    }> = {}
+
+    let totalDeduction = 0
+    let totalCount = 0
+
+    for (const d of deductions) {
+      const uid = d.user_id
+      if (!employeeMap[uid]) {
+        employeeMap[uid] = {
+          userId: uid,
+          name: d.user_name,
+          department: d.user_department,
+          deductionAmount: 0,
+          deductionCount: 0,
+          details: [],
+        }
+      }
+
+      const deductionAmount = d.deduction_amount || 0
+      employeeMap[uid].deductionAmount += deductionAmount
+      employeeMap[uid].deductionCount += 1
+      totalDeduction += deductionAmount
+      totalCount += 1
+
+      employeeMap[uid].details.push({
+        id: d.id,
+        type: d.type,
+        typeName: typeMap[d.type] || d.type,
+        title: d.title,
+        originalAmount: d.original_amount || d.total_amount + deductionAmount,
+        deductionAmount: deductionAmount,
+        deductionReason: d.deduction_reason,
+        submitTime: d.submit_time,
+      })
+    }
+
+    // 转换为数组并按核减金额降序排序
+    const employees = Object.values(employeeMap).sort((a, b) => b.deductionAmount - a.deductionAmount)
+
+    res.json({
+      success: true,
+      data: {
+        period,
+        totalDeduction,
+        totalCount,
+        employeeCount: employees.length,
+        employees,
+      },
+    })
+  } catch (error) {
+    console.error('查询核减金额失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '查询核减金额失败',
     })
   }
 })

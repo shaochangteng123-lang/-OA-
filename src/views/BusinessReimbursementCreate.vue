@@ -22,6 +22,26 @@
               <el-input :value="getCurrentMonth()" disabled />
             </el-form-item>
 
+            <el-form-item label="报销范围/区域" required>
+              <el-cascader
+                v-model="formData.reimbursementScope"
+                :options="scopeOptions"
+                :props="cascaderProps"
+                placeholder="请选择报销范围/区域"
+                style="width: 100%"
+                clearable
+              />
+            </el-form-item>
+
+            <el-form-item label="服务对象" required>
+              <el-input
+                v-model="formData.serviceTarget"
+                placeholder="请输入服务对象"
+                maxlength="100"
+                show-word-limit
+              />
+            </el-form-item>
+
             <el-form-item label="发票上传" required>
               <InvoiceUploader
                 v-model="invoice.fileList.value"
@@ -68,13 +88,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import type { FormInstance } from 'element-plus'
-import { format } from 'date-fns'
-import { zhCN } from 'date-fns/locale'
 
 // 导入报销相关组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
@@ -83,11 +101,15 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 // 导入工具函数和常量
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
+import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
+import { api } from '@/utils/api'
 
 const router = useRouter()
 
 // 表单数据
 const formData = reactive({
+  reimbursementScope: [] as string[], // 报销范围/区域（级联选择器使用数组）
+  serviceTarget: '', // 服务对象
   description: '',
 })
 
@@ -100,9 +122,32 @@ const submitting = ref(false)
 // 创建发票管理实例
 const invoice = useInvoice()
 
-// 获取当前月份
+// 级联选择器配置
+const scopeOptions = ref<any[]>([])
+const cascaderProps = {
+  value: 'value',
+  label: 'name',
+  children: 'children',
+  checkStrictly: false, // 只能选择叶子节点
+  emitPath: true, // 返回完整路径
+}
+
+// 加载报销范围选项
+const loadScopeOptions = async () => {
+  try {
+    const response = await api.get('/api/reimbursement-scope/list')
+    if (response.data.success) {
+      scopeOptions.value = response.data.data
+    }
+  } catch (error) {
+    console.error('加载报销范围失败:', error)
+  }
+}
+
+// 获取当前月份（商务报销直接使用当月）
 const getCurrentMonth = () => {
-  return format(new Date(), 'yyyy年MM月', { locale: zhCN })
+  const monthStr = calculateReimbursementMonth(undefined, 'business')
+  return formatReimbursementMonth(monthStr)
 }
 
 // 返回列表页
@@ -145,19 +190,31 @@ const handleSaveDraft = async () => {
     return
   }
 
+  if (!formData.reimbursementScope || formData.reimbursementScope.length === 0) {
+    ElMessage.warning('请选择报销范围/区域')
+    return
+  }
+
+  if (!formData.serviceTarget) {
+    ElMessage.warning('请输入服务对象')
+    return
+  }
+
   try {
     submitting.value = true
 
-    // 构建提交数据
+    // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'business' as const,
       title: `${getCurrentMonth()} 商务报销`,
+      reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
+      serviceTarget: formData.serviceTarget,
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
       status: 'draft', // 草稿状态
     }
 
-    const response = await fetch('/api/reimbursement/draft', {
+    const response = await fetch('/api/reimbursement/create', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -190,18 +247,30 @@ const handleSubmit = async () => {
     return
   }
 
+  if (!formData.reimbursementScope || formData.reimbursementScope.length === 0) {
+    ElMessage.warning('请选择报销范围/区域')
+    return
+  }
+
+  if (!formData.serviceTarget) {
+    ElMessage.warning('请输入服务对象')
+    return
+  }
+
   try {
     submitting.value = true
 
-    // 构建提交数据
+    // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'business' as const,
       title: `${getCurrentMonth()} 商务报销`,
+      reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
+      serviceTarget: formData.serviceTarget,
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
     }
 
-    const response = await fetch('/api/reimbursement/submit', {
+    const response = await fetch('/api/reimbursement/create', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -214,7 +283,7 @@ const handleSubmit = async () => {
 
     if (result.success) {
       ElMessage.success('提交成功')
-      router.push('/basic-reimbursement')
+      router.push('/business-reimbursement')
     } else {
       ElMessage.error(result.message || '提交失败')
     }
@@ -225,13 +294,18 @@ const handleSubmit = async () => {
     submitting.value = false
   }
 }
+
+// 组件挂载时加载报销范围选项
+onMounted(() => {
+  loadScopeOptions()
+})
 </script>
 
 <style scoped>
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .create-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px;
+  margin: -24px -45px;
   padding: 0;
 }
 
@@ -241,6 +315,7 @@ const handleSubmit = async () => {
   flex-direction: column;
   border-radius: 0;
   border: none;
+  box-shadow: none;
 }
 
 .page-card :deep(.el-card__header) {

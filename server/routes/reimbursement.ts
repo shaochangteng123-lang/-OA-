@@ -6,6 +6,7 @@ import path from 'path'
 import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
+import { recognizeReceipt } from '../services/receiptOcr.js'
 import { calculateReimbursementMonth } from '../utils/reimbursement.js'
 
 const router = Router()
@@ -67,6 +68,29 @@ const uploadPaymentProof = multer({
       cb(null, true)
     } else {
       cb(new Error('只支持 PDF、JPG、PNG 格式的文件'))
+    }
+  },
+})
+
+// 配置 multer 用于收据/支付截图上传（仅支持图片）
+const uploadReceipt = multer({
+  dest: tempDir,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = [
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/gif',
+      'image/bmp',
+      'image/webp',
+    ]
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true)
+    } else {
+      cb(new Error('只支持 JPG、PNG、GIF、BMP、WEBP 格式的图片'))
     }
   },
 })
@@ -195,11 +219,12 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
 
 /**
  * 查询用户当月运输/交通/汽油/柴油类发票已使用额度
- * GET /api/reimbursement/transport-fuel-quota
+ * GET /api/reimbursement/transport-fuel-quota?excludeId=xxx
  */
 router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
   try {
     const userId = req.session.user?.id
+    const { excludeId } = req.query // 要排除的报销单ID（编辑模式）
 
     if (!userId) {
       return res.status(401).json({
@@ -216,7 +241,8 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
     const currentReimbursementMonth = calculateReimbursementMonth(now, 'basic')
 
     // 查询当前报销月份所有已提交(非草稿、非拒绝)的基础报销单中的运输/交通/汽油/柴油类发票
-    const result = db.prepare(`
+    // 如果提供了 excludeId，则排除该报销单（用于编辑模式）
+    let sql = `
       SELECT COALESCE(SUM(ri.amount), 0) as used_amount
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
@@ -224,13 +250,25 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
         AND r.type = 'basic'
         AND r.status NOT IN ('draft', 'rejected')
         AND r.reimbursement_month = ?
+    `
+
+    const params: any[] = [userId, currentReimbursementMonth]
+
+    if (excludeId) {
+      sql += ' AND r.id != ?'
+      params.push(excludeId)
+    }
+
+    sql += `
         AND (
           LOWER(ri.category) LIKE '%运输%'
           OR LOWER(ri.category) LIKE '%交通%'
           OR LOWER(ri.category) LIKE '%汽油%'
           OR LOWER(ri.category) LIKE '%柴油%'
         )
-    `).get(userId, currentReimbursementMonth) as { used_amount: number }
+    `
+
+    const result = db.prepare(sql).get(...params) as { used_amount: number }
 
     const usedAmount = result?.used_amount || 0
     const remainingQuota = Math.max(0, 1500 - usedAmount)
@@ -345,6 +383,66 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     })
   } catch (error) {
     console.error('上传发票失败:', error)
+
+    // 清理临时文件
+    if (req.file?.path) {
+      try {
+        fs.unlinkSync(req.file.path)
+      } catch (e) {
+        console.error('清理临时文件失败:', e)
+      }
+    }
+
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : '上传失败',
+    })
+  }
+})
+
+/**
+ * 上传收据/支付截图并进行OCR识别
+ * POST /api/reimbursement/upload-receipt
+ */
+router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: '请上传收据图片',
+      })
+    }
+
+    const tempFilePath = req.file.path
+    console.log('📸 收到收据上传:', req.file.originalname)
+
+    // 进行OCR识别
+    console.log('🔍 开始OCR识别支付截图...')
+    const ocrResult = await recognizeReceipt(tempFilePath)
+    console.log('✅ OCR识别完成:', ocrResult)
+
+    // 移动文件到正式目录
+    const decodedFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+    const finalFileName = `receipt-${Date.now()}-${decodedFileName}`
+    const finalPath = path.join(invoicesDir, finalFileName)
+    fs.renameSync(tempFilePath, finalPath)
+
+    res.json({
+      success: true,
+      message: '收据上传成功',
+      data: {
+        fileName: finalFileName,
+        filePath: `/uploads/invoices/${finalFileName}`,
+        ocrResult: {
+          amount: ocrResult.amount,
+          date: ocrResult.date,
+          invoiceNumber: ocrResult.transactionNo,
+          type: ocrResult.itemName,
+        },
+      },
+    })
+  } catch (error) {
+    console.error('上传收据失败:', error)
 
     // 清理临时文件
     if (req.file?.path) {
@@ -487,6 +585,42 @@ router.get('/statistics', requireAuth, async (req, res) => {
       WHERE ${baseCondition}
     `).get(...baseParams) as { count: number; amount: number }
 
+    // 查询核减金额统计（仅基础报销，每年1月1日清零，且只统计已审批通过的报销单）
+    let deductedCondition = 'r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?, ?)'
+    const deductedParams: any[] = [userId, 'basic', 'approved', 'paying', 'payment_uploaded', 'completed']
+
+    // 添加日期范围筛选
+    if (startDate) {
+      deductedCondition += ' AND DATE(r.created_at) >= ?'
+      deductedParams.push(startDate)
+    } else {
+      // 如果没有指定开始日期，默认从当前年度1月1日开始统计（年度清零规则）
+      const currentYear = new Date().getFullYear()
+      deductedCondition += ' AND DATE(r.created_at) >= ?'
+      deductedParams.push(`${currentYear}-01-01`)
+    }
+
+    if (endDate) {
+      deductedCondition += ' AND DATE(r.created_at) <= ?'
+      deductedParams.push(endDate)
+    }
+
+    const deductedStats = db.prepare(`
+      SELECT COALESCE(SUM(i.deducted_amount), 0) as amount
+      FROM reimbursement_invoices i
+      INNER JOIN reimbursements r ON i.reimbursement_id = r.id
+      WHERE ${deductedCondition}
+    `).get(...deductedParams) as { amount: number }
+
+    // 查询有核减的报销单数量
+    const deductedCountStats = db.prepare(`
+      SELECT COUNT(DISTINCT r.id) as count
+      FROM reimbursements r
+      INNER JOIN reimbursement_invoices i ON r.id = i.reimbursement_id
+      WHERE ${deductedCondition}
+      AND i.deducted_amount > 0
+    `).get(...deductedParams) as { count: number }
+
     const statistics = {
       pending: {
         count: pendingStats.count,
@@ -507,6 +641,10 @@ router.get('/statistics', requireAuth, async (req, res) => {
       total: {
         count: totalStats.count,
         amount: totalStats.amount,
+      },
+      deducted: {
+        count: deductedCountStats.count,
+        amount: deductedStats.amount,
       },
     }
 
@@ -677,8 +815,110 @@ router.post('/create', requireAuth, async (req, res) => {
     // 导入数据库
     const { db } = await import('../db/index.js')
 
+    // 如果是基础报销，需要重新计算核减金额
+    let processedInvoices = invoices
+    if (type === 'basic') {
+      // 获取当月已使用的运输/交通/汽油/柴油类发票额度
+      const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
+      const monthlyUsedResult = db.prepare(`
+        SELECT COALESCE(SUM(i.amount), 0) as used_amount
+        FROM reimbursement_invoices i
+        INNER JOIN reimbursements r ON i.reimbursement_id = r.id
+        WHERE r.user_id = ?
+        AND r.type = 'basic'
+        AND r.reimbursement_month = ?
+        AND r.status != 'rejected'
+        AND (
+          LOWER(i.category) LIKE '%运输%'
+          OR LOWER(i.category) LIKE '%交通%'
+          OR LOWER(i.category) LIKE '%汽油%'
+          OR LOWER(i.category) LIKE '%柴油%'
+        )
+      `).get(userId, currentMonth) as { used_amount: number }
+
+      const monthlyUsedQuota = monthlyUsedResult?.used_amount || 0
+      const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota)
+
+      // 计算本次提交的运输/交通/汽油/柴油类发票总额
+      let transportFuelTotal = 0
+      const transportFuelInvoices: any[] = []
+
+      processedInvoices = invoices.map((inv: any) => {
+        const category = (inv.category || '').toLowerCase()
+        const isTransportOrFuel =
+          category.includes('运输') ||
+          category.includes('交通') ||
+          category.includes('汽油') ||
+          category.includes('柴油')
+
+        if (isTransportOrFuel) {
+          transportFuelInvoices.push(inv)
+          transportFuelTotal += inv.amount || 0
+        }
+
+        return { ...inv, deductedAmount: 0 }
+      })
+
+      // 如果运输/交通/汽油/柴油类发票总额超过剩余额度，需要核减
+      if (transportFuelTotal > remainingQuota) {
+        const deductionAmountCents = Math.round((transportFuelTotal - remainingQuota) * 100)
+        const transportFuelTotalCents = Math.round(transportFuelTotal * 100)
+
+        // 按比例分配核减金额到每张运输/交通/汽油/柴油类发票
+        // 使用分（cents）来避免精度问题
+        let accumulatedDeductionCents = 0
+        const transportInvoices: any[] = []
+
+        processedInvoices.forEach((inv: any) => {
+          const category = (inv.category || '').toLowerCase()
+          const isTransportOrFuel =
+            category.includes('运输') ||
+            category.includes('交通') ||
+            category.includes('汽油') ||
+            category.includes('柴油')
+
+          if (isTransportOrFuel) {
+            transportInvoices.push(inv)
+          }
+        })
+
+        processedInvoices = processedInvoices.map((inv: any, index: number) => {
+          const category = (inv.category || '').toLowerCase()
+          const isTransportOrFuel =
+            category.includes('运输') ||
+            category.includes('交通') ||
+            category.includes('汽油') ||
+            category.includes('柴油')
+
+          if (isTransportOrFuel && transportFuelTotalCents > 0) {
+            const invAmountCents = Math.round((inv.amount || 0) * 100)
+            const ratio = invAmountCents / transportFuelTotalCents
+            let invoiceDeductionCents = Math.round(deductionAmountCents * ratio)
+
+            // 最后一张运输类发票，调整核减金额以确保总和精确
+            const isLastTransportInvoice = transportInvoices[transportInvoices.length - 1] === inv
+            if (isLastTransportInvoice) {
+              invoiceDeductionCents = deductionAmountCents - accumulatedDeductionCents
+            }
+
+            accumulatedDeductionCents += invoiceDeductionCents
+            return { ...inv, deductedAmount: invoiceDeductionCents / 100 }
+          }
+
+          return inv
+        })
+      }
+    }
+
     // 计算总金额（使用实际报销金额，即扣除核减后的金额）
-    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.actualAmount || inv.amount || 0), 0)
+    // 使用分（cents）来避免浮点数精度问题
+    const totalAmountCents = processedInvoices.reduce((sum: number, inv: any) => {
+      const amountCents = Math.round((inv.amount || 0) * 100)
+      const deductedCents = Math.round((inv.deductedAmount || 0) * 100)
+      const actualCents = amountCents - deductedCents
+      return sum + actualCents
+    }, 0)
+    const totalAmount = totalAmountCents / 100
 
     // 生成报销单ID
     const now = new Date()
@@ -728,7 +968,7 @@ router.post('/create', requireAuth, async (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
-    for (const invoice of invoices) {
+    for (const invoice of processedInvoices) {
       const invoiceId = `INV${Date.now()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`
       insertInvoice.run(
         invoiceId,
@@ -805,7 +1045,7 @@ router.post('/create', requireAuth, async (req, res) => {
  */
 router.get('/list', requireAuth, async (req, res) => {
   try {
-    const { type, status, page = '1', pageSize = '10' } = req.query
+    const { type, status, page = '1', pageSize = '10', startDate, endDate } = req.query
     const userId = req.session.user?.id
 
     if (!userId) {
@@ -836,12 +1076,44 @@ router.get('/list', requireAuth, async (req, res) => {
       params.push(status)
     }
 
-    // 添加一个月的时间限制（基础/大额/商务报销只显示一个月内的数据）
-    const oneMonthAgo = new Date()
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
-    const oneMonthAgoStr = oneMonthAgo.toISOString()
-    whereClause += ' AND created_at >= ?'
-    params.push(oneMonthAgoStr)
+    // 处理日期范围查询（支持年份格式 YYYY、月份格式 YYYY-MM 和日期格式 YYYY-MM-DD）
+    if (startDate && endDate) {
+      let startDateStr = startDate as string
+      let endDateStr = endDate as string
+
+      // 如果是年份格式（YYYY），转换为该年的第一天和最后一天
+      if (/^\d{4}$/.test(startDateStr)) {
+        startDateStr = `${startDateStr}-01-01`
+      }
+      if (/^\d{4}$/.test(endDateStr)) {
+        endDateStr = `${endDateStr}-12-31`
+      }
+      // 如果是月份格式（YYYY-MM），转换为日期范围
+      else if (/^\d{4}-\d{2}$/.test(startDateStr)) {
+        // 开始月份的第一天
+        startDateStr = `${startDateStr}-01`
+      }
+      if (/^\d{4}-\d{2}$/.test(endDateStr)) {
+        // 结束月份的最后一天
+        const [year, month] = endDateStr.split('-').map(Number)
+        const lastDay = new Date(year, month, 0).getDate()
+        endDateStr = `${endDateStr}-${String(lastDay).padStart(2, '0')}`
+      }
+
+      // 转换为 ISO 字符串用于数据库查询
+      const startDateTime = new Date(startDateStr).toISOString()
+      const endDateTime = new Date(endDateStr + 'T23:59:59').toISOString()
+
+      whereClause += ' AND created_at >= ? AND created_at <= ?'
+      params.push(startDateTime, endDateTime)
+    } else {
+      // 如果没有指定日期范围，默认显示最近一个月的数据
+      const oneMonthAgo = new Date()
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
+      const oneMonthAgoStr = oneMonthAgo.toISOString()
+      whereClause += ' AND created_at >= ?'
+      params.push(oneMonthAgoStr)
+    }
 
     // 查询总数（包含一个月限制）
     const countQuery = `SELECT COUNT(*) as total FROM reimbursements ${whereClause}`
@@ -1086,16 +1358,29 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
     }
 
     // 更新报销单状态
-    const newStatus = action === 'approve' ? 'approved' : 'rejected'
+    // 如果是审批通过且报销金额为0，直接设置为已完成状态
+    let newStatus = action === 'approve' ? 'approved' : 'rejected'
     const now = new Date().toISOString()
 
-    db.prepare(`
-      UPDATE reimbursements
-      SET status = ?, approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
-      WHERE id = ?
-    `).run(newStatus, now, currentUserName, reason || null, now, id)
+    // 检查报销金额是否为0（实际报销金额为0时，无需付款流程）
+    if (action === 'approve' && reimbursement.total_amount === 0) {
+      newStatus = 'completed'
+      db.prepare(`
+        UPDATE reimbursements
+        SET status = ?, approve_time = ?, approver = ?, reject_reason = ?, completed_time = ?, updated_at = ?
+        WHERE id = ?
+      `).run(newStatus, now, currentUserName, reason || null, now, now, id)
 
-    console.log(`✅ 报销单审批成功: ${id}, 操作: ${action}, 审批人: ${currentUserName}`)
+      console.log(`✅ 报销单审批成功（金额为0，直接完成）: ${id}, 审批人: ${currentUserName}`)
+    } else {
+      db.prepare(`
+        UPDATE reimbursements
+        SET status = ?, approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
+        WHERE id = ?
+      `).run(newStatus, now, currentUserName, reason || null, now, id)
+
+      console.log(`✅ 报销单审批成功: ${id}, 操作: ${action}, 审批人: ${currentUserName}`)
+    }
 
     res.json({
       success: true,
@@ -1677,7 +1962,13 @@ router.put('/:id', requireAuth, async (req, res) => {
     }
 
     // 计算总金额（使用实际报销金额，即扣除核减后的金额）
-    const totalAmount = invoices.reduce((sum: number, inv: any) => sum + (inv.actualAmount || inv.amount || 0), 0)
+    // 使用分（cents）来避免浮点数精度问题
+    const totalAmountCents = invoices.reduce((sum: number, inv: any) => {
+      const actualAmount = inv.actualAmount || inv.amount || 0
+      const actualCents = Math.round(actualAmount * 100)
+      return sum + actualCents
+    }, 0)
+    const totalAmount = totalAmountCents / 100
 
     const timestamp = new Date().toISOString()
 

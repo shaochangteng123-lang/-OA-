@@ -22,20 +22,38 @@
               <el-input :value="getCurrentMonth()" disabled />
             </el-form-item>
 
-            <el-form-item label="发票上传" required>
-              <InvoiceUploader
-                v-model="invoice.fileList.value"
-                theme-color="#667eea"
-                @file-change="handleFileChange"
-                @delete-file="handleDeleteFile"
-              />
-            </el-form-item>
+            <!-- 两列布局：左侧发票，右侧无票 -->
+            <div class="upload-layout">
+              <div class="upload-left">
+                <el-form-item label="发票上传" required>
+                  <InvoiceUploader
+                    v-model="invoice.fileList.value"
+                    theme-color="#667eea"
+                    @file-change="handleFileChange"
+                    @delete-file="handleDeleteFile"
+                  />
+                </el-form-item>
+              </div>
 
+              <div class="upload-right">
+                <el-form-item label="无票上传">
+                  <ReceiptUploader
+                    v-model="receiptFileList"
+                    theme-color="#67c23a"
+                    @file-change="handleReceiptChange"
+                    @delete-file="handleDeleteReceipt"
+                  />
+                </el-form-item>
+              </div>
+            </div>
+
+            <!-- 发票明细独立显示，不受两列布局限制 -->
             <el-form-item label="发票明细" class="invoice-detail-item">
               <InvoiceTable
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="false"
                 :show-deduction="true"
+                :monthly-used-quota="invoice.monthlyUsedQuota.value"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -69,21 +87,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import type { FormInstance } from 'element-plus'
-import { format } from 'date-fns'
-import { zhCN } from 'date-fns/locale'
 
 // 导入报销相关组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
+import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入工具函数和常量
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
+import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
 
 const router = useRouter()
 
@@ -101,9 +119,13 @@ const submitting = ref(false)
 // 创建发票管理实例
 const invoice = useInvoice()
 
-// 获取当前月份
+// 收据文件列表
+const receiptFileList = ref<any[]>([])
+
+// 获取当前月份（根据报销规则计算，基础报销使用特殊规则）
 const getCurrentMonth = () => {
-  return format(new Date(), 'yyyy年MM月', { locale: zhCN })
+  const monthStr = calculateReimbursementMonth(undefined, 'basic')
+  return formatReimbursementMonth(monthStr)
 }
 
 // 返回列表页
@@ -124,8 +146,10 @@ const handleBack = () => {
 }
 
 // 处理文件变化
-const handleFileChange = (file: any, fileList: any[]) => {
-  invoice.handleFileChange(file, fileList)
+const handleFileChange = async (file: any, fileList: any[]) => {
+  await invoice.handleFileChange(file, fileList)
+  // 每次上传发票后,重新获取当月已使用额度
+  await invoice.fetchMonthlyUsedQuota()
 }
 
 // 处理删除文件
@@ -136,6 +160,18 @@ const handleDeleteFile = (file: any) => {
 // 处理删除发票
 const handleDeleteInvoice = (invoiceItem: any) => {
   invoice.deleteInvoiceById(invoiceItem.id)
+}
+
+// 处理收据变化
+const handleReceiptChange = async (file: any, fileList: any[]) => {
+  await invoice.handleReceiptChange(file, fileList)
+  // 每次上传收据后,重新获取当月已使用额度
+  await invoice.fetchMonthlyUsedQuota()
+}
+
+// 处理删除收据
+const handleDeleteReceipt = (file: any) => {
+  invoice.deleteInvoiceByFile(file.uid)
 }
 
 // 保存草稿
@@ -226,6 +262,11 @@ const handleSubmit = async () => {
     submitting.value = false
   }
 }
+
+// 页面加载时获取当月已使用额度
+onMounted(async () => {
+  await invoice.fetchMonthlyUsedQuota()
+})
 </script>
 
 <style scoped>
@@ -293,12 +334,51 @@ const handleSubmit = async () => {
 
 .reimbursement-form {
   width: 100%;
-  max-width: 900px;
+  max-width: 1100px;
 }
 
 /* 减少发票上传和发票明细之间的间距 */
 .invoice-detail-item {
-  margin-top: -14px;
+  margin-top: 8px;
+}
+
+/* 两列布局 */
+.upload-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.upload-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-right {
+  width: 450px;
+  flex-shrink: 0;
+}
+
+/* 确保两侧的 form-item 样式一致 */
+.upload-layout .el-form-item {
+  margin-bottom: 0;
+}
+
+/* 确保两侧标签字体大小和对齐方式一致 */
+.upload-layout :deep(.el-form-item__label) {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+/* 确保内容区域对齐 */
+.upload-layout :deep(.el-form-item__content) {
+  line-height: 32px;
+}
+
+/* 确保两侧上传组件的提示信息区域高度一致 */
+.upload-layout :deep(.upload-header) {
+  min-height: 48px;
 }
 
 .form-actions {

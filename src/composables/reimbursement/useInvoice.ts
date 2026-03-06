@@ -214,6 +214,85 @@ export function useInvoice() {
   }
 
   /**
+   * 处理收据/支付截图变化 - 上传并OCR识别
+   */
+  async function handleReceiptChange(file: any, fileListParam: any[]): Promise<void> {
+    // 校验文件格式
+    if (file.raw && !file.raw.type.startsWith('image/')) {
+      ElMessage.error('仅支持图片文件')
+      removeFromFileList(file.uid, fileListParam)
+      return
+    }
+
+    // 调用后端API进行收据OCR识别
+    try {
+      ElMessage.info(`正在识别支付截图 ${file.name}...`)
+
+      const uploadFormData = new FormData()
+      uploadFormData.append('receipt', file.raw)
+      uploadFormData.append('originalFileName', file.name)
+
+      const response = await fetch('/api/reimbursement/upload-receipt', {
+        method: 'POST',
+        body: uploadFormData,
+        credentials: 'include',
+      })
+
+      const result: UploadResponse = await response.json()
+
+      if (result.success && result.data?.ocrResult) {
+        const { amount, date, invoiceNumber, type } = result.data.ocrResult
+
+        // 校验金额 - 收据必须有金额
+        if (!amount || amount <= 0) {
+          ElMessage.error(`${file.name} 未能识别到金额，请上传更清晰的支付截图`)
+          removeFromFileList(file.uid, fileListParam)
+          return
+        }
+
+        const amountResult = validateInvoiceAmount(amount)
+        if (!amountResult.valid) {
+          ElMessage.error(amountResult.message)
+          removeFromFileList(file.uid, fileListParam)
+          return
+        }
+
+        // 校验日期
+        if (date) {
+          const dateResult = validateInvoiceDate(date)
+          if (!dateResult.valid) {
+            ElMessage.error(dateResult.message)
+            removeFromFileList(file.uid, fileListParam)
+            return
+          }
+        }
+
+        // 添加收据到列表
+        addInvoice({
+          amount: amount,
+          invoiceDate: date || '',
+          invoiceNumber: invoiceNumber || `RECEIPT-${Date.now()}`,
+          category: type || '无票报销', // 添加报销类型
+          filePath: result.data.filePath || '',
+          fileUid: file.uid,
+        })
+
+        ElMessage.success(`${file.name} 识别成功！金额：¥${amount}`)
+
+        // 保存文件路径供后续提交使用
+        file.serverPath = result.data.filePath
+      } else {
+        ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
+        removeFromFileList(file.uid, fileListParam)
+      }
+    } catch (error) {
+      console.error('收据识别失败:', error)
+      ElMessage.error(`${file.name} 识别失败，请重新上传`)
+      removeFromFileList(file.uid, fileListParam)
+    }
+  }
+
+  /**
    * 从文件列表中移除
    */
   function removeFromFileList(uid: string | number, fileListParam: any[]): void {
@@ -243,10 +322,15 @@ export function useInvoice() {
 
   /**
    * 获取当月运输/交通/汽油/柴油类发票已使用额度
+   * @param excludeReimbursementId 要排除的报销单ID（编辑模式下排除当前报销单）
    */
-  async function fetchMonthlyUsedQuota(): Promise<void> {
+  async function fetchMonthlyUsedQuota(excludeReimbursementId?: string): Promise<void> {
     try {
-      const response = await fetch('/api/reimbursement/transport-fuel-quota', {
+      const url = excludeReimbursementId
+        ? `/api/reimbursement/transport-fuel-quota?excludeId=${excludeReimbursementId}`
+        : '/api/reimbursement/transport-fuel-quota'
+
+      const response = await fetch(url, {
         credentials: 'include',
       })
       const result = await response.json()
@@ -296,28 +380,28 @@ export function useInvoice() {
       })
     } else if (totalTransportAndFuelAmount > remainingQuota) {
       // 如果本次上传的发票总额超过剩余额度，使用"先到先得"逻辑
-      let accumulatedAmount = 0
+      // 全程使用分（cents）来避免浮点数精度问题
+      let accumulatedCents = 0
+      const remainingQuotaCents = Math.round(remainingQuota * 100)
 
       transportAndFuelInvoices.forEach(inv => {
         const invAmountCents = Math.round(inv.amount * 100)
-        const accumulatedCents = Math.round(accumulatedAmount * 100)
-        const remainingQuotaCents = Math.round(remainingQuota * 100) - accumulatedCents
+        const availableCents = remainingQuotaCents - accumulatedCents
 
-        if (remainingQuotaCents <= 0) {
+        if (availableCents <= 0) {
           // 已经超过额度，这张发票完全不予报销
           inv.deductedAmount = inv.amount
           inv.actualAmount = 0
-        } else if (invAmountCents <= remainingQuotaCents) {
+        } else if (invAmountCents <= availableCents) {
           // 这张发票可以全额报销
           inv.deductedAmount = 0
           inv.actualAmount = inv.amount
-          accumulatedAmount += inv.amount
+          accumulatedCents += invAmountCents
         } else {
           // 这张发票部分报销
-          const actualAmountCents = remainingQuotaCents
-          inv.actualAmount = actualAmountCents / 100
+          inv.actualAmount = availableCents / 100
           inv.deductedAmount = inv.amount - inv.actualAmount
-          accumulatedAmount = remainingQuota // 已达上限
+          accumulatedCents += availableCents
         }
       })
     } else {
@@ -419,8 +503,11 @@ export function useInvoice() {
       amount: inv.amount,
       invoiceDate: inv.invoiceDate,
       invoiceNumber: inv.invoiceNumber,
+      category: inv.category,
       filePath: inv.filePath,
       fileUid: `existing-${index}`,
+      deductedAmount: inv.deductedAmount || 0,
+      actualAmount: inv.actualAmount || inv.amount,
     }))
 
     fileList.value = invoices.map((inv, index) => ({
@@ -471,6 +558,7 @@ export function useInvoice() {
     formatDateToChinese,
     beforeUpload,
     handleFileChange,
+    handleReceiptChange,
     deleteInvoiceByFile,
     deleteInvoiceById,
     handleFileRemove,

@@ -1,6 +1,6 @@
 <template>
   <div
-    class="invoice-uploader"
+    class="receipt-uploader"
     @drop.prevent="handleDrop"
     @dragover.prevent="handleDragOver"
     @dragleave.prevent="handleDragLeave"
@@ -16,19 +16,20 @@
       :on-change="onFileChange"
       :on-preview="handlePreview"
       :on-remove="handleFileRemove"
-      accept=".pdf"
+      accept=".jpg,.jpeg,.png"
       list-type="picture-card"
-      class="invoice-upload"
+      class="receipt-upload"
       :disabled="disabled"
       multiple
     >
       <div class="upload-trigger">
         <el-icon class="upload-icon"><Plus /></el-icon>
-        <div class="upload-text">上传发票</div>
+        <div class="upload-text">无票上传</div>
       </div>
       <template #file="{ file }">
-        <div class="invoice-preview" @dblclick="handlePreview(file)">
-          <el-icon class="pdf-icon"><Document /></el-icon>
+        <div class="receipt-preview" @dblclick="handlePreview(file)">
+          <img v-if="file.url" :src="file.url" class="preview-image" />
+          <el-icon v-else class="image-icon"><Picture /></el-icon>
           <span class="file-name">{{ file.name }}</span>
           <el-icon v-if="!disabled" class="delete-icon" @click.stop="onDeleteFile(file)">
             <Delete />
@@ -40,11 +41,11 @@
     <div class="upload-header">
       <div class="upload-tip">
         <el-icon><InfoFilled /></el-icon>
-        <span>上传发票后，系统将自动识别并填充报销信息</span>
+        <span>上传支付截图后，系统将自动识别并填充报销信息</span>
       </div>
       <div class="upload-notice">
         <el-icon><WarningFilled /></el-icon>
-        <span>仅支持PDF文件，单个文件不超过5M</span>
+        <span>仅支持JPG、PNG图片格式，单个文件不超过5M</span>
       </div>
     </div>
 
@@ -60,7 +61,7 @@
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { Plus, Upload, Document, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
+import { Plus, Upload, Picture, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 // Props
@@ -71,7 +72,7 @@ const props = withDefaults(defineProps<{
   maxFiles?: number
 }>(), {
   disabled: false,
-  themeColor: '#667eea',
+  themeColor: '#67c23a',
   maxFiles: 50,
 })
 
@@ -105,7 +106,6 @@ function handleDragOver(e: DragEvent): void {
 
 // 拖拽离开
 function handleDragLeave(e: DragEvent): void {
-  // 检查是否真的离开了组件区域
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
   const x = e.clientX
   const y = e.clientY
@@ -138,13 +138,14 @@ function handleDrop(e: DragEvent): void {
   for (let i = 0; i < files.length; i++) {
     const file = files[i]
 
-    // 检查文件类型
-    if (file.type !== 'application/pdf') {
-      ElMessage.error(`${file.name} 不是PDF文件，已跳过`)
+    // 检查文件类型 - 只接受 JPG 和 PNG
+    const isValidType = file.type === 'image/jpeg' || file.type === 'image/png'
+    if (!isValidType) {
+      ElMessage.error(`${file.name} 不是JPG或PNG格式，已跳过`)
       continue
     }
 
-    // 检查文件大小
+    // 检查文件大小 - 改为 5M
     const maxSize = 5 * 1024 * 1024
     if (file.size > maxSize) {
       ElMessage.error(`${file.name} 超过5MB，已跳过`)
@@ -157,7 +158,6 @@ function handleDrop(e: DragEvent): void {
   // 手动触发上传
   if (validFiles.length > 0) {
     validFiles.forEach(file => {
-      // 创建文件对象
       const fileObj = {
         name: file.name,
         size: file.size,
@@ -165,13 +165,12 @@ function handleDrop(e: DragEvent): void {
         uid: Date.now() + Math.random(),
         status: 'ready',
         raw: file,
+        url: URL.createObjectURL(file),
       }
 
-      // 添加到文件列表
       const newFileList = [...fileList.value, fileObj]
       fileList.value = newFileList
 
-      // 触发文件变化事件
       emit('file-change', fileObj, newFileList)
     })
   }
@@ -179,25 +178,16 @@ function handleDrop(e: DragEvent): void {
 
 // 上传前校验
 function beforeUpload(file: File): boolean {
-  const fileName = file.name.toLowerCase()
-  const isImageFile =
-    fileName.endsWith('.jpg') ||
-    fileName.endsWith('.jpeg') ||
-    fileName.endsWith('.png') ||
-    fileName.endsWith('.gif') ||
-    fileName.endsWith('.bmp')
-
-  if (isImageFile) {
-    return false
-  }
-
-  const isPDF = file.type === 'application/pdf'
-  if (!isPDF) {
+  // 只接受 JPG 和 PNG 格式
+  const isValidType = file.type === 'image/jpeg' || file.type === 'image/png'
+  if (!isValidType) {
+    ElMessage.error('仅支持JPG、PNG图片格式')
     return false
   }
 
   const maxSize = 5 * 1024 * 1024
   if (file.size > maxSize) {
+    ElMessage.error('文件大小不能超过5MB')
     return false
   }
 
@@ -206,6 +196,10 @@ function beforeUpload(file: File): boolean {
 
 // 文件变化
 function onFileChange(file: any, fileListParam: any[]): void {
+  // 为图片文件创建预览URL
+  if (file.raw && file.raw.type.startsWith('image/')) {
+    file.url = URL.createObjectURL(file.raw)
+  }
   emit('file-change', file, fileListParam)
 }
 
@@ -230,18 +224,18 @@ function handlePreview(file: any): void {
 </script>
 
 <style scoped>
-.invoice-uploader {
+.receipt-uploader {
   width: 100%;
   position: relative;
   display: flex;
   flex-direction: column;
 }
 
-.invoice-uploader.is-dragging {
+.receipt-uploader.is-dragging {
   position: relative;
 }
 
-.invoice-upload {
+.receipt-upload {
   min-height: 116px;
 }
 
@@ -264,7 +258,7 @@ function handlePreview(file: any): void {
 }
 
 .upload-tip .el-icon {
-  color: #409eff;
+  color: #67c23a;
   font-size: 16px;
   flex-shrink: 0;
 }
@@ -291,7 +285,7 @@ function handlePreview(file: any): void {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(102, 126, 234, 0.1);
+  background: rgba(103, 194, 58, 0.1);
   border: 2px dashed v-bind('props.themeColor');
   border-radius: 8px;
   display: flex;
@@ -335,19 +329,19 @@ function handlePreview(file: any): void {
 }
 
 /* 缩小上传框尺寸 */
-.invoice-upload :deep(.el-upload--picture-card) {
+.receipt-upload :deep(.el-upload--picture-card) {
   width: 100px;
   height: 100px;
 }
 
-.invoice-upload :deep(.el-upload-list__item) {
+.receipt-upload :deep(.el-upload-list__item) {
   width: 100px;
   height: 100px;
   background-color: #f5f7fa;
 }
 
 /* 自适应布局 */
-.invoice-upload :deep(.el-upload-list--picture-card) {
+.receipt-upload :deep(.el-upload-list--picture-card) {
   display: grid;
   grid-template-columns: repeat(auto-fill, 100px);
   gap: 8px;
@@ -355,25 +349,26 @@ function handlePreview(file: any): void {
 
 /* 响应式断点 */
 @media (max-width: 768px) {
-  .invoice-upload :deep(.el-upload--picture-card) {
+  .receipt-upload :deep(.el-upload--picture-card) {
     width: 80px;
     height: 80px;
   }
 
-  .invoice-upload :deep(.el-upload-list__item) {
+  .receipt-upload :deep(.el-upload-list__item) {
     width: 80px;
     height: 80px;
   }
 
-  .invoice-upload :deep(.el-upload-list--picture-card) {
+  .receipt-upload :deep(.el-upload-list--picture-card) {
     grid-template-columns: repeat(auto-fill, 80px);
   }
 
-  .invoice-preview .pdf-icon {
-    font-size: 32px !important;
+  .receipt-preview .preview-image {
+    width: 100% !important;
+    height: 100% !important;
   }
 
-  .invoice-preview .file-name {
+  .receipt-preview .file-name {
     font-size: 10px !important;
   }
 
@@ -398,7 +393,7 @@ function handlePreview(file: any): void {
   }
 }
 
-.invoice-preview {
+.receipt-preview {
   width: 100%;
   height: 100%;
   display: flex;
@@ -406,19 +401,31 @@ function handlePreview(file: any): void {
   align-items: center;
   justify-content: center;
   padding: 8px;
-  background: linear-gradient(135deg, v-bind('props.themeColor') 0%, #764ba2 100%);
+  background: linear-gradient(135deg, v-bind('props.themeColor') 0%, #85ce61 100%);
   position: relative;
   cursor: pointer;
   user-select: none;
+  overflow: hidden;
 }
 
-.invoice-preview .pdf-icon {
+.receipt-preview .preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.receipt-preview .image-icon {
   font-size: 36px;
   color: #fff;
   margin-bottom: 6px;
 }
 
-.invoice-preview .file-name {
+.receipt-preview .file-name {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
   font-size: 11px;
   color: #fff;
   text-align: center;
@@ -430,9 +437,11 @@ function handlePreview(file: any): void {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 2px 4px;
 }
 
-.invoice-preview .delete-icon {
+.receipt-preview .delete-icon {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -443,9 +452,10 @@ function handlePreview(file: any): void {
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.3);
   transition: all 0.3s;
+  z-index: 10;
 }
 
-.invoice-preview .delete-icon:hover {
+.receipt-preview .delete-icon:hover {
   color: #fff;
   background: #f56c6c;
 }
@@ -471,11 +481,11 @@ function handlePreview(file: any): void {
   font-weight: 500;
 }
 
-.invoice-upload :deep(.el-upload--picture-card:hover) .upload-icon {
+.receipt-upload :deep(.el-upload--picture-card:hover) .upload-icon {
   color: v-bind('props.themeColor');
 }
 
-.invoice-upload :deep(.el-upload--picture-card:hover) .upload-text {
+.receipt-upload :deep(.el-upload--picture-card:hover) .upload-text {
   color: v-bind('props.themeColor');
 }
 </style>

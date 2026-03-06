@@ -6,9 +6,9 @@
           {{ $index + 1 }}
         </template>
       </el-table-column>
-      <el-table-column prop="category" label="报销类型" width="100" align="center">
+      <el-table-column prop="category" label="报销类型" min-width="160" align="center">
         <template #default="{ row }">
-          {{ row.category || '-' }}
+          <span style="white-space: nowrap;">{{ row.category || '-' }}</span>
         </template>
       </el-table-column>
       <el-table-column prop="amount" label="金额" width="100" align="center">
@@ -21,15 +21,20 @@
           {{ formatDateToChinese(row.invoiceDate) }}
         </template>
       </el-table-column>
-      <el-table-column prop="invoiceNumber" label="发票号码" min-width="140" align="center">
+      <el-table-column prop="invoiceNumber" label="发票号码" min-width="300" align="center">
         <template #default="{ row }">
-          {{ row.invoiceNumber || '' }}
+          <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; max-width: 100%;">{{ row.invoiceNumber || '' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="缩略图" width="90" align="center">
         <template #default="{ row }">
           <div v-if="row.filePath" class="thumbnail-wrapper" @click="handlePreview(row.filePath)">
-            <div class="pdf-icon">
+            <!-- 判断是否为图片文件 -->
+            <div v-if="isImageFile(row.filePath)" class="image-thumbnail">
+              <img :src="getImageUrl(row.filePath)" alt="收据" class="thumbnail-image" />
+            </div>
+            <!-- PDF文件显示图标 -->
+            <div v-else class="pdf-icon">
               <el-icon :size="30"><Document /></el-icon>
               <div style="font-size: 10px; margin-top: 2px;">PDF</div>
             </div>
@@ -195,18 +200,19 @@ const transportFuelSubtotal = computed(() => {
 
 // 实际报销金额（所有发票）
 const transportFuelActual = computed(() => {
-  // 计算运输/交通/汽油/柴油类发票的实际报销金额
-  const remainingQuota = Math.max(0, 1500 - props.monthlyUsedQuota)
-  let transportFuelActualAmount = 0
+  // 使用分（cents）来避免浮点数精度问题
+  const remainingQuotaCents = Math.max(0, Math.round((1500 - props.monthlyUsedQuota) * 100))
+  const transportFuelSubtotalCents = Math.round(transportFuelSubtotal.value * 100)
 
-  if (transportFuelSubtotal.value <= remainingQuota) {
-    transportFuelActualAmount = transportFuelSubtotal.value
+  let transportFuelActualCents = 0
+  if (transportFuelSubtotalCents <= remainingQuotaCents) {
+    transportFuelActualCents = transportFuelSubtotalCents
   } else {
-    transportFuelActualAmount = remainingQuota
+    transportFuelActualCents = remainingQuotaCents
   }
 
   // 计算其他类别发票的总金额（不受限额限制）
-  const otherCategoriesTotal = props.invoiceList.reduce((acc, item) => {
+  const otherCategoriesTotalCents = props.invoiceList.reduce((acc, item) => {
     const category = item.category?.toLowerCase() || ''
     const isTransportOrFuel =
       category.includes('运输') ||
@@ -218,10 +224,10 @@ const transportFuelActual = computed(() => {
       return acc + Math.round(item.amount * 100)
     }
     return acc
-  }, 0) / 100
+  }, 0)
 
-  // 返回运输类实际报销金额 + 其他类别总金额
-  return transportFuelActualAmount + otherCategoriesTotal
+  // 返回运输类实际报销金额 + 其他类别总金额（转换回元）
+  return (transportFuelActualCents + otherCategoriesTotalCents) / 100
 })
 
 // 是否显示金额警告
@@ -261,6 +267,21 @@ function getImageUrl(filePath: string): string {
   return `/api/${filePath}`
 }
 
+// 判断是否为图片文件
+function isImageFile(filePath: string): boolean {
+  if (!filePath) return false
+  const lowerPath = filePath.toLowerCase()
+  return (
+    lowerPath.endsWith('.jpg') ||
+    lowerPath.endsWith('.jpeg') ||
+    lowerPath.endsWith('.png') ||
+    lowerPath.endsWith('.gif') ||
+    lowerPath.endsWith('.bmp') ||
+    lowerPath.endsWith('.webp') ||
+    lowerPath.includes('receipt-') // 收据文件名包含 receipt-
+  )
+}
+
 // 处理预览
 function handlePreview(filePath: string): void {
   const imageUrl = getImageUrl(filePath)
@@ -279,7 +300,7 @@ function onDelete(invoice: InvoiceItem): void {
 <style scoped>
 .invoice-table-wrapper {
   width: 100%;
-  overflow-x: hidden;
+  overflow-x: visible;
 }
 
 .invoice-table {
@@ -334,6 +355,24 @@ function onDelete(invoice: InvoiceItem): void {
   border-radius: 4px;
   color: #f56c6c;
   transition: all 0.2s;
+}
+
+.image-thumbnail {
+  width: 50px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #f5f7fa;
+}
+
+.thumbnail-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
 }
 
 .preview-container {

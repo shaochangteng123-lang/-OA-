@@ -389,6 +389,11 @@ export function initDatabase() {
     { name: 'receipt_confirmed_by', type: 'TEXT' },
     { name: 'is_deleted', type: 'INTEGER DEFAULT 0' },  // 软删除标记：0=未删除，1=已删除
     { name: 'deleted_at', type: 'TEXT' },               // 删除时间
+    { name: 'reimbursement_scope', type: 'TEXT' },      // 报销范围/区域
+    { name: 'service_target', type: 'TEXT' },           // 服务对象
+    { name: 'deduction_amount', type: 'REAL DEFAULT 0' }, // 核减金额
+    { name: 'deduction_reason', type: 'TEXT' },         // 核减原因
+    { name: 'original_amount', type: 'REAL' },          // 原始申请金额（核减前）
   ]
 
   for (const column of newColumns) {
@@ -706,6 +711,47 @@ export function initDatabase() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_onboarding_templates_file_type ON onboarding_templates(file_type);
   `)
+
+  // 报销范围配置表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reimbursement_scopes (
+      id TEXT PRIMARY KEY,
+      parent_id TEXT,
+      name TEXT NOT NULL,
+      value TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_parent_id ON reimbursement_scopes(parent_id);
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_sort_order ON reimbursement_scopes(sort_order);
+  `)
+
+  // 初始化默认报销范围数据
+  const existingScopes = db.prepare('SELECT COUNT(*) as count FROM reimbursement_scopes').get() as { count: number }
+  if (existingScopes.count === 0) {
+    const now = new Date().toISOString()
+    const insertScope = db.prepare(`
+      INSERT INTO reimbursement_scopes (id, parent_id, name, value, sort_order, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+
+    // 一级分类
+    insertScope.run('scope_1', null, '公司内部', 'company_internal', 1, 1, now, now)
+    insertScope.run('scope_2', null, '海淀区', 'haidian', 2, 1, now, now)
+    insertScope.run('scope_3', null, '朝阳区', 'chaoyang', 3, 1, now, now)
+
+    // 二级分类
+    insertScope.run('scope_2_1', 'scope_2', 'GJDW', 'haidian_gjdw', 1, 1, now, now)
+    insertScope.run('scope_2_2', 'scope_2', 'WFAH', 'haidian_wfah', 2, 1, now, now)
+    insertScope.run('scope_3_1', 'scope_3', 'GJDW', 'chaoyang_gjdw', 1, 1, now, now)
+
+    console.log('✅ 初始化默认报销范围配置')
+  }
 
   console.log('✅ 数据库表初始化完成')
 }

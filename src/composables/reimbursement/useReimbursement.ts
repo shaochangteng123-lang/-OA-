@@ -108,7 +108,8 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
 
       if (result.success) {
         ElMessage.success(isDraft ? '草稿保存成功' : '提交成功')
-        router.push(listRoute)
+        // 使用 goBack 方法返回，这样可以正确返回到来源页面
+        goBack()
         return true
       } else {
         ElMessage.error(result.message || `${isDraft ? '保存' : '提交'}失败`)
