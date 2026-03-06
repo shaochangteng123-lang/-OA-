@@ -73,14 +73,23 @@
               {{ (pagination.page - 1) * pagination.pageSize + $index + 1 }}
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="报销事由" min-width="200" />
-          <el-table-column prop="amount" label="报销金额" width="140">
+          <el-table-column prop="title" label="报销事由" min-width="200" align="center" />
+          <el-table-column prop="category" label="报销类型" width="180" align="center">
             <template #default="{ row }">
-              <span class="amount-text large">¥{{ row.amount.toFixed(2) }}</span>
+              {{ row.invoiceCategory || row.category || '-' }}
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="报销类型" width="120" />
-          <el-table-column prop="status" label="状态" width="120">
+          <el-table-column prop="reimbursementScope" label="报销范围/区域" width="180" align="center">
+            <template #default="{ row }">
+              <span>{{ getScopeText(row.reimbursementScope) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="amount" label="报销金额" width="120" align="center">
+            <template #default="{ row }">
+              <span class="amount-text">¥{{ row.amount.toFixed(2) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="status" label="状态" width="120" align="center">
             <template #default="{ row }">
               <el-tag
                 :type="getStatusType(row.status)"
@@ -91,8 +100,8 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="submitTime" label="提交时间" width="180" />
-          <el-table-column label="操作" width="200" fixed="right">
+          <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
+          <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleView(row)">
                 查看
@@ -456,6 +465,20 @@ const getStatusText = (status: string) => {
   return textMap[status] || status
 }
 
+// 获取报销范围/区域文本
+const getScopeText = (scope: string | undefined) => {
+  if (!scope) return '-'
+  const scopeMap: Record<string, string> = {
+    'company_internal': '公司内部',
+    'haidian': '海淀区',
+    'haidian_gjdw': '海淀区 / GJDW',
+    'haidian_wfah': '海淀区 / WFAH',
+    'chaoyang': '朝阳区',
+    'chaoyang_gjdw': '朝阳区 / GJDW',
+  }
+  return scopeMap[scope] || scope
+}
+
 // 判断是否可以编辑（只有草稿和已拒绝状态可以编辑）
 const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
@@ -507,7 +530,10 @@ const fetchList = async () => {
 
 // 新建报销单
 const handleCreate = () => {
-  router.push('/large-reimbursement/create')
+  router.push({
+    path: '/large-reimbursement/create',
+    query: { from: '/large-reimbursement' }
+  })
 }
 
 // 查询
@@ -551,7 +577,10 @@ const handleView = async (row: any) => {
 const handleGoToDetail = () => {
   if (!currentApprovalRecord.value) return
   approvalDialogVisible.value = false
-  router.push(`/large-reimbursement/${currentApprovalRecord.value.id}?mode=view`)
+  router.push({
+    path: `/large-reimbursement/${currentApprovalRecord.value.id}`,
+    query: { mode: 'view', from: '/large-reimbursement' }
+  })
 }
 
 // 预览付款回单
@@ -602,7 +631,10 @@ const handleConfirmReceipt = async () => {
 
 // 编辑
 const handleEdit = (row: any) => {
-  router.push(`/large-reimbursement/${row.id}`)
+  router.push({
+    path: `/large-reimbursement/${row.id}`,
+    query: { from: '/large-reimbursement' }
+  })
 }
 
 // 删除
@@ -654,7 +686,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .large-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px;
+  margin: -24px -45px;
   padding: 0;
 }
 
@@ -664,6 +696,7 @@ onMounted(() => {
   flex-direction: column;
   border-radius: 0;
   border: none;
+  box-shadow: none;
 }
 
 .page-card :deep(.el-card__header) {

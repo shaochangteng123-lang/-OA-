@@ -1,43 +1,52 @@
 # ============================================
-# YuliLog 工作日志系统 - Docker Compose 配置
+# YuliLog 工作日志系统 - 开发模式 Docker Compose
 # ============================================
 # 使用方法：
-#   启动：docker compose up -d --build
-#   停止：docker compose down
+#   启动：docker compose up -d
 #   日志：docker compose logs -f
+#   停止：docker compose down
 # ============================================
 
 services:
-  yulilog:
-    container_name: yulilog-app
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: yulilog:latest
+  yulilog-dev:
+    container_name: yulilog-dev
+    image: node:20-alpine
     ports:
-      - "${HOST_PORT:-8899}:8899"
+      - "8899:8899"   # Vite 前端
+      - "3000:3000"   # Express 后端
+    env_file:
+      - .env
     environment:
-      - NODE_ENV=production
-      - PORT=8899
+      - NODE_ENV=development
+      - PORT=3000
       - DATABASE_PATH=/app/data/worklog.db
       - TZ=Asia/Shanghai
-      - SESSION_SECRET=${SESSION_SECRET:-yulilog_default_session_secret_2025}
-      # 百度OCR配置（从.env文件读取）
-      - BAIDU_OCR_API_KEY=${BAIDU_OCR_API_KEY:-}
-      - BAIDU_OCR_SECRET_KEY=${BAIDU_OCR_SECRET_KEY:-}
-      # 腾讯云OCR配置（备用）
-      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID:-}
-      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY:-}
-      # 飞书配置
-      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
-      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+    working_dir: /app
     volumes:
+      # 数据持久化
       - ./data:/app/data
       - ./uploads:/app/uploads
+      # 源代码挂载（热重载）
+      - ./src:/app/src
+      - ./server:/app/server
+      - ./public:/app/public
+      # 配置文件
+      - ./package.json:/app/package.json
+      - ./package-lock.json:/app/package-lock.json
+      - ./tsconfig.json:/app/tsconfig.json
+      - ./tsconfig.node.json:/app/tsconfig.node.json
+      - ./tsconfig.server.json:/app/tsconfig.server.json
+      - ./vite.config.ts:/app/vite.config.ts
+      - ./index.html:/app/index.html
+      # node_modules 命名卷
+      - node_modules:/app/node_modules
+    command: >
+      sh -c "
+        apk add --no-cache python3 make g++ sqlite sqlite-libs &&
+        npm ci --prefer-offline &&
+        npm run dev
+      "
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8899/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+
+volumes:
+  node_modules:

@@ -578,37 +578,50 @@ router.get('/records', requireAuth, async (req, res) => {
     const offset = (parseInt(page as string) - 1) * parseInt(pageSize as string)
     const listQuery = `
       SELECT
-        id, type, title, total_amount as amount, status,
-        applicant_name as applicant,
-        submit_time as submitTime,
-        approve_time as approveTime,
-        approver,
-        pay_time as payTime,
-        payment_upload_time as paymentUploadTime,
-        completed_time as completedTime,
-        payment_proof_path as paymentProofPath,
-        receipt_confirmed_by as receiptConfirmedBy,
-        reimbursement_month as reimbursementMonth,
-        created_at as createTime
-      FROM reimbursements
+        r.id, r.type, r.title, r.total_amount as amount, r.status,
+        r.applicant_name as applicant,
+        r.reimbursement_scope as reimbursementScope,
+        r.submit_time as submitTime,
+        r.approve_time as approveTime,
+        r.approver,
+        r.pay_time as payTime,
+        r.payment_upload_time as paymentUploadTime,
+        r.completed_time as completedTime,
+        r.payment_proof_path as paymentProofPath,
+        r.receipt_confirmed_by as receiptConfirmedBy,
+        r.reimbursement_month as reimbursementMonth,
+        r.created_at as createTime,
+        (SELECT GROUP_CONCAT(DISTINCT category) FROM reimbursement_invoices WHERE reimbursement_id = r.id AND category IS NOT NULL) as invoiceCategories
+      FROM reimbursements r
       ${whereClause}
       ORDER BY
-        CASE WHEN status = 'completed' THEN 1 ELSE 0 END,
-        CASE WHEN status = 'completed' THEN completed_time ELSE created_at END DESC
+        CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END,
+        CASE WHEN r.status = 'completed' THEN r.completed_time ELSE r.created_at END DESC
       LIMIT ? OFFSET ?
     `
     params.push(parseInt(pageSize as string), offset)
     const list = db.prepare(listQuery).all(...params)
 
-    // 格式化时间字段
-    const formattedList = list.map((item: any) => ({
-      ...item,
-      submitTime: formatDateTime(item.submitTime),
-      approveTime: formatDateTime(item.approveTime),
-      payTime: formatDateTime(item.payTime),
-      paymentUploadTime: formatDateTime(item.paymentUploadTime),
-      completedTime: formatDateTime(item.completedTime),
-    }))
+    // 格式化时间字段和发票类型
+    const formattedList = list.map((item: any) => {
+      // 处理发票类型：将逗号分隔的类型字符串转换为去重后的显示文本
+      let invoiceCategory = ''
+      if (item.invoiceCategories) {
+        const categories = item.invoiceCategories.split(',')
+        const uniqueCategories = [...new Set(categories)]
+        invoiceCategory = uniqueCategories.join('、')
+      }
+
+      return {
+        ...item,
+        invoiceCategory,
+        submitTime: formatDateTime(item.submitTime),
+        approveTime: formatDateTime(item.approveTime),
+        payTime: formatDateTime(item.payTime),
+        paymentUploadTime: formatDateTime(item.paymentUploadTime),
+        completedTime: formatDateTime(item.completedTime),
+      }
+    })
 
     res.json({
       success: true,
@@ -634,7 +647,7 @@ router.get('/records', requireAuth, async (req, res) => {
  */
 router.post('/create', requireAuth, async (req, res) => {
   try {
-    const { type, category, title, description, invoices, businessType, client, status = 'pending' } = req.body
+    const { type, category, title, description, invoices, businessType, client, status = 'pending', reimbursementScope, serviceTarget } = req.body
     const userId = req.session.user?.id
     const userName = req.session.user?.name
 
@@ -683,8 +696,8 @@ router.post('/create', requireAuth, async (req, res) => {
       INSERT INTO reimbursements (
         id, type, category, title, total_amount, status, description,
         business_type, client, user_id, applicant_name,
-        submit_time, reimbursement_month, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        submit_time, reimbursement_month, reimbursement_scope, service_target, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     insertReimbursement.run(
@@ -696,11 +709,13 @@ router.post('/create', requireAuth, async (req, res) => {
       status, // 使用传入的状态值（draft 或 pending）
       description || null,
       businessType || null,
-      client || null,
+      client || serviceTarget || null, // 如果 client 为空，使用 serviceTarget
       userId,
       userName,
       timestamp,
       reimbursementMonth,
+      reimbursementScope || null,
+      serviceTarget || null,
       timestamp,
       timestamp
     )
@@ -734,6 +749,14 @@ router.post('/create', requireAuth, async (req, res) => {
 
     // 如果状态是 pending（提交审批），创建审批实例
     if (status === 'pending') {
+      // 大额报销金额验证：总金额必须超过1000元
+      if (type === 'large' && totalAmount < 1000) {
+        return res.status(400).json({
+          success: false,
+          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
+        })
+      }
+
       const approvalInstanceId = nanoid()
 
       // 确定审批类型
@@ -801,6 +824,11 @@ router.get('/list', requireAuth, async (req, res) => {
     if (type) {
       whereClause += ' AND type = ?'
       params.push(type)
+
+      // 大额报销只显示金额 >= 1000 的记录
+      if (type === 'large') {
+        whereClause += ' AND total_amount >= 1000'
+      }
     }
 
     if (status) {
@@ -824,12 +852,14 @@ router.get('/list', requireAuth, async (req, res) => {
     const offset = (parseInt(page as string) - 1) * parseInt(pageSize as string)
     const listQuery = `
       SELECT
-        id, type, category, title, total_amount as amount, status,
-        business_type as businessType, client,
-        submit_time as submitTime, created_at as createTime
-      FROM reimbursements
+        r.id, r.type, r.category, r.title, r.total_amount as amount, r.status,
+        r.business_type as businessType, r.client,
+        r.reimbursement_scope as reimbursementScope,
+        r.submit_time as submitTime, r.created_at as createTime,
+        (SELECT GROUP_CONCAT(DISTINCT category) FROM reimbursement_invoices WHERE reimbursement_id = r.id AND category IS NOT NULL) as invoiceCategories
+      FROM reimbursements r
       ${whereClause}
-      ORDER BY created_at DESC
+      ORDER BY r.created_at DESC
       LIMIT ? OFFSET ?
     `
     params.push(parseInt(pageSize as string), offset)
@@ -859,11 +889,22 @@ router.get('/list', requireAuth, async (req, res) => {
       expert_guidance: '专家指导',
     }
 
-    const listWithCategoryLabel = list.map((item: any) => ({
-      ...item,
-      category: categoryMap[item.category] || item.category || '',
-      submitTime: formatDateTime(item.submitTime),
-    }))
+    const listWithCategoryLabel = list.map((item: any) => {
+      // 处理发票类型：将逗号分隔的类型字符串转换为去重后的显示文本
+      let invoiceCategory = ''
+      if (item.invoiceCategories) {
+        const categories = item.invoiceCategories.split(',')
+        const uniqueCategories = [...new Set(categories)]
+        invoiceCategory = uniqueCategories.join('、')
+      }
+
+      return {
+        ...item,
+        category: categoryMap[item.category] || item.category || '',
+        invoiceCategory,
+        submitTime: formatDateTime(item.submitTime),
+      }
+    })
 
     res.json({
       success: true,
@@ -930,6 +971,7 @@ router.get('/pending-list', requireAuth, async (req, res) => {
       SELECT
         id, type, category, title, total_amount as amount, status,
         business_type as businessType, client,
+        reimbursement_scope as reimbursementScope,
         applicant_name as applicant, user_id as userId,
         submit_time as submitTime, created_at as createTime
       FROM reimbursements
@@ -1492,6 +1534,7 @@ router.get('/:id', requireAuth, async (req, res) => {
           payment_upload_time as paymentUploadTime, completed_time as completedTime,
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
+          reimbursement_scope as reimbursementScope,
           created_at as createTime, updated_at as updateTime
         FROM reimbursements
         WHERE id = ?
@@ -1508,6 +1551,7 @@ router.get('/:id', requireAuth, async (req, res) => {
           payment_upload_time as paymentUploadTime, completed_time as completedTime,
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
+          reimbursement_scope as reimbursementScope,
           created_at as createTime, updated_at as updateTime
         FROM reimbursements
         WHERE id = ? AND user_id = ?
@@ -1526,23 +1570,55 @@ router.get('/:id', requireAuth, async (req, res) => {
       SELECT
         id, amount, invoice_date as invoiceDate, invoice_number as invoiceNumber,
         file_path as filePath, seller, buyer, tax_amount as taxAmount,
-        invoice_code as invoiceCode
+        invoice_code as invoiceCode, category, deducted_amount as deductedAmount
       FROM reimbursement_invoices
       WHERE reimbursement_id = ?
       ORDER BY created_at ASC
     `).all(id)
 
+    // 查询审批历史记录
+    const approvalHistory = db.prepare(`
+      SELECT
+        ar.id, ar.action, ar.comment, ar.action_time as actionTime,
+        u.name as approverName, u.username as approverUsername
+      FROM approval_records ar
+      LEFT JOIN approval_instances ai ON ar.instance_id = ai.id
+      LEFT JOIN users u ON ar.approver_id = u.id
+      WHERE ai.target_id = ? AND ai.target_type = 'reimbursement'
+      ORDER BY ar.action_time ASC
+    `).all(id)
+
+    // 格式化审批历史记录的时间
+    const formattedApprovalHistory = approvalHistory.map((record: any) => ({
+      ...record,
+      actionTime: formatDateTime(record.actionTime),
+    }))
+
     console.log('📋 返回报销单详情:', {
       id,
       status: (reimbursement as any).status,
-      rejectReason: (reimbursement as any).rejectReason
+      rejectReason: (reimbursement as any).rejectReason,
+      approvalHistoryCount: formattedApprovalHistory.length
     })
+
+    // 格式化时间字段
+    const formattedReimbursement = {
+      ...reimbursement,
+      submitTime: formatDateTime((reimbursement as any).submitTime),
+      approveTime: formatDateTime((reimbursement as any).approveTime),
+      payTime: formatDateTime((reimbursement as any).payTime),
+      paymentUploadTime: formatDateTime((reimbursement as any).paymentUploadTime),
+      completedTime: formatDateTime((reimbursement as any).completedTime),
+      createTime: formatDateTime((reimbursement as any).createTime),
+      updateTime: formatDateTime((reimbursement as any).updateTime),
+    }
 
     res.json({
       success: true,
       data: {
-        ...reimbursement,
+        ...formattedReimbursement,
         invoices,
+        approvalHistory: formattedApprovalHistory,
       },
     })
   } catch (error) {
@@ -1659,6 +1735,14 @@ router.put('/:id', requireAuth, async (req, res) => {
     // 如果是从草稿状态或被拒绝状态提交审批（status 变为 pending），创建审批实例
     const oldReimbursement = existingReimbursement as any
     if ((oldReimbursement.status === 'draft' || oldReimbursement.status === 'rejected') && status === 'pending') {
+      // 大额报销金额验证：总金额必须超过1000元
+      if (oldReimbursement.type === 'large' && totalAmount < 1000) {
+        return res.status(400).json({
+          success: false,
+          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
+        })
+      }
+
       // 更新提交时间，清除拒绝原因
       db.prepare('UPDATE reimbursements SET submit_time = ?, reject_reason = NULL WHERE id = ?').run(timestamp, id)
 

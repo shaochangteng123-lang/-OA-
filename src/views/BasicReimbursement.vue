@@ -72,14 +72,18 @@
               {{ (pagination.page - 1) * pagination.pageSize + $index + 1 }}
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="报销事由" min-width="200" />
-          <el-table-column prop="amount" label="报销金额" width="120">
+          <el-table-column prop="title" label="报销事由" min-width="200" align="center" />
+          <el-table-column prop="category" label="报销类型" width="180" align="center">
+            <template #default="{ row }">
+              {{ row.invoiceCategory || row.category || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="amount" label="报销金额" width="120" align="center">
             <template #default="{ row }">
               <span class="amount-text">¥{{ row.amount.toFixed(2) }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="报销类型" width="120" />
-          <el-table-column prop="status" label="状态" width="120">
+          <el-table-column prop="status" label="状态" width="120" align="center">
             <template #default="{ row }">
               <el-tag
                 :type="getStatusType(row.status)"
@@ -90,8 +94,8 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="submitTime" label="提交时间" width="180" />
-          <el-table-column label="操作" width="200" fixed="right">
+          <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
+          <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleView(row)">
                 查看
@@ -178,43 +182,69 @@
                   </div>
                 </el-timeline-item>
 
-                <!-- 2. 管理员审批 -->
-                <el-timeline-item
-                  v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                  :timestamp="currentApprovalRecord.approveTime"
-                  placement="top"
-                  type="success"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
-                  </div>
-                </el-timeline-item>
-                <el-timeline-item
-                  v-else-if="currentApprovalRecord.status === 'rejected'"
-                  :timestamp="currentApprovalRecord.approveTime"
-                  placement="top"
-                  type="danger"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
-                    <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
-                      拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                <!-- 2. 审批历史记录 -->
+                <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
+                  <el-timeline-item
+                    v-for="(record, index) in currentApprovalRecord.approvalHistory"
+                    :key="record.id"
+                    :timestamp="record.actionTime"
+                    placement="top"
+                    :type="record.action === 'approve' ? 'success' : 'danger'"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">
+                        {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                      </div>
+                      <div class="timeline-desc">
+                        {{ record.approverName || record.approverUsername || '管理员' }}
+                        {{ record.action === 'approve' ? '审批通过' : '拒绝了申请' }}
+                      </div>
+                      <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
+                        拒绝原因：{{ record.comment }}
+                      </div>
                     </div>
-                  </div>
-                </el-timeline-item>
-                <el-timeline-item
-                  v-else-if="currentApprovalRecord.status === 'pending'"
-                  timestamp="待审批"
-                  placement="top"
-                  type="warning"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">等待管理员审批...</div>
-                  </div>
-                </el-timeline-item>
+                  </el-timeline-item>
+                </template>
+
+                <!-- 如果没有审批历史，显示当前状态 -->
+                <template v-else>
+                  <el-timeline-item
+                    v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                    :timestamp="currentApprovalRecord.approveTime"
+                    placement="top"
+                    type="success"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
+                    </div>
+                  </el-timeline-item>
+                  <el-timeline-item
+                    v-else-if="currentApprovalRecord.status === 'rejected'"
+                    :timestamp="currentApprovalRecord.approveTime"
+                    placement="top"
+                    type="danger"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
+                      <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
+                        拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                      </div>
+                    </div>
+                  </el-timeline-item>
+                  <el-timeline-item
+                    v-else-if="currentApprovalRecord.status === 'pending'"
+                    timestamp="待审批"
+                    placement="top"
+                    type="warning"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">等待管理员审批...</div>
+                    </div>
+                  </el-timeline-item>
+                </template>
 
                 <!-- 3. 财务付款 -->
                 <el-timeline-item
@@ -506,7 +536,10 @@ const canDelete = (status: string) => {
 
 // 新建报销单
 const handleCreate = () => {
-  router.push('/basic-reimbursement/create')
+  router.push({
+    path: '/basic-reimbursement/create',
+    query: { from: '/basic-reimbursement' }
+  })
 }
 
 // 查询
@@ -549,7 +582,10 @@ const handleView = async (row: any) => {
 const handleGoToDetail = () => {
   if (!currentApprovalRecord.value) return
   approvalDialogVisible.value = false
-  router.push(`/basic-reimbursement/${currentApprovalRecord.value.id}?mode=view`)
+  router.push({
+    path: `/basic-reimbursement/${currentApprovalRecord.value.id}`,
+    query: { mode: 'view', from: '/basic-reimbursement' }
+  })
 }
 
 // 预览付款回单
@@ -600,7 +636,10 @@ const handleConfirmReceipt = async () => {
 
 // 编辑
 const handleEdit = (row: any) => {
-  router.push(`/basic-reimbursement/${row.id}?mode=edit`)
+  router.push({
+    path: `/basic-reimbursement/${row.id}`,
+    query: { mode: 'edit', from: '/basic-reimbursement' }
+  })
 }
 
 // 删除
@@ -657,7 +696,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .basic-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px;
+  margin: -24px -45px;
   padding: 0;
 }
 
@@ -667,6 +706,7 @@ onMounted(() => {
   flex-direction: column;
   border-radius: 0;
   border: none;
+  box-shadow: none;
 }
 
 .page-card :deep(.el-card__header) {

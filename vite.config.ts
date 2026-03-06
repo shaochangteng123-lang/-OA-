@@ -27,10 +27,16 @@ export default defineConfig({
   base: '/',
   cacheDir: '.vite-cache',
   server: {
-    host: true,
+    host: '0.0.0.0',
     port: 8899,
+    strictPort: true,
+    hmr: {
+      clientPort: 8899,
+      host: 'localhost',
+    },
     watch: {
       ignored: ['**/CLAUDE.md', '**/node_modules/**', '**/dist/**'],
+      usePolling: true,
     },
     proxy: {
       '/api': {
