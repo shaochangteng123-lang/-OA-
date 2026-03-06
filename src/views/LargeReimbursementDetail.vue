@@ -14,19 +14,6 @@
         <div class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
-          <!-- 大额报销提示 -->
-          <el-alert
-            title="大额报销说明"
-            type="info"
-            :closable="false"
-            show-icon
-            class="large-alert"
-          >
-            <template #default>
-              大额报销适用于发票总金额超过 {{ LARGE_AMOUNT_THRESHOLD }} 元的报销申请。如果金额不足 {{ LARGE_AMOUNT_THRESHOLD }} 元，请使用基础报销。
-            </template>
-          </el-alert>
-
           <!-- 拒绝原因提示（已拒绝状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
@@ -55,12 +42,8 @@
               <el-input v-model="reimbursementMonth" disabled />
             </el-form-item>
 
-            <el-form-item label="报销类型" prop="category">
-              <el-input
-                v-model="formData.category"
-                placeholder="请输入报销类型，如：办公设备、差旅费等"
-                :disabled="isReadonly"
-              />
+            <el-form-item label="报销范围/区域">
+              <el-input v-model="reimbursementScope" disabled />
             </el-form-item>
 
             <el-form-item label="发票上传" prop="files">
@@ -71,7 +54,6 @@
                 theme-color="#e6a23c"
                 @file-change="handleFileChange"
                 @delete-file="handleDeleteFile"
-                @exceed="invoice.handleExceed"
               />
             </el-form-item>
 
@@ -177,7 +159,7 @@ import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { LARGE_AMOUNT_THRESHOLD, UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
 
 // 使用 composables
-const invoice = useInvoice(UPLOAD_CONFIG.LARGE_MAX_FILES)
+const invoice = useInvoice()
 const reimbursement = useReimbursement('large', '/large-reimbursement')
 
 // 表单数据
@@ -203,6 +185,19 @@ const paymentProofDialogVisible = ref(false)
 
 // 拒绝原因
 const rejectReason = ref('')
+
+// 报销范围/区域
+const reimbursementScope = ref('')
+
+// 报销范围/区域映射
+const scopeMap: Record<string, string> = {
+  'company_internal': '公司内部',
+  'haidian': '海淀区',
+  'haidian_gjdw': '海淀区 / GJDW',
+  'haidian_wfah': '海淀区 / WFAH',
+  'chaoyang': '朝阳区',
+  'chaoyang_gjdw': '朝阳区 / GJDW',
+}
 
 // 计算属性
 const { pageMode, isReadonly, reimbursementMonth } = reimbursement
@@ -334,6 +329,12 @@ async function loadDetail(): Promise<void> {
   formData.category = data.category || ''
   formData.description = data.description || ''
 
+  // 设置报销范围/区域
+  if ((data as any).reimbursementScope) {
+    const scopeValue = (data as any).reimbursementScope
+    reimbursementScope.value = scopeMap[scopeValue] || scopeValue
+  }
+
   // 加载发票数据
   if (data.invoices) {
     invoice.loadInvoices(data.invoices)
@@ -370,8 +371,8 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
   height: calc(100vh - 60px);
-  margin: -24px;
-  padding: 24px;
+  margin: -24px -45px;
+  padding: 0;
   position: relative;
 }
 
@@ -379,6 +380,9 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
 }
 
 .card-header {
@@ -427,7 +431,7 @@ onMounted(() => {
 
 /* 拒绝原因区域样式 */
 .reject-reason-section {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 0 auto 24px;
 }
 
@@ -447,7 +451,7 @@ onMounted(() => {
 }
 
 .reimbursement-form {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
   background: #f5f7fa;
@@ -478,7 +482,7 @@ onMounted(() => {
 
 /* 付款回单区域样式 */
 .payment-proof-section {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 32px auto 0;
   padding: 24px;
   background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);

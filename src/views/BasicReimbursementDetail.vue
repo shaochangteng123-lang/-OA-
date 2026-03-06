@@ -49,10 +49,6 @@
               <el-input v-model="reimbursementMonth" disabled />
             </el-form-item>
 
-            <el-form-item label="报销类型">
-              <el-input v-model="selectedTypeLabel" disabled />
-            </el-form-item>
-
             <el-form-item label="发票上传" prop="files">
               <InvoiceUploader
                 v-model="invoice.fileList.value"
@@ -70,6 +66,8 @@
               <InvoiceTable
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="isReadonly"
+                :show-deduction="true"
+                :monthly-used-quota="invoice.monthlyUsedQuota.value"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -169,8 +167,8 @@ import { getTypeLabel, UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
 const invoice = useInvoice(UPLOAD_CONFIG.BASIC_MAX_FILES)
 const reimbursement = useReimbursement('basic', '/basic-reimbursement')
 
-// 当前步骤
-const currentStep = ref(1)
+// 当前步骤 - 如果是查看/编辑模式，直接跳到步骤2
+const currentStep = ref(reimbursement.reimbursementId.value ? 2 : 1)
 
 // 选中的报销类型
 const selectedType = ref('')
@@ -218,6 +216,12 @@ const isRejected = computed(() => {
   return reimbursement.reimbursementStatus.value === 'rejected'
 })
 
+// 是否已审核通过（审核通过后才显示核减金额）
+const isApprovedOrCompleted = computed(() => {
+  const status = reimbursement.reimbursementStatus.value
+  return status === 'approved' || status === 'paying' || status === 'payment_uploaded' || status === 'completed'
+})
+
 // 判断付款回单是否为图片
 const isPaymentProofImage = computed(() => {
   if (!paymentProofPath.value) return false
@@ -242,8 +246,10 @@ function handleTypeSelect(type: string): void {
 }
 
 // 处理文件变化
-function handleFileChange(file: any, fileList: any[]): void {
-  invoice.handleFileChange(file, fileList)
+async function handleFileChange(file: any, fileList: any[]): Promise<void> {
+  await invoice.handleFileChange(file, fileList)
+  // 每次上传发票后,重新获取当月已使用额度（编辑模式下排除当前报销单）
+  await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
 }
 
 // 处理删除文件
@@ -379,16 +385,20 @@ async function loadDetail(): Promise<void> {
     isRejected: data.status === 'rejected'
   })
 
-  // 如果有数据，直接进入第二步
-  if (data.category) {
-    currentStep.value = 2
-  }
+  // 查看或编辑已有报销单时，直接进入第二步
+  currentStep.value = 2
 }
 
 // 组件挂载
-onMounted(() => {
+onMounted(async () => {
+  // 如果是编辑/查看模式，先加载详情，然后获取额度时排除当前报销单
   if (reimbursement.reimbursementId.value) {
-    loadDetail()
+    await loadDetail()
+    // 获取当月已使用额度（排除当前报销单）
+    await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
+  } else {
+    // 新建模式，直接获取当月已使用额度
+    await invoice.fetchMonthlyUsedQuota()
   }
 })
 </script>
@@ -397,8 +407,8 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
   height: calc(100vh - 60px);
-  margin: -24px;
-  padding: 24px;
+  margin: -24px -45px;
+  padding: 0;
   position: relative;
 }
 
@@ -406,6 +416,9 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
 }
 
 .card-header {
@@ -434,7 +447,7 @@ onMounted(() => {
 }
 
 .step-content {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 16px 20px;
 }
@@ -450,7 +463,7 @@ onMounted(() => {
 
 /* 拒绝原因区域样式 */
 .reject-reason-section {
-  max-width: 800px;
+  max-width: 1100px;
   margin: 0 auto 24px;
 }
 
@@ -470,7 +483,7 @@ onMounted(() => {
 }
 
 .reimbursement-form {
-  max-width: 800px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 24px;
   background: #f5f7fa;
@@ -501,7 +514,7 @@ onMounted(() => {
 
 /* 付款回单区域样式 */
 .payment-proof-section {
-  max-width: 800px;
+  max-width: 1100px;
   margin: 32px auto 0;
   padding: 24px;
   background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);

@@ -1,7 +1,7 @@
 <template>
   <div class="top-bar" :class="{ 'sidebar-pinned': sidebarPinned }">
     <!-- 页面标题 -->
-    <div class="page-title">
+    <div class="page-title" v-if="title">
       <slot name="title">{{ title }}</slot>
     </div>
 
@@ -114,7 +114,6 @@ function handleCommand(command: string) {
   border-bottom: 1px solid #e5e7eb;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   padding: 0 24px;
   z-index: 99;
   transition: left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
@@ -135,6 +134,7 @@ function handleCommand(command: string) {
   display: flex;
   align-items: center;
   gap: 16px;
+  margin-left: auto;
 }
 
 /* 用户触发器 */

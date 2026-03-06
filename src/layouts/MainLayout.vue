@@ -86,6 +86,14 @@
             />
             <SidebarMenuItem
               v-if="isAdmin"
+              path="/reimbursement-management"
+              label="报销管理"
+              :icon="Setting"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="报销管理"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin"
               path="/approval"
               label="审批中心"
               :icon="Stamp"
@@ -351,7 +359,8 @@ const pageTitle = computed(() => {
     '/large-reimbursement/create': '新建大额报销单',
     '/business-reimbursement': '商务报销',
     '/business-reimbursement/create': '新建商务报销单',
-    '/reimbursement-statistics': '报销统计',
+    '/reimbursement-statistics': '', // 不显示标题
+    '/reimbursement-management': '', // 不显示标题
     '/onboarding': '入职',
     '/probation': '转正',
     '/resignation': '离职',
@@ -367,11 +376,11 @@ const pageTitle = computed(() => {
     '/departments': '部门管理',
     '/users': '用户管理',
     '/settings': '个人设置',
-    '/approval': '审批中心',
+    '/approval': '', // 不显示标题
     '/system-settings': '系统设置',
     '/user-settings': '用户设置',
   }
-  return routeTitles[route.path] || '工作日志管理系统'
+  return routeTitles[route.path] !== undefined ? routeTitles[route.path] : '工作日志管理系统'
 })
 
 // 切换锁定状态

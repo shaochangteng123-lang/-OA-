@@ -29,7 +29,7 @@
 
 .el-card {
   border-radius: var(--yl-radius-base);
-  box-shadow: var(--yl-shadow-base);
+  box-shadow: none;
   border: 1px solid var(--yl-border-light);
   transition: all var(--yl-transition-fast) var(--yl-ease-out);
 }

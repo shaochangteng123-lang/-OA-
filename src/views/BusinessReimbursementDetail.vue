@@ -14,19 +14,6 @@
         <div class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
-          <!-- 商务报销提示 -->
-          <el-alert
-            title="商务报销说明"
-            type="info"
-            :closable="false"
-            show-icon
-            class="business-alert"
-          >
-            <template #default>
-              商务报销适用于商务接待、客户拜访、商务差旅等业务活动产生的费用。请详细填写商务活动的目的、参与人员、客户信息等内容。
-            </template>
-          </el-alert>
-
           <!-- 拒绝原因提示（已拒绝状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
@@ -55,12 +42,8 @@
               <el-input v-model="reimbursementMonth" disabled />
             </el-form-item>
 
-            <el-form-item label="报销类型" prop="category">
-              <el-input
-                v-model="formData.category"
-                placeholder="请输入报销类型"
-                :disabled="isReadonly"
-              />
+            <el-form-item label="报销范围/区域">
+              <el-input v-model="reimbursementScope" disabled />
             </el-form-item>
 
             <el-form-item label="客户/对象" prop="client">
@@ -214,6 +197,22 @@ const paymentProofDialogVisible = ref(false)
 // 拒绝原因
 const rejectReason = ref('')
 
+// 报销范围/区域
+const reimbursementScope = ref('')
+
+// 服务对象
+const serviceTarget = ref('')
+
+// 报销范围/区域映射
+const scopeMap: Record<string, string> = {
+  'company_internal': '公司内部',
+  'haidian': '海淀区',
+  'haidian_gjdw': '海淀区 / GJDW',
+  'haidian_wfah': '海淀区 / WFAH',
+  'chaoyang': '朝阳区',
+  'chaoyang_gjdw': '朝阳区 / GJDW',
+}
+
 // 计算属性
 const { pageMode, isReadonly, reimbursementMonth } = reimbursement
 
@@ -337,8 +336,19 @@ async function loadDetail(): Promise<void> {
 
   // 设置表单数据
   formData.category = data.category || ''
-  formData.client = (data as any).client || ''
+  formData.client = (data as any).client || (data as any).serviceTarget || ''
   formData.description = data.description || ''
+
+  // 设置报销范围/区域
+  if ((data as any).reimbursementScope) {
+    const scopeValue = (data as any).reimbursementScope
+    reimbursementScope.value = scopeMap[scopeValue] || scopeValue
+  }
+
+  // 设置服务对象
+  if ((data as any).serviceTarget) {
+    serviceTarget.value = (data as any).serviceTarget
+  }
 
   // 加载发票数据
   if (data.invoices) {
@@ -376,8 +386,8 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
   height: calc(100vh - 60px);
-  margin: -24px;
-  padding: 24px;
+  margin: -24px -45px;
+  padding: 0;
   position: relative;
 }
 
@@ -385,6 +395,9 @@ onMounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
 }
 
 .card-header {
@@ -433,7 +446,7 @@ onMounted(() => {
 
 /* 拒绝原因区域样式 */
 .reject-reason-section {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 0 auto 24px;
 }
 
@@ -453,7 +466,7 @@ onMounted(() => {
 }
 
 .reimbursement-form {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 24px;
   background: #f5f7fa;
@@ -484,7 +497,7 @@ onMounted(() => {
 
 /* 付款回单区域样式 */
 .payment-proof-section {
-  max-width: 800px;
+  max-width: 1200px;
   margin: 32px auto 0;
   padding: 24px;
   background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);

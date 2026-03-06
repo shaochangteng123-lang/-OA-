@@ -475,7 +475,7 @@ onMounted(async () => {
   height: calc(100vh - 60px);
   overflow: hidden;
   position: relative;
-  margin: -24px;
+  margin: -24px -45px;
 }
 
 /* 左栏侧边栏（优化模块22：背景改为白色） */

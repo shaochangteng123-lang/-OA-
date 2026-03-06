@@ -1,114 +1,94 @@
 <template>
   <div class="yl-page approval-center">
-    <div class="yl-page-header">
-      <div class="yl-page-title">
-        <el-icon :size="24" color="var(--yl-primary)">
-          <Stamp />
-        </el-icon>
-        <h1>审批中心</h1>
-      </div>
-      <div class="yl-page-actions">
-        <el-button :icon="Refresh" @click="refreshData">刷新</el-button>
-      </div>
-    </div>
-
     <!-- 统计区域 - 可点击 -->
     <div class="statistics-section">
-      <el-row :gutter="20">
-        <el-col :span="4">
-          <el-card
-            class="stat-card pending-card"
-            shadow="hover"
-            :class="{ active: activeTab === 'pending' }"
-            @click="switchTab('pending')"
-          >
-            <div class="stat-content">
-              <div class="stat-icon">
-                <el-icon :size="32" color="#E6A23C"><Clock /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ statistics.pendingCount }}</div>
-                <div class="stat-label">待审批</div>
-              </div>
+      <el-card
+        class="stat-card pending-card"
+        shadow="hover"
+        :class="{ active: activeTab === 'pending' }"
+        @click="switchTab('pending')"
+      >
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><Clock /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.pendingCount }}</div>
+            <div class="stat-label">待审批</div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card
+        class="stat-card approved-card"
+        shadow="hover"
+        :class="{ active: activeTab === 'approved' }"
+        @click="switchTab('approved')"
+      >
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><CircleCheck /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.approvedThisMonth }}</div>
+            <div class="stat-label">本月已通过</div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card
+        class="stat-card unpaid-card"
+        shadow="hover"
+        :class="{ active: activeTab === 'unpaid' }"
+        @click="switchTab('unpaid')"
+      >
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><Wallet /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.approvedUnpaid }}</div>
+            <div class="stat-label">已通过未付款</div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card
+        class="stat-card paid-card"
+        shadow="hover"
+        :class="{ active: activeTab === 'paid' }"
+        @click="switchTab('paid')"
+      >
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><Money /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.paidThisMonth }}</div>
+            <div class="stat-label">本月已付款</div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card
+        class="stat-card completed-card"
+        shadow="hover"
+        :class="{ active: activeTab === 'completed' }"
+        @click="switchTab('completed')"
+      >
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><SuccessFilled /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.completedThisMonth }}</div>
+            <div class="stat-label">本月已完成</div>
+            <div class="stat-amount" v-if="statistics.completedThisMonthAmount > 0">
+              ¥{{ statistics.completedThisMonthAmount.toFixed(2) }}
             </div>
-          </el-card>
-        </el-col>
-        <el-col :span="5">
-          <el-card
-            class="stat-card approved-card"
-            shadow="hover"
-            :class="{ active: activeTab === 'approved' }"
-            @click="switchTab('approved')"
-          >
-            <div class="stat-content">
-              <div class="stat-icon">
-                <el-icon :size="32" color="#67C23A"><CircleCheck /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ statistics.approvedThisMonth }}</div>
-                <div class="stat-label">本月已通过</div>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :span="5">
-          <el-card
-            class="stat-card unpaid-card"
-            shadow="hover"
-            :class="{ active: activeTab === 'unpaid' }"
-            @click="switchTab('unpaid')"
-          >
-            <div class="stat-content">
-              <div class="stat-icon">
-                <el-icon :size="32" color="#F56C6C"><Wallet /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ statistics.approvedUnpaid }}</div>
-                <div class="stat-label">已通过未付款</div>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :span="4">
-          <el-card
-            class="stat-card paid-card"
-            shadow="hover"
-            :class="{ active: activeTab === 'paid' }"
-            @click="switchTab('paid')"
-          >
-            <div class="stat-content">
-              <div class="stat-icon">
-                <el-icon :size="32" color="#409EFF"><Money /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ statistics.paidThisMonth }}</div>
-                <div class="stat-label">本月已付款</div>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-        <el-col :span="4">
-          <el-card
-            class="stat-card completed-card"
-            shadow="hover"
-            :class="{ active: activeTab === 'completed' }"
-            @click="switchTab('completed')"
-          >
-            <div class="stat-content">
-              <div class="stat-icon">
-                <el-icon :size="32" color="#67C23A"><SuccessFilled /></el-icon>
-              </div>
-              <div class="stat-info">
-                <div class="stat-value">{{ statistics.completedThisMonth }}</div>
-                <div class="stat-label">本月已完成</div>
-                <div class="stat-amount" v-if="statistics.completedThisMonthAmount > 0">
-                  ¥{{ statistics.completedThisMonthAmount.toFixed(2) }}
-                </div>
-              </div>
-            </div>
-          </el-card>
-        </el-col>
-      </el-row>
+          </div>
+        </div>
+      </el-card>
     </div>
 
     <el-tabs v-model="activeTab" @tab-change="handleTabChange">
@@ -444,7 +424,7 @@
       <!-- 全部查询 -->
       <el-tab-pane label="全部查询" name="all">
         <el-card>
-          <!-- 筛选区域 -->
+          <!-- 筛选条件 -->
           <div class="filter-section">
             <el-form :inline="true" :model="allFilterForm" class="filter-form">
               <el-form-item label="员工">
@@ -453,7 +433,7 @@
                   placeholder="全部员工"
                   clearable
                   filterable
-                  style="width: 150px"
+                  style="width: 130px"
                 >
                   <el-option
                     v-for="emp in employeeList"
@@ -464,31 +444,75 @@
                 </el-select>
               </el-form-item>
               <el-form-item label="类型">
-                <el-select v-model="allFilterForm.type" placeholder="全部" clearable style="width: 120px">
-                  <el-option label="基础报销" value="basic" />
-                  <el-option label="大额报销" value="large" />
-                  <el-option label="商务报销" value="business" />
+                <el-select
+                  v-model="allFilterForm.type"
+                  placeholder="全部"
+                  clearable
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  popper-class="type-select-popper"
+                  style="width: 160px"
+                >
+                  <el-option value="basic" label="基础报销">
+                    <el-checkbox :model-value="allFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
+                    基础报销
+                  </el-option>
+                  <el-option value="large" label="大额报销">
+                    <el-checkbox :model-value="allFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
+                    大额报销
+                  </el-option>
+                  <el-option value="business" label="商务报销">
+                    <el-checkbox :model-value="allFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
+                    商务报销
+                  </el-option>
                 </el-select>
               </el-form-item>
+              <el-form-item label="所属区域">
+                <el-cascader
+                  v-model="allFilterForm.reimbursementScope"
+                  :options="scopeList"
+                  :props="{
+                    value: 'value',
+                    label: 'name',
+                    children: 'children',
+                    checkStrictly: true,
+                    emitPath: false,
+                    multiple: true
+                  }"
+                  collapse-tags
+                  collapse-tags-tooltip
+                  :disabled="isBasicReimbursementSelected"
+                  clearable
+                  placeholder="全部"
+                  style="width: 160px"
+                />
+              </el-form-item>
               <el-form-item label="状态">
-                <el-select v-model="allFilterForm.status" placeholder="全部" clearable style="width: 140px">
-                  <el-option label="草稿" value="draft" />
+                <el-select
+                  v-model="allFilterForm.status"
+                  placeholder="全部"
+                  clearable
+                  style="width: 110px"
+                >
                   <el-option label="待审批" value="pending" />
-                  <el-option label="已审批未付款" value="approved" />
+                  <el-option label="已通过" value="approved" />
                   <el-option label="已拒绝" value="rejected" />
+                  <el-option label="付款中" value="paying" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
                 </el-select>
               </el-form-item>
-              <el-form-item label="日期范围">
+              <el-form-item label="日期">
                 <el-date-picker
-                  v-model="allFilterForm.dateRange"
-                  type="daterange"
+                  v-model="dateRangeModel"
+                  :type="currentDatePickerType"
+                  :value-format="currentDateValueFormat"
+                  :start-placeholder="currentStartPlaceholder"
+                  :end-placeholder="currentEndPlaceholder"
                   range-separator="至"
-                  start-placeholder="开始"
-                  end-placeholder="结束"
-                  value-format="YYYY-MM-DD"
-                  style="width: 240px"
+                  :shortcuts="dateTypeShortcuts"
+                  style="width: 280px"
                 />
               </el-form-item>
               <el-form-item>
@@ -496,9 +520,8 @@
                   查询
                 </el-button>
                 <el-button @click="handleResetAllFilter">重置</el-button>
-                <el-button type="success" :icon="Download" @click="handleExportAllList" :disabled="allList.length === 0">
-                  导出
-                </el-button>
+                <el-button type="success" :icon="Download" @click="handleExportAllList">导出</el-button>
+                <el-button type="warning" @click="handleOpenDeductionQuery">核减查询</el-button>
               </el-form-item>
             </el-form>
           </div>
@@ -539,7 +562,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120">
+            <el-table-column label="申请人" width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="28">
@@ -549,7 +572,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="100">
+            <el-table-column label="类型" width="100" align="center">
               <template #default="{ row }">
                 <el-tag :type="getTypeTagType(row.type)" size="small">
                   {{ row.typeName }}
@@ -564,19 +587,24 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120">
+            <el-table-column label="所属区域" width="150" align="center">
+              <template #default="{ row }">
+                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="120" align="center">
               <template #default="{ row }">
                 <el-tag :type="getAllStatusType(row.status)" size="small">
                   {{ row.statusName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="160">
+            <el-table-column label="提交时间" width="160" align="center">
               <template #default="{ row }">
                 {{ row.submitTime ? formatDate(row.submitTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right">
+            <el-table-column label="操作" width="180" fixed="right" align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -855,11 +883,154 @@
       </template>
     </el-dialog>
 
+    <!-- 核减金额查询对话框 -->
+    <el-dialog v-model="deductionDialogVisible" title="核减金额查询" width="900px" :close-on-click-modal="false">
+      <!-- 查询条件 -->
+      <div class="deduction-filter">
+        <el-form :inline="true" :model="deductionForm" class="filter-form">
+          <el-form-item label="员工">
+            <el-select
+              v-model="deductionForm.userId"
+              placeholder="全部员工"
+              clearable
+              filterable
+              style="width: 150px"
+            >
+              <el-option
+                v-for="emp in employeeList"
+                :key="emp.id"
+                :label="emp.name"
+                :value="emp.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="日期范围">
+            <el-date-picker
+              v-model="deductionDateRangeModel"
+              :type="deductionCurrentDatePickerType"
+              :value-format="deductionCurrentDateValueFormat"
+              :start-placeholder="deductionCurrentStartPlaceholder"
+              :end-placeholder="deductionCurrentEndPlaceholder"
+              range-separator="至"
+              :shortcuts="deductionDateTypeShortcuts"
+              style="width: 280px"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :icon="Search" :loading="deductionLoading" @click="handleQueryDeduction">
+              查询
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <!-- 核减金额汇总 -->
+      <div v-if="deductionResult" class="deduction-result">
+        <div class="deduction-summary">
+          <h4>{{ deductionResult.period }} 核减金额汇总</h4>
+          <div class="summary-cards">
+            <el-card class="summary-card">
+              <div class="card-label">总核减金额</div>
+              <div class="card-value total">¥{{ deductionResult.totalDeduction.toFixed(2) }}</div>
+            </el-card>
+            <el-card class="summary-card">
+              <div class="card-label">核减笔数</div>
+              <div class="card-value">{{ deductionResult.totalCount }} 笔</div>
+            </el-card>
+            <el-card class="summary-card">
+              <div class="card-label">涉及员工</div>
+              <div class="card-value">{{ deductionResult.employeeCount }} 人</div>
+            </el-card>
+          </div>
+        </div>
+
+        <!-- 员工明细 -->
+        <div class="deduction-details">
+          <h4>员工明细</h4>
+          <el-table :data="deductionResult.employees" border stripe>
+            <el-table-column label="序号" width="60" align="center">
+              <template #default="{ $index }">
+                {{ $index + 1 }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="name" label="员工姓名" width="120" />
+            <el-table-column prop="department" label="部门" width="120" />
+            <el-table-column label="核减金额" width="120" align="right">
+              <template #default="{ row }">
+                <span style="color: #f56c6c; font-weight: 600;">¥{{ row.deductionAmount.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="核减笔数" width="100" align="center">
+              <template #default="{ row }">
+                {{ row.deductionCount }} 笔
+              </template>
+            </el-table-column>
+            <el-table-column label="明细" min-width="200">
+              <template #default="{ row }">
+                <el-button type="primary" link size="small" @click="handleViewDeductionDetail(row)">
+                  查看明细
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+      <div v-else class="deduction-empty">
+        <el-empty description="请选择查询条件后点击查询" />
+      </div>
+
+      <template #footer>
+        <el-button @click="deductionDialogVisible = false">关闭</el-button>
+        <el-button type="success" :icon="Download" @click="handleExportDeduction" :disabled="!deductionResult">
+          导出Excel
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 核减明细对话框 -->
+    <el-dialog v-model="deductionDetailDialogVisible" title="核减明细" width="800px" :close-on-click-modal="false">
+      <div v-if="currentDeductionEmployee">
+        <h4>{{ currentDeductionEmployee.name }} - 核减明细</h4>
+        <el-table :data="currentDeductionEmployee.details" border stripe>
+          <el-table-column label="序号" width="60" align="center">
+            <template #default="{ $index }">
+              {{ $index + 1 }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="typeName" label="报销类型" width="100" />
+          <el-table-column prop="title" label="报销事由" min-width="200" />
+          <el-table-column label="申请金额" width="120" align="right">
+            <template #default="{ row }">
+              ¥{{ row.originalAmount.toFixed(2) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="核减金额" width="120" align="right">
+            <template #default="{ row }">
+              <span style="color: #f56c6c; font-weight: 600;">¥{{ row.deductionAmount.toFixed(2) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="核减原因" min-width="150">
+            <template #default="{ row }">
+              {{ row.deductionReason || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="提交时间" width="160">
+            <template #default="{ row }">
+              {{ row.submitTime ? formatDate(row.submitTime) : '-' }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="deductionDetailDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -995,6 +1166,15 @@ const summaryForm = reactive({
   dateRange: null as [string, string] | null,
 })
 
+// 报销范围/区域数据
+interface ScopeOption {
+  value: string
+  name: string
+  children?: ScopeOption[]
+}
+const scopeList = ref<ScopeOption[]>([])
+const scopeMap = ref<Record<string, string>>({}) // value -> 完整路径名称映射
+
 // 全部查询相关
 interface AllReimbursementItem {
   id: string
@@ -1022,16 +1202,74 @@ interface AllReimbursementItem {
 
 const allFilterForm = reactive({
   userId: '',
-  type: '',
+  type: [] as string[], // 改为数组支持多选
   status: '',
+  reimbursementScope: [] as string[], // 改为数组支持多选
+  dateQueryType: 'day' as 'year' | 'month' | 'day', // 日期查询类型
   dateRange: null as [string, string] | null,
+  yearRange: null as [string, string] | null,
+  monthRange: null as [string, string] | null,
 })
 const allList = ref<AllReimbursementItem[]>([])
 const allListLoading = ref(false)
 
+// 当前日期选择器类型（yearrange / monthrange / daterange）
+const currentDatePickerType = computed(() => {
+  if (allFilterForm.dateQueryType === 'year') return 'yearrange'
+  if (allFilterForm.dateQueryType === 'month') return 'monthrange'
+  return 'daterange'
+})
+
+// 不同查询类型下的 value-format
+const currentDateValueFormat = computed(() => {
+  if (allFilterForm.dateQueryType === 'year') return 'YYYY'
+  if (allFilterForm.dateQueryType === 'month') return 'YYYY-MM'
+  return 'YYYY-MM-DD'
+})
+
+// 不同查询类型下的占位文案
+const currentStartPlaceholder = computed(() => {
+  if (allFilterForm.dateQueryType === 'year') return '开始年份'
+  if (allFilterForm.dateQueryType === 'month') return '开始月份'
+  return '开始日期'
+})
+
+const currentEndPlaceholder = computed(() => {
+  if (allFilterForm.dateQueryType === 'year') return '结束年份'
+  if (allFilterForm.dateQueryType === 'month') return '结束月份'
+  return '结束日期'
+})
+
+// 统一给 el-date-picker 使用的 v-model，根据当前查询类型映射到不同字段
+const dateRangeModel = computed<[string, string] | null>({
+  get() {
+    if (allFilterForm.dateQueryType === 'year') return allFilterForm.yearRange
+    if (allFilterForm.dateQueryType === 'month') return allFilterForm.monthRange
+    return allFilterForm.dateRange
+  },
+  set(val) {
+    allFilterForm.yearRange = null
+    allFilterForm.monthRange = null
+    allFilterForm.dateRange = null
+    if (!val) return
+    if (allFilterForm.dateQueryType === 'year') {
+      allFilterForm.yearRange = val
+    } else if (allFilterForm.dateQueryType === 'month') {
+      allFilterForm.monthRange = val
+    } else {
+      allFilterForm.dateRange = val
+    }
+  },
+})
+
 // 计算全部列表总金额
 const allListTotalAmount = computed(() => {
   return allList.value.reduce((sum, item) => sum + (item.amount || 0), 0)
+})
+
+// 判断是否选择了基础报销（用于禁用所属区域）
+const isBasicReimbursementSelected = computed(() => {
+  return allFilterForm.type.includes('basic')
 })
 
 // 计算全部列表按类型汇总
@@ -1129,6 +1367,100 @@ interface AllExportData {
 const allExportDialogVisible = ref(false)
 const allExportData = ref<AllExportData | null>(null)
 const allExportActiveCollapse = ref<string[]>([])
+
+// 核减金额查询相关
+interface DeductionEmployee {
+  userId: string
+  name: string
+  department: string | null
+  deductionAmount: number
+  deductionCount: number
+  details: Array<{
+    id: string
+    type: string
+    typeName: string
+    title: string
+    originalAmount: number
+    deductionAmount: number
+    deductionReason: string | null
+    submitTime: string
+  }>
+}
+
+interface DeductionResult {
+  period: string
+  totalDeduction: number
+  totalCount: number
+  employeeCount: number
+  employees: DeductionEmployee[]
+}
+
+const deductionDialogVisible = ref(false)
+const deductionDetailDialogVisible = ref(false)
+const deductionLoading = ref(false)
+const deductionForm = reactive({
+  // 日期查询类型：年 / 月 / 日
+  dateType: 'day' as 'year' | 'month' | 'day',
+  // 按日范围
+  dateRange: null as [string, string] | null,
+  // 按年范围
+  yearRange: null as [string, string] | null,
+  // 按月范围
+  monthRange: null as [string, string] | null,
+  // 员工
+  userId: '',
+})
+const deductionResult = ref<DeductionResult | null>(null)
+const currentDeductionEmployee = ref<DeductionEmployee | null>(null)
+
+// 核减查询日期选择器类型
+const deductionCurrentDatePickerType = computed(() => {
+  if (deductionForm.dateType === 'year') return 'yearrange'
+  if (deductionForm.dateType === 'month') return 'monthrange'
+  return 'daterange'
+})
+
+// 核减查询日期 value-format
+const deductionCurrentDateValueFormat = computed(() => {
+  if (deductionForm.dateType === 'year') return 'YYYY'
+  if (deductionForm.dateType === 'month') return 'YYYY-MM'
+  return 'YYYY-MM-DD'
+})
+
+// 核减查询日期占位
+const deductionCurrentStartPlaceholder = computed(() => {
+  if (deductionForm.dateType === 'year') return '开始年份'
+  if (deductionForm.dateType === 'month') return '开始月份'
+  return '开始日期'
+})
+
+const deductionCurrentEndPlaceholder = computed(() => {
+  if (deductionForm.dateType === 'year') return '结束年份'
+  if (deductionForm.dateType === 'month') return '结束月份'
+  return '结束日期'
+})
+
+// 核减查询统一 v-model
+const deductionDateRangeModel = computed<[string, string] | null>({
+  get() {
+    if (deductionForm.dateType === 'year') return deductionForm.yearRange
+    if (deductionForm.dateType === 'month') return deductionForm.monthRange
+    return deductionForm.dateRange
+  },
+  set(val) {
+    deductionForm.yearRange = null
+    deductionForm.monthRange = null
+    deductionForm.dateRange = null
+    if (!val) return
+    if (deductionForm.dateType === 'year') {
+      deductionForm.yearRange = val
+    } else if (deductionForm.dateType === 'month') {
+      deductionForm.monthRange = val
+    } else {
+      deductionForm.dateRange = val
+    }
+  },
+})
 
 // 获取类型标签
 function getTypeTagType(type: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
@@ -1256,7 +1588,8 @@ function handleTabChange(tab: string | number) {
   } else if (tab === 'completed') {
     loadCompletedList()
   } else if (tab === 'all') {
-    loadEmployeeList() // 为全部查询加载员工列表
+    // 全部查询tab不自动加载数据，保留用户的查询结果
+    // 员工列表在 onMounted 时已加载
   }
 }
 
@@ -1390,6 +1723,31 @@ async function loadEmployeeList() {
     }
   } catch {
     console.error('加载员工列表失败')
+  }
+}
+
+// 加载报销范围列表
+async function loadScopeList() {
+  try {
+    const res = await api.get('/api/reimbursement-scope/list')
+    if (res.data.success) {
+      scopeList.value = res.data.data
+      // 递归构建 value -> 完整路径名称 映射
+      const buildMap = (items: ScopeOption[], parentName = '') => {
+        for (const item of items) {
+          if (item.value) {
+            const fullName = parentName ? `${parentName} / ${item.name}` : item.name
+            scopeMap.value[item.value] = fullName
+          }
+          if (item.children?.length) {
+            buildMap(item.children, item.name)
+          }
+        }
+      }
+      buildMap(scopeList.value)
+    }
+  } catch {
+    console.error('加载报销范围列表失败')
   }
 }
 
@@ -1551,22 +1909,41 @@ async function loadAllList() {
     if (allFilterForm.userId) {
       params.userId = allFilterForm.userId
     }
-    if (allFilterForm.type) {
-      params.type = allFilterForm.type
+    // 类型支持多选，传递数组
+    if (allFilterForm.type && allFilterForm.type.length > 0) {
+      params.type = allFilterForm.type.join(',')
     }
     if (allFilterForm.status) {
       params.status = allFilterForm.status
     }
-    if (allFilterForm.dateRange && allFilterForm.dateRange[0]) {
-      params.startDate = allFilterForm.dateRange[0]
+    // 所属区域支持多选，传递数组
+    if (allFilterForm.reimbursementScope && allFilterForm.reimbursementScope.length > 0) {
+      params.reimbursementScope = allFilterForm.reimbursementScope.join(',')
     }
-    if (allFilterForm.dateRange && allFilterForm.dateRange[1]) {
+
+    // 根据日期查询类型设置日期参数
+    if (allFilterForm.dateQueryType === 'day' && allFilterForm.dateRange && allFilterForm.dateRange[0] && allFilterForm.dateRange[1]) {
+      // 按日期范围查询
+      params.startDate = allFilterForm.dateRange[0]
       params.endDate = allFilterForm.dateRange[1]
+    } else if (allFilterForm.dateQueryType === 'month' && allFilterForm.monthRange && allFilterForm.monthRange[0] && allFilterForm.monthRange[1]) {
+      // 按月查询
+      const [startYear, startMonth] = allFilterForm.monthRange[0].split('-')
+      const [endYear, endMonth] = allFilterForm.monthRange[1].split('-')
+      params.startDate = `${startYear}-${startMonth}-01`
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.endDate = `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`
+    } else if (allFilterForm.dateQueryType === 'year' && allFilterForm.yearRange && allFilterForm.yearRange[0] && allFilterForm.yearRange[1]) {
+      // 按年查询
+      params.startDate = `${allFilterForm.yearRange[0]}-01-01`
+      params.endDate = `${allFilterForm.yearRange[1]}-12-31`
     }
 
     const res = await api.get('/api/approval/all-reimbursements', { params })
     if (res.data.success) {
       allList.value = res.data.data
+      // 保存查询结果和筛选条件到 sessionStorage
+      saveAllQueryState()
     } else {
       ElMessage.error(res.data.message || '查询失败')
     }
@@ -1577,6 +1954,82 @@ async function loadAllList() {
   }
 }
 
+// 保存全部查询状态到 sessionStorage
+function saveAllQueryState() {
+  try {
+    const state = {
+      allList: allList.value,
+      allFilterForm: {
+        userId: allFilterForm.userId,
+        type: allFilterForm.type,
+        status: allFilterForm.status,
+        reimbursementScope: allFilterForm.reimbursementScope,
+        dateQueryType: allFilterForm.dateQueryType,
+        dateRange: allFilterForm.dateRange,
+        yearRange: allFilterForm.yearRange,
+        monthRange: allFilterForm.monthRange,
+      },
+    }
+    sessionStorage.setItem('approval_all_query_state', JSON.stringify(state))
+  } catch (err) {
+    console.error('保存查询状态失败:', err)
+  }
+}
+
+// 从 sessionStorage 恢复全部查询状态
+function restoreAllQueryState() {
+  try {
+    const stateStr = sessionStorage.getItem('approval_all_query_state')
+    if (stateStr) {
+      const state = JSON.parse(stateStr)
+      allList.value = state.allList || []
+      if (state.allFilterForm) {
+        allFilterForm.userId = state.allFilterForm.userId || ''
+        allFilterForm.type = state.allFilterForm.type || []
+        allFilterForm.status = state.allFilterForm.status || ''
+        allFilterForm.reimbursementScope = state.allFilterForm.reimbursementScope || []
+        allFilterForm.dateQueryType = state.allFilterForm.dateQueryType || 'day'
+        allFilterForm.dateRange = state.allFilterForm.dateRange || null
+        allFilterForm.yearRange = state.allFilterForm.yearRange || null
+        allFilterForm.monthRange = state.allFilterForm.monthRange || null
+      }
+    }
+  } catch (err) {
+    console.error('恢复查询状态失败:', err)
+  }
+}
+
+// 处理日期查询类型变化
+function handleDateQueryTypeChange(type: 'year' | 'month' | 'day') {
+  allFilterForm.dateQueryType = type
+  // 清空所有日期字段
+  allFilterForm.dateRange = null
+  allFilterForm.yearRange = null
+  allFilterForm.monthRange = null
+}
+
+// 日期选择器左侧快捷选项 - 切换查询类型但不直接关闭面板
+const dateTypeShortcuts = [
+  {
+    text: '年',
+    onClick: () => {
+      handleDateQueryTypeChange('year')
+    },
+  },
+  {
+    text: '月',
+    onClick: () => {
+      handleDateQueryTypeChange('month')
+    },
+  },
+  {
+    text: '日',
+    onClick: () => {
+      handleDateQueryTypeChange('day')
+    },
+  },
+]
+
 // 查询全部列表
 function handleQueryAllList() {
   loadAllList()
@@ -1585,10 +2038,16 @@ function handleQueryAllList() {
 // 重置全部筛选
 function handleResetAllFilter() {
   allFilterForm.userId = ''
-  allFilterForm.type = ''
+  allFilterForm.type = []
   allFilterForm.status = ''
+  allFilterForm.reimbursementScope = []
+  allFilterForm.dateQueryType = 'day'
   allFilterForm.dateRange = null
+  allFilterForm.yearRange = null
+  allFilterForm.monthRange = null
   allList.value = []
+  // 清除 sessionStorage 中的查询状态
+  sessionStorage.removeItem('approval_all_query_state')
 }
 
 // 导出全部列表数据（显示预览弹窗）
@@ -1717,6 +2176,154 @@ function handleDownloadAllExcel() {
   ElMessage.success('导出成功')
 }
 
+// 打开核减金额查询对话框
+function handleOpenDeductionQuery() {
+  deductionDialogVisible.value = true
+}
+
+// 处理核减日期类型变化
+function handleDeductionDateTypeChange(type: 'year' | 'month' | 'day') {
+  deductionForm.dateType = type
+  deductionForm.dateRange = null
+  deductionForm.yearRange = null
+  deductionForm.monthRange = null
+  deductionResult.value = null
+}
+
+// 核减查询日期面板左侧快捷项
+const deductionDateTypeShortcuts = [
+  {
+    text: '年',
+    onClick: () => {
+      handleDeductionDateTypeChange('year')
+    },
+  },
+  {
+    text: '月',
+    onClick: () => {
+      handleDeductionDateTypeChange('month')
+    },
+  },
+  {
+    text: '日',
+    onClick: () => {
+      handleDeductionDateTypeChange('day')
+    },
+  },
+]
+
+// 查询核减金额
+async function handleQueryDeduction() {
+  // 校验日期范围
+  if (deductionForm.dateType === 'day') {
+    if (!deductionForm.dateRange || !deductionForm.dateRange[0] || !deductionForm.dateRange[1]) {
+      ElMessage.warning('请选择日期范围')
+      return
+    }
+  } else if (deductionForm.dateType === 'month') {
+    if (!deductionForm.monthRange || !deductionForm.monthRange[0] || !deductionForm.monthRange[1]) {
+      ElMessage.warning('请选择月份范围')
+      return
+    }
+  } else if (deductionForm.dateType === 'year') {
+    if (!deductionForm.yearRange || !deductionForm.yearRange[0] || !deductionForm.yearRange[1]) {
+      ElMessage.warning('请选择年份范围')
+      return
+    }
+  }
+
+  try {
+    deductionLoading.value = true
+    const params: any = {
+      dateType: deductionForm.dateType,
+    }
+
+    // 统一转换为 startDate / endDate
+    if (deductionForm.dateType === 'day' && deductionForm.dateRange) {
+      params.startDate = deductionForm.dateRange[0]
+      params.endDate = deductionForm.dateRange[1]
+    } else if (deductionForm.dateType === 'month' && deductionForm.monthRange) {
+      const [startYear, startMonth] = deductionForm.monthRange[0].split('-')
+      const [endYear, endMonth] = deductionForm.monthRange[1].split('-')
+      params.startDate = `${startYear}-${startMonth}-01`
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.endDate = `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`
+    } else if (deductionForm.dateType === 'year' && deductionForm.yearRange) {
+      params.startDate = `${deductionForm.yearRange[0]}-01-01`
+      params.endDate = `${deductionForm.yearRange[1]}-12-31`
+    }
+
+    if (deductionForm.userId) {
+      params.userId = deductionForm.userId
+    }
+
+    const res = await api.get('/api/approval/deduction-query', { params })
+    if (res.data.success) {
+      deductionResult.value = res.data.data
+    } else {
+      ElMessage.error(res.data.message || '查询失败')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '查询失败')
+  } finally {
+    deductionLoading.value = false
+  }
+}
+
+// 查看核减明细
+function handleViewDeductionDetail(employee: DeductionEmployee) {
+  currentDeductionEmployee.value = employee
+  deductionDetailDialogVisible.value = true
+}
+
+// 导出核减金额数据
+function handleExportDeduction() {
+  if (!deductionResult.value) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+
+  // 生成CSV内容
+  const headers = ['员工', '部门', '报销类型', '报销事由', '申请金额', '核减金额', '核减原因', '提交时间']
+  const rows: string[][] = []
+
+  deductionResult.value.employees.forEach(emp => {
+    emp.details.forEach(detail => {
+      rows.push([
+        emp.name,
+        emp.department || '',
+        detail.typeName,
+        detail.title,
+        detail.originalAmount.toFixed(2),
+        detail.deductionAmount.toFixed(2),
+        detail.deductionReason || '',
+        detail.submitTime || '',
+      ])
+    })
+  })
+
+  // 添加汇总行
+  rows.push([])
+  rows.push(['汇总', '', '', '', '', deductionResult.value.totalDeduction.toFixed(2), `共${deductionResult.value.totalCount}笔`, ''])
+
+  // 转换为CSV格式
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
+  ].join('\n')
+
+  // 添加BOM以支持中文
+  const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `核减金额_${deductionResult.value.period.replace(/\s+/g, '_')}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+
+  ElMessage.success('导出成功')
+}
+
 // 查看全部列表详情
 function handleViewAllDetail(row: AllReimbursementItem) {
   const typeMap: Record<string, string> = {
@@ -1730,13 +2337,47 @@ function handleViewAllDetail(row: AllReimbursementItem) {
   }
 }
 
+// 监听类型选择变化，如果选择了基础报销，清空所属区域
+watch(
+  () => allFilterForm.type,
+  (newType) => {
+    if (newType.includes('basic')) {
+      allFilterForm.reimbursementScope = []
+    }
+  }
+)
+
+// 监听路由变化，处理从详情页返回时的 tab 切换
+watch(
+  () => route.query.tab,
+  (newTab) => {
+    if (newTab && typeof newTab === 'string' && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all'].includes(newTab)) {
+      if (activeTab.value !== newTab) {
+        activeTab.value = newTab
+        // 如果是返回到 all tab，先恢复查询状态
+        if (newTab === 'all') {
+          restoreAllQueryState()
+        }
+        handleTabChange(newTab)
+      }
+    }
+  }
+)
+
 onMounted(() => {
   // 加载统计数据
   loadStatistics()
+  // 加载员工列表和报销范围列表（用于全部查询筛选）
+  loadEmployeeList()
+  loadScopeList()
   // 根据URL参数决定默认tab，支持从付款页面返回时定位到正确的tab
   const tab = route.query.tab as string
   if (tab && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all'].includes(tab)) {
     activeTab.value = tab
+    // 如果是返回到 all tab，先恢复查询状态
+    if (tab === 'all') {
+      restoreAllQueryState()
+    }
     handleTabChange(tab)
   } else {
     // 默认加载待审批列表
@@ -1747,30 +2388,30 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 表头居中 */
+:deep(.el-table th.el-table__cell) {
+  text-align: center;
+}
+
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .approval-center {
   height: calc(100vh - 60px);
-  margin: -24px;
+  margin: -24px -45px;
   padding: 24px;
 }
 
 .statistics-section {
   margin-bottom: 24px;
-}
-
-.statistics-section :deep(.el-col) {
-  display: flex;
-}
-
-.statistics-section :deep(.el-col .el-card) {
-  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 20px;
 }
 
 .stat-card {
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.3s ease;
-  border: 2px solid transparent;
+  border: 1px solid #ebeef5;
   min-height: 110px;
 }
 
@@ -1781,7 +2422,7 @@ onMounted(() => {
 }
 
 .stat-card:hover {
-  transform: translateY(-2px);
+  transform: translateY(-4px);
 }
 
 .stat-card.active {
@@ -1806,26 +2447,32 @@ onMounted(() => {
   border-radius: 12px;
   background: #f5f7fa;
   flex-shrink: 0;
+  font-size: 28px;
 }
 
 .pending-card .stat-icon {
-  background: rgba(230, 162, 60, 0.1);
+  background-color: rgba(230, 162, 60, 0.1);
+  color: #E6A23C;
 }
 
 .approved-card .stat-icon {
-  background: rgba(103, 194, 58, 0.1);
+  background-color: rgba(103, 194, 58, 0.1);
+  color: #67C23A;
 }
 
 .unpaid-card .stat-icon {
-  background: rgba(245, 108, 108, 0.1);
+  background-color: rgba(245, 108, 108, 0.1);
+  color: #F56C6C;
 }
 
 .paid-card .stat-icon {
-  background: rgba(64, 158, 255, 0.1);
+  background-color: rgba(64, 158, 255, 0.1);
+  color: #409EFF;
 }
 
 .completed-card .stat-icon {
-  background: rgba(103, 194, 58, 0.1);
+  background-color: rgba(103, 194, 58, 0.1);
+  color: #67C23A;
 }
 
 .stat-info {
@@ -1882,9 +2529,18 @@ onMounted(() => {
 
 .filter-form {
   display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+  flex-wrap: nowrap;
+  gap: 12px;
   align-items: flex-end;
+}
+
+.filter-form :deep(.el-form-item) {
+  margin-bottom: 0;
+  margin-right: 0;
+}
+
+.filter-form :deep(.el-form-item__label) {
+  padding-right: 8px;
 }
 
 .summary-result {
@@ -2205,5 +2861,79 @@ onMounted(() => {
   width: 100%;
   height: 70vh;
   border: none;
+}
+
+/* 核减金额查询样式 */
+.deduction-filter {
+  margin-bottom: 20px;
+  padding: 16px;
+  background-color: #f5f7fa;
+  border-radius: 4px;
+}
+
+.deduction-result {
+  margin-top: 20px;
+}
+
+.deduction-summary {
+  margin-bottom: 24px;
+}
+
+.deduction-summary h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 16px;
+}
+
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.summary-card {
+  text-align: center;
+  padding: 16px;
+}
+
+.summary-card .card-label {
+  font-size: 14px;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.summary-card .card-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: #f56c6c;
+}
+
+.summary-card .card-value.total {
+  color: #f56c6c;
+  font-size: 28px;
+}
+
+.deduction-details {
+  margin-top: 24px;
+}
+
+.deduction-details h4 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 16px;
+}
+
+.deduction-empty {
+  padding: 40px 0;
+  text-align: center;
+}
+</style>
+
+<!-- 非 scoped 样式：用于类型多选下拉框的 checkbox 效果 -->
+<style>
+.type-select-popper .el-select-dropdown__item.is-selected::after {
+  display: none;
 }
 </style>

@@ -93,6 +93,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '报销统计' },
       },
       {
+        path: '/reimbursement-management',
+        name: 'ReimbursementManagement',
+        component: () => import('@/views/ReimbursementManagement.vue'),
+        meta: { title: '报销管理', requiresAdmin: true },
+      },
+      {
         path: '/onboarding',
         name: 'Onboarding',
         component: () => import('@/views/Onboarding.vue'),

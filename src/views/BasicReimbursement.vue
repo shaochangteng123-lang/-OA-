@@ -20,7 +20,7 @@
           class="alert-info"
         >
           <template #default>
-            <p>此页面仅显示最近一个月内的报销数据，超过一个月的历史数据请在"报销统计"中查看。</p>
+            <p>可通过日期范围按年、月、日进行查询，查看不同时间段的报销数据。</p>
           </template>
         </el-alert>
 
@@ -39,16 +39,14 @@
             </el-form-item>
             <el-form-item label="日期范围">
               <el-date-picker
-                v-model="filterForm.dateRange"
-                type="daterange"
+                v-model="dateRangeModel"
+                :type="currentDatePickerType"
                 range-separator="至"
-                start-placeholder="开始日期"
-                end-placeholder="结束日期"
-                :shortcuts="dateShortcuts"
-                :disabled-date="disabledDate"
-                value-format="YYYY-MM-DD"
-                style="width: 260px"
-                @change="handleDateRangeChange"
+                :start-placeholder="currentStartPlaceholder"
+                :end-placeholder="currentEndPlaceholder"
+                :shortcuts="dateTypeShortcuts"
+                :value-format="currentDateValueFormat"
+                style="width: 280px"
               />
             </el-form-item>
             <el-form-item>
@@ -349,73 +347,67 @@ import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue
 
 const router = useRouter()
 
-// 计算默认日期范围（最近一个月）
-const getDefaultDateRange = (): [Date, Date] => {
-  const end = new Date()
-  const start = new Date()
-  start.setMonth(start.getMonth() - 1)
-  return [start, end]
-}
-
 // 筛选表单
 const filterForm = reactive({
   status: '',
-  dateRange: getDefaultDateRange() as [Date, Date] | null,
+  // 日期查询类型：年 / 月 / 日
+  dateQueryType: 'day' as 'year' | 'month' | 'day',
+  // 按日的日期范围
+  dateRange: null as [string, string] | null,
+  // 按年的年份范围
+  yearRange: null as [string, string] | null,
+  // 按月的月份范围
+  monthRange: null as [string, string] | null,
 })
 
-// 日期选择器快捷选项
-const dateShortcuts = [
-  {
-    text: '最近一周',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setDate(start.getDate() - 7)
-      return [start, end]
-    },
-  },
-  {
-    text: '最近两周',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setDate(start.getDate() - 14)
-      return [start, end]
-    },
-  },
-  {
-    text: '最近一个月',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setMonth(start.getMonth() - 1)
-      return [start, end]
-    },
-  },
-]
+// 当前日期选择器类型（yearrange / monthrange / daterange）
+const currentDatePickerType = computed(() => {
+  if (filterForm.dateQueryType === 'year') return 'yearrange'
+  if (filterForm.dateQueryType === 'month') return 'monthrange'
+  return 'daterange'
+})
 
-// 禁用超过一个月范围的日期
-const disabledDate = (time: Date) => {
-  // 不能选择未来的日期
-  if (time.getTime() > Date.now()) {
-    return true
-  }
-  return false
-}
+// 不同查询类型下的 value-format
+const currentDateValueFormat = computed(() => {
+  if (filterForm.dateQueryType === 'year') return 'YYYY'
+  if (filterForm.dateQueryType === 'month') return 'YYYY-MM'
+  return 'YYYY-MM-DD'
+})
 
-// 日期范围变化时的校验
-const handleDateRangeChange = (val: [Date, Date] | null) => {
-  if (val && val[0] && val[1]) {
-    const diffTime = Math.abs(val[1].getTime() - val[0].getTime())
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24))
-    if (diffDays > 31) {
-      ElMessage.warning('日期范围不能超过一个月，已自动调整')
-      const newStart = new Date(val[1])
-      newStart.setMonth(newStart.getMonth() - 1)
-      filterForm.dateRange = [newStart, val[1]]
+// 占位文案
+const currentStartPlaceholder = computed(() => {
+  if (filterForm.dateQueryType === 'year') return '开始年份'
+  if (filterForm.dateQueryType === 'month') return '开始月份'
+  return '开始日期'
+})
+
+const currentEndPlaceholder = computed(() => {
+  if (filterForm.dateQueryType === 'year') return '结束年份'
+  if (filterForm.dateQueryType === 'month') return '结束月份'
+  return '结束日期'
+})
+
+// 统一提供给 el-date-picker 使用的 v-model
+const dateRangeModel = computed<[string, string] | null>({
+  get() {
+    if (filterForm.dateQueryType === 'year') return filterForm.yearRange
+    if (filterForm.dateQueryType === 'month') return filterForm.monthRange
+    return filterForm.dateRange
+  },
+  set(val) {
+    filterForm.yearRange = null
+    filterForm.monthRange = null
+    filterForm.dateRange = null
+    if (!val) return
+    if (filterForm.dateQueryType === 'year') {
+      filterForm.yearRange = val
+    } else if (filterForm.dateQueryType === 'month') {
+      filterForm.monthRange = val
+    } else {
+      filterForm.dateRange = val
     }
-  }
-}
+  },
+})
 
 // 分页
 const pagination = reactive({
@@ -461,9 +453,19 @@ const fetchReimbursementList = async () => {
       params.append('status', filterForm.status)
     }
 
-    if (filterForm.dateRange && filterForm.dateRange[0] && filterForm.dateRange[1]) {
-      params.append('startDate', filterForm.dateRange[0] as unknown as string)
-      params.append('endDate', filterForm.dateRange[1] as unknown as string)
+    // 根据日期查询类型构建起止日期参数
+    if (filterForm.dateQueryType === 'day' && filterForm.dateRange && filterForm.dateRange[0] && filterForm.dateRange[1]) {
+      params.append('startDate', filterForm.dateRange[0])
+      params.append('endDate', filterForm.dateRange[1])
+    } else if (filterForm.dateQueryType === 'month' && filterForm.monthRange && filterForm.monthRange[0] && filterForm.monthRange[1]) {
+      const [startYear, startMonth] = filterForm.monthRange[0].split('-')
+      const [endYear, endMonth] = filterForm.monthRange[1].split('-')
+      params.append('startDate', `${startYear}-${startMonth}-01`)
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.append('endDate', `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`)
+    } else if (filterForm.dateQueryType === 'year' && filterForm.yearRange && filterForm.yearRange[0] && filterForm.yearRange[1]) {
+      params.append('startDate', `${filterForm.yearRange[0]}-01-01`)
+      params.append('endDate', `${filterForm.yearRange[1]}-12-31`)
     }
 
     const response = await fetch(`/api/reimbursement/list?${params}`, {
@@ -551,9 +553,42 @@ const handleSearch = () => {
 // 重置
 const handleReset = () => {
   filterForm.status = ''
-  filterForm.dateRange = getDefaultDateRange()
+  filterForm.dateQueryType = 'day'
+  filterForm.dateRange = null
+  filterForm.yearRange = null
+  filterForm.monthRange = null
   handleSearch()
 }
+
+// 修改日期查询类型（年 / 月 / 日）
+const handleDateQueryTypeChange = (type: 'year' | 'month' | 'day') => {
+  filterForm.dateQueryType = type
+  filterForm.dateRange = null
+  filterForm.yearRange = null
+  filterForm.monthRange = null
+}
+
+// 日期面板左侧快捷项：切换到按年 / 月 / 日查询（不直接关闭面板）
+const dateTypeShortcuts = [
+  {
+    text: '年',
+    onClick: () => {
+      handleDateQueryTypeChange('year')
+    },
+  },
+  {
+    text: '月',
+    onClick: () => {
+      handleDateQueryTypeChange('month')
+    },
+  },
+  {
+    text: '日',
+    onClick: () => {
+      handleDateQueryTypeChange('day')
+    },
+  },
+]
 
 // 查看详情 - 打开审批流程弹窗
 const handleView = async (row: any) => {

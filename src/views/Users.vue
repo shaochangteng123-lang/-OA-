@@ -549,7 +549,7 @@ onMounted(() => {
   height: calc(100vh - 60px);
   display: flex;
   flex-direction: column;
-  margin: -24px;
+  margin: -24px -45px;
   padding: 24px;
 }
 

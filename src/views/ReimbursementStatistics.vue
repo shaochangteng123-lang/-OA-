@@ -1,20 +1,13 @@
 <template>
   <div class="reimbursement-statistics-container">
     <el-card class="page-card">
-      <template #header>
-        <div class="card-header">
-          <h2>报销统计</h2>
-          <el-button :icon="Refresh" @click="handleRefresh">刷新</el-button>
-        </div>
-      </template>
-
       <div class="content-wrapper">
-        <!-- 统计卡片区域 -->
+        <!-- 统计卡片 -->
         <div class="statistics-cards">
           <el-card class="stat-card" shadow="hover">
             <div class="stat-content">
               <div class="stat-icon pending">
-                <el-icon><Clock /></el-icon>
+                <el-icon :size="28"><Clock /></el-icon>
               </div>
               <div class="stat-info">
                 <div class="stat-label">待审批</div>
@@ -27,10 +20,10 @@
           <el-card class="stat-card" shadow="hover">
             <div class="stat-content">
               <div class="stat-icon unpaid">
-                <el-icon><Warning /></el-icon>
+                <el-icon :size="28"><Wallet /></el-icon>
               </div>
               <div class="stat-info">
-                <div class="stat-label">未付款</div>
+                <div class="stat-label">已审批未付款</div>
                 <div class="stat-value">{{ statistics.approved.count }}</div>
                 <div class="stat-amount">¥{{ statistics.approved.amount.toFixed(2) }}</div>
               </div>
@@ -40,7 +33,7 @@
           <el-card class="stat-card" shadow="hover">
             <div class="stat-content">
               <div class="stat-icon completed">
-                <el-icon><CircleCheck /></el-icon>
+                <el-icon :size="28"><CircleCheck /></el-icon>
               </div>
               <div class="stat-info">
                 <div class="stat-label">已完成</div>
@@ -53,12 +46,26 @@
           <el-card class="stat-card" shadow="hover">
             <div class="stat-content">
               <div class="stat-icon total">
-                <el-icon><Wallet /></el-icon>
+                <el-icon :size="28"><Wallet /></el-icon>
               </div>
               <div class="stat-info">
-                <div class="stat-label">总金额</div>
+                <div class="stat-label">总计</div>
                 <div class="stat-value">{{ statistics.total.count }}</div>
                 <div class="stat-amount">¥{{ statistics.total.amount.toFixed(2) }}</div>
+              </div>
+            </div>
+          </el-card>
+
+          <el-card class="stat-card" shadow="hover">
+            <div class="stat-content">
+              <div class="stat-icon deducted">
+                <el-icon :size="28"><RemoveFilled /></el-icon>
+              </div>
+              <div class="stat-info">
+                <div class="stat-label">核减金额</div>
+                <div class="stat-value">{{ statistics.deducted.count }}</div>
+                <div class="stat-amount">¥{{ statistics.deducted.amount.toFixed(2) }}</div>
+                <div class="stat-note">{{ deductedAmountNote }}</div>
               </div>
             </div>
           </el-card>
@@ -68,39 +75,38 @@
         <div class="filter-section">
           <el-form :inline="true" :model="filterForm" class="filter-form">
             <el-form-item label="报销类型">
-              <el-select v-model="filterForm.type" placeholder="全部" clearable style="width: 140px">
-                <el-option label="全部" value="" />
+              <el-select v-model="filterForm.type" placeholder="全部" clearable>
                 <el-option label="基础报销" value="basic" />
-                <el-option label="大额报销" value="large" />
                 <el-option label="商务报销" value="business" />
+                <el-option label="大额报销" value="large" />
               </el-select>
             </el-form-item>
             <el-form-item label="状态">
-              <el-select v-model="filterForm.status" placeholder="全部状态" clearable style="width: 140px">
-                <el-option label="草稿" value="draft" />
+              <el-select v-model="filterForm.status" placeholder="全部" clearable>
                 <el-option label="待审批" value="pending" />
                 <el-option label="已审批未付款" value="approved" />
                 <el-option label="已拒绝" value="rejected" />
+                <el-option label="付款中" value="paying" />
                 <el-option label="待确认" value="payment_uploaded" />
                 <el-option label="已完成" value="completed" />
               </el-select>
             </el-form-item>
-            <el-form-item label="日期范围">
+            <el-form-item label="日期">
               <el-date-picker
-                v-model="filterForm.dateRange"
-                type="daterange"
+                v-model="dateRangeModel"
+                :type="currentDatePickerType"
+                :value-format="currentDateValueFormat"
+                :start-placeholder="currentStartPlaceholder"
+                :end-placeholder="currentEndPlaceholder"
                 range-separator="至"
-                start-placeholder="开始日期"
-                end-placeholder="结束日期"
-                value-format="YYYY-MM-DD"
-                style="width: 260px"
+                :shortcuts="dateTypeShortcuts"
+                style="width: 280px"
               />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" :icon="Search" @click="handleSearch">
-                查询
-              </el-button>
-              <el-button :icon="Refresh" @click="handleReset">重置</el-button>
+              <el-button type="primary" :icon="Search" @click="handleSearch">查询</el-button>
+              <el-button @click="handleReset">重置</el-button>
+              <el-button :icon="Refresh" @click="handleRefresh">刷新</el-button>
             </el-form-item>
           </el-form>
         </div>
@@ -112,24 +118,28 @@
           stripe
           style="width: 100%"
         >
-          <el-table-column label="序号" width="80" align="center">
+          <el-table-column label="序号" width="80" align="center" header-align="center">
             <template #default="{ $index }">
               {{ (pagination.page - 1) * pagination.pageSize + $index + 1 }}
             </template>
           </el-table-column>
-          <el-table-column prop="type" label="报销类型" width="120">
+          <el-table-column prop="title" label="报销事由" min-width="200" align="center" header-align="center" />
+          <el-table-column prop="type" label="报销类型" width="180" align="center" header-align="center">
             <template #default="{ row }">
-              {{ getTypeText(row.type) }}
+              {{ row.invoiceCategory || getTypeText(row.type) }}
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="报销事由" min-width="200" />
-          <el-table-column prop="applicant" label="申请人" width="100" />
-          <el-table-column prop="amount" label="报销金额" width="120">
+          <el-table-column label="报销范围/区域" width="150" align="center" header-align="center">
+            <template #default="{ row }">
+              {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="amount" label="报销金额" width="120" align="center" header-align="center">
             <template #default="{ row }">
               <span class="amount-text">¥{{ row.amount.toFixed(2) }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="status" label="状态" width="100">
+          <el-table-column prop="status" label="状态" width="100" align="center" header-align="center">
             <template #default="{ row }">
               <el-tag
                 :type="getStatusType(row.status)"
@@ -140,18 +150,18 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="submitTime" label="提交时间" width="180" />
-          <el-table-column prop="approveTime" label="审批时间" width="180">
+          <el-table-column prop="submitTime" label="提交时间" width="180" align="center" header-align="center" />
+          <el-table-column prop="approveTime" label="审批时间" width="180" align="center" header-align="center">
             <template #default="{ row }">
               {{ row.approveTime || '-' }}
             </template>
           </el-table-column>
-          <el-table-column prop="approver" label="审批人" width="100">
+          <el-table-column prop="approver" label="审批人" width="100" align="center" header-align="center">
             <template #default="{ row }">
               {{ row.approver || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="120" align="center" header-align="center" fixed="right">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleViewApproval(row)">
                 查看详情
@@ -382,9 +392,41 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Clock, CircleCheck, Wallet, Warning, Document, ZoomIn } from '@element-plus/icons-vue'
+import { Refresh, Search, Clock, CircleCheck, Wallet, Warning, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
 
 const router = useRouter()
+
+// 报销范围/区域数据
+interface ScopeOption {
+  value: string
+  name: string
+  children?: ScopeOption[]
+}
+const scopeMap = ref<Record<string, string>>({})
+
+// 加载报销范围列表
+const loadScopeList = async () => {
+  try {
+    const response = await fetch('/api/reimbursement-scope/list', { credentials: 'include' })
+    const result = await response.json()
+    if (result.success) {
+      const buildMap = (items: ScopeOption[], parentName = '') => {
+        for (const item of items) {
+          if (item.value) {
+            const fullName = parentName ? `${parentName} / ${item.name}` : item.name
+            scopeMap.value[item.value] = fullName
+          }
+          if (item.children?.length) {
+            buildMap(item.children, item.name)
+          }
+        }
+      }
+      buildMap(result.data)
+    }
+  } catch {
+    console.error('加载报销范围列表失败')
+  }
+}
 
 // 统计数据
 const statistics = reactive({
@@ -404,13 +446,73 @@ const statistics = reactive({
     count: 0,
     amount: 0,
   },
+  deducted: {
+    count: 0,
+    amount: 0,
+  },
 })
 
 // 筛选表单
 const filterForm = reactive({
   type: '',
   status: '',
-  dateRange: null as any,
+  // 日期查询类型：年 / 月 / 日
+  dateQueryType: 'day' as 'year' | 'month' | 'day',
+  // 按日的日期范围
+  dateRange: null as [string, string] | null,
+  // 按年的年份范围
+  yearRange: null as [string, string] | null,
+  // 按月的月份范围
+  monthRange: null as [string, string] | null,
+})
+
+// 当前日期选择器类型（yearrange / monthrange / daterange）
+const currentDatePickerType = computed(() => {
+  if (filterForm.dateQueryType === 'year') return 'yearrange'
+  if (filterForm.dateQueryType === 'month') return 'monthrange'
+  return 'daterange'
+})
+
+// 不同查询类型下的 value-format
+const currentDateValueFormat = computed(() => {
+  if (filterForm.dateQueryType === 'year') return 'YYYY'
+  if (filterForm.dateQueryType === 'month') return 'YYYY-MM'
+  return 'YYYY-MM-DD'
+})
+
+// 占位文案
+const currentStartPlaceholder = computed(() => {
+  if (filterForm.dateQueryType === 'year') return '开始年份'
+  if (filterForm.dateQueryType === 'month') return '开始月份'
+  return '开始日期'
+})
+
+const currentEndPlaceholder = computed(() => {
+  if (filterForm.dateQueryType === 'year') return '结束年份'
+  if (filterForm.dateQueryType === 'month') return '结束月份'
+  return '结束日期'
+})
+
+// 统一提供给 el-date-picker 使用的 v-model
+const dateRangeModel = computed<[string, string] | null>({
+  get() {
+    if (filterForm.dateQueryType === 'year') return filterForm.yearRange
+    if (filterForm.dateQueryType === 'month') return filterForm.monthRange
+    return filterForm.dateRange
+  },
+  set(val) {
+    filterForm.yearRange = null
+    filterForm.monthRange = null
+    filterForm.dateRange = null
+    if (!val) return
+    if (filterForm.dateQueryType === 'year') {
+      filterForm.yearRange = val
+    } else if (filterForm.dateQueryType === 'month') {
+      filterForm.monthRange = val
+    } else {
+      filterForm.dateRange = val
+    }
+  },
 })
 
 // 审批记录列表
@@ -441,6 +543,21 @@ const isPaymentProofImage = computed(() => {
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
 
+// 核减金额说明文本
+const deductedAmountNote = computed(() => {
+  const currentYear = new Date().getFullYear()
+  // 如果选择了任意一种日期范围，显示“所选范围”
+  if (
+    (filterForm.dateQueryType === 'day' && filterForm.dateRange && filterForm.dateRange[0]) ||
+    (filterForm.dateQueryType === 'month' && filterForm.monthRange && filterForm.monthRange[0]) ||
+    (filterForm.dateQueryType === 'year' && filterForm.yearRange && filterForm.yearRange[0])
+  ) {
+    return '所选范围'
+  }
+  // 默认显示当前年度说明
+  return `${currentYear}年累计`
+})
+
 // 分页
 const pagination = reactive({
   page: 1,
@@ -456,11 +573,19 @@ const fetchStatistics = async () => {
     if (filterForm.type) {
       params.append('type', filterForm.type)
     }
-    if (filterForm.dateRange && filterForm.dateRange[0]) {
+    // 按当前日期查询类型设置起止日期
+    if (filterForm.dateQueryType === 'day' && filterForm.dateRange && filterForm.dateRange[0] && filterForm.dateRange[1]) {
       params.append('startDate', filterForm.dateRange[0])
-    }
-    if (filterForm.dateRange && filterForm.dateRange[1]) {
       params.append('endDate', filterForm.dateRange[1])
+    } else if (filterForm.dateQueryType === 'month' && filterForm.monthRange && filterForm.monthRange[0] && filterForm.monthRange[1]) {
+      const [startYear, startMonth] = filterForm.monthRange[0].split('-')
+      const [endYear, endMonth] = filterForm.monthRange[1].split('-')
+      params.append('startDate', `${startYear}-${startMonth}-01`)
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.append('endDate', `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`)
+    } else if (filterForm.dateQueryType === 'year' && filterForm.yearRange && filterForm.yearRange[0] && filterForm.yearRange[1]) {
+      params.append('startDate', `${filterForm.yearRange[0]}-01-01`)
+      params.append('endDate', `${filterForm.yearRange[1]}-12-31`)
     }
 
     const url = params.toString() ? `/api/reimbursement/statistics?${params}` : '/api/reimbursement/statistics'
@@ -494,11 +619,19 @@ const fetchRecordList = async () => {
     if (filterForm.status) {
       params.append('status', filterForm.status)
     }
-    if (filterForm.dateRange && filterForm.dateRange[0]) {
+    // 按当前日期查询类型设置起止日期
+    if (filterForm.dateQueryType === 'day' && filterForm.dateRange && filterForm.dateRange[0] && filterForm.dateRange[1]) {
       params.append('startDate', filterForm.dateRange[0])
-    }
-    if (filterForm.dateRange && filterForm.dateRange[1]) {
       params.append('endDate', filterForm.dateRange[1])
+    } else if (filterForm.dateQueryType === 'month' && filterForm.monthRange && filterForm.monthRange[0] && filterForm.monthRange[1]) {
+      const [startYear, startMonth] = filterForm.monthRange[0].split('-')
+      const [endYear, endMonth] = filterForm.monthRange[1].split('-')
+      params.append('startDate', `${startYear}-${startMonth}-01`)
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.append('endDate', `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`)
+    } else if (filterForm.dateQueryType === 'year' && filterForm.yearRange && filterForm.yearRange[0] && filterForm.yearRange[1]) {
+      params.append('startDate', `${filterForm.yearRange[0]}-01-01`)
+      params.append('endDate', `${filterForm.yearRange[1]}-12-31`)
     }
 
     const response = await fetch(`/api/reimbursement/records?${params}`, {
@@ -537,7 +670,10 @@ const handleSearch = () => {
 const handleReset = () => {
   filterForm.type = ''
   filterForm.status = ''
+  filterForm.dateQueryType = 'day'
   filterForm.dateRange = null
+  filterForm.yearRange = null
+  filterForm.monthRange = null
   pagination.page = 1
   fetchStatistics()
   fetchRecordList()
@@ -551,6 +687,36 @@ const handleSizeChange = () => {
 const handlePageChange = () => {
   fetchRecordList()
 }
+
+// 修改日期查询类型（年 / 月 / 日）
+const handleDateQueryTypeChange = (type: 'year' | 'month' | 'day') => {
+  filterForm.dateQueryType = type
+  filterForm.dateRange = null
+  filterForm.yearRange = null
+  filterForm.monthRange = null
+}
+
+// 日期面板左侧快捷项：切换到按年 / 月 / 日查询（不直接关闭面板）
+const dateTypeShortcuts = [
+  {
+    text: '年',
+    onClick: () => {
+      handleDateQueryTypeChange('year')
+    },
+  },
+  {
+    text: '月',
+    onClick: () => {
+      handleDateQueryTypeChange('month')
+    },
+  },
+  {
+    text: '日',
+    onClick: () => {
+      handleDateQueryTypeChange('day')
+    },
+  },
+]
 
 // 查看审批过程
 const handleViewApproval = (row: any) => {
@@ -769,6 +935,7 @@ const getStatusColor = (status: string) => {
 onMounted(() => {
   fetchStatistics()
   fetchRecordList()
+  loadScopeList()
 })
 </script>
 
@@ -776,7 +943,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-statistics-container {
   height: calc(100vh - 60px);
-  margin: -24px;
+  margin: -24px -45px;
   padding: 0;
 }
 
@@ -868,6 +1035,10 @@ onMounted(() => {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
+.stat-icon.deducted {
+  background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%);
+}
+
 .stat-info {
   flex: 1;
 }
@@ -890,6 +1061,12 @@ onMounted(() => {
   font-size: 14px;
   color: #606266;
   font-weight: 500;
+}
+
+.stat-note {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 4px;
 }
 
 /* 筛选区域 */

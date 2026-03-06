@@ -572,7 +572,7 @@ async function handleSave() {
   height: calc(100vh - 60px);
   background: #ffffff;
   overflow: hidden;
-  margin: -24px;
+  margin: -24px -45px;
 }
 
 /* ========== 编辑器主区域 ========== */
