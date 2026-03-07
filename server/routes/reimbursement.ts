@@ -8,6 +8,7 @@ import { requireAuth } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
 import { recognizeReceipt } from '../services/receiptOcr.js'
 import { calculateReimbursementMonth } from '../utils/reimbursement.js'
+import { db } from '../db/index.js'
 
 const router = Router()
 
@@ -156,7 +157,12 @@ async function recognizeInvoice(filePath: string): Promise<{
   } catch (error) {
     console.error('❌ 本地 OCR 识别失败:', error)
 
-    // 如果识别失败，返回默认值供用户手动填写
+    // 如果是无效发票错误，直接抛出，不返回默认值
+    if (error instanceof Error && error.message.includes('此不是发票文件')) {
+      throw error
+    }
+
+    // 如果是其他识别失败（如文本提取失败），返回默认值供用户手动填写
     console.warn('⚠️  OCR 识别失败，返回默认值，请手动核对发票信息')
 
     const randomAmount = (Math.random() * 1000 + 100).toFixed(2)
@@ -420,6 +426,42 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     console.log('🔍 开始OCR识别支付截图...')
     const ocrResult = await recognizeReceipt(tempFilePath)
     console.log('✅ OCR识别完成:', ocrResult)
+
+    // 查重：检查交易单号是否已存在
+    if (ocrResult.transactionNo) {
+      const existingInvoice = db.prepare(`
+        SELECT
+          ri.invoice_number,
+          ri.amount,
+          ri.invoice_date,
+          r.applicant_name,
+          r.created_at
+        FROM reimbursement_invoices ri
+        JOIN reimbursements r ON ri.reimbursement_id = r.id
+        WHERE ri.invoice_number = ?
+        LIMIT 1
+      `).get(ocrResult.transactionNo) as {
+        invoice_number: string
+        amount: number
+        invoice_date: string
+        applicant_name: string
+        created_at: string
+      } | undefined
+
+      if (existingInvoice) {
+        // 清理临时文件
+        try {
+          fs.unlinkSync(tempFilePath)
+        } catch (e) {
+          console.error('清理临时文件失败:', e)
+        }
+
+        return res.status(400).json({
+          success: false,
+          message: `${existingInvoice.applicant_name} 已上传此支付截图，请勿重复上传`,
+        })
+      }
+    }
 
     // 移动文件到正式目录
     const decodedFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')

@@ -225,9 +225,12 @@ export function useInvoice() {
     }
 
     // 调用后端API进行收据OCR识别
-    try {
-      ElMessage.info(`正在识别支付截图 ${file.name}...`)
+    const loadingMessage = ElMessage.info({
+      message: `正在识别支付截图 ${file.name}...`,
+      duration: 0, // 持续显示，不自动关闭
+    })
 
+    try {
       const uploadFormData = new FormData()
       uploadFormData.append('receipt', file.raw)
       uploadFormData.append('originalFileName', file.name)
@@ -245,6 +248,7 @@ export function useInvoice() {
 
         // 校验金额 - 收据必须有金额
         if (!amount || amount <= 0) {
+          loadingMessage.close()
           ElMessage.error(`${file.name} 未能识别到金额，请上传更清晰的支付截图`)
           removeFromFileList(file.uid, fileListParam)
           return
@@ -252,6 +256,7 @@ export function useInvoice() {
 
         const amountResult = validateInvoiceAmount(amount)
         if (!amountResult.valid) {
+          loadingMessage.close()
           ElMessage.error(amountResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
@@ -261,7 +266,21 @@ export function useInvoice() {
         if (date) {
           const dateResult = validateInvoiceDate(date)
           if (!dateResult.valid) {
+            loadingMessage.close()
             ElMessage.error(dateResult.message)
+            removeFromFileList(file.uid, fileListParam)
+            return
+          }
+        }
+
+        // 本地查重：检查当前发票列表中是否已有相同的交易单号
+        if (invoiceNumber) {
+          const duplicateInvoice = invoiceList.value.find(
+            inv => inv.invoiceNumber === invoiceNumber
+          )
+          if (duplicateInvoice) {
+            loadingMessage.close()
+            ElMessage.error(`发票号码 ${invoiceNumber} 已存在，请勿重复上传`)
             removeFromFileList(file.uid, fileListParam)
             return
           }
@@ -277,16 +296,19 @@ export function useInvoice() {
           fileUid: file.uid,
         })
 
+        loadingMessage.close()
         ElMessage.success(`${file.name} 识别成功！金额：¥${amount}`)
 
         // 保存文件路径供后续提交使用
         file.serverPath = result.data.filePath
       } else {
+        loadingMessage.close()
         ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error) {
       console.error('收据识别失败:', error)
+      loadingMessage.close()
       ElMessage.error(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
     }
