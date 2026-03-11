@@ -9,7 +9,6 @@
 
 services:
   yulilog-dev:
-    container_name: yulilog-dev
     image: node:20-alpine
     ports:
       - "8899:8899"   # Vite 前端

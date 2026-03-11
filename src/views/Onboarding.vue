@@ -166,6 +166,11 @@
                 <div class="section-title">工作信息</div>
                 <el-row :gutter="24">
                   <el-col :span="8">
+                    <el-form-item label="员工编号" prop="employeeNo">
+                      <el-input v-model="formData.employeeNo" placeholder="由系统自动生成" disabled />
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="8">
                     <el-form-item label="入职日期" prop="hireDate">
                       <el-date-picker
                         v-model="formData.hireDate"
@@ -178,12 +183,18 @@
                   </el-col>
                   <el-col :span="8">
                     <el-form-item label="所属部门" prop="department">
-                      <el-input v-model="formData.department" placeholder="由管理员分配" disabled />
+                      <el-select v-model="formData.department" placeholder="请选择部门" style="width: 100%" :disabled="profileData?.status === 'submitted'">
+                        <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+                      </el-select>
                     </el-form-item>
                   </el-col>
+                </el-row>
+                <el-row :gutter="24">
                   <el-col :span="8">
                     <el-form-item label="职位" prop="position">
-                      <el-input v-model="formData.position" placeholder="由管理员分配" disabled />
+                      <el-select v-model="formData.position" placeholder="请先选择部门" :disabled="!formData.department || profileData?.status === 'submitted'" style="width: 100%">
+                        <el-option v-for="pos in getPositionsByDepartment(formData.department)" :key="pos" :label="pos" :value="pos" />
+                      </el-select>
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -254,6 +265,10 @@
                   <template #default="{ row }">
                     <div class="file-type-name">
                       <span class="name-text">{{ row.name }}</span>
+                      <!-- 劳动合同显示员工编号 -->
+                      <span v-if="row.id === 'contract' && formData.employeeNo" class="employee-no-badge">
+                        编号：{{ formData.employeeNo }}
+                      </span>
                     </div>
                     <div v-if="row.children && row.children.length > 0" class="file-children">
                       <div v-for="(child, index) in row.children" :key="index" class="child-item">
@@ -359,13 +374,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Document, Download, View, Folder, Clock } from '@element-plus/icons-vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/utils/api'
+import { DEPARTMENTS, getPositionsByDepartment } from '@/constants/department'
 
 // 员工档案文件类型
 interface MyDocument {
@@ -417,6 +433,7 @@ const formData = reactive({
   education: '',
   school: '',
   major: '',
+  employeeNo: '',
   hireDate: '',
   department: '',
   position: '',
@@ -488,6 +505,13 @@ const validateEmergencyPhone = () => {
   }
 }
 
+// 部门变化时清空职位（填充数据时跳过）
+const isPopulating = ref(false)
+watch(() => formData.department, () => {
+  if (isPopulating.value) return
+  formData.position = ''
+})
+
 // 获取当前用户的员工信息
 const fetchProfile = async () => {
   loading.value = true
@@ -496,6 +520,7 @@ const fetchProfile = async () => {
     if (res.data.success && res.data.data) {
       profileData.value = res.data.data
       // 填充表单数据（转换 snake_case 到 camelCase）
+      isPopulating.value = true
       const data = res.data.data
       formData.name = data.name || ''
       formData.gender = data.gender || ''
@@ -512,6 +537,7 @@ const fetchProfile = async () => {
       formData.education = data.education || ''
       formData.school = data.school || ''
       formData.major = data.major || ''
+      formData.employeeNo = data.employee_no || ''
       formData.hireDate = data.hire_date || ''
       formData.department = data.department || ''
       formData.position = data.position || ''
@@ -519,6 +545,9 @@ const fetchProfile = async () => {
       formData.bankAccountPhone = data.bank_account_phone || ''
       formData.bankName = data.bank_name || ''
       formData.bankAccountNumber = data.bank_account_number || ''
+      nextTick(() => {
+        isPopulating.value = false
+      })
     }
   } catch (error) {
     console.error('获取员工信息失败:', error)
@@ -531,6 +560,7 @@ const fetchProfile = async () => {
 const handleReset = () => {
   if (profileData.value) {
     // 重置为服务器数据
+    isPopulating.value = true
     const data = profileData.value
     formData.name = data.name || ''
     formData.gender = data.gender || ''
@@ -554,6 +584,9 @@ const handleReset = () => {
     formData.bankAccountPhone = data.bank_account_phone || ''
     formData.bankName = data.bank_name || ''
     formData.bankAccountNumber = data.bank_account_number || ''
+    nextTick(() => {
+      isPopulating.value = false
+    })
   } else {
     formRef.value?.resetFields()
   }
@@ -929,6 +962,18 @@ onMounted(() => {
 
 .name-text {
   font-weight: 500;
+}
+
+.employee-no-badge {
+  display: inline-block;
+  margin-left: 12px;
+  padding: 2px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #409eff;
+  background-color: #ecf5ff;
+  border: 1px solid #b3d8ff;
+  border-radius: 4px;
 }
 
 .file-children {

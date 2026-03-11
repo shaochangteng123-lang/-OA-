@@ -11,6 +11,9 @@ ARG NODE_IMAGE=node:20-alpine
 # ==========================================
 FROM ${NODE_IMAGE} AS base
 
+# 配置 Alpine 镜像源（使用阿里云镜像）
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+
 # 安装 better-sqlite3 原生编译所需依赖
 RUN apk add --no-cache python3 make g++ sqlite sqlite-libs
 
@@ -61,6 +64,9 @@ FROM ${NODE_IMAGE} AS production
 
 LABEL maintainer="YuliLog Team"
 LABEL description="YuliLog 工作日志管理系统"
+
+# 配置 Alpine 镜像源（使用阿里云镜像）
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
 # 安装运行时依赖
 RUN apk add --no-cache sqlite dumb-init wget \

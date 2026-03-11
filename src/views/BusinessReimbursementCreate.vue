@@ -206,7 +206,7 @@ const handleSaveDraft = async () => {
     // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'business' as const,
-      title: `${getCurrentMonth()} 商务报销`,
+      title: `${getCurrentMonth()}-商务报销`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
       serviceTarget: formData.serviceTarget,
       description: formData.description,
@@ -263,7 +263,7 @@ const handleSubmit = async () => {
     // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'business' as const,
-      title: `${getCurrentMonth()} 商务报销`,
+      title: `${getCurrentMonth()}-商务报销`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
       serviceTarget: formData.serviceTarget,
       description: formData.description,
@@ -366,7 +366,11 @@ onMounted(() => {
 
 .reimbursement-form {
   width: 100%;
-  max-width: 900px;
+  max-width: 1100px;
+}
+
+.reimbursement-form :deep(.el-form-item__content) {
+  width: 100%;
 }
 
 .form-actions {

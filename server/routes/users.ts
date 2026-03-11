@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import type { UserRow, UserActivityRow } from '../types/database.js'
 import { hashPassword, validatePasswordStrength, validateUsername } from '../utils/password.js'
+import { generateEmployeeNumber } from '../utils/employee-number.js'
 
 const router = express.Router()
 
@@ -89,6 +90,7 @@ router.get('/', requireAuth, (req, res) => {
       status: user.status,
       department: user.department,
       position: user.position,
+      employeeNo: user.employee_no,
       bankAccountName: user.bank_account_name,
       bankAccountPhone: user.bank_account_phone,
       bankName: user.bank_name,
@@ -112,9 +114,9 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 更新用户信息
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
-    const { id, username, name, role, status, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
+    const { id, username, name, password, email, mobile, role, status, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
     const now = new Date().toISOString()
 
     if (!id) {
@@ -152,6 +154,33 @@ router.post('/', requireAuth, (req, res) => {
       }
     }
 
+    // 验证密码强度（如果提供）
+    if (password) {
+      const passwordValidation = validatePasswordStrength(password)
+      if (!passwordValidation.valid) {
+        return res.status(400).json({
+          success: false,
+          message: passwordValidation.message,
+        })
+      }
+    }
+
+    // 验证手机号格式（如果提供）
+    if (mobile && !/^1[3-9]\d{9}$/.test(mobile)) {
+      return res.status(400).json({
+        success: false,
+        message: '手机号格式不正确',
+      })
+    }
+
+    // 验证邮箱格式（如果提供）
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        success: false,
+        message: '邮箱格式不正确',
+      })
+    }
+
     // 验证银行卡信息格式（如果提供）
     if (bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
@@ -167,10 +196,16 @@ router.post('/', requireAuth, (req, res) => {
       })
     }
 
+    // 更新密码（如果提供）
+    if (password) {
+      const passwordHash = await hashPassword(password)
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, id)
+    }
+
     db.prepare(
       `
       UPDATE users
-      SET username = ?, name = ?, role = ?, status = ?, department = ?, position = ?,
+      SET username = ?, name = ?, email = ?, mobile = ?, role = ?, status = ?, department = ?, position = ?,
           bank_account_name = ?, bank_account_phone = ?, bank_name = ?, bank_account_number = ?,
           updated_at = ?
       WHERE id = ?
@@ -178,6 +213,8 @@ router.post('/', requireAuth, (req, res) => {
     ).run(
       username || user.username,
       name || user.name,
+      email || user.email || null,
+      mobile || user.mobile || null,
       role,
       status,
       department || null,
@@ -239,6 +276,17 @@ router.get('/activities', requireAuth, (req, res) => {
       success: false,
       message: '获取用户活动失败',
     })
+  }
+})
+
+// 获取下一个员工编号（管理员可用）
+router.get('/next-employee-no', requireAdmin, (req, res) => {
+  try {
+    const employeeNo = generateEmployeeNumber()
+    res.json({ success: true, data: { employeeNo } })
+  } catch (error) {
+    console.error('获取员工编号失败:', error)
+    res.status(500).json({ success: false, message: '获取员工编号失败' })
   }
 })
 
@@ -323,11 +371,11 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证角色
-    const validRoles = ['admin', 'user', 'guest']
+    const validRoles = ['admin', 'general_manager', 'user', 'guest']
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
-        message: '无效的角色，可选值：admin, user, guest',
+        message: '无效的角色，可选值：admin, general_manager, user, guest',
       })
     }
 
@@ -336,9 +384,12 @@ router.post('/create', requireAdmin, async (req, res) => {
     const passwordHash = await hashPassword(password)
     const now = new Date().toISOString()
 
+    // 自动生成员工编号
+    const employeeNo = generateEmployeeNumber()
+
     db.prepare(`
-      INSERT INTO users (id, username, password_hash, name, email, mobile, role, status, department, position, bank_account_name, bank_account_phone, bank_name, bank_account_number, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, username, password_hash, name, email, mobile, role, status, department, position, bank_account_name, bank_account_phone, bank_name, bank_account_number, employee_no, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       userId,
       username,
@@ -353,11 +404,12 @@ router.post('/create', requireAdmin, async (req, res) => {
       bankAccountPhone,
       bankName,
       bankAccountNumber,
+      employeeNo,
       now,
       now
     )
 
-    console.log('✅ 创建用户成功:', { userId, username, role: role || 'user' })
+    console.log('✅ 创建用户成功:', { userId, username, employeeNo, role: role || 'user' })
 
     res.json({
       success: true,
@@ -367,6 +419,7 @@ router.post('/create', requireAdmin, async (req, res) => {
         name: username,
         email,
         mobile,
+        employeeNo,
         role: role || 'user',
       },
       message: '用户创建成功',

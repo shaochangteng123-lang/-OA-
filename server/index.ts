@@ -173,6 +173,54 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
   })
 })
 
+// 月末自动清除报销数据（软删除非当月数据，历史数据在报销统计中仍可查看）
+const setupReimbursementCleanup = () => {
+  const runCleanup = async () => {
+    try {
+      const now = new Date()
+      const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
+      // 判断是否是当月最后一天（明天是下个月1号）
+      if (tomorrow.getDate() !== 1) return
+
+      const { db } = await import('./db/index.js')
+      const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+      const cleanupTime = now.toISOString()
+
+      // 软删除当月之前的未删除报销数据
+      const result = db.prepare(
+        'UPDATE reimbursements SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE created_at < ? AND (is_deleted IS NULL OR is_deleted = 0)'
+      ).run(cleanupTime, cleanupTime, firstDayOfMonth)
+
+      if (result.changes > 0) {
+        console.log(`✅ 月末清除：已软删除 ${result.changes} 条历史报销数据`)
+      }
+    } catch (error) {
+      console.error('月末清除报销数据失败:', error)
+    }
+  }
+
+  // 每天凌晨 23:55 检查一次
+  const scheduleCheck = () => {
+    const now = new Date()
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 55, 0)
+    let delay = target.getTime() - now.getTime()
+    if (delay < 0) {
+      // 已过今天的检查时间，安排明天
+      delay += 24 * 60 * 60 * 1000
+    }
+    setTimeout(() => {
+      runCleanup()
+      // 之后每24小时执行一次
+      setInterval(runCleanup, 24 * 60 * 60 * 1000)
+    }, delay)
+  }
+
+  scheduleCheck()
+  console.log('✅ 月末报销数据自动清除任务已启动')
+}
+
+setupReimbursementCleanup()
+
 // Start server
 app.listen(PORT, () => {
   console.log(`✅ Server is running on port ${PORT}`)

@@ -98,6 +98,9 @@
     <!-- 创建用户对话框 -->
     <el-dialog v-model="createDialogVisible" title="创建用户" width="500px" :close-on-click-modal="false">
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="100px">
+        <el-form-item label="员工编号">
+          <el-input :value="nextEmployeeNo" disabled placeholder="自动生成" />
+        </el-form-item>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="createForm.username" placeholder="使用员工姓名，即为显示名称" />
         </el-form-item>
@@ -111,14 +114,19 @@
           <el-input v-model="createForm.mobile" placeholder="11位手机号" maxlength="11" />
         </el-form-item>
         <el-form-item label="部门" prop="department">
-          <el-input v-model="createForm.department" placeholder="请输入部门" />
+          <el-select v-model="createForm.department" placeholder="请选择部门" style="width: 100%">
+            <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+          </el-select>
         </el-form-item>
         <el-form-item label="职位" prop="position">
-          <el-input v-model="createForm.position" placeholder="请输入职位" />
+          <el-select v-model="createForm.position" placeholder="请先选择部门" :disabled="!createForm.department" style="width: 100%">
+            <el-option v-for="pos in getPositionsByDepartment(createForm.department)" :key="pos" :label="pos" :value="pos" />
+          </el-select>
         </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="createForm.role" style="width: 100%">
             <el-option label="管理员" value="admin" />
+            <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
             <el-option label="访客" value="guest" />
           </el-select>
@@ -133,16 +141,39 @@
     <!-- 编辑用户对话框 -->
     <el-dialog v-model="editDialogVisible" title="编辑用户" width="500px" :close-on-click-modal="false">
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-width="100px">
+        <el-form-item label="员工编号">
+          <el-input :value="editEmployeeNo" disabled placeholder="-" />
+        </el-form-item>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="editForm.username" placeholder="仅字母、数字、下划线" />
         </el-form-item>
         <el-form-item label="显示名称" prop="name">
           <el-input v-model="editForm.name" placeholder="用户的显示名称" />
         </el-form-item>
+        <el-form-item label="密码" prop="password">
+          <el-input v-model="editForm.password" type="password" placeholder="不修改请留空" show-password />
+        </el-form-item>
+        <el-form-item label="邮箱" prop="email">
+          <el-input v-model="editForm.email" placeholder="输入有效邮箱" />
+        </el-form-item>
+        <el-form-item label="手机号" prop="mobile">
+          <el-input v-model="editForm.mobile" placeholder="11位手机号" maxlength="11" />
+        </el-form-item>
+        <el-form-item label="部门" prop="department">
+          <el-select v-model="editForm.department" placeholder="请选择部门" clearable style="width: 100%">
+            <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="职位" prop="position">
+          <el-select v-model="editForm.position" placeholder="请先选择部门" :disabled="!editForm.department" clearable style="width: 100%">
+            <el-option v-for="pos in getPositionsByDepartment(editForm.department)" :key="pos" :label="pos" :value="pos" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="editForm.role" style="width: 100%" :disabled="editForm.role === 'super_admin'">
             <el-option label="超级管理员" value="super_admin" :disabled="editForm.role !== 'super_admin'" />
             <el-option label="管理员" value="admin" />
+            <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
             <el-option label="访客" value="guest" />
           </el-select>
@@ -152,27 +183,6 @@
             <el-option label="激活" value="active" />
             <el-option label="停用" value="inactive" />
           </el-select>
-        </el-form-item>
-        <el-form-item label="部门" prop="department">
-          <el-input v-model="editForm.department" placeholder="可选" />
-        </el-form-item>
-        <el-form-item label="职位" prop="position">
-          <el-input v-model="editForm.position" placeholder="可选" />
-        </el-form-item>
-
-        <el-divider content-position="left">收款信息</el-divider>
-
-        <el-form-item label="收款人姓名" prop="bankAccountName">
-          <el-input v-model="editForm.bankAccountName" placeholder="请输入收款人姓名" />
-        </el-form-item>
-        <el-form-item label="收款人手机" prop="bankAccountPhone">
-          <el-input v-model="editForm.bankAccountPhone" placeholder="11位手机号" maxlength="11" />
-        </el-form-item>
-        <el-form-item label="开户行" prop="bankName">
-          <el-input v-model="editForm.bankName" placeholder="请输入开户银行名称" />
-        </el-form-item>
-        <el-form-item label="银行卡号" prop="bankAccountNumber">
-          <el-input v-model="editForm.bankAccountNumber" placeholder="请输入银行卡号" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -200,7 +210,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { User, Edit, Refresh, Clock, Plus, Delete, Key } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -209,6 +219,7 @@ import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 import type { User as UserType, ElementPlusTagType } from '@/types'
 import { useAuthStore } from '@/stores/auth'
+import { DEPARTMENTS, getPositionsByDepartment } from '@/constants/department'
 
 const authStore = useAuthStore()
 
@@ -227,6 +238,8 @@ const paginatedUsers = computed(() => {
 const createDialogVisible = ref(false)
 const createFormRef = ref<FormInstance>()
 const createLoading = ref(false)
+const nextEmployeeNo = ref('')
+const editEmployeeNo = ref('')
 const createForm = reactive({
   username: '',
   password: '',
@@ -266,10 +279,10 @@ const createRules: FormRules = {
     { required: true, validator: validateMobile, trigger: 'blur' },
   ],
   department: [
-    { required: true, message: '请输入部门', trigger: 'blur' },
+    { required: true, message: '请选择部门', trigger: 'change' },
   ],
   position: [
-    { required: true, message: '请输入职位', trigger: 'blur' },
+    { required: true, message: '请选择职位', trigger: 'change' },
   ],
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
@@ -284,6 +297,9 @@ const editForm = reactive({
   id: '',
   username: '',
   name: '',
+  password: '',
+  email: '',
+  mobile: '',
   role: 'user',
   status: 'active',
   department: '',
@@ -360,6 +376,7 @@ function getRoleTagType(role: string): ElementPlusTagType {
   const roleMap: Record<string, ElementPlusTagType> = {
     super_admin: 'danger',
     admin: 'warning',
+    general_manager: '',
     user: 'primary',
     guest: 'info',
   }
@@ -371,6 +388,7 @@ function getRoleText(role: string) {
   const roleMap: Record<string, string> = {
     super_admin: '超级管理员',
     admin: '管理员',
+    general_manager: '总经理',
     user: '普通用户',
     guest: '访客',
   }
@@ -399,8 +417,22 @@ function refreshUsers() {
   ElMessage.success('已刷新')
 }
 
+// 部门变化时清空职位（创建表单）
+watch(() => createForm.department, () => {
+  createForm.position = ''
+})
+
+// 编辑表单填充时跳过 watcher
+const isEditFormPopulating = ref(false)
+
+// 部门变化时清空职位（编辑表单）
+watch(() => editForm.department, () => {
+  if (isEditFormPopulating.value) return
+  editForm.position = ''
+})
+
 // 显示创建对话框
-function showCreateDialog() {
+async function showCreateDialog() {
   createForm.username = ''
   createForm.password = ''
   createForm.email = ''
@@ -409,6 +441,15 @@ function showCreateDialog() {
   createForm.department = ''
   createForm.position = ''
   createDialogVisible.value = true
+  // 获取下一个员工编号
+  try {
+    const res = await api.get('/api/users/next-employee-no')
+    if (res.data.success) {
+      nextEmployeeNo.value = res.data.data.employeeNo
+    }
+  } catch {
+    nextEmployeeNo.value = ''
+  }
 }
 
 // 创建用户
@@ -438,9 +479,13 @@ async function handleCreateUser() {
 
 // 编辑用户
 function editUser(user: UserType) {
+  isEditFormPopulating.value = true
   editForm.id = user.id
   editForm.username = user.username || ''
   editForm.name = user.name
+  editForm.password = ''
+  editForm.email = user.email || ''
+  editForm.mobile = (user as any).mobile || ''
   editForm.role = user.role
   editForm.status = user.status
   editForm.department = user.department || ''
@@ -449,7 +494,11 @@ function editUser(user: UserType) {
   editForm.bankAccountPhone = (user as any).bankAccountPhone || ''
   editForm.bankName = (user as any).bankName || ''
   editForm.bankAccountNumber = (user as any).bankAccountNumber || ''
+  editEmployeeNo.value = (user as any).employeeNo || '-'
   editDialogVisible.value = true
+  nextTick(() => {
+    isEditFormPopulating.value = false
+  })
 }
 
 // 保存编辑
@@ -468,6 +517,9 @@ async function handleEditUser() {
       id: editForm.id,
       username: editForm.username,
       name: editForm.name,
+      password: editForm.password || undefined,
+      email: editForm.email || null,
+      mobile: editForm.mobile || null,
       role: editForm.role,
       status: editForm.status,
       department: editForm.department || null,

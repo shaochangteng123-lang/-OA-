@@ -75,6 +75,43 @@ export function initDatabase() {
     }
   }
 
+  // 添加员工编号字段
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN employee_no TEXT`)
+  } catch (error: any) {
+    if (!error.message?.includes('duplicate column name')) {
+      console.warn('添加employee_no字段时出错:', error.message)
+    }
+  }
+
+  // 为缺少员工编号的用户自动补充
+  const usersWithoutNo = db.prepare(
+    `SELECT id FROM users WHERE employee_no IS NULL OR employee_no = '' ORDER BY created_at ASC`
+  ).all() as { id: string }[]
+
+  if (usersWithoutNo.length > 0) {
+    // 获取当前最大编号
+    const maxResult = db.prepare(
+      `SELECT employee_no FROM users WHERE employee_no IS NOT NULL AND employee_no LIKE 'YULI-CS%' ORDER BY employee_no DESC LIMIT 1`
+    ).get() as { employee_no: string } | undefined
+
+    let nextNum = 1
+    if (maxResult?.employee_no) {
+      const match = maxResult.employee_no.match(/YULI-CS(\d+)/)
+      if (match) nextNum = parseInt(match[1], 10) + 1
+    }
+
+    const updateUserStmt = db.prepare(`UPDATE users SET employee_no = ? WHERE id = ?`)
+    const updateProfileStmt = db.prepare(`UPDATE employee_profiles SET employee_no = ? WHERE user_id = ?`)
+    for (const user of usersWithoutNo) {
+      const employeeNo = `YULI-CS${nextNum.toString().padStart(3, '0')}`
+      updateUserStmt.run(employeeNo, user.id)
+      updateProfileStmt.run(employeeNo, user.id)
+      nextNum++
+    }
+    console.log(`✅ 已为 ${usersWithoutNo.length} 个用户补充员工编号`)
+  }
+
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);

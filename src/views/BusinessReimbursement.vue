@@ -102,7 +102,13 @@
           <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
           <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" size="small" @click="handleView(row)">
+              <el-button
+                v-if="row.status !== 'draft'"
+                link
+                type="primary"
+                size="small"
+                @click="handleView(row)"
+              >
                 查看
               </el-button>
               <el-button
@@ -227,7 +233,7 @@
 
                 <!-- 3. 财务付款 -->
                 <el-timeline-item
-                  v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  v-if="!isDeductionOnly && ['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                   :timestamp="currentApprovalRecord.payTime || ''"
                   placement="top"
                   :type="currentApprovalRecord.status === 'paying' ? 'warning' : 'success'"
@@ -240,7 +246,7 @@
 
                 <!-- 4. 上传付款凭证 -->
                 <el-timeline-item
-                  v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  v-if="!isDeductionOnly && ['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                   :timestamp="currentApprovalRecord.paymentUploadTime || ''"
                   placement="top"
                   type="success"
@@ -277,9 +283,11 @@
                   type="success"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">付款完成</div>
-                    <div class="timeline-desc">报销流程已完成</div>
-                    <div v-if="currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
+                    <div class="timeline-title">{{ isDeductionOnly ? '已计算到核减金额' : '付款完成' }}</div>
+                    <div class="timeline-desc">
+                      {{ isDeductionOnly ? '核减金额已记录，报销流程已完成' : '报销流程已完成' }}
+                    </div>
+                    <div v-if="!isDeductionOnly && currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
                       {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
                     </div>
                   </div>
@@ -325,6 +333,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
+import { api } from '@/utils/api'
 
 const router = useRouter()
 
@@ -420,6 +429,16 @@ const isPaymentProofImage = computed(() => {
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
 
+// 判断是否为核减金额（报销金额为0，无需付款流程）
+const isDeductionOnly = computed(() => {
+  if (!currentApprovalRecord.value) return false
+  const deductionAmount = currentApprovalRecord.value.deductionAmount || 0
+  const totalAmount = currentApprovalRecord.value.totalAmount || currentApprovalRecord.value.amount || 0
+  // 实际报销金额 = 总金额 - 核减金额
+  const actualAmount = totalAmount - deductionAmount
+  return actualAmount <= 0
+})
+
 // 获取状态类型（使用不同颜色区分各状态）
 const getStatusType = (status: string) => {
   const typeMap: Record<string, any> = {
@@ -458,15 +477,36 @@ const getStatusText = (status: string) => {
   return textMap[status] || status
 }
 
+// 报销范围映射表（从 API 动态获取）
+const scopeMap = ref<Record<string, string>>({})
+
+// 从 API 获取报销范围配置，构建 value→name 映射
+const fetchScopeOptions = async () => {
+  try {
+    const response = await api.get('/api/reimbursement-scope/list')
+    if (response.data.success) {
+      const buildMap = (items: any[], parentName = '') => {
+        for (const item of items) {
+          if (item.value) {
+            const fullName = parentName ? `${parentName} / ${item.name}` : item.name
+            scopeMap.value[item.value] = fullName
+          }
+          if (item.children?.length) {
+            buildMap(item.children, item.name)
+          }
+        }
+      }
+      buildMap(response.data.data)
+    }
+  } catch (error) {
+    console.error('获取报销范围配置失败:', error)
+  }
+}
+
 // 获取报销范围/区域文本
 const getScopeText = (scope: string | undefined) => {
   if (!scope) return '-'
-  const scopeMap: Record<string, string> = {
-    'company_internal': '公司内部',
-    'haidian_gjdw_wfah': '海淀区（GJDW、WFAH）',
-    'chaoyang_gjdw': '朝阳区（GJDW）',
-  }
-  return scopeMap[scope] || scope
+  return scopeMap.value[scope] || scope
 }
 
 // 判断是否可以编辑（只有草稿和已拒绝状态可以编辑）
@@ -474,9 +514,9 @@ const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
 
-// 判断是否可以删除（只有草稿状态可以删除）
-const canDelete = (status: string) => {
-  return status === 'draft'
+// 判断是否可以删除（所有状态均可删除）
+const canDelete = (_status: string) => {
+  return true
 }
 
 // 获取报销单列表
@@ -711,6 +751,7 @@ const handlePageChange = () => {
 
 // 组件挂载
 onMounted(() => {
+  fetchScopeOptions()
   fetchList()
 })
 </script>

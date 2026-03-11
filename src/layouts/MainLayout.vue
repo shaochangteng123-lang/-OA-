@@ -85,6 +85,16 @@
               tooltip-content="报销统计"
             />
             <SidebarMenuItem
+              v-if="isGeneralManager"
+              path="/gm-approval"
+              label="审批中心"
+              :icon="Stamp"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="审批中心"
+              :badge="gmPendingApprovalCount > 0 ? gmPendingApprovalCount : undefined"
+              badge-type="danger"
+            />
+            <SidebarMenuItem
               v-if="isAdmin"
               path="/reimbursement-management"
               label="报销管理"
@@ -336,10 +346,16 @@ const groupStates = reactive<Record<string, GroupState>>({
 
 // 待审批数量
 const pendingApprovalCount = ref(0)
+const gmPendingApprovalCount = ref(0)
 
 // 是否是管理员
 const isAdmin = computed(() => {
   return authStore.user?.role === 'super_admin' || authStore.user?.role === 'admin'
+})
+
+// 是否是总经理
+const isGeneralManager = computed(() => {
+  return authStore.user?.role === 'general_manager'
 })
 
 // 是否是超级管理员
@@ -353,12 +369,12 @@ const pageTitle = computed(() => {
     '/': '今日日志',
     '/history': '历史日志',
     '/calendar': '日历',
-    '/basic-reimbursement': '基础报销',
-    '/basic-reimbursement/create': '新建基础报销单',
-    '/large-reimbursement': '大额报销',
-    '/large-reimbursement/create': '新建大额报销单',
-    '/business-reimbursement': '商务报销',
-    '/business-reimbursement/create': '新建商务报销单',
+    '/basic-reimbursement': '',
+    '/basic-reimbursement/create': '', // 不显示标题
+    '/large-reimbursement': '',
+    '/large-reimbursement/create': '', // 不显示标题
+    '/business-reimbursement': '',
+    '/business-reimbursement/create': '', // 不显示标题
     '/reimbursement-statistics': '', // 不显示标题
     '/reimbursement-management': '', // 不显示标题
     '/onboarding': '入职',
@@ -473,6 +489,11 @@ onMounted(() => {
   if (isAdmin.value) {
     loadPendingApprovalCount()
   }
+
+  // 如果是总经理，获取待审批数量
+  if (isGeneralManager.value) {
+    loadGMPendingApprovalCount()
+  }
 })
 
 // 获取待审批数量
@@ -481,6 +502,18 @@ async function loadPendingApprovalCount() {
     const res = await api.get('/api/approval/statistics')
     if (res.data.success) {
       pendingApprovalCount.value = res.data.data.pendingCount || 0
+    }
+  } catch {
+    // 静默失败，不影响页面加载
+  }
+}
+
+// 获取总经理待审批数量
+async function loadGMPendingApprovalCount() {
+  try {
+    const res = await api.get('/api/approval/gm-statistics')
+    if (res.data.success) {
+      gmPendingApprovalCount.value = res.data.data.pendingCount || 0
     }
   } catch {
     // 静默失败，不影响页面加载

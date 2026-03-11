@@ -8,7 +8,7 @@ export interface User {
   email: string | null
   mobile: string | null
   avatar_url: string | null
-  role: 'super_admin' | 'admin' | 'user' | 'guest'
+  role: 'super_admin' | 'admin' | 'general_manager' | 'user' | 'guest'
   status: 'active' | 'inactive'
   department: string | null
   position: string | null

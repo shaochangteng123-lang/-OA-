@@ -5,8 +5,6 @@
  */
 
 import fs from 'fs'
-import path from 'path'
-import { PDFDocument } from 'pdf-lib'
 
 // 动态导入 pdf-parse
 let PDFParseClass: any = null
@@ -32,38 +30,6 @@ export interface InvoiceOcrResult {
   invoiceCode?: string
   type?: string // 报销类型（从项目名称提取）
   isValidInvoice: boolean
-}
-
-/**
- * 将 PDF 第一页转换为图片
- */
-async function pdfToImage(pdfPath: string): Promise<Buffer> {
-  try {
-    // 读取 PDF 文件
-    const pdfBytes = fs.readFileSync(pdfPath)
-    const pdfDoc = await PDFDocument.load(pdfBytes)
-
-    // 获取第一页
-    const pages = pdfDoc.getPages()
-    if (pages.length === 0) {
-      throw new Error('PDF 文件没有页面')
-    }
-
-    // 注意：pdf-lib 不支持直接渲染为图片
-    // 这里我们需要使用其他方法
-    // 暂时返回 PDF 原始数据，后续可以集成 pdf2pic 或其他库
-    console.log('⚠️  PDF 转图片功能需要额外配置，当前使用文本提取')
-
-    // 尝试从 PDF 提取文本
-    const textContent = await extractTextFromPdf(pdfPath)
-
-    // 创建一个简单的图片缓冲区（用于 OCR）
-    // 实际上我们会直接使用提取的文本
-    return Buffer.from(textContent)
-  } catch (error) {
-    console.error('PDF 转图片失败:', error)
-    throw error
-  }
 }
 
 /**
@@ -306,8 +272,14 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     console.log('📋 提取到报销类型:', result.type)
   }
 
-  // 判断是否为有效发票（至少要有金额）
-  result.isValidInvoice = result.amount > 0
+  // 判断是否为有效发票（更严格的验证条件）
+  result.isValidInvoice =
+    result.amount > 0 && // 条件1：金额必须大于0
+    !!result.invoiceNumber && // 条件2：必须有发票号码
+    result.invoiceNumber.length >= 8 && // 条件3：发票号码至少8位
+    /^\d+$/.test(result.invoiceNumber) && // 条件4：发票号码必须是纯数字（不含字母）
+    !!result.date && // 条件5：必须有日期
+    /^\d{4}-\d{2}-\d{2}$/.test(result.date) // 条件6：日期格式必须是 YYYY-MM-DD
 
   console.log('✅ 发票解析完成:', {
     amount: result.amount,
@@ -316,6 +288,11 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     type: result.type,
     isValid: result.isValidInvoice,
   })
+
+  // 如果不是有效发票，抛出错误
+  if (!result.isValidInvoice) {
+    throw new Error('此不是发票文件，请重新上传')
+  }
 
   return result
 }
@@ -344,14 +321,8 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
       throw new Error('无法从 PDF 提取文本，请确保上传的是电子发票')
     }
 
-    // 解析文本提取发票信息
+    // 解析文本提取发票信息（如果无效会自动抛出错误）
     const result = parseInvoiceText(text)
-
-    // 如果没有提取到关键信息，返回提示
-    if (result.amount === 0) {
-      console.warn('⚠️  未能识别到发票金额')
-      result.isValidInvoice = false
-    }
 
     return result
   } catch (error) {

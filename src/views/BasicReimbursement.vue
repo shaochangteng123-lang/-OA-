@@ -95,7 +95,13 @@
           <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
           <el-table-column label="操作" width="200" align="center" fixed="right">
             <template #default="{ row }">
-              <el-button link type="primary" size="small" @click="handleView(row)">
+              <el-button
+                v-if="row.status !== 'draft'"
+                link
+                type="primary"
+                size="small"
+                @click="handleView(row)"
+              >
                 查看
               </el-button>
               <el-button
@@ -246,7 +252,7 @@
 
                 <!-- 3. 财务付款 -->
                 <el-timeline-item
-                  v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  v-if="!isDeductionOnly && ['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                   :timestamp="currentApprovalRecord.payTime || ''"
                   placement="top"
                   :type="currentApprovalRecord.status === 'paying' ? 'warning' : 'success'"
@@ -259,7 +265,7 @@
 
                 <!-- 4. 上传付款凭证 -->
                 <el-timeline-item
-                  v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  v-if="!isDeductionOnly && ['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                   :timestamp="currentApprovalRecord.paymentUploadTime || ''"
                   placement="top"
                   type="success"
@@ -296,9 +302,11 @@
                   type="success"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">付款完成</div>
-                    <div class="timeline-desc">报销流程已完成</div>
-                    <div v-if="currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
+                    <div class="timeline-title">{{ isDeductionOnly ? '已计算到核减金额' : '付款完成' }}</div>
+                    <div class="timeline-desc">
+                      {{ isDeductionOnly ? '核减金额已记录，报销流程已完成' : '报销流程已完成' }}
+                    </div>
+                    <div v-if="!isDeductionOnly && currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
                       {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
                     </div>
                   </div>
@@ -439,6 +447,16 @@ const isPaymentProofImage = computed(() => {
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
 
+// 判断是否为核减金额（报销金额为0，无需付款流程）
+const isDeductionOnly = computed(() => {
+  if (!currentApprovalRecord.value) return false
+  const deductionAmount = currentApprovalRecord.value.deductionAmount || 0
+  const totalAmount = currentApprovalRecord.value.totalAmount || currentApprovalRecord.value.amount || 0
+  // 实际报销金额 = 总金额 - 核减金额
+  const actualAmount = totalAmount - deductionAmount
+  return actualAmount <= 0
+})
+
 // 获取报销单列表
 const fetchReimbursementList = async () => {
   loading.value = true
@@ -531,9 +549,9 @@ const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
 
-// 判断是否可以删除（只有草稿状态可以删除）
-const canDelete = (status: string) => {
-  return status === 'draft'
+// 判断是否可以删除（所有状态均可删除）
+const canDelete = (_status: string) => {
+  return true
 }
 
 // 新建报销单

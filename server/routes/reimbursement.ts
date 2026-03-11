@@ -1166,7 +1166,11 @@ router.get('/list', requireAuth, async (req, res) => {
     const offset = (parseInt(page as string) - 1) * parseInt(pageSize as string)
     const listQuery = `
       SELECT
-        r.id, r.type, r.category, r.title, r.total_amount as amount, r.status,
+        r.id, r.type, r.category, r.title,
+        (r.total_amount - COALESCE(r.deduction_amount, 0)) as amount,
+        r.total_amount as originalAmount,
+        COALESCE(r.deduction_amount, 0) as deductionAmount,
+        r.status,
         r.business_type as businessType, r.client,
         r.reimbursement_scope as reimbursementScope,
         r.submit_time as submitTime, r.created_at as createTime,
@@ -1845,15 +1849,19 @@ router.get('/:id', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 管理员可以查看所有报销单，普通用户只能查看自己的
-    const isAdmin = userRole === 'super_admin' || userRole === 'admin'
+    // 管理员和总经理可以查看所有报销单，普通用户只能查看自己的
+    const isAdmin = userRole === 'super_admin' || userRole === 'admin' || userRole === 'general_manager'
 
     let reimbursement
     if (isAdmin) {
       // 管理员查看所有报销单
       reimbursement = db.prepare(`
         SELECT
-          id, type, category, title, total_amount as amount, status,
+          id, type, category, title,
+          (total_amount - COALESCE(deduction_amount, 0)) as amount,
+          total_amount as totalAmount,
+          COALESCE(deduction_amount, 0) as deductionAmount,
+          status,
           description, business_type as businessType, client,
           user_id as userId, applicant_name as applicant,
           submit_time as submitTime, approve_time as approveTime,
@@ -1870,7 +1878,11 @@ router.get('/:id', requireAuth, async (req, res) => {
       // 普通用户只能查看自己的报销单
       reimbursement = db.prepare(`
         SELECT
-          id, type, category, title, total_amount as amount, status,
+          id, type, category, title,
+          (total_amount - COALESCE(deduction_amount, 0)) as amount,
+          total_amount as totalAmount,
+          COALESCE(deduction_amount, 0) as deductionAmount,
+          status,
           description, business_type as businessType, client,
           user_id as userId, applicant_name as applicant,
           submit_time as submitTime, approve_time as approveTime,

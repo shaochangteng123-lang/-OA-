@@ -68,6 +68,7 @@
                 :readonly="isReadonly"
                 :show-deduction="true"
                 :monthly-used-quota="invoice.monthlyUsedQuota.value"
+                :approval-deduction-amount="approvalDeductionAmount"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -192,6 +193,9 @@ const paymentProofDialogVisible = ref(false)
 // 拒绝原因
 const rejectReason = ref('')
 
+// 审批核减金额
+const approvalDeductionAmount = ref(0)
+
 // 计算属性
 const { pageMode, isReadonly, reimbursementMonth } = reimbursement
 
@@ -304,7 +308,9 @@ function handleBack(): void {
 
 // 校验表单
 async function validateForm(): Promise<boolean> {
-  if (!selectedType.value) {
+  // 只在新建模式下检查是否选择了类型
+  // 编辑模式下（草稿或拒绝状态），selectedType 可能为空但不影响提交
+  if (!selectedType.value && !reimbursement.reimbursementId.value) {
     ElMessage.warning('请先选择报销类型')
     return false
   }
@@ -326,10 +332,14 @@ async function validateForm(): Promise<boolean> {
 
 // 构建提交数据
 function buildSubmitData() {
+  // 如果是编辑模式且 selectedType 为空，使用默认值
+  const category = selectedType.value || '基础报销'
+  const categoryLabel = selectedType.value ? selectedTypeLabel.value : '基础报销'
+
   return {
     type: 'basic' as const,
-    category: selectedType.value,
-    title: reimbursement.generateTitle(selectedTypeLabel.value),
+    category,
+    title: reimbursement.generateTitle(categoryLabel),
     description: formData.description,
     invoices: invoice.getInvoicesForSubmit(),
   }
@@ -358,6 +368,11 @@ async function loadDetail(): Promise<void> {
 
   // 设置报销类型
   selectedType.value = data.category || ''
+  console.log('📋 加载报销类型:', {
+    category: data.category,
+    selectedType: selectedType.value,
+    isEmpty: !selectedType.value
+  })
 
   // 设置表单数据
   formData.description = data.description || ''
@@ -379,10 +394,17 @@ async function loadDetail(): Promise<void> {
   if ((data as any).rejectReason) {
     rejectReason.value = (data as any).rejectReason
   }
+
+  // 加载审批核减金额
+  if ((data as any).deductionAmount !== undefined) {
+    approvalDeductionAmount.value = (data as any).deductionAmount || 0
+  }
+
   console.log('📋 报销单详情加载完成:', {
     status: data.status,
     rejectReason: (data as any).rejectReason,
-    isRejected: data.status === 'rejected'
+    isRejected: data.status === 'rejected',
+    deductionAmount: approvalDeductionAmount.value
   })
 
   // 查看或编辑已有报销单时，直接进入第二步

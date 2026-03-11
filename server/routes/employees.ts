@@ -134,9 +134,56 @@ router.get('/my-profile', requireAuth, (req, res) => {
   try {
     const userId = req.session.userId
 
+    // 联合查询 employee_profiles 和 users 表，获取员工编号
     const profile = db.prepare(`
-      SELECT * FROM employee_profiles WHERE user_id = ?
-    `).get(userId) as EmployeeProfile | undefined
+      SELECT
+        ep.*,
+        COALESCE(u.employee_no, ep.employee_no) as employee_no,
+        u.department as user_department,
+        u.position as user_position
+      FROM employee_profiles ep
+      LEFT JOIN users u ON ep.user_id = u.id
+      WHERE ep.user_id = ?
+    `).get(userId) as (EmployeeProfile & { employee_no?: string; user_department?: string; user_position?: string }) | undefined
+
+    // 如果 employee_profiles 中没有部门和职位，使用 users 表中的
+    if (profile) {
+      if (!profile.department && profile.user_department) {
+        profile.department = profile.user_department
+      }
+      if (!profile.position && profile.user_position) {
+        profile.position = profile.user_position
+      }
+    }
+
+    // 如果没有 employee_profiles 记录，从 users 表获取基本信息
+    if (!profile) {
+      const user = db.prepare(`
+        SELECT id, name, email, mobile, employee_no, department, position,
+               bank_account_name, bank_account_phone, bank_name, bank_account_number
+        FROM users WHERE id = ?
+      `).get(userId) as any | undefined
+
+      if (user) {
+        return res.json({
+          success: true,
+          data: {
+            user_id: user.id,
+            name: user.name,
+            email: user.email,
+            mobile: user.mobile,
+            employee_no: user.employee_no,
+            department: user.department,
+            position: user.position,
+            bank_account_name: user.bank_account_name,
+            bank_account_phone: user.bank_account_phone,
+            bank_name: user.bank_name,
+            bank_account_number: user.bank_account_number,
+            status: null
+          }
+        })
+      }
+    }
 
     res.json({
       success: true,
@@ -418,39 +465,47 @@ router.get('/list', requireAdmin, (req, res) => {
   try {
     const { status, employmentStatus, department, keyword, page = 1, pageSize = 20 } = req.query
 
-    let sql = `SELECT * FROM employee_profiles WHERE 1=1`
+    // 联合查询 employee_profiles 和 users 表，获取员工编号
+    let sql = `
+      SELECT
+        ep.*,
+        COALESCE(u.employee_no, ep.employee_no) as employee_no
+      FROM employee_profiles ep
+      LEFT JOIN users u ON ep.user_id = u.id
+      WHERE 1=1
+    `
     const params: any[] = []
 
     // status 是入职信息提交状态（draft/submitted）
     if (status) {
-      sql += ` AND status = ?`
+      sql += ` AND ep.status = ?`
       params.push(status)
     }
 
     // employmentStatus 是在职状态（active/probation/resigned/on_leave）
     if (employmentStatus) {
-      sql += ` AND employment_status = ?`
+      sql += ` AND ep.employment_status = ?`
       params.push(employmentStatus)
     }
 
     if (department) {
-      sql += ` AND department = ?`
+      sql += ` AND ep.department = ?`
       params.push(department)
     }
 
     if (keyword) {
-      sql += ` AND (name LIKE ? OR employee_no LIKE ? OR mobile LIKE ?)`
+      sql += ` AND (ep.name LIKE ? OR u.employee_no LIKE ? OR ep.mobile LIKE ?)`
       const kw = `%${keyword}%`
       params.push(kw, kw, kw)
     }
 
     // 获取总数
-    const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as total')
+    const countSql = sql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM')
     const countResult = db.prepare(countSql).get(...params) as { total: number }
 
     // 分页
     const offset = (Number(page) - 1) * Number(pageSize)
-    sql += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    sql += ` ORDER BY ep.created_at DESC LIMIT ? OFFSET ?`
     params.push(Number(pageSize), offset)
 
     const list = db.prepare(sql).all(...params) as EmployeeProfile[]

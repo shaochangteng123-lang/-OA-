@@ -82,47 +82,53 @@
                 :data="employeeList"
                 stripe
                 style="width: 100%"
+                header-align="center"
               >
                 <el-table-column type="index" label="序号" width="80" align="center" />
-                <el-table-column prop="name" label="姓名" width="100" />
-                <el-table-column prop="gender" label="性别" width="80">
+                <el-table-column prop="employee_no" label="员工编号" width="130" align="center">
+                  <template #default="{ row }">
+                    {{ row.employee_no || '-' }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="name" label="姓名" width="100" align="center" />
+                <el-table-column prop="gender" label="性别" width="80" align="center">
                   <template #default="{ row }">
                     {{ getGenderText(row.gender) }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="department" label="部门" width="120">
+                <el-table-column prop="department" label="部门" width="120" align="center">
                   <template #default="{ row }">
                     {{ row.department || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="position" label="职位" width="150">
+                <el-table-column prop="position" label="职位" width="150" align="center">
                   <template #default="{ row }">
                     {{ row.position || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="mobile" label="联系电话" width="130">
+                <el-table-column prop="mobile" label="联系电话" width="130" align="center">
                   <template #default="{ row }">
                     {{ row.mobile || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="email" label="邮箱" min-width="180">
+                <el-table-column prop="email" label="邮箱" min-width="180" align="center">
                   <template #default="{ row }">
                     {{ row.email || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="hire_date" label="入职日期" width="120">
+                <el-table-column prop="hire_date" label="入职日期" width="120" align="center">
                   <template #default="{ row }">
                     {{ row.hire_date || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="employment_status" label="状态" width="100">
+                <el-table-column prop="employment_status" label="状态" width="100" align="center">
                   <template #default="{ row }">
                     <el-tag :type="getEmploymentStatusType(row.employment_status)">
                       {{ getEmploymentStatusText(row.employment_status) }}
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="150" fixed="right">
+                <el-table-column label="操作" width="150" fixed="right" align="center">
                   <template #default="{ row }">
                     <el-button link type="primary" size="small" @click="handleView(row)">
                       查看

@@ -159,7 +159,14 @@ const handleDeleteFile = (file: any) => {
 
 // 处理删除发票
 const handleDeleteInvoice = (invoiceItem: any) => {
+  // 先从 invoice 中删除
   invoice.deleteInvoiceById(invoiceItem.id)
+
+  // 如果是收据（从 receiptFileList 中删除）
+  const receiptIndex = receiptFileList.value.findIndex(f => f.uid === invoiceItem.fileUid)
+  if (receiptIndex > -1) {
+    receiptFileList.value.splice(receiptIndex, 1)
+  }
 }
 
 // 处理收据变化
@@ -171,7 +178,14 @@ const handleReceiptChange = async (file: any, fileList: any[]) => {
 
 // 处理删除收据
 const handleDeleteReceipt = (file: any) => {
+  // 从 invoice 中删除
   invoice.deleteInvoiceByFile(file.uid)
+
+  // 从 receiptFileList 中删除
+  const index = receiptFileList.value.findIndex(f => f.uid === file.uid)
+  if (index > -1) {
+    receiptFileList.value.splice(index, 1)
+  }
 }
 
 // 保存草稿
@@ -188,13 +202,13 @@ const handleSaveDraft = async () => {
     // 构建提交数据
     const submitData = {
       type: 'basic' as const,
-      title: `${getCurrentMonth()} 基础报销`,
+      title: `${getCurrentMonth()}-基础报销`,
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
       status: 'draft', // 草稿状态
     }
 
-    const response = await fetch('/api/reimbursement/draft', {
+    const response = await fetch('/api/reimbursement/create', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -233,7 +247,7 @@ const handleSubmit = async () => {
     // 构建提交数据
     const submitData = {
       type: 'basic' as const,
-      title: `${getCurrentMonth()} 基础报销`,
+      title: `${getCurrentMonth()}-基础报销`,
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
     }

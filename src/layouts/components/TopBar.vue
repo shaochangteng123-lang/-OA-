@@ -82,6 +82,7 @@ function getRoleLabel(role?: string): string {
   const labels: Record<string, string> = {
     super_admin: '超级管理员',
     admin: '管理员',
+    general_manager: '总经理',
     user: '成员',
     guest: '访客',
   }

@@ -201,6 +201,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '审批中心' },
       },
       {
+        path: '/gm-approval',
+        name: 'GMApprovalCenter',
+        component: () => import('@/views/GMApprovalCenter.vue'),
+        meta: { title: '审批中心' },
+      },
+      {
         path: '/approval/payment/:id',
         name: 'ApprovalPayment',
         component: () => import('@/views/ApprovalPayment.vue'),

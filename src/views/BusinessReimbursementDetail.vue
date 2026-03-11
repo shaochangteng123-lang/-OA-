@@ -72,6 +72,7 @@
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="isReadonly"
                 theme-color="#67c23a"
+                :approval-deduction-amount="approvalDeductionAmount"
                 @delete="handleDeleteInvoice"
               />
             </el-form-item>
@@ -164,6 +165,7 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
+import { api } from '@/utils/api'
 
 // 使用 composables
 const invoice = useInvoice(UPLOAD_CONFIG.LARGE_MAX_FILES)
@@ -197,20 +199,39 @@ const paymentProofDialogVisible = ref(false)
 // 拒绝原因
 const rejectReason = ref('')
 
+// 审批核减金额
+const approvalDeductionAmount = ref(0)
+
 // 报销范围/区域
 const reimbursementScope = ref('')
 
 // 服务对象
 const serviceTarget = ref('')
 
-// 报销范围/区域映射
-const scopeMap: Record<string, string> = {
-  'company_internal': '公司内部',
-  'haidian': '海淀区',
-  'haidian_gjdw': '海淀区 / GJDW',
-  'haidian_wfah': '海淀区 / WFAH',
-  'chaoyang': '朝阳区',
-  'chaoyang_gjdw': '朝阳区 / GJDW',
+// 报销范围/区域映射（从 API 动态获取）
+const scopeMap = ref<Record<string, string>>({})
+
+// 从 API 获取报销范围配置
+const fetchScopeOptions = async () => {
+  try {
+    const response = await api.get('/api/reimbursement-scope/list')
+    if (response.data.success) {
+      const buildMap = (items: any[], parentName = '') => {
+        for (const item of items) {
+          if (item.value) {
+            const fullName = parentName ? `${parentName} / ${item.name}` : item.name
+            scopeMap.value[item.value] = fullName
+          }
+          if (item.children?.length) {
+            buildMap(item.children, item.name)
+          }
+        }
+      }
+      buildMap(response.data.data)
+    }
+  } catch (error) {
+    console.error('获取报销范围配置失败:', error)
+  }
 }
 
 // 计算属性
@@ -331,7 +352,9 @@ async function handleSubmit(): Promise<void> {
 
 // 加载报销单详情
 async function loadDetail(): Promise<void> {
+  console.log('🔍 loadDetail 开始, reimbursementId:', reimbursement.reimbursementId.value)
   const data = await reimbursement.loadReimbursementDetail()
+  console.log('🔍 loadDetail 返回数据:', data)
   if (!data) return
 
   // 设置表单数据
@@ -342,7 +365,7 @@ async function loadDetail(): Promise<void> {
   // 设置报销范围/区域
   if ((data as any).reimbursementScope) {
     const scopeValue = (data as any).reimbursementScope
-    reimbursementScope.value = scopeMap[scopeValue] || scopeValue
+    reimbursementScope.value = scopeMap.value[scopeValue] || scopeValue
   }
 
   // 设置服务对象
@@ -367,15 +390,23 @@ async function loadDetail(): Promise<void> {
   if ((data as any).rejectReason) {
     rejectReason.value = (data as any).rejectReason
   }
+
+  // 加载审批核减金额
+  if ((data as any).deductionAmount !== undefined) {
+    approvalDeductionAmount.value = (data as any).deductionAmount || 0
+  }
+
   console.log('📋 商务报销单详情加载完成:', {
     status: data.status,
     rejectReason: (data as any).rejectReason,
-    isRejected: data.status === 'rejected'
+    isRejected: data.status === 'rejected',
+    deductionAmount: approvalDeductionAmount.value
   })
 }
 
 // 组件挂载
-onMounted(() => {
+onMounted(async () => {
+  fetchScopeOptions()
   if (reimbursement.reimbursementId.value) {
     loadDetail()
   }
@@ -385,19 +416,25 @@ onMounted(() => {
 <style scoped>
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
-  height: calc(100vh - 60px);
+  min-height: calc(100vh - 60px);
   margin: -24px -45px;
   padding: 0;
   position: relative;
 }
 
 .page-card {
-  height: 100%;
+  min-height: 100%;
   display: flex;
   flex-direction: column;
   border-radius: 0;
   border: none;
   box-shadow: none;
+}
+
+.page-card :deep(.el-card__body) {
+  flex: 1;
+  padding: 24px;
+  overflow: visible !important;
 }
 
 .card-header {
@@ -421,8 +458,8 @@ onMounted(() => {
 
 .content-wrapper {
   flex: 1;
-  overflow-y: auto;
   padding: 0;
+  overflow: visible !important;
 }
 
 .step-content {

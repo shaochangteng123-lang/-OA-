@@ -191,14 +191,14 @@ const handleSaveDraft = async () => {
     // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'large' as const,
-      title: `${getCurrentMonth()} 大额报销`,
+      title: `${getCurrentMonth()}-大额报销`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
       status: 'draft', // 草稿状态
     }
 
-    const response = await fetch('/api/reimbursement/draft', {
+    const response = await fetch('/api/reimbursement/create', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -242,7 +242,7 @@ const handleSubmit = async () => {
     // 构建提交数据（将级联选择器的数组转为最后一个值）
     const submitData = {
       type: 'large' as const,
-      title: `${getCurrentMonth()} 大额报销`,
+      title: `${getCurrentMonth()}-大额报销`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
@@ -344,7 +344,11 @@ onMounted(() => {
 
 .reimbursement-form {
   width: 100%;
-  max-width: 900px;
+  max-width: 1100px;
+}
+
+.reimbursement-form :deep(.el-form-item__content) {
+  width: 100%;
 }
 
 .form-actions {

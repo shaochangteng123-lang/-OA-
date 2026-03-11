@@ -1,6 +1,6 @@
 <template>
   <div class="invoice-table-wrapper">
-    <el-table :data="invoiceList" border class="invoice-table">
+    <el-table :data="invoiceList" border class="invoice-table" :max-height="null">
       <el-table-column prop="id" label="序号" width="50" align="center">
         <template #default="{ $index }">
           {{ $index + 1 }}
@@ -26,7 +26,7 @@
           <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; max-width: 100%;">{{ row.invoiceNumber || '' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="缩略图" width="90" align="center">
+      <el-table-column label="缩略图" width="110" align="center">
         <template #default="{ row }">
           <div v-if="row.filePath" class="thumbnail-wrapper" @click="handlePreview(row.filePath)">
             <!-- 判断是否为图片文件 -->
@@ -56,8 +56,11 @@
     <div class="invoice-total" :class="{ 'amount-warning': showAmountWarning }">
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
-      <span v-if="showDeduction && hasTransportFuelInvoices" class="deducted-info">
+      <span v-if="showDeduction && hasTransportFuelInvoices && !approvalDeductionAmount" class="deducted-info">
         （核减：-¥{{ totalDeductedAmount }}）
+      </span>
+      <span v-if="approvalDeductionAmount > 0" class="deducted-info">
+        （核减：-¥{{ approvalDeductionAmount.toFixed(2) }}）
       </span>
       <span v-if="warningText" class="amount-tip">
         {{ warningText }}
@@ -65,7 +68,7 @@
     </div>
 
     <!-- 核减提示信息 -->
-    <div v-if="showDeduction && hasTransportFuelInvoices" class="deduction-notice">
+    <div v-if="showDeduction && hasTransportFuelInvoices && !approvalDeductionAmount" class="deduction-notice">
       <div class="notice-detail-list">
         <div class="notice-detail-row">
           <span class="detail-text">本次运输/交通/汽油/柴油类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
@@ -82,7 +85,22 @@
       </div>
     </div>
 
-    <!-- 图片预览对话框 -->
+    <!-- 审批核减提示信息 -->
+    <div v-if="approvalDeductionAmount > 0" class="deduction-notice">
+      <div class="notice-detail-list">
+        <div class="notice-detail-row">
+          <span class="detail-text">发票总金额：¥{{ totalAmount }}</span>
+        </div>
+        <div class="notice-detail-row deduction-row">
+          <span class="detail-text">审批核减金额：<span class="deducted-highlight">-¥{{ approvalDeductionAmount.toFixed(2) }}</span></span>
+        </div>
+        <div class="notice-detail-row actual-row">
+          <span class="detail-text">实际报销金额：<span class="actual-highlight">¥{{ transportFuelActual.toFixed(2) }}</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 图片/PDF预览对话框 -->
     <el-dialog
       v-model="previewVisible"
       :show-close="true"
@@ -94,12 +112,20 @@
       class="preview-dialog"
     >
       <div class="preview-container">
-        <iframe
-          v-if="previewImageUrl"
+        <!-- 图片预览 -->
+        <img
+          v-if="previewImageUrl && !previewPdfUrl"
           :src="previewImageUrl"
-          class="preview-iframe"
+          class="preview-image"
+          alt="预览图片"
+        />
+        <!-- PDF预览 -->
+        <iframe
+          v-if="previewPdfUrl"
+          :src="previewPdfUrl"
+          class="preview-pdf"
           frameborder="0"
-        ></iframe>
+        />
       </div>
     </el-dialog>
   </div>
@@ -113,6 +139,7 @@ import type { InvoiceItem } from '@/composables/reimbursement/useInvoice'
 // 预览相关
 const previewVisible = ref(false)
 const previewImageUrl = ref('')
+const previewPdfUrl = ref('')
 
 // Props
 const props = withDefaults(defineProps<{
@@ -123,6 +150,7 @@ const props = withDefaults(defineProps<{
   showThresholdWarning?: boolean
   showDeduction?: boolean  // 是否显示核减金额列（仅基础报销显示）
   monthlyUsedQuota?: number  // 当月已使用的运输/交通/汽油/柴油类发票额度
+  approvalDeductionAmount?: number  // 审批核减金额（已审批状态下使用）
 }>(), {
   readonly: false,
   themeColor: '#409eff',
@@ -130,6 +158,7 @@ const props = withDefaults(defineProps<{
   showThresholdWarning: false,
   showDeduction: false,
   monthlyUsedQuota: 0,
+  approvalDeductionAmount: 0,
 })
 
 // Emits
@@ -200,6 +229,14 @@ const transportFuelSubtotal = computed(() => {
 
 // 实际报销金额（所有发票）
 const transportFuelActual = computed(() => {
+  // 如果有审批核减金额（已审批状态），使用：总金额 - 审批核减金额
+  if (props.approvalDeductionAmount > 0) {
+    const totalCents = Math.round(totalAmountNumber.value * 100)
+    const deductionCents = Math.round(props.approvalDeductionAmount * 100)
+    return (totalCents - deductionCents) / 100
+  }
+
+  // 否则使用月度限额逻辑（提交前的预估）
   // 使用分（cents）来避免浮点数精度问题
   const remainingQuotaCents = Math.max(0, Math.round((1500 - props.monthlyUsedQuota) * 100))
   const transportFuelSubtotalCents = Math.round(transportFuelSubtotal.value * 100)
@@ -284,10 +321,23 @@ function isImageFile(filePath: string): boolean {
 
 // 处理预览
 function handlePreview(filePath: string): void {
-  const imageUrl = getImageUrl(filePath)
+  const fileUrl = getImageUrl(filePath)
+
+  // 如果是PDF文件，使用弹窗预览
+  if (!isImageFile(filePath)) {
+    console.log('原始路径:', filePath)
+    console.log('处理后路径:', fileUrl)
+    previewPdfUrl.value = fileUrl
+    previewImageUrl.value = ''
+    previewVisible.value = true
+    return
+  }
+
+  // 如果是图片文件，使用对话框预览
   console.log('原始路径:', filePath)
-  console.log('处理后路径:', imageUrl)
-  previewImageUrl.value = imageUrl
+  console.log('处理后路径:', fileUrl)
+  previewImageUrl.value = fileUrl
+  previewPdfUrl.value = ''
   previewVisible.value = true
 }
 
@@ -300,12 +350,34 @@ function onDelete(invoice: InvoiceItem): void {
 <style scoped>
 .invoice-table-wrapper {
   width: 100%;
-  overflow-x: visible;
+  overflow: visible;
 }
 
 .invoice-table {
   margin-top: 8px;
   width: 100%;
+}
+
+/* 强制表格完整展示，不使用滚动 */
+.invoice-table :deep(.el-table__body-wrapper) {
+  overflow: visible !important;
+  max-height: none !important;
+  height: auto !important;
+}
+
+.invoice-table :deep(.el-table__inner-wrapper) {
+  overflow: visible !important;
+  max-height: none !important;
+  height: auto !important;
+}
+
+.invoice-table :deep(.el-scrollbar__wrap) {
+  overflow: visible !important;
+  max-height: none !important;
+}
+
+.invoice-table :deep(.el-scrollbar__view) {
+  overflow: visible !important;
 }
 
 .invoice-table :deep(.el-table__header-wrapper th) {
@@ -355,6 +427,7 @@ function onDelete(invoice: InvoiceItem): void {
   border-radius: 4px;
   color: #f56c6c;
   transition: all 0.2s;
+  padding: 4px;
 }
 
 .image-thumbnail {
@@ -386,9 +459,17 @@ function onDelete(invoice: InvoiceItem): void {
   padding: 0;
 }
 
-.preview-iframe {
-  width: 100%;
-  height: 100%;
+.preview-image {
+  max-width: 90vw;
+  max-height: 90vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.preview-pdf {
+  width: 90vw;
+  height: 90vh;
   border: none;
 }
 

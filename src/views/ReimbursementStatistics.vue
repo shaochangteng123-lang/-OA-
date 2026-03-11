@@ -62,10 +62,9 @@
                 <el-icon :size="28"><RemoveFilled /></el-icon>
               </div>
               <div class="stat-info">
-                <div class="stat-label">核减金额</div>
+                <div class="stat-label">核减金额 / {{ deductedAmountNote }}</div>
                 <div class="stat-value">{{ statistics.deducted.count }}</div>
                 <div class="stat-amount">¥{{ statistics.deducted.amount.toFixed(2) }}</div>
-                <div class="stat-note">{{ deductedAmountNote }}</div>
               </div>
             </div>
           </el-card>
@@ -1004,7 +1003,7 @@ onMounted(() => {
 
 .stat-content {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 16px;
 }
 
@@ -1017,6 +1016,7 @@ onMounted(() => {
   justify-content: center;
   font-size: 28px;
   color: #fff;
+  flex-shrink: 0;
 }
 
 .stat-icon.pending {

@@ -18,7 +18,7 @@ export interface User {
   updatedAt?: string
 }
 
-export type UserRole = 'super_admin' | 'admin' | 'user' | 'guest'
+export type UserRole = 'super_admin' | 'admin' | 'general_manager' | 'user' | 'guest'
 
 export type Permission =
   | 'view_worklogs'
@@ -82,6 +82,26 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'manage_presets',
     'view_users',
     'manage_users',
+    'view_calendar',
+    'manage_calendar',
+    'view_blocks',
+    'manage_blocks',
+    'view_departments',
+  ],
+  general_manager: [
+    'view_worklogs',
+    'create_worklog',
+    'edit_worklog',
+    'delete_worklog',
+    'view_projects',
+    'create_project',
+    'edit_project',
+    'delete_project',
+    'view_events',
+    'manage_events',
+    'view_presets',
+    'manage_presets',
+    'view_users',
     'view_calendar',
     'manage_calendar',
     'view_blocks',
