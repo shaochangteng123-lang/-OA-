@@ -6,7 +6,7 @@
 import { Router } from 'express'
 import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
-import { requireAuth, requireAdmin } from '../middleware/auth.js'
+import { requireAuth, requireAdmin, requireRole } from '../middleware/auth.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 
 const router = Router()
@@ -19,37 +19,29 @@ router.get('/statistics', requireAdmin, (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    // 1. 待审批数量（排除已删除的报销单）
+    // 1. 待办数量（包括待审批和已通过待付款的报销）
     const pendingCount = db.prepare(`
       SELECT COUNT(*) as count FROM approval_instances ai
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status = 'pending'
+      WHERE (ai.status = 'pending' OR (ai.status = 'approved' AND r.status = 'approved'))
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
+      AND (ai.target_type != 'reimbursement' OR r.type != 'business')
     `).get() as { count: number }
 
-    // 2. 当月审批通过数量（排除已删除的报销单）
-    const approvedThisMonth = db.prepare(`
-      SELECT COUNT(*) as count FROM approval_instances ai
-      LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status = 'approved'
-      AND ai.complete_time >= ? AND ai.complete_time <= ?
-      AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
-    `).get(monthStart, monthEnd) as { count: number }
-
-    // 3. 审批通过但未付款的报销单数量（status = 'approved' 的报销单）
+    // 2. 审批通过但未付款的报销单数量（status = 'approved' 的报销单）
     const approvedUnpaid = db.prepare(`
       SELECT COUNT(*) as count FROM reimbursements
       WHERE status = 'approved'
     `).get() as { count: number }
 
-    // 4. 本月已付款数量（包括待确认收款和已完成）
+    // 3. 本月已付款数量（包括待确认收款和已完成）
     const paidThisMonth = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
       WHERE status IN ('paying', 'payment_uploaded', 'completed')
       AND pay_time >= ? AND pay_time <= ?
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
-    // 5. 本月已完成数量（员工已确认收款）
+    // 4. 本月已完成数量（员工已确认收款）
     const completedThisMonth = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
       WHERE status = 'completed'
@@ -60,7 +52,6 @@ router.get('/statistics', requireAdmin, (req, res) => {
       success: true,
       data: {
         pendingCount: pendingCount.count,
-        approvedThisMonth: approvedThisMonth.count,
         approvedUnpaid: approvedUnpaid.count,
         paidThisMonth: paidThisMonth.count,
         paidThisMonthAmount: paidThisMonth.amount,
@@ -74,60 +65,6 @@ router.get('/statistics', requireAdmin, (req, res) => {
     res.status(500).json({
       success: false,
       message: '获取审批统计失败',
-    })
-  }
-})
-
-// 获取本月已通过的审批列表
-router.get('/approved-this-month', requireAdmin, (req, res) => {
-  try {
-    // 获取当月的开始和结束时间
-    const now = new Date()
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
-
-    const instances = db.prepare(`
-      SELECT
-        ai.*,
-        u.name as applicant_name,
-        u.avatar_url as applicant_avatar,
-        r.title as reimbursement_title,
-        r.total_amount as reimbursement_amount
-      FROM approval_instances ai
-      LEFT JOIN users u ON ai.applicant_id = u.id
-      LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status = 'approved'
-      AND ai.complete_time >= ? AND ai.complete_time <= ?
-      AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
-      ORDER BY ai.complete_time DESC
-    `).all(monthStart, monthEnd) as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null }>
-
-    res.json({
-      success: true,
-      data: instances.map(instance => ({
-        id: instance.id,
-        type: instance.type,
-        targetId: instance.target_id,
-        targetType: instance.target_type,
-        applicantId: instance.applicant_id,
-        applicantName: instance.applicant_name,
-        applicantAvatar: instance.applicant_avatar,
-        currentStep: instance.current_step,
-        status: instance.status,
-        submitTime: instance.submit_time,
-        completeTime: instance.complete_time,
-        createdAt: instance.created_at,
-        reimbursementInfo: instance.target_type === 'reimbursement' && instance.reimbursement_title ? {
-          title: instance.reimbursement_title,
-          amount: instance.reimbursement_amount || 0,
-        } : null,
-      })),
-    })
-  } catch (error) {
-    console.error('获取本月已通过列表失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '获取本月已通过列表失败',
     })
   }
 })
@@ -152,7 +89,9 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
         id: r.id,
         type: r.type,
         title: r.title,
-        amount: r.total_amount,
+        amount: r.total_amount - (r.deduction_amount || 0),
+        totalAmount: r.total_amount,
+        deductionAmount: r.deduction_amount || 0,
         status: r.status,
         applicantName: r.applicant_name,
         applicantAvatar: r.applicant_avatar,
@@ -195,7 +134,9 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
         id: r.id,
         type: r.type,
         title: r.title,
-        amount: r.total_amount,
+        amount: r.total_amount - (r.deduction_amount || 0),
+        totalAmount: r.total_amount,
+        deductionAmount: r.deduction_amount || 0,
         status: r.status,
         applicantName: r.applicant_name,
         applicantAvatar: r.applicant_avatar,
@@ -244,7 +185,9 @@ router.get('/completed-this-month', requireAdmin, (req, res) => {
         id: r.id,
         type: r.type,
         title: r.title,
-        amount: r.total_amount,
+        amount: r.total_amount - (r.deduction_amount || 0),
+        totalAmount: r.total_amount,
+        deductionAmount: r.deduction_amount || 0,
         status: r.status,
         applicantName: r.applicant_name,
         applicantAvatar: r.applicant_avatar,
@@ -322,23 +265,101 @@ router.get('/payee-info/:userId', requireAdmin, (req, res) => {
   }
 })
 
+// 根据目标ID和类型获取审批记录
+router.get('/by-target', requireAuth, (req, res) => {
+  try {
+    const { targetId, targetType } = req.query
+
+    if (!targetId || !targetType) {
+      return res.status(400).json({
+        success: false,
+        message: '缺少必要参数',
+      })
+    }
+
+    // 查询审批实例
+    const instance = db.prepare(`
+      SELECT * FROM approval_instances
+      WHERE target_id = ? AND target_type = ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(targetId, targetType) as ApprovalInstance | undefined
+
+    if (!instance) {
+      return res.json({
+        success: true,
+        data: {
+          instance: null,
+          records: [],
+        },
+      })
+    }
+
+    // 获取审批记录
+    const records = db.prepare(`
+      SELECT
+        ar.*,
+        u.name as approver_name,
+        u.avatar_url as approver_avatar
+      FROM approval_records ar
+      LEFT JOIN users u ON ar.approver_id = u.id
+      WHERE ar.instance_id = ?
+      ORDER BY ar.action_time ASC
+    `).all(instance.id) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
+
+    res.json({
+      success: true,
+      data: {
+        instance: {
+          id: instance.id,
+          status: instance.status,
+          submitTime: instance.submit_time,
+          completeTime: instance.complete_time,
+        },
+        records: records.map(record => ({
+          id: record.id,
+          step: record.step,
+          approverId: record.approver_id,
+          approverName: record.approver_name,
+          approverAvatar: record.approver_avatar,
+          action: record.action,
+          comment: record.comment,
+          actionTime: record.action_time,
+        })),
+      },
+    })
+  } catch (error) {
+    console.error('获取审批记录失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '获取审批记录失败',
+    })
+  }
+})
+
 // 获取待我审批的列表
 router.get('/pending', requireAdmin, (req, res) => {
   try {
+    // 待办列表包含：
+    // 1. 所有待审批的报销（status = 'pending'）
+    // 2. 所有已通过待付款的报销（status = 'approved'）
+    // 管理员不审批商务报销（type='business'），只审批基础报销和大额报销
     const instances = db.prepare(`
       SELECT
         ai.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
         r.title as reimbursement_title,
-        r.total_amount as reimbursement_amount
+        r.total_amount as reimbursement_amount,
+        r.status as reimbursement_status
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status = 'pending'
+      WHERE (ai.status = 'pending' OR (ai.status = 'approved' AND r.status = 'approved'))
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
+      AND (ai.target_type != 'reimbursement' OR r.type != 'business')
       ORDER BY ai.submit_time DESC
-    `).all() as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null }>
+    `).all() as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_status: string | null }>
 
     res.json({
       success: true,
@@ -463,7 +484,7 @@ router.get('/processed', requireAdmin, (req, res) => {
 
 // 获取所有员工列表（用于汇总查询下拉选择）
 // 注意：此路由必须放在 /:id 路由之前，否则会被 /:id 路由拦截
-router.get('/employees', requireAdmin, (req, res) => {
+router.get('/employees', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
   try {
     // 排除系统管理员账号（super_admin 角色）
     const employees = db.prepare(`
@@ -620,9 +641,13 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
     let whereClause = 'WHERE 1=1'
     const params: any[] = []
 
+    // 默认只查询已付款状态（paying, payment_uploaded, completed）
     if (status) {
       whereClause += ' AND r.status = ?'
       params.push(status)
+    } else {
+      // 未指定状态时，默认只返回已付款的记录
+      whereClause += " AND r.status IN ('paying', 'payment_uploaded', 'completed')"
     }
 
     // 类型支持多选（逗号分隔）
@@ -692,33 +717,44 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
       completed: '已完成',
     }
 
+    // 已付款状态：金额显示实际银行转账金额（与银行流水对应）
+    const paidStatuses = ['paying', 'payment_uploaded', 'completed']
+
     res.json({
       success: true,
-      data: reimbursements.map(r => ({
-        id: r.id,
-        type: r.type,
-        typeName: typeMap[r.type] || r.type,
-        title: r.title,
-        amount: r.total_amount,
-        status: r.status,
-        statusName: statusMap[r.status] || r.status,
-        applicantName: r.applicant_name,
-        applicantAvatar: r.applicant_avatar,
-        applicantDepartment: r.applicant_department,
-        submitTime: r.submit_time,
-        approveTime: r.approve_time,
-        approver: r.approver,
-        rejectReason: r.reject_reason,
-        payTime: r.pay_time,
-        paymentUploadTime: r.payment_upload_time,
-        completedTime: r.completed_time,
-        paymentProofPath: r.payment_proof_path,
-        receiptConfirmedBy: r.receipt_confirmed_by,
-        reimbursementMonth: r.reimbursement_month,
-        reimbursementScope: r.reimbursement_scope, // 添加所属区域字段
-        createdAt: r.created_at,
-        userId: r.user_id,
-      })),
+      data: reimbursements.map(r => {
+        const isPaid = paidStatuses.includes(r.status)
+        // amount：已付款的显示实际转账金额，未付款的显示0
+        const paidAmount = isPaid ? (r.total_amount - (r.deduction_amount || 0)) : 0
+
+        return {
+          id: r.id,
+          type: r.type,
+          typeName: typeMap[r.type] || r.type,
+          title: r.title,
+          amount: paidAmount,
+          totalAmount: r.total_amount,
+          deductionAmount: r.deduction_amount || 0,
+          status: r.status,
+          statusName: statusMap[r.status] || r.status,
+          applicantName: r.applicant_name,
+          applicantAvatar: r.applicant_avatar,
+          applicantDepartment: r.applicant_department,
+          submitTime: r.submit_time,
+          approveTime: r.approve_time,
+          approver: r.approver,
+          rejectReason: r.reject_reason,
+          payTime: r.pay_time,
+          paymentUploadTime: r.payment_upload_time,
+          completedTime: r.completed_time,
+          paymentProofPath: r.payment_proof_path,
+          receiptConfirmedBy: r.receipt_confirmed_by,
+          reimbursementMonth: r.reimbursement_month,
+          reimbursementScope: r.reimbursement_scope,
+          createdAt: r.created_at,
+          userId: r.user_id,
+        }
+      }),
     })
   } catch (error) {
     console.error('获取全部报销记录失败:', error)
@@ -799,16 +835,16 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
         }
       }
 
-      employeeSummary[userId].totalAmount += r.total_amount
+      employeeSummary[userId].totalAmount += r.total_amount - (r.deduction_amount || 0)
       employeeSummary[userId].count += 1
-      grandTotal += r.total_amount
+      grandTotal += r.total_amount - (r.deduction_amount || 0)
 
       employeeSummary[userId].details.push({
         id: r.id,
         type: r.type,
         typeName: typeMap[r.type] || r.type,
         title: r.title,
-        amount: r.total_amount,
+        amount: r.total_amount - (r.deduction_amount || 0),
         status: r.status,
         statusName: statusMap[r.status] || r.status,
         payTime: r.pay_time,
@@ -921,8 +957,8 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.deduction_amount > 0
-        AND r.created_at >= ?
-        AND r.created_at <= ?
+        AND r.submit_time >= ?
+        AND r.submit_time <= ?
         AND r.status IN ('approved', 'paying', 'payment_uploaded', 'completed')
     `
 
@@ -1013,6 +1049,373 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
   }
 })
 
+// ==================== 总经理审批中心 API ====================
+
+// 获取总经理审批统计数据
+router.get('/gm-statistics', requireAuth, (req, res) => {
+  try {
+    const userId = req.session.userId
+
+    // 检查是否是总经理
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    if (!user || user.role !== 'general_manager') {
+      return res.status(403).json({
+        success: false,
+        message: '无权访问',
+      })
+    }
+
+    // 获取当月的开始和结束时间
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
+
+    // 1. 待审批数量和金额（只统计商务报销）
+    const pendingStats = db.prepare(`
+      SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
+      FROM approval_instances ai
+      INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+      WHERE ai.status = 'pending'
+      AND r.type = 'business'
+    `).get() as { count: number; amount: number }
+
+    // 2. 本月已审批数量（包括通过和驳回的商务报销）
+    const completedThisMonth = db.prepare(`
+      SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
+      FROM approval_instances ai
+      INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+      WHERE ai.status IN ('approved', 'rejected')
+      AND r.type = 'business'
+      AND ai.updated_at >= ? AND ai.updated_at <= ?
+    `).get(monthStart, monthEnd) as { count: number; amount: number }
+
+    // 3. 全部已完成商务报销数量和金额
+    const completedAll = db.prepare(`
+      SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
+      FROM reimbursements
+      WHERE type = 'business'
+      AND status = 'completed'
+    `).get() as { count: number; amount: number }
+
+    res.json({
+      success: true,
+      data: {
+        pendingCount: pendingStats.count,
+        pendingAmount: pendingStats.amount,
+        completedThisMonth: completedThisMonth.count,
+        completedThisMonthAmount: completedThisMonth.amount,
+        completedCount: completedAll.count,
+        completedAmount: completedAll.amount,
+        currentMonth: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+      },
+    })
+  } catch (error) {
+    console.error('获取总经理审批统计失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '获取统计数据失败',
+    })
+  }
+})
+
+// 获取总经理待审批列表（只显示商务报销）
+router.get('/gm-pending', requireAuth, (req, res) => {
+  try {
+    const userId = req.session.userId
+
+    // 检查是否是总经理
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    if (!user || user.role !== 'general_manager') {
+      return res.status(403).json({
+        success: false,
+        message: '无权访问',
+      })
+    }
+
+    // 查询待审批的商务报销
+    const instances = db.prepare(`
+      SELECT
+        ai.id,
+        ai.target_type,
+        ai.target_id,
+        ai.applicant_id,
+        ai.current_step,
+        ai.status,
+        ai.submit_time,
+        ai.created_at,
+        u.name as applicant_name,
+        u.avatar_url as applicant_avatar,
+        r.title as reimbursement_title,
+        r.total_amount as reimbursement_amount
+      FROM approval_instances ai
+      LEFT JOIN users u ON ai.applicant_id = u.id
+      INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+      WHERE ai.status = 'pending'
+      AND r.type = 'business'
+      ORDER BY ai.submit_time DESC
+    `).all() as Array<{
+      id: string
+      target_type: string
+      target_id: string
+      applicant_id: string
+      current_step: number
+      status: string
+      submit_time: string
+      created_at: string
+      applicant_name: string
+      applicant_avatar: string | null
+      reimbursement_title: string
+      reimbursement_amount: number
+    }>
+
+    const result = instances.map((item) => ({
+      id: item.id,
+      type: 'business',
+      targetId: item.target_id,
+      targetType: item.target_type,
+      applicantId: item.applicant_id,
+      applicantName: item.applicant_name,
+      applicantAvatar: item.applicant_avatar,
+      currentStep: item.current_step,
+      status: item.status,
+      submitTime: item.submit_time,
+      createdAt: item.created_at,
+      reimbursementInfo: {
+        title: item.reimbursement_title,
+        amount: item.reimbursement_amount,
+      },
+    }))
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    console.error('获取总经理待审批列表失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '获取待审批列表失败',
+    })
+  }
+})
+
+// 获取总经理本月已审批列表（只显示商务报销）
+router.get('/gm-completed', requireAuth, (req, res) => {
+  try {
+    const userId = req.session.userId
+
+    // 检查是否是总经理
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    if (!user || user.role !== 'general_manager') {
+      return res.status(403).json({
+        success: false,
+        message: '无权访问',
+      })
+    }
+
+    // 获取当月的开始和结束时间
+    const now = new Date()
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
+
+    // 查询本月已审批的商务报销
+    const reimbursements = db.prepare(`
+      SELECT
+        r.id,
+        r.type,
+        r.title,
+        r.total_amount,
+        r.status,
+        r.approve_time,
+        r.approver,
+        r.pay_time,
+        r.completed_time,
+        r.user_id,
+        r.created_at as submit_time,
+        u.name as applicant_name,
+        u.avatar_url as applicant_avatar
+      FROM reimbursements r
+      LEFT JOIN users u ON r.user_id = u.id
+      INNER JOIN approval_instances ai ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+      WHERE r.type = 'business'
+      AND ai.status IN ('approved', 'rejected')
+      AND ai.updated_at >= ? AND ai.updated_at <= ?
+      ORDER BY ai.updated_at DESC
+    `).all(monthStart, monthEnd) as Array<{
+      id: string
+      type: string
+      title: string
+      total_amount: number
+      status: string
+      approve_time: string | null
+      approver: string | null
+      pay_time: string | null
+      completed_time: string | null
+      user_id: string
+      submit_time: string | null
+      applicant_name: string
+      applicant_avatar: string | null
+    }>
+
+    const result = reimbursements.map((item) => ({
+      id: item.id,
+      type: item.type,
+      title: item.title,
+      amount: item.total_amount,
+      status: item.status,
+      applicantName: item.applicant_name,
+      applicantAvatar: item.applicant_avatar,
+      approveTime: item.approve_time,
+      approver: item.approver,
+      payTime: item.pay_time,
+      completedTime: item.completed_time,
+      submitTime: item.submit_time,
+      userId: item.user_id,
+    }))
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    console.error('获取总经理已审批列表失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '获取已审批列表失败',
+    })
+  }
+})
+
+// 获取总经理全部查询列表（支持完整筛选条件，和管理员一致）
+router.get('/gm-all', requireAuth, (req, res) => {
+  try {
+    const userId = req.session.userId
+    const { status, type, userId: filterUserId, reimbursementScope, startDate, endDate } = req.query
+
+    // 检查是否是总经理
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    if (!user || user.role !== 'general_manager') {
+      return res.status(403).json({
+        success: false,
+        message: '无权访问',
+      })
+    }
+
+    let whereClause = "WHERE r.type = 'business'"
+    const params: any[] = []
+
+    // 状态筛选
+    if (status) {
+      whereClause += ' AND r.status = ?'
+      params.push(status)
+    } else {
+      // 未指定状态时，默认只返回已付款的记录
+      whereClause += " AND r.status IN ('paying', 'payment_uploaded', 'completed')"
+    }
+
+    // 类型支持多选（逗号分隔）
+    if (type) {
+      const types = String(type).split(',').filter(t => t.trim())
+      if (types.length > 0) {
+        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
+        params.push(...types)
+      }
+    }
+
+    // 员工筛选
+    if (filterUserId) {
+      whereClause += ' AND r.user_id = ?'
+      params.push(filterUserId)
+    }
+
+    // 所属区域支持多选（逗号分隔）
+    if (reimbursementScope) {
+      const scopes = String(reimbursementScope).split(',').filter(s => s.trim())
+      if (scopes.length > 0) {
+        whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
+        params.push(...scopes)
+      }
+    }
+
+    // 日期范围筛选（使用报销月份）
+    if (startDate) {
+      const startMonth = String(startDate).substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND r.reimbursement_month >= ?'
+      params.push(startMonth)
+    }
+
+    if (endDate) {
+      const endMonth = String(endDate).substring(0, 7) // 取 YYYY-MM 部分
+      whereClause += ' AND r.reimbursement_month <= ?'
+      params.push(endMonth)
+    }
+
+    const reimbursements = db.prepare(`
+      SELECT
+        r.*,
+        u.name as applicant_name,
+        u.avatar_url as applicant_avatar,
+        u.department as applicant_department
+      FROM reimbursements r
+      LEFT JOIN users u ON r.user_id = u.id
+      ${whereClause}
+      ORDER BY r.created_at DESC
+    `).all(...params) as Array<any>
+
+    // 类型映射
+    const typeMap: Record<string, string> = {
+      basic: '基础报销',
+      large: '大额报销',
+      business: '商务报销',
+    }
+
+    // 状态映射
+    const statusMap: Record<string, string> = {
+      draft: '草稿',
+      pending: '待审批',
+      approved: '已审批未付款',
+      rejected: '已拒绝',
+      paying: '付款中',
+      payment_uploaded: '待确认',
+      completed: '已完成',
+    }
+
+    const result = reimbursements.map((item) => ({
+      id: item.id,
+      type: item.type,
+      typeName: typeMap[item.type] || item.type,
+      title: item.title,
+      amount: item.total_amount,
+      status: item.status,
+      statusName: statusMap[item.status] || item.status,
+      submitTime: item.submit_time,
+      applicantName: item.applicant_name,
+      applicantAvatar: item.applicant_avatar,
+      applicantDepartment: item.applicant_department,
+      approveTime: item.approve_time,
+      approver: item.approver,
+      payTime: item.pay_time,
+      completedTime: item.completed_time,
+      paymentUploadTime: item.payment_upload_time,
+      paymentProofPath: item.payment_proof_path,
+      userId: item.user_id,
+      reimbursementScope: item.reimbursement_scope,
+      createdAt: item.created_at,
+    }))
+
+    res.json({
+      success: true,
+      data: result,
+    })
+  } catch (error) {
+    console.error('获取总经理全部查询列表失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '获取全部查询列表失败',
+    })
+  }
+})
+
 // 获取审批详情
 router.get('/:id', requireAuth, (req, res) => {
   try {
@@ -1083,8 +1486,8 @@ router.get('/:id', requireAuth, (req, res) => {
   }
 })
 
-// 通过审批
-router.post('/:id/approve', requireAdmin, (req, res) => {
+// 通过审批（管理员和总经理均可操作）
+router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
@@ -1126,12 +1529,36 @@ router.post('/:id/approve', requireAdmin, (req, res) => {
 
     // 如果是报销单审批，同步更新报销单状态
     if (instance.target_type === 'reimbursement') {
-      db.prepare(`
-        UPDATE reimbursements
-        SET status = 'approved', approve_time = ?, approver = ?, updated_at = ?
-        WHERE id = ?
-      `).run(now, userName || '系统', now, instance.target_id)
-      console.log('✅ 同步更新报销单状态为已通过:', instance.target_id)
+      // 计算总核减金额
+      const invoices = db.prepare(`
+        SELECT COALESCE(SUM(deducted_amount), 0) as total_deduction
+        FROM reimbursement_invoices
+        WHERE reimbursement_id = ?
+      `).get(instance.target_id) as { total_deduction: number }
+
+      const totalDeduction = invoices?.total_deduction || 0
+
+      // 获取报销单原始金额，判断核减后实际报销金额是否为0
+      const reimbursement = db.prepare('SELECT total_amount FROM reimbursements WHERE id = ?').get(instance.target_id) as { total_amount: number } | undefined
+      const totalAmount = reimbursement?.total_amount || 0
+      const actualAmount = totalAmount - totalDeduction
+
+      // 实际报销金额为0时（全额核减），直接完成，无需付款流程
+      if (actualAmount <= 0) {
+        db.prepare(`
+          UPDATE reimbursements
+          SET status = 'completed', approve_time = ?, approver = ?, deduction_amount = ?, completed_time = ?, updated_at = ?
+          WHERE id = ?
+        `).run(now, userName || '系统', totalDeduction, now, now, instance.target_id)
+        console.log('✅ 报销单全额核减，直接完成:', instance.target_id, '核减金额:', totalDeduction)
+      } else {
+        db.prepare(`
+          UPDATE reimbursements
+          SET status = 'approved', approve_time = ?, approver = ?, deduction_amount = ?, updated_at = ?
+          WHERE id = ?
+        `).run(now, userName || '系统', totalDeduction, now, instance.target_id)
+        console.log('✅ 同步更新报销单状态为已通过:', instance.target_id, '核减金额:', totalDeduction)
+      }
     }
 
     console.log('✅ 审批通过:', { instanceId: id, approverId: userId })
@@ -1149,8 +1576,8 @@ router.post('/:id/approve', requireAdmin, (req, res) => {
   }
 })
 
-// 驳回审批
-router.post('/:id/reject', requireAdmin, (req, res) => {
+// 驳回审批（管理员和总经理均可操作）
+router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
@@ -1325,6 +1752,227 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
       success: false,
       message: '撤销审批失败',
     })
+  }
+})
+
+// ==================== 发票管理 API ====================
+
+// 发票管理 - 查询发票列表
+router.get('/invoice-management', requireAdmin, (req, res) => {
+  try {
+    const { userId, type, reimbursementScope, startDate, endDate } = req.query
+
+    let whereClause = 'WHERE r.status IN (\'approved\', \'paying\', \'payment_uploaded\', \'completed\')'
+    const params: any[] = []
+
+    // 员工筛选
+    if (userId) {
+      whereClause += ' AND r.user_id = ?'
+      params.push(userId)
+    }
+
+    // 类型筛选（支持多选，逗号分隔）
+    if (type) {
+      const types = String(type).split(',').filter(t => t.trim())
+      if (types.length > 0) {
+        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
+        params.push(...types)
+      }
+    }
+
+    // 所属区域筛选（支持多选，逗号分隔）
+    if (reimbursementScope) {
+      const scopes = String(reimbursementScope).split(',').filter(s => s.trim())
+      if (scopes.length > 0) {
+        whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
+        params.push(...scopes)
+      }
+    }
+
+    // 日期范围筛选（按发票日期）
+    if (startDate) {
+      whereClause += ' AND ri.invoice_date >= ?'
+      params.push(startDate)
+    }
+
+    if (endDate) {
+      whereClause += ' AND ri.invoice_date <= ?'
+      params.push(endDate)
+    }
+
+    // 查询发票列表
+    const invoices = db.prepare(`
+      SELECT
+        ri.id,
+        ri.reimbursement_id,
+        ri.amount,
+        ri.invoice_date,
+        ri.invoice_number,
+        ri.file_path,
+        ri.category,
+        ri.deducted_amount,
+        ri.seller,
+        ri.buyer,
+        ri.created_at,
+        r.type as reimbursement_type,
+        r.title as reimbursement_title,
+        r.user_id,
+        r.reimbursement_scope,
+        r.status as reimbursement_status,
+        u.name as user_name,
+        u.department as user_department
+      FROM reimbursement_invoices ri
+      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
+      LEFT JOIN users u ON r.user_id = u.id
+      ${whereClause}
+      ORDER BY ri.invoice_date DESC, ri.created_at DESC
+    `).all(...params) as Array<any>
+
+    // 类型映射
+    const typeMap: Record<string, string> = {
+      basic: '基础报销',
+      large: '大额报销',
+      business: '商务报销',
+    }
+
+    // 判断文件类型（发票 PDF 或收据图片）
+    const getFileType = (filePath: string) => {
+      const lowerPath = filePath.toLowerCase()
+      if (lowerPath.includes('receipt-')) {
+        return 'receipt' // 收据/无票
+      }
+      return 'invoice' // 发票
+    }
+
+    res.json({
+      success: true,
+      data: invoices.map(inv => ({
+        id: inv.id,
+        reimbursementId: inv.reimbursement_id,
+        amount: inv.amount,
+        invoiceDate: inv.invoice_date,
+        invoiceNumber: inv.invoice_number,
+        filePath: inv.file_path,
+        fileType: getFileType(inv.file_path),
+        category: inv.category,
+        deductedAmount: inv.deducted_amount || 0,
+        seller: inv.seller,
+        buyer: inv.buyer,
+        reimbursementType: inv.reimbursement_type,
+        reimbursementTypeName: typeMap[inv.reimbursement_type] || inv.reimbursement_type,
+        reimbursementTitle: inv.reimbursement_title,
+        reimbursementScope: inv.reimbursement_scope,
+        reimbursementStatus: inv.reimbursement_status,
+        userId: inv.user_id,
+        userName: inv.user_name,
+        userDepartment: inv.user_department,
+        createdAt: inv.created_at,
+      })),
+    })
+  } catch (error) {
+    console.error('查询发票列表失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '查询发票列表失败',
+    })
+  }
+})
+
+// 发票管理 - 批量下载发票（ZIP打包）
+router.post('/invoice-management/batch-download', requireAdmin, async (req, res) => {
+  try {
+    const { invoiceIds } = req.body
+
+    if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择要下载的发票',
+      })
+    }
+
+    // 查询发票信息
+    const placeholders = invoiceIds.map(() => '?').join(',')
+    const invoices = db.prepare(`
+      SELECT
+        ri.id,
+        ri.file_path,
+        ri.invoice_number,
+        ri.invoice_date,
+        ri.reimbursement_id,
+        r.type as reimbursement_type,
+        u.name as user_name
+      FROM reimbursement_invoices ri
+      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
+      LEFT JOIN users u ON r.user_id = u.id
+      WHERE ri.id IN (${placeholders})
+    `).all(...invoiceIds) as Array<any>
+
+    if (invoices.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '未找到发票',
+      })
+    }
+
+    // 动态导入 archiver
+    const archiver = (await import('archiver')).default
+    const path = (await import('path')).default
+    const fs = (await import('fs')).default
+
+    // 设置响应头
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="invoices_${timestamp}.zip"`)
+
+    // 创建 ZIP 归档
+    const archive = archiver('zip', {
+      zlib: { level: 9 }, // 最高压缩级别
+    })
+
+    // 监听错误
+    archive.on('error', (err) => {
+      console.error('ZIP 创建失败:', err)
+      res.status(500).json({
+        success: false,
+        message: 'ZIP 创建失败',
+      })
+    })
+
+    // 将 ZIP 流输出到响应
+    archive.pipe(res)
+
+    // 添加文件到 ZIP
+    for (const inv of invoices) {
+      const filePath = path.join(process.cwd(), inv.file_path)
+
+      // 检查文件是否存在
+      if (!fs.existsSync(filePath)) {
+        console.warn(`文件不存在: ${filePath}`)
+        continue
+      }
+
+      // 生成文件名：员工姓名_发票日期_发票号码.扩展名
+      const ext = path.extname(inv.file_path)
+      const fileName = inv.invoice_number
+        ? `${inv.user_name}_${inv.invoice_date}_${inv.invoice_number}${ext}`
+        : `${inv.user_name}_${inv.invoice_date}_${inv.id}${ext}`
+
+      // 添加文件到 ZIP
+      archive.file(filePath, { name: fileName })
+    }
+
+    // 完成 ZIP 归档
+    await archive.finalize()
+
+    console.log(`✅ 批量下载发票成功: ${invoices.length} 个文件`)
+  } catch (error) {
+    console.error('批量下载发票失败:', error)
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: '批量下载发票失败',
+      })
+    }
   }
 })
 

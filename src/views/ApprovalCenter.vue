@@ -14,24 +14,7 @@
           </div>
           <div class="stat-info">
             <div class="stat-value">{{ statistics.pendingCount }}</div>
-            <div class="stat-label">待审批</div>
-          </div>
-        </div>
-      </el-card>
-
-      <el-card
-        class="stat-card approved-card"
-        shadow="hover"
-        :class="{ active: activeTab === 'approved' }"
-        @click="switchTab('approved')"
-      >
-        <div class="stat-content">
-          <div class="stat-icon">
-            <el-icon :size="32"><CircleCheck /></el-icon>
-          </div>
-          <div class="stat-info">
-            <div class="stat-value">{{ statistics.approvedThisMonth }}</div>
-            <div class="stat-label">本月已通过</div>
+            <div class="stat-label">待办</div>
           </div>
         </div>
       </el-card>
@@ -93,9 +76,9 @@
 
     <el-tabs v-model="activeTab" @tab-change="handleTabChange">
       <!-- 待审批 -->
-      <el-tab-pane label="待审批" name="pending">
+      <el-tab-pane label="待办" name="pending">
         <el-card>
-          <el-table :data="pendingList" border stripe empty-text="暂无待审批项">
+          <el-table :data="pendingList" border stripe empty-text="暂无待办项">
             <el-table-column label="序号" width="60" align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
@@ -134,7 +117,7 @@
                 {{ formatDate(row.submitTime) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="280" fixed="right">
+            <el-table-column label="操作" width="360" fixed="right">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -146,12 +129,28 @@
                   >
                     详情
                   </el-button>
-                  <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
-                    通过
+                  <el-button
+                    v-if="row.targetType === 'reimbursement'"
+                    type="info"
+                    size="small"
+                    :icon="List"
+                    @click="handleViewApprovalProcessFromPending(row)"
+                  >
+                    审批流程
                   </el-button>
-                  <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
-                    驳回
-                  </el-button>
+                  <!-- 只有待审批状态才显示通过和驳回按钮 -->
+                  <template v-if="row.status === 'pending'">
+                    <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
+                      通过
+                    </el-button>
+                    <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
+                      驳回
+                    </el-button>
+                  </template>
+                  <!-- 已通过待付款状态显示标签 -->
+                  <el-tag v-else-if="row.status === 'approved'" type="success" size="small">
+                    已通过待付款
+                  </el-tag>
                 </div>
               </template>
             </el-table-column>
@@ -160,69 +159,6 @@
       </el-tab-pane>
 
       <!-- 本月已通过 -->
-      <el-tab-pane label="本月已通过" name="approved">
-        <el-card>
-          <el-table :data="approvedList" border stripe empty-text="暂无本月已通过记录">
-            <el-table-column label="序号" width="60" align="center">
-              <template #default="{ $index }">
-                {{ $index + 1 }}
-              </template>
-            </el-table-column>
-            <el-table-column label="申请人" width="150">
-              <template #default="{ row }">
-                <div class="applicant-cell">
-                  <el-avatar :src="row.applicantAvatar" :size="32">
-                    <el-icon><User /></el-icon>
-                  </el-avatar>
-                  <span>{{ row.applicantName }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="类型" width="120">
-              <template #default="{ row }">
-                <el-tag :type="getTypeTagType(row.type)" size="small">
-                  {{ getTypeLabel(row.type) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="标题/金额" min-width="200">
-              <template #default="{ row }">
-                <div v-if="row.reimbursementInfo">
-                  <div>{{ row.reimbursementInfo.title }}</div>
-                  <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
-                    ¥{{ row.reimbursementInfo.amount.toFixed(2) }}
-                  </div>
-                </div>
-                <div v-else>-</div>
-              </template>
-            </el-table-column>
-            <el-table-column label="提交时间" width="180">
-              <template #default="{ row }">
-                {{ formatDate(row.submitTime) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="通过时间" width="180">
-              <template #default="{ row }">
-                {{ row.completeTime ? formatDate(row.completeTime) : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="100" fixed="right">
-              <template #default="{ row }">
-                <el-button
-                  v-if="row.targetType === 'reimbursement'"
-                  type="primary"
-                  size="small"
-                  :icon="View"
-                  @click="handleViewReimbursement(row)"
-                >
-                  详情
-                </el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
-
       <!-- 已通过未付款 -->
       <el-tab-pane label="已通过未付款" name="unpaid">
         <el-card>
@@ -262,7 +198,7 @@
                 {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right">
+            <el-table-column label="操作" width="280" fixed="right">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -272,6 +208,14 @@
                     @click="handleViewUnpaidReimbursement(row)"
                   >
                     详情
+                  </el-button>
+                  <el-button
+                    type="info"
+                    size="small"
+                    :icon="List"
+                    @click="handleViewApprovalProcessFromUnpaid(row)"
+                  >
+                    审批流程
                   </el-button>
                   <el-button
                     type="success"
@@ -482,10 +426,12 @@
                   }"
                   collapse-tags
                   collapse-tags-tooltip
+                  :max-collapse-tags="1"
                   :disabled="isBasicReimbursementSelected"
                   clearable
                   placeholder="全部"
-                  style="width: 160px"
+                  class="scope-cascader"
+                  style="width: 200px"
                 />
               </el-form-item>
               <el-form-item label="状态">
@@ -495,9 +441,6 @@
                   clearable
                   style="width: 110px"
                 >
-                  <el-option label="待审批" value="pending" />
-                  <el-option label="已通过" value="approved" />
-                  <el-option label="已拒绝" value="rejected" />
                   <el-option label="付款中" value="paying" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
@@ -552,7 +495,7 @@
           <!-- 汇总信息条 -->
           <div class="summary-bar" v-if="allList.length > 0">
             <span>共 <strong>{{ allList.length }}</strong> 条记录</span>
-            <span style="margin-left: 16px;">总金额 <strong style="color: #409eff;">¥{{ allListTotalAmount.toFixed(2) }}</strong></span>
+            <span v-if="allListTotalAmount > 0" style="margin-left: 16px;">已付款金额 <strong style="color: #409eff;">¥{{ allListTotalAmount.toFixed(2) }}</strong></span>
           </div>
 
           <!-- 列表 -->
@@ -582,9 +525,10 @@
             <el-table-column label="标题/金额" min-width="180">
               <template #default="{ row }">
                 <div>{{ row.title }}</div>
-                <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
+                <div v-if="row.amount > 0" style="color: #409eff; font-weight: 600; margin-top: 4px;">
                   ¥{{ row.amount.toFixed(2) }}
                 </div>
+                <div v-else style="color: #909399; margin-top: 4px;">-</div>
               </template>
             </el-table-column>
             <el-table-column label="所属区域" width="150" align="center">
@@ -627,7 +571,216 @@
           </el-table>
         </el-card>
       </el-tab-pane>
+
+      <!-- 发票管理 -->
+      <el-tab-pane label="发票管理" name="invoices">
+        <el-card>
+          <!-- 筛选条件 -->
+          <div class="filter-section">
+            <el-form :inline="true" :model="invoiceFilterForm" class="filter-form">
+              <el-form-item label="员工">
+                <el-select
+                  v-model="invoiceFilterForm.userId"
+                  placeholder="全部员工"
+                  clearable
+                  filterable
+                  style="width: 130px"
+                >
+                  <el-option
+                    v-for="emp in employeeList"
+                    :key="emp.id"
+                    :label="emp.name"
+                    :value="emp.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="类型">
+                <el-select
+                  v-model="invoiceFilterForm.type"
+                  placeholder="全部"
+                  clearable
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  style="width: 160px"
+                >
+                  <el-option value="basic" label="基础报销" />
+                  <el-option value="large" label="大额报销" />
+                  <el-option value="business" label="商务报销" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="所属区域">
+                <el-cascader
+                  v-model="invoiceFilterForm.reimbursementScope"
+                  :options="scopeList"
+                  :props="{
+                    value: 'value',
+                    label: 'name',
+                    children: 'children',
+                    checkStrictly: true,
+                    emitPath: false,
+                    multiple: true
+                  }"
+                  collapse-tags
+                  collapse-tags-tooltip
+                  :max-collapse-tags="1"
+                  clearable
+                  placeholder="全部"
+                  class="scope-cascader"
+                  style="width: 200px"
+                />
+              </el-form-item>
+              <el-form-item label="日期">
+                <el-date-picker
+                  v-model="invoiceDateRangeModel"
+                  :type="invoiceDatePickerType"
+                  :value-format="invoiceDateValueFormat"
+                  :start-placeholder="invoiceDateStartPlaceholder"
+                  :end-placeholder="invoiceDateEndPlaceholder"
+                  range-separator="至"
+                  :shortcuts="invoiceDateShortcuts"
+                  style="width: 280px"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :icon="Search" :loading="invoiceListLoading" @click="handleQueryInvoiceList">
+                  查询
+                </el-button>
+                <el-button @click="handleResetInvoiceFilter">重置</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+
+          <!-- 操作按钮 -->
+          <div class="invoice-actions" v-if="invoiceList.length > 0">
+            <div class="action-left">
+              <el-checkbox
+                v-model="invoiceSelectAll"
+                :indeterminate="invoiceSelectIndeterminate"
+                @change="handleInvoiceSelectAllChange"
+              >
+                全选
+              </el-checkbox>
+              <span class="selected-count" v-if="selectedInvoiceIds.length > 0">
+                已选 {{ selectedInvoiceIds.length }} 项
+              </span>
+            </div>
+            <div class="action-right">
+              <el-button
+                type="primary"
+                :icon="Download"
+                :disabled="selectedInvoiceIds.length === 0"
+                :loading="batchDownloading"
+                @click="handleBatchDownload"
+              >
+                批量下载
+              </el-button>
+              <el-button
+                type="success"
+                :icon="Printer"
+                :disabled="selectedInvoiceIds.length === 0"
+                @click="handleBatchPrint"
+              >
+                批量打印
+              </el-button>
+            </div>
+          </div>
+
+          <!-- 汇总信息 -->
+          <div class="summary-bar" v-if="invoiceList.length > 0">
+            <span>共 <strong>{{ invoiceList.length }}</strong> 条发票记录</span>
+            <span style="margin-left: 16px;">总金额 <strong style="color: #409eff;">¥{{ invoiceTotalAmount.toFixed(2) }}</strong></span>
+          </div>
+
+          <!-- 发票列表 -->
+          <el-table :data="invoiceList" border stripe empty-text="请设置筛选条件后点击查询" v-loading="invoiceListLoading">
+            <el-table-column width="50" align="center">
+              <template #default="{ row }">
+                <el-checkbox
+                  :model-value="selectedInvoiceIds.includes(row.id)"
+                  @change="(val: boolean | string | number) => handleInvoiceSelect(row.id, !!val)"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="序号" width="60" align="center">
+              <template #default="{ $index }">
+                {{ $index + 1 }}
+              </template>
+            </el-table-column>
+            <el-table-column label="员工" width="100" align="center">
+              <template #default="{ row }">
+                {{ row.userName }}
+              </template>
+            </el-table-column>
+            <el-table-column label="报销类型" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag :type="getTypeTagType(row.reimbursementType)" size="small">
+                  {{ row.reimbursementTypeName }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="文件类型" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.fileType === 'invoice' ? 'primary' : 'warning'" size="small">
+                  {{ row.fileType === 'invoice' ? '发票' : '收据' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="金额" width="120" align="right">
+              <template #default="{ row }">
+                <span style="color: #409eff; font-weight: 600;">¥{{ row.amount.toFixed(2) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="发票日期" width="120" align="center" prop="invoiceDate" />
+            <el-table-column label="发票号码" width="180" align="center">
+              <template #default="{ row }">
+                {{ row.invoiceNumber || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="报销事由" min-width="150">
+              <template #default="{ row }">
+                {{ row.reimbursementTitle }}
+              </template>
+            </el-table-column>
+            <el-table-column label="预览" width="80" align="center">
+              <template #default="{ row }">
+                <el-button type="primary" link size="small" @click="handlePreviewInvoice(row)">
+                  查看
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-tab-pane>
     </el-tabs>
+
+    <!-- 发票预览对话框 -->
+    <el-dialog v-model="invoicePreviewDialogVisible" title="发票预览" width="80%" :close-on-click-modal="true">
+      <div class="preview-dialog-content">
+        <img v-if="previewInvoiceIsImage" :src="previewInvoicePath" class="preview-dialog-image" alt="发票" />
+        <iframe v-else :src="previewInvoicePath" class="preview-dialog-pdf" />
+      </div>
+    </el-dialog>
+
+    <!-- 批量打印对话框 -->
+    <el-dialog v-model="printDialogVisible" title="批量打印预览" width="90%" :close-on-click-modal="false">
+      <div class="print-preview-container" ref="printContainerRef">
+        <div v-for="(inv, index) in printInvoiceList" :key="inv.id" class="print-item">
+          <div class="print-item-header">
+            <span>{{ index + 1 }}. {{ inv.userName }} - {{ inv.reimbursementTypeName }} - ¥{{ inv.amount.toFixed(2) }}</span>
+            <span v-if="inv.invoiceNumber">发票号: {{ inv.invoiceNumber }}</span>
+          </div>
+          <div class="print-item-content">
+            <img v-if="isImageFile(inv.filePath)" :src="inv.filePath" class="print-item-image" alt="发票" />
+            <iframe v-else :src="inv.filePath" class="print-item-pdf" />
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="printDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :icon="Printer" @click="executePrint">打印</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 驳回对话框 -->
     <el-dialog v-model="rejectDialogVisible" title="驳回审批" width="400px" :close-on-click-modal="false">
@@ -692,48 +845,71 @@
               </div>
             </el-timeline-item>
 
-            <!-- 2. 管理员审批 -->
-            <el-timeline-item
-              v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-              :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-              placement="top"
-              type="success"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">管理员审批</div>
-                <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
-              </div>
-            </el-timeline-item>
-            <el-timeline-item
-              v-else-if="currentApprovalRecord.status === 'rejected'"
-              :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-              placement="top"
-              type="danger"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">管理员审批</div>
-                <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
-                <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
-                  <div class="reject-reason-label">拒绝原因：</div>
-                  <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
+            <!-- 2. 管理员审批 -->\n            <!-- 如果有审批记录，显示详细记录 -->
+            <template v-if="approvalRecords.length > 0">
+              <el-timeline-item
+                v-for="record in approvalRecords"
+                :key="record.id"
+                :timestamp="formatDate(record.actionTime)"
+                placement="top"
+                :type="record.action === 'approve' ? 'success' : 'danger'"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">
+                    {{ record.approverName }}
+                  </div>
+                  <div class="timeline-desc">
+                    <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
+                      {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                    </el-tag>
+                  </div>
                 </div>
-              </div>
-            </el-timeline-item>
-            <el-timeline-item
-              v-else-if="currentApprovalRecord.status === 'pending'"
-              timestamp="待审批"
-              placement="top"
-              type="warning"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">管理员审批</div>
-                <div class="timeline-desc">等待管理员审批...</div>
-              </div>
-            </el-timeline-item>
+              </el-timeline-item>
+            </template>
+            <!-- 如果没有审批记录，显示简化版本 -->
+            <template v-else>
+              <el-timeline-item
+                v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                placement="top"
+                type="success"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
+                </div>
+              </el-timeline-item>
+              <el-timeline-item
+                v-else-if="currentApprovalRecord.status === 'rejected'"
+                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                placement="top"
+                type="danger"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
+                  <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
+                    <div class="reject-reason-label">拒绝原因：</div>
+                    <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
+                  </div>
+                </div>
+              </el-timeline-item>
+              <el-timeline-item
+                v-else-if="currentApprovalRecord.status === 'pending'"
+                timestamp="待审批"
+                placement="top"
+                type="warning"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-desc">等待管理员审批...</div>
+                </div>
+              </el-timeline-item>
+            </template>
 
             <!-- 3. 财务付款 -->
             <el-timeline-item
-              v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+              v-if="!isDeductionOnly && ['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
               :timestamp="currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : ''"
               placement="top"
               type="success"
@@ -746,7 +922,7 @@
 
             <!-- 4. 上传付款凭证 -->
             <el-timeline-item
-              v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+              v-if="!isDeductionOnly && ['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
               :timestamp="currentApprovalRecord.paymentUploadTime ? formatDate(currentApprovalRecord.paymentUploadTime) : ''"
               placement="top"
               type="success"
@@ -783,15 +959,17 @@
               type="success"
             >
               <div class="timeline-content">
-                <div class="timeline-title">付款完成</div>
-                <div class="timeline-desc">报销流程已完成</div>
-                <div v-if="currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
+                <div class="timeline-title">{{ isDeductionOnly ? '已计算到核减金额' : '付款完成' }}</div>
+                <div class="timeline-desc">
+                  {{ isDeductionOnly ? '核减金额已记录，报销流程已完成' : '报销流程已完成' }}
+                </div>
+                <div v-if="!isDeductionOnly && currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
                   {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
                 </div>
               </div>
             </el-timeline-item>
             <el-timeline-item
-              v-else-if="currentApprovalRecord.status === 'payment_uploaded'"
+              v-else-if="!isDeductionOnly && currentApprovalRecord.status === 'payment_uploaded'"
               timestamp="待确认收款"
               placement="top"
               type="warning"
@@ -835,6 +1013,24 @@
               <el-statistic title="报销总额" :value="allExportData.summary.totalAmount" :precision="2" prefix="¥" />
             </el-col>
           </el-row>
+        </div>
+
+        <!-- 报销范围汇总（如果有数据） -->
+        <div v-if="allExportData.byScope && allExportData.byScope.length > 0" class="export-scope-summary">
+          <h4>报销范围汇总</h4>
+          <el-table :data="allExportData.byScope" border size="small" style="margin-top: 10px;">
+            <el-table-column prop="scopeName" label="报销范围" min-width="150" />
+            <el-table-column label="报销笔数" width="100" align="right">
+              <template #default="{ row }">
+                {{ row.count }} 笔
+              </template>
+            </el-table-column>
+            <el-table-column label="报销金额" width="120" align="right">
+              <template #default="{ row }">
+                ¥{{ row.amount.toFixed(2) }}
+              </template>
+            </el-table-column>
+          </el-table>
         </div>
 
         <!-- 员工明细 -->
@@ -953,8 +1149,8 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column prop="name" label="员工姓名" width="120" />
-            <el-table-column prop="department" label="部门" width="120" />
+            <el-table-column prop="name" label="员工姓名" width="120" align="center" />
+            <el-table-column prop="department" label="部门" width="120" align="center" />
             <el-table-column label="核减金额" width="120" align="right">
               <template #default="{ row }">
                 <span style="color: #f56c6c; font-weight: 600;">¥{{ row.deductionAmount.toFixed(2) }}</span>
@@ -1034,7 +1230,7 @@ import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { Stamp, Refresh, User, Check, Close, View, Clock, CircleCheck, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn } from '@element-plus/icons-vue'
+import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
@@ -1081,7 +1277,6 @@ interface ReimbursementItem {
 
 interface Statistics {
   pendingCount: number
-  approvedThisMonth: number
   approvedUnpaid: number
   paidThisMonth: number
   paidThisMonthAmount: number
@@ -1092,13 +1287,11 @@ interface Statistics {
 
 const activeTab = ref('pending')
 const pendingList = ref<ApprovalItem[]>([])
-const approvedList = ref<ApprovalItem[]>([])
 const unpaidList = ref<ReimbursementItem[]>([])
 const paidList = ref<ReimbursementItem[]>([])
 const completedList = ref<ReimbursementItem[]>([])
 const statistics = ref<Statistics>({
   pendingCount: 0,
-  approvedThisMonth: 0,
   approvedUnpaid: 0,
   paidThisMonth: 0,
   paidThisMonthAmount: 0,
@@ -1175,6 +1368,48 @@ interface ScopeOption {
 const scopeList = ref<ScopeOption[]>([])
 const scopeMap = ref<Record<string, string>>({}) // value -> 完整路径名称映射
 
+// 递归收集某个节点下所有子孙的 value
+function collectDescendantValues(items: ScopeOption[]): string[] {
+  const result: string[] = []
+  for (const item of items) {
+    if (item.value) result.push(item.value)
+    if (item.children?.length) {
+      result.push(...collectDescendantValues(item.children))
+    }
+  }
+  return result
+}
+
+// 展开选中的 scope：如果选中了父级，自动包含其所有子级 value
+function expandScopeSelection(selectedValues: string[]): string[] {
+  if (!selectedValues.length || !scopeList.value.length) return selectedValues
+
+  const expanded = new Set<string>()
+
+  // 在树中查找节点并收集其所有子孙
+  function findAndExpand(items: ScopeOption[], targetValue: string): boolean {
+    for (const item of items) {
+      if (item.value === targetValue) {
+        expanded.add(item.value)
+        if (item.children?.length) {
+          collectDescendantValues(item.children).forEach(v => expanded.add(v))
+        }
+        return true
+      }
+      if (item.children?.length && findAndExpand(item.children, targetValue)) {
+        return true
+      }
+    }
+    return false
+  }
+
+  for (const val of selectedValues) {
+    findAndExpand(scopeList.value, val)
+  }
+
+  return Array.from(expanded)
+}
+
 // 全部查询相关
 interface AllReimbursementItem {
   id: string
@@ -1182,6 +1417,8 @@ interface AllReimbursementItem {
   typeName: string
   title: string
   amount: number
+  totalAmount?: number
+  deductionAmount?: number
   status: string
   statusName: string
   applicantName: string
@@ -1196,6 +1433,7 @@ interface AllReimbursementItem {
   completedTime?: string
   paymentProofPath?: string
   receiptConfirmedBy?: string
+  reimbursementScope?: string // 报销范围/区域
   createdAt: string
   userId: string
 }
@@ -1295,8 +1533,14 @@ const allSummary = computed(() => {
     byTypeMap[item.type].amount += item.amount || 0
   })
 
+  // 固定排序：基础报销、大额报销、商务报销
+  const typeOrder = ['basic', 'large', 'business']
+  const sortedByType = typeOrder
+    .filter(t => byTypeMap[t])
+    .map(t => byTypeMap[t])
+
   return {
-    byType: Object.values(byTypeMap),
+    byType: sortedByType,
     total: {
       count: allList.value.length,
       amount: allListTotalAmount.value,
@@ -1307,11 +1551,15 @@ const allSummary = computed(() => {
 // 审批流程弹窗相关
 interface ApprovalProcessRecord {
   id: string
+  targetId: string // 报销单ID
   type: string
   title: string
   amount: number
+  totalAmount?: number
+  deductionAmount?: number
   status: string
   applicantName: string
+  applicantAvatar?: string
   submitTime?: string
   approveTime?: string
   approver?: string
@@ -1322,8 +1570,21 @@ interface ApprovalProcessRecord {
   paymentProofPath?: string
   receiptConfirmedBy?: string
 }
+
+interface ApprovalRecordItem {
+  id: string
+  step: number
+  approverId: string
+  approverName: string
+  approverAvatar: string | null
+  action: 'approve' | 'reject'
+  comment: string | null
+  actionTime: string
+}
+
 const approvalProcessDialogVisible = ref(false)
 const currentApprovalRecord = ref<ApprovalProcessRecord | null>(null)
+const approvalRecords = ref<ApprovalRecordItem[]>([])
 
 // 付款回单预览
 const paymentProofDialogVisible = ref(false)
@@ -1333,6 +1594,16 @@ const isPaymentProofImage = computed(() => {
   if (!currentApprovalRecord.value?.paymentProofPath) return false
   const path = currentApprovalRecord.value.paymentProofPath.toLowerCase()
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
+})
+
+// 判断是否为核减金额（报销金额为0，无需付款流程）
+const isDeductionOnly = computed(() => {
+  if (!currentApprovalRecord.value) return false
+  const deductionAmount = currentApprovalRecord.value.deductionAmount || 0
+  const totalAmount = currentApprovalRecord.value.totalAmount || currentApprovalRecord.value.amount || 0
+  // 实际报销金额 = 总金额 - 核减金额
+  const actualAmount = totalAmount - deductionAmount
+  return actualAmount <= 0
 })
 
 // 全部查询导出相关
@@ -1361,6 +1632,12 @@ interface AllExportData {
     totalCount: number
     employeeCount: number
   }
+  byScope?: Array<{
+    scope: string
+    scopeName: string
+    count: number
+    amount: number
+  }>
   employees: AllExportEmployee[]
 }
 
@@ -1462,6 +1739,138 @@ const deductionDateRangeModel = computed<[string, string] | null>({
   },
 })
 
+// ==================== 发票管理相关 ====================
+interface InvoiceManagementItem {
+  id: string
+  reimbursementId: string
+  amount: number
+  invoiceDate: string
+  invoiceNumber: string
+  filePath: string
+  fileType: 'invoice' | 'receipt'
+  category: string
+  deductedAmount: number
+  seller: string
+  buyer: string
+  reimbursementType: string
+  reimbursementTypeName: string
+  reimbursementTitle: string
+  reimbursementScope: string
+  reimbursementStatus: string
+  userId: string
+  userName: string
+  userDepartment: string
+  createdAt: string
+}
+
+const invoiceFilterForm = reactive({
+  userId: '',
+  type: [] as string[],
+  reimbursementScope: [] as string[],
+  dateQueryType: 'month' as 'month' | 'day',
+  dateRange: null as [string, string] | null,
+  monthRange: null as [string, string] | null,
+})
+
+const invoiceList = ref<InvoiceManagementItem[]>([])
+const invoiceListLoading = ref(false)
+const selectedInvoiceIds = ref<string[]>([])
+const batchDownloading = ref(false)
+const printDialogVisible = ref(false)
+const printInvoiceList = ref<InvoiceManagementItem[]>([])
+const printContainerRef = ref<HTMLElement>()
+const invoicePreviewDialogVisible = ref(false)
+const previewInvoicePath = ref('')
+
+// 发票日期选择器类型
+const invoiceDatePickerType = computed(() => {
+  return invoiceFilterForm.dateQueryType === 'month' ? 'monthrange' : 'daterange'
+})
+
+const invoiceDateValueFormat = computed(() => {
+  return invoiceFilterForm.dateQueryType === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD'
+})
+
+const invoiceDateStartPlaceholder = computed(() => {
+  return invoiceFilterForm.dateQueryType === 'month' ? '开始月份' : '开始日期'
+})
+
+const invoiceDateEndPlaceholder = computed(() => {
+  return invoiceFilterForm.dateQueryType === 'month' ? '结束月份' : '结束日期'
+})
+
+const invoiceDateRangeModel = computed<[string, string] | null>({
+  get() {
+    if (invoiceFilterForm.dateQueryType === 'month') return invoiceFilterForm.monthRange
+    return invoiceFilterForm.dateRange
+  },
+  set(val) {
+    invoiceFilterForm.monthRange = null
+    invoiceFilterForm.dateRange = null
+    if (!val) return
+    if (invoiceFilterForm.dateQueryType === 'month') {
+      invoiceFilterForm.monthRange = val
+    } else {
+      invoiceFilterForm.dateRange = val
+    }
+  },
+})
+
+// 发票日期快捷切换
+const invoiceDateShortcuts = [
+  {
+    text: '月',
+    onClick: () => {
+      invoiceFilterForm.dateQueryType = 'month'
+      invoiceFilterForm.dateRange = null
+      invoiceFilterForm.monthRange = null
+    },
+  },
+  {
+    text: '日',
+    onClick: () => {
+      invoiceFilterForm.dateQueryType = 'day'
+      invoiceFilterForm.dateRange = null
+      invoiceFilterForm.monthRange = null
+    },
+  },
+]
+
+// 发票总金额
+const invoiceTotalAmount = computed(() => {
+  return invoiceList.value.reduce((sum, item) => sum + (item.amount || 0), 0)
+})
+
+// 全选相关
+const invoiceSelectAll = computed({
+  get() {
+    return invoiceList.value.length > 0 && selectedInvoiceIds.value.length === invoiceList.value.length
+  },
+  set(val: boolean) {
+    if (val) {
+      selectedInvoiceIds.value = invoiceList.value.map(inv => inv.id)
+    } else {
+      selectedInvoiceIds.value = []
+    }
+  },
+})
+
+const invoiceSelectIndeterminate = computed(() => {
+  return selectedInvoiceIds.value.length > 0 && selectedInvoiceIds.value.length < invoiceList.value.length
+})
+
+// 预览发票是否为图片
+const previewInvoiceIsImage = computed(() => {
+  const path = previewInvoicePath.value.toLowerCase()
+  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.gif') || path.endsWith('.webp')
+})
+
+// 判断文件是否为图片
+function isImageFile(filePath: string) {
+  const path = filePath.toLowerCase()
+  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.gif') || path.endsWith('.webp')
+}
+
 // 获取类型标签
 function getTypeTagType(type: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
   const typeMap: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
@@ -1521,18 +1930,6 @@ async function loadPendingList() {
   }
 }
 
-// 加载本月已通过列表
-async function loadApprovedList() {
-  try {
-    const res = await api.get('/api/approval/approved-this-month')
-    if (res.data.success) {
-      approvedList.value = res.data.data
-    }
-  } catch {
-    console.error('加载本月已通过列表失败')
-  }
-}
-
 // 加载已通过未付款列表
 async function loadUnpaidList() {
   try {
@@ -1579,8 +1976,6 @@ function switchTab(tab: string) {
 function handleTabChange(tab: string | number) {
   if (tab === 'pending') {
     loadPendingList()
-  } else if (tab === 'approved') {
-    loadApprovedList()
   } else if (tab === 'unpaid') {
     loadUnpaidList()
   } else if (tab === 'paid') {
@@ -1590,6 +1985,8 @@ function handleTabChange(tab: string | number) {
   } else if (tab === 'all') {
     // 全部查询tab不自动加载数据，保留用户的查询结果
     // 员工列表在 onMounted 时已加载
+  } else if (tab === 'invoices') {
+    // 发票管理tab不自动加载数据，需要用户设置筛选条件后查询
   }
 }
 
@@ -1613,7 +2010,8 @@ async function handleApprove(item: ApprovalItem) {
     if (res.data.success) {
       ElMessage.success('审批已通过')
       loadStatistics()
-      loadPendingList()
+      // 保持在当前页面，刷新当前标签页数据
+      handleTabChange(activeTab.value)
     }
   } catch (err: any) {
     if (err !== 'cancel') {
@@ -1648,7 +2046,8 @@ async function confirmReject() {
       ElMessage.success('审批已驳回')
       rejectDialogVisible.value = false
       loadStatistics()
-      loadPendingList()
+      // 保持在当前页面，刷新当前标签页数据
+      handleTabChange(activeTab.value)
     }
   } catch (err: any) {
     ElMessage.error(err.response?.data?.message || '操作失败')
@@ -1668,6 +2067,64 @@ function handleViewReimbursement(item: ApprovalItem) {
   if (routePath) {
     router.push(`${routePath}/${item.targetId}?mode=view&from=/approval&tab=${activeTab.value}`)
   }
+}
+
+// 查看待审批报销单的审批流程
+async function handleViewApprovalProcessFromPending(item: ApprovalItem) {
+  // 加载审批记录
+  await loadApprovalRecords(item.targetId)
+
+  // 设置当前审批记录信息
+  currentApprovalRecord.value = {
+    id: item.id,
+    targetId: item.targetId, // 报销单ID
+    type: item.type,
+    title: item.reimbursementInfo?.title || '',
+    amount: item.reimbursementInfo?.amount || 0,
+    applicantName: item.applicantName || '',
+    applicantAvatar: item.applicantAvatar || '',
+    submitTime: item.submitTime,
+    status: item.status,
+    approveTime: '',
+    approver: '',
+    rejectReason: '',
+    payTime: '',
+    paymentUploadTime: '',
+    completedTime: '',
+    paymentProofPath: '',
+    receiptConfirmedBy: '',
+  }
+
+  approvalProcessDialogVisible.value = true
+}
+
+// 查看已通过未付款报销单的审批流程
+async function handleViewApprovalProcessFromUnpaid(item: ReimbursementItem) {
+  // 加载审批记录
+  await loadApprovalRecords(item.id)
+
+  // 设置当前审批记录信息
+  currentApprovalRecord.value = {
+    id: item.id,
+    targetId: item.id, // 报销单ID（已通过未付款的item.id就是报销单ID）
+    type: item.type,
+    title: item.title,
+    amount: item.amount,
+    applicantName: item.applicantName,
+    applicantAvatar: item.applicantAvatar || '',
+    submitTime: '',
+    status: item.status,
+    approveTime: item.approveTime || '',
+    approver: item.approver || '',
+    rejectReason: '',
+    payTime: item.payTime || '',
+    paymentUploadTime: item.paymentUploadTime || '',
+    completedTime: item.completedTime || '',
+    paymentProofPath: item.paymentProofPath || '',
+    receiptConfirmedBy: item.receiptConfirmedBy || '',
+  }
+
+  approvalProcessDialogVisible.value = true
 }
 
 // 查看未付款报销单详情
@@ -1809,9 +2266,10 @@ function handleViewSummaryDetail(row: any) {
 }
 
 // 查看审批流程（从已完成tab）
-function handleViewApprovalProcess(item: ReimbursementItem) {
+async function handleViewApprovalProcess(item: ReimbursementItem) {
   currentApprovalRecord.value = {
     id: item.id,
+    targetId: item.id, // 报销单ID
     type: item.type,
     title: item.title,
     amount: item.amount,
@@ -1826,16 +2284,23 @@ function handleViewApprovalProcess(item: ReimbursementItem) {
     paymentProofPath: item.paymentProofPath,
     receiptConfirmedBy: item.receiptConfirmedBy,
   }
+
+  // 加载审批记录
+  await loadApprovalRecords(item.id)
+
   approvalProcessDialogVisible.value = true
 }
 
 // 查看审批流程（从全部查询tab）
-function handleViewApprovalProcessFromAll(row: AllReimbursementItem) {
+async function handleViewApprovalProcessFromAll(row: AllReimbursementItem) {
   currentApprovalRecord.value = {
     id: row.id,
+    targetId: row.id, // 报销单ID
     type: row.type,
     title: row.title,
     amount: row.amount,
+    totalAmount: row.totalAmount,
+    deductionAmount: row.deductionAmount,
     status: row.status,
     applicantName: row.applicantName,
     submitTime: row.submitTime,
@@ -1848,7 +2313,30 @@ function handleViewApprovalProcessFromAll(row: AllReimbursementItem) {
     paymentProofPath: row.paymentProofPath,
     receiptConfirmedBy: row.receiptConfirmedBy,
   }
+
+  // 加载审批记录
+  await loadApprovalRecords(row.id)
+
   approvalProcessDialogVisible.value = true
+}
+
+// 加载审批记录
+async function loadApprovalRecords(reimbursementId: string) {
+  try {
+    const res = await api.get(`/api/approval/by-target`, {
+      params: {
+        targetId: reimbursementId,
+        targetType: 'reimbursement',
+      },
+    })
+
+    if (res.data.success && res.data.data) {
+      approvalRecords.value = res.data.data.records || []
+    }
+  } catch (error) {
+    console.error('加载审批记录失败:', error)
+    approvalRecords.value = []
+  }
 }
 
 // 预览付款回单
@@ -1864,11 +2352,14 @@ function handleGoToReimbursementDetail() {
     basic: '/basic-reimbursement',
     large: '/large-reimbursement',
     business: '/business-reimbursement',
+    reimbursement_basic: '/basic-reimbursement',
+    reimbursement_large: '/large-reimbursement',
+    reimbursement_business: '/business-reimbursement',
   }
   const routePath = typeMap[currentApprovalRecord.value.type]
   if (routePath) {
     approvalProcessDialogVisible.value = false
-    router.push(`${routePath}/${currentApprovalRecord.value.id}?mode=view&from=/approval&tab=${activeTab.value}`)
+    router.push(`${routePath}/${currentApprovalRecord.value.targetId}?mode=view&from=/approval&tab=${activeTab.value}`)
   }
 }
 
@@ -1916,9 +2407,10 @@ async function loadAllList() {
     if (allFilterForm.status) {
       params.status = allFilterForm.status
     }
-    // 所属区域支持多选，传递数组
+    // 所属区域支持多选，选择父级时自动包含所有子级
     if (allFilterForm.reimbursementScope && allFilterForm.reimbursementScope.length > 0) {
-      params.reimbursementScope = allFilterForm.reimbursementScope.join(',')
+      const expandedScopes = expandScopeSelection(allFilterForm.reimbursementScope)
+      params.reimbursementScope = expandedScopes.join(',')
     }
 
     // 根据日期查询类型设置日期参数
@@ -2102,6 +2594,25 @@ function handleExportAllList() {
   // 转换为数组格式
   const employeeListData = Object.values(employeeSummary)
 
+  // 按报销范围分类统计（仅统计大额和商务报销）
+  const byScopeMap: Record<string, { scope: string; scopeName: string; count: number; amount: number }> = {}
+  allList.value.forEach(item => {
+    // 只统计有报销范围的记录（大额和商务报销）
+    if (item.reimbursementScope && (item.type === 'large' || item.type === 'business')) {
+      if (!byScopeMap[item.reimbursementScope]) {
+        byScopeMap[item.reimbursementScope] = {
+          scope: item.reimbursementScope,
+          scopeName: scopeMap.value[item.reimbursementScope] || item.reimbursementScope,
+          count: 0,
+          amount: 0,
+        }
+      }
+      byScopeMap[item.reimbursementScope].count += 1
+      byScopeMap[item.reimbursementScope].amount += item.amount || 0
+    }
+  })
+  const byScopeData = Object.values(byScopeMap)
+
   // 设置导出数据
   allExportData.value = {
     filterDesc: filterDesc.join(' '),
@@ -2110,6 +2621,7 @@ function handleExportAllList() {
       totalCount: allList.value.length,
       employeeCount: employeeListData.length,
     },
+    byScope: byScopeData.length > 0 ? byScopeData : undefined,
     employees: employeeListData,
   }
 
@@ -2155,6 +2667,15 @@ function handleDownloadAllExcel() {
     rows.push(['分类汇总', '', '', '', '', '', ''])
     allSummary.value.byType.forEach(item => {
       rows.push(['', '', item.typeName, '', item.amount.toFixed(2), `${item.count}笔`, ''])
+    })
+  }
+
+  // 按报销范围汇总（如果有数据）
+  if (allExportData.value.byScope && allExportData.value.byScope.length > 0) {
+    rows.push([])
+    rows.push(['报销范围汇总', '', '', '', '', '', ''])
+    allExportData.value.byScope.forEach(item => {
+      rows.push(['', '', item.scopeName, '', item.amount.toFixed(2), `${item.count}笔`, ''])
     })
   }
 
@@ -2351,7 +2872,7 @@ watch(
 watch(
   () => route.query.tab,
   (newTab) => {
-    if (newTab && typeof newTab === 'string' && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all'].includes(newTab)) {
+    if (newTab && typeof newTab === 'string' && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all', 'invoices'].includes(newTab)) {
       if (activeTab.value !== newTab) {
         activeTab.value = newTab
         // 如果是返回到 all tab，先恢复查询状态
@@ -2364,6 +2885,201 @@ watch(
   }
 )
 
+// ==================== 发票管理方法 ====================
+
+// 查询发票列表
+async function loadInvoiceList() {
+  try {
+    invoiceListLoading.value = true
+    selectedInvoiceIds.value = []
+    const params: any = {}
+
+    if (invoiceFilterForm.userId) {
+      params.userId = invoiceFilterForm.userId
+    }
+    if (invoiceFilterForm.type.length > 0) {
+      params.type = invoiceFilterForm.type.join(',')
+    }
+    if (invoiceFilterForm.reimbursementScope.length > 0) {
+      const expandedScopes = expandScopeSelection(invoiceFilterForm.reimbursementScope)
+      params.reimbursementScope = expandedScopes.join(',')
+    }
+
+    // 日期参数
+    if (invoiceFilterForm.dateQueryType === 'month' && invoiceFilterForm.monthRange && invoiceFilterForm.monthRange[0] && invoiceFilterForm.monthRange[1]) {
+      const [startYear, startMonth] = invoiceFilterForm.monthRange[0].split('-')
+      const [endYear, endMonth] = invoiceFilterForm.monthRange[1].split('-')
+      params.startDate = `${startYear}-${startMonth}-01`
+      const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
+      params.endDate = `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`
+    } else if (invoiceFilterForm.dateQueryType === 'day' && invoiceFilterForm.dateRange && invoiceFilterForm.dateRange[0] && invoiceFilterForm.dateRange[1]) {
+      params.startDate = invoiceFilterForm.dateRange[0]
+      params.endDate = invoiceFilterForm.dateRange[1]
+    }
+
+    const res = await api.get('/api/approval/invoice-management', { params })
+    if (res.data.success) {
+      invoiceList.value = res.data.data
+    } else {
+      ElMessage.error(res.data.message || '查询失败')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '查询失败')
+  } finally {
+    invoiceListLoading.value = false
+  }
+}
+
+function handleQueryInvoiceList() {
+  loadInvoiceList()
+}
+
+function handleResetInvoiceFilter() {
+  invoiceFilterForm.userId = ''
+  invoiceFilterForm.type = []
+  invoiceFilterForm.reimbursementScope = []
+  invoiceFilterForm.dateQueryType = 'month'
+  invoiceFilterForm.dateRange = null
+  invoiceFilterForm.monthRange = null
+  invoiceList.value = []
+  selectedInvoiceIds.value = []
+}
+
+// 选择发票
+function handleInvoiceSelect(id: string, checked: boolean) {
+  if (checked) {
+    if (!selectedInvoiceIds.value.includes(id)) {
+      selectedInvoiceIds.value.push(id)
+    }
+  } else {
+    selectedInvoiceIds.value = selectedInvoiceIds.value.filter(i => i !== id)
+  }
+}
+
+function handleInvoiceSelectAllChange(val: boolean | string | number) {
+  if (val) {
+    selectedInvoiceIds.value = invoiceList.value.map(inv => inv.id)
+  } else {
+    selectedInvoiceIds.value = []
+  }
+}
+
+// 预览发票
+function handlePreviewInvoice(inv: InvoiceManagementItem) {
+  previewInvoicePath.value = inv.filePath
+  invoicePreviewDialogVisible.value = true
+}
+
+// 批量下载
+async function handleBatchDownload() {
+  if (selectedInvoiceIds.value.length === 0) {
+    ElMessage.warning('请选择要下载的发票')
+    return
+  }
+
+  try {
+    batchDownloading.value = true
+    const res = await api.post('/api/approval/invoice-management/batch-download', {
+      invoiceIds: selectedInvoiceIds.value,
+    }, {
+      responseType: 'blob',
+    })
+
+    // 创建下载链接
+    const blob = new Blob([res.data], { type: 'application/zip' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
+    link.download = `发票_${timestamp}.zip`
+    link.click()
+    URL.revokeObjectURL(url)
+
+    ElMessage.success(`已下载 ${selectedInvoiceIds.value.length} 个发票文件`)
+  } catch (err: any) {
+    ElMessage.error('下载失败')
+  } finally {
+    batchDownloading.value = false
+  }
+}
+
+// 批量打印
+function handleBatchPrint() {
+  if (selectedInvoiceIds.value.length === 0) {
+    ElMessage.warning('请选择要打印的发票')
+    return
+  }
+
+  // 获取选中的发票列表
+  printInvoiceList.value = invoiceList.value.filter(inv => selectedInvoiceIds.value.includes(inv.id))
+  printDialogVisible.value = true
+}
+
+// 执行打印
+function executePrint() {
+  // 创建打印窗口
+  const printWindow = window.open('', '_blank')
+  if (!printWindow) {
+    ElMessage.error('无法打开打印窗口，请检查浏览器弹窗设置')
+    return
+  }
+
+  // 构建打印内容
+  let printContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>发票打印</title>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: "Microsoft YaHei", sans-serif; }
+        .print-page { page-break-after: always; padding: 10mm; }
+        .print-page:last-child { page-break-after: auto; }
+        .print-header { font-size: 12px; color: #666; margin-bottom: 8px; display: flex; justify-content: space-between; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+        .print-body { text-align: center; }
+        .print-body img { max-width: 100%; max-height: calc(100vh - 60px); object-fit: contain; }
+        .print-body iframe { width: 100%; height: calc(100vh - 60px); border: none; }
+        @media print {
+          .print-page { padding: 5mm; }
+          .print-header { font-size: 10px; }
+        }
+      </style>
+    </head>
+    <body>
+  `
+
+  for (const inv of printInvoiceList.value) {
+    const isImage = isImageFile(inv.filePath)
+    printContent += `
+      <div class="print-page">
+        <div class="print-header">
+          <span>${inv.userName} - ${inv.reimbursementTypeName} - ¥${inv.amount.toFixed(2)}</span>
+          <span>${inv.invoiceNumber ? '发票号: ' + inv.invoiceNumber : inv.fileType === 'receipt' ? '收据' : ''}</span>
+        </div>
+        <div class="print-body">
+          ${isImage
+            ? `<img src="${window.location.origin}${inv.filePath}" />`
+            : `<iframe src="${window.location.origin}${inv.filePath}"></iframe>`
+          }
+        </div>
+      </div>
+    `
+  }
+
+  printContent += '</body></html>'
+
+  printWindow.document.write(printContent)
+  printWindow.document.close()
+
+  // 等待内容加载完成后打印
+  printWindow.onload = () => {
+    setTimeout(() => {
+      printWindow.print()
+    }, 500)
+  }
+}
+
 onMounted(() => {
   // 加载统计数据
   loadStatistics()
@@ -2372,7 +3088,7 @@ onMounted(() => {
   loadScopeList()
   // 根据URL参数决定默认tab，支持从付款页面返回时定位到正确的tab
   const tab = route.query.tab as string
-  if (tab && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all'].includes(tab)) {
+  if (tab && ['pending', 'approved', 'unpaid', 'paid', 'completed', 'all', 'invoices'].includes(tab)) {
     activeTab.value = tab
     // 如果是返回到 all tab，先恢复查询状态
     if (tab === 'all') {
@@ -2455,11 +3171,6 @@ onMounted(() => {
   color: #E6A23C;
 }
 
-.approved-card .stat-icon {
-  background-color: rgba(103, 194, 58, 0.1);
-  color: #67C23A;
-}
-
 .unpaid-card .stat-icon {
   background-color: rgba(245, 108, 108, 0.1);
   color: #F56C6C;
@@ -2508,6 +3219,7 @@ onMounted(() => {
 .action-buttons {
   display: flex;
   gap: 8px;
+  justify-content: center;
 }
 
 .summary-bar {
@@ -2760,6 +3472,17 @@ onMounted(() => {
   color: #303133;
 }
 
+.export-scope-summary {
+  margin-top: 24px;
+}
+
+.export-scope-summary h4 {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
 .employee-collapse-title {
   display: flex;
   align-items: center;
@@ -2928,6 +3651,118 @@ onMounted(() => {
 .deduction-empty {
   padding: 40px 0;
   text-align: center;
+}
+
+/* 所属区域 cascader 单行不换行 */
+.scope-cascader {
+  line-height: normal;
+}
+
+.scope-cascader :deep(.el-input__wrapper) {
+  flex-wrap: nowrap !important;
+}
+
+.scope-cascader :deep(.el-cascader__tags) {
+  flex-wrap: nowrap !important;
+  overflow: hidden;
+  max-width: calc(100% - 30px);
+  height: 24px;
+}
+
+.scope-cascader :deep(.el-tag) {
+  max-width: 110px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.scope-cascader :deep(.el-tag .el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+
+.scope-cascader :deep(.el-cascader__collapse-tags) {
+  flex-shrink: 0;
+}
+
+.scope-cascader :deep(.el-cascader__collapse-tags .el-tag) {
+  flex-shrink: 0;
+  max-width: none;
+}
+
+/* 发票管理样式 */
+.invoice-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+.action-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.action-right {
+  display: flex;
+  gap: 8px;
+}
+
+.selected-count {
+  font-size: 14px;
+  color: #409eff;
+  font-weight: 500;
+}
+
+/* 批量打印预览样式 */
+.print-preview-container {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.print-item {
+  margin-bottom: 24px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.print-item:last-child {
+  margin-bottom: 0;
+}
+
+.print-item-header {
+  padding: 12px 16px;
+  background: #f5f7fa;
+  border-bottom: 1px solid #dcdfe6;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  color: #606266;
+}
+
+.print-item-content {
+  padding: 16px;
+  text-align: center;
+  background: #fff;
+}
+
+.print-item-image {
+  max-width: 100%;
+  max-height: 400px;
+  object-fit: contain;
+}
+
+.print-item-pdf {
+  width: 100%;
+  height: 400px;
+  border: none;
 }
 </style>
 
