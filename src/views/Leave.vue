@@ -266,7 +266,7 @@ const handleApprove = (row: any) => {
 }
 
 // 取消
-const handleCancel = (row: any) => {
+const handleCancel = (_row: any) => {
   ElMessageBox.confirm('确定要取消这条请假申请吗？', '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',

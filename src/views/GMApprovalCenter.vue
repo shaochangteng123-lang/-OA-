@@ -431,73 +431,20 @@
         <div class="timeline-section">
           <h4 class="section-title">审批流程</h4>
           <el-timeline>
-            <!-- 1. 员工提交 -->
-            <el-timeline-item
-              :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
-              placement="top"
-              type="primary"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">员工提交</div>
-                <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
-              </div>
-            </el-timeline-item>
+            <!-- 待审批时仅显示当前下一步 -->
+            <template v-if="currentApprovalRecord.status === 'pending'">
+              <el-timeline-item
+                :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
+                placement="top"
+                type="primary"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">员工提交</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
+                </div>
+              </el-timeline-item>
 
-            <!-- 2. 审批记录 -->
-            <template v-if="approvalRecords.length > 0">
-              <el-timeline-item
-                v-for="record in approvalRecords"
-                :key="record.id"
-                :timestamp="formatDate(record.actionTime)"
-                placement="top"
-                :type="record.action === 'approve' ? 'success' : 'danger'"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">
-                    {{ record.approverName }}
-                  </div>
-                  <div class="timeline-desc">
-                    <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
-                      {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
-                    </el-tag>
-                  </div>
-                </div>
-              </el-timeline-item>
-            </template>
-            <!-- 如果没有审批记录，显示简化版本 -->
-            <template v-else>
-              <el-timeline-item
-                v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-                placement="top"
-                type="success"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">总经理审批</div>
-                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 审批通过</div>
-                </div>
-              </el-timeline-item>
-              <el-timeline-item
-                v-else-if="currentApprovalRecord.status === 'rejected'"
-                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-                placement="top"
-                type="danger"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">总经理审批</div>
-                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 拒绝了申请</div>
-                  <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
-                    <div class="reject-reason-label">拒绝原因：</div>
-                    <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
-                  </div>
-                </div>
-              </el-timeline-item>
-              <el-timeline-item
-                v-else-if="currentApprovalRecord.status === 'pending'"
-                timestamp="待审批"
-                placement="top"
-                type="warning"
-              >
+              <el-timeline-item timestamp="待审批" placement="top" type="warning">
                 <div class="timeline-content">
                   <div class="timeline-title">总经理审批</div>
                   <div class="timeline-desc">等待总经理审批...</div>
@@ -505,93 +452,149 @@
               </el-timeline-item>
             </template>
 
-            <!-- 3. 财务付款 -->
-            <el-timeline-item
-              :timestamp="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '') : '待处理'"
-              placement="top"
-              :type="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title" :class="{ 'timeline-pending': !['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">财务付款</div>
-                <div class="timeline-desc">
-                  <template v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">财务已付款</template>
-                  <template v-else>等待财务付款...</template>
+            <template v-else>
+              <!-- 1. 员工提交 -->
+              <el-timeline-item
+                :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
+                placement="top"
+                type="primary"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">员工提交</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
                 </div>
-              </div>
-            </el-timeline-item>
+              </el-timeline-item>
 
-            <!-- 4. 上传付款凭证 -->
-            <el-timeline-item
-              :timestamp="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.paymentUploadTime ? formatDate(currentApprovalRecord.paymentUploadTime) : '') : '待处理'"
-              placement="top"
-              :type="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title" :class="{ 'timeline-pending': !['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">上传付款凭证</div>
-                <div class="timeline-desc">
-                  <template v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">
-                    财务已上传付款凭证
-                    <!-- 付款回单展示 -->
-                    <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
-                      <div class="proof-card" @click="paymentProofDialogVisible = true">
-                        <template v-if="isPaymentProofImage">
-                          <img :src="currentApprovalRecord.paymentProofPath" class="proof-image" alt="付款回单" />
-                        </template>
-                        <template v-else>
-                          <div class="proof-pdf">
-                            <el-icon :size="32" color="#409EFF"><Document /></el-icon>
-                            <span>付款回单.pdf</span>
+              <!-- 2. 审批记录 -->
+              <template v-if="approvalRecords.length > 0">
+                <el-timeline-item
+                  v-for="record in approvalRecords"
+                  :key="record.id"
+                  :timestamp="formatDate(record.actionTime)"
+                  placement="top"
+                  :type="record.action === 'approve' ? 'success' : 'danger'"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">
+                      {{ record.approverName }}
+                    </div>
+                    <div class="timeline-desc">
+                      <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
+                        {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </el-timeline-item>
+              </template>
+              <!-- 如果没有审批记录，显示简化版本 -->
+              <template v-else>
+                <el-timeline-item
+                  v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                  placement="top"
+                  type="success"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">总经理审批</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 审批通过</div>
+                  </div>
+                </el-timeline-item>
+                <el-timeline-item
+                  v-else-if="currentApprovalRecord.status === 'rejected'"
+                  :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                  placement="top"
+                  type="danger"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">总经理审批</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 拒绝了申请</div>
+                    <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
+                      <div class="reject-reason-label">拒绝原因：</div>
+                      <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
+                    </div>
+                  </div>
+                </el-timeline-item>
+              </template>
+
+              <!-- 3. 财务付款：approved及之后的状态才显示 -->
+              <el-timeline-item
+                v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '') : '待处理'"
+                placement="top"
+                :type="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title" :class="{ 'timeline-pending': !['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">财务付款</div>
+                  <div class="timeline-desc">
+                    <template v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">财务已付款</template>
+                    <template v-else>等待财务付款...</template>
+                  </div>
+                </div>
+              </el-timeline-item>
+
+              <!-- 4. 上传付款凭证：paying及之后的状态才显示 -->
+              <el-timeline-item
+                v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.paymentUploadTime ? formatDate(currentApprovalRecord.paymentUploadTime) : '') : '待处理'"
+                placement="top"
+                :type="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title" :class="{ 'timeline-pending': !['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">上传付款凭证</div>
+                  <div class="timeline-desc">
+                    <template v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">
+                      财务已上传付款凭证
+                      <!-- 付款回单展示 -->
+                      <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
+                        <div class="proof-card" @click="paymentProofDialogVisible = true">
+                          <template v-if="isPaymentProofImage">
+                            <img :src="currentApprovalRecord.paymentProofPath" class="proof-image" alt="付款回单" />
+                          </template>
+                          <template v-else>
+                            <div class="proof-pdf">
+                              <el-icon :size="32" color="#409EFF"><Document /></el-icon>
+                              <span>付款回单.pdf</span>
+                            </div>
+                          </template>
+                          <div class="proof-overlay">
+                            <el-icon :size="20"><ZoomIn /></el-icon>
+                            <span>点击查看</span>
                           </div>
-                        </template>
-                        <div class="proof-overlay">
-                          <el-icon :size="20"><ZoomIn /></el-icon>
-                          <span>点击查看</span>
                         </div>
                       </div>
-                    </div>
-                  </template>
-                  <template v-else>等待上传付款凭证...</template>
+                    </template>
+                    <template v-else>等待上传付款凭证...</template>
+                  </div>
                 </div>
-              </div>
-            </el-timeline-item>
+              </el-timeline-item>
 
-            <!-- 5. 确认收款/完成 -->
-            <el-timeline-item
-              v-if="currentApprovalRecord.status === 'completed'"
-              :timestamp="currentApprovalRecord.completedTime ? formatDate(currentApprovalRecord.completedTime) : ''"
-              placement="top"
-              type="success"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">付款完成</div>
-                <div class="timeline-desc">报销流程已完成</div>
-                <div v-if="currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
-                  {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
+              <!-- 5. 确认收款/完成：payment_uploaded及之后的状态才显示 -->
+              <el-timeline-item
+                v-if="currentApprovalRecord.status === 'completed'"
+                :timestamp="currentApprovalRecord.completedTime ? formatDate(currentApprovalRecord.completedTime) : ''"
+                placement="top"
+                type="success"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">付款完成</div>
+                  <div class="timeline-desc">报销流程已完成</div>
+                  <div v-if="currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
+                    {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
+                  </div>
                 </div>
-              </div>
-            </el-timeline-item>
-            <el-timeline-item
-              v-else-if="currentApprovalRecord.status === 'payment_uploaded'"
-              timestamp="待确认收款"
-              placement="top"
-              type="warning"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title">待确认收款</div>
-                <div class="timeline-desc">等待员工确认收款...</div>
-              </div>
-            </el-timeline-item>
-            <el-timeline-item
-              v-else
-              timestamp="待处理"
-              placement="top"
-              type="info"
-            >
-              <div class="timeline-content">
-                <div class="timeline-title timeline-pending">确认收款</div>
-                <div class="timeline-desc">等待员工确认收款...</div>
-              </div>
-            </el-timeline-item>
+              </el-timeline-item>
+              <el-timeline-item
+                v-else-if="currentApprovalRecord.status === 'payment_uploaded'"
+                timestamp="待确认收款"
+                placement="top"
+                type="warning"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">待确认收款</div>
+                  <div class="timeline-desc">等待员工确认收款...</div>
+                </div>
+              </el-timeline-item>
+            </template>
           </el-timeline>
         </div>
       </div>
@@ -720,6 +723,8 @@ interface ApprovalItem {
     title: string
     amount: number
   }
+  paymentUploadTime?: string
+  paymentProofPath?: string
 }
 
 interface ReimbursementItem {
@@ -732,14 +737,17 @@ interface ReimbursementItem {
   statusName: string
   applicantName: string
   applicantAvatar?: string
+  applicantDepartment?: string
   approveTime?: string
   approver?: string
   payTime?: string
   completedTime?: string
-  submitTime?: string
+  submitTime: string
   userId: string
   reimbursementScope?: string
   createdAt: string
+  paymentProofPath?: string
+  paymentUploadTime?: string
 }
 
 interface Statistics {
@@ -750,13 +758,6 @@ interface Statistics {
   completedCount: number
   completedAmount: number
   currentMonth: string
-}
-
-interface ApprovalRecord {
-  action: string
-  approverName: string
-  comment?: string
-  createdAt: string
 }
 
 interface ApprovalProcessRecord {
@@ -985,7 +986,6 @@ const rejectFormRules: FormRules = {
 
 // 审批流程对话框
 const approvalProcessDialogVisible = ref(false)
-const approvalProcessList = ref<ApprovalRecord[]>([])
 const currentApprovalRecord = ref<ApprovalProcessRecord | null>(null)
 const approvalRecords = ref<ApprovalRecordItem[]>([])
 
@@ -1471,19 +1471,13 @@ function getStatusLabel(status: string) {
 }
 
 // 获取类型标签类型
-function getTypeTagType(type: string) {
-  const typeMap: Record<string, string> = {
+function getTypeTagType(type: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
+  const typeMap: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'primary'> = {
     basic: 'success',
     large: 'warning',
     business: 'primary',
   }
   return typeMap[type] || 'info'
-}
-
-// 获取报销范围标签
-function getScopeLabel(scope?: string) {
-  if (!scope) return '-'
-  return scopeMap.value[scope] || scope
 }
 
 // 初始化

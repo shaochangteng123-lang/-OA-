@@ -374,10 +374,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { Document, Download, View, Folder, Clock } from '@element-plus/icons-vue'
+import { Document, Download, View, Clock } from '@element-plus/icons-vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/utils/api'
@@ -708,7 +708,7 @@ const handleSubmit = async () => {
 
 // 预览对话框
 const previewDialogVisible = ref(false)
-const previewFile = ref<{ name: string; url: string } | null>(null)
+const previewFile = ref<{ id: string; name: string; url: string } | null>(null)
 
 // 判断是否为图片文件
 const isImageFile = (filename?: string) => {

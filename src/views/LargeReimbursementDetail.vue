@@ -39,7 +39,7 @@
             class="reimbursement-form"
           >
             <el-form-item label="报销月份">
-              <el-input v-model="reimbursementMonth" disabled />
+              <el-input :model-value="reimbursementMonthDisplay || reimbursementMonth" disabled />
             </el-form-item>
 
             <el-form-item label="报销范围/区域">
@@ -220,6 +220,9 @@ const fetchScopeOptions = async () => {
   }
 }
 
+// 报销月份（从详情接口获取真实值，新建时使用当前月份）
+const reimbursementMonthDisplay = ref('')
+
 // 计算属性
 const { pageMode, isReadonly, reimbursementMonth } = reimbursement
 
@@ -350,6 +353,11 @@ async function loadDetail(): Promise<void> {
   formData.category = data.category || ''
   formData.description = data.description || ''
 
+  // 设置报销月份（使用接口返回的真实月份）
+  if ((data as any).reimbursementMonth) {
+    reimbursementMonthDisplay.value = (data as any).reimbursementMonth
+  }
+
   // 设置报销范围/区域
   if ((data as any).reimbursementScope) {
     const scopeValue = (data as any).reimbursementScope
@@ -389,9 +397,9 @@ async function loadDetail(): Promise<void> {
 
 // 组件挂载
 onMounted(async () => {
-  fetchScopeOptions()
+  await fetchScopeOptions()
   if (reimbursement.reimbursementId.value) {
-    loadDetail()
+    await loadDetail()
   }
 })
 </script>

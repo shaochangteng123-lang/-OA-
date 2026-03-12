@@ -98,7 +98,7 @@ watch(fileList, (val) => {
 }, { deep: true })
 
 // 拖拽进入
-function handleDragOver(e: DragEvent): void {
+function handleDragOver(_e: DragEvent): void {
   if (props.disabled) return
   isDragging.value = true
 }

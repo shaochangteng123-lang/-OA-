@@ -39,7 +39,7 @@
             class="reimbursement-form"
           >
             <el-form-item label="报销月份">
-              <el-input v-model="reimbursementMonth" disabled />
+              <el-input :model-value="displayMonth" disabled />
             </el-form-item>
 
             <el-form-item label="报销范围/区域">
@@ -62,7 +62,7 @@
                 theme-color="#67c23a"
                 @file-change="handleFileChange"
                 @delete-file="handleDeleteFile"
-                @exceed="invoice.handleExceed"
+                @exceed="() => ElMessage.warning('超出最大上传数量限制')"
               />
             </el-form-item>
 
@@ -164,11 +164,10 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 // 导入 composables
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
-import { UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
 
 // 使用 composables
-const invoice = useInvoice(UPLOAD_CONFIG.LARGE_MAX_FILES)
+const invoice = useInvoice()
 const reimbursement = useReimbursement('business', '/business-reimbursement')
 
 // 表单数据
@@ -233,6 +232,12 @@ const fetchScopeOptions = async () => {
     console.error('获取报销范围配置失败:', error)
   }
 }
+
+// 报销月份（从详情接口获取真实值，新建时使用当前月份）
+const reimbursementMonthDisplay = ref('')
+
+// 显示用的报销月份（优先使用接口返回的真实月份）
+const displayMonth = computed(() => reimbursementMonthDisplay.value || reimbursementMonth.value)
 
 // 计算属性
 const { pageMode, isReadonly, reimbursementMonth } = reimbursement
@@ -362,6 +367,11 @@ async function loadDetail(): Promise<void> {
   formData.client = (data as any).client || (data as any).serviceTarget || ''
   formData.description = data.description || ''
 
+  // 设置报销月份（使用接口返回的真实月份）
+  if ((data as any).reimbursementMonth) {
+    reimbursementMonthDisplay.value = (data as any).reimbursementMonth
+  }
+
   // 设置报销范围/区域
   if ((data as any).reimbursementScope) {
     const scopeValue = (data as any).reimbursementScope
@@ -406,9 +416,9 @@ async function loadDetail(): Promise<void> {
 
 // 组件挂载
 onMounted(async () => {
-  fetchScopeOptions()
+  await fetchScopeOptions()
   if (reimbursement.reimbursementId.value) {
-    loadDetail()
+    await loadDetail()
   }
 })
 </script>

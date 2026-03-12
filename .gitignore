@@ -33,10 +33,14 @@ backup/
 .DS_Store
 Thumbs.db
 *.tmp
-*.temp# 缓存
+*.temp
+
+# 缓存
 .vite-cache/
 .cache/
-*.cache# 测试覆盖率
+*.cache
+
+# 测试覆盖率
 coverage/
 .nyc_output/
 
@@ -48,7 +52,9 @@ logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*# 临时文件
+yarn-error.log*
+
+# 临时文件
 tmp/
 temp/
 *.bak
@@ -57,6 +63,12 @@ temp/
 *.backup
 
 # 上传的文件
-uploads/invoices/*.pdf# 配置文件（敏感信息）
+uploads/invoices/*.pdf
+uploads/invoices/*.jpg
+
+# OCR 训练数据
+*.traineddata
+
+# 配置文件（敏感信息）
 *.local.json
 .claude/

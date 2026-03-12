@@ -1211,7 +1211,7 @@ const handleUpload = async (fileTypeId: string, file: File) => {
 }
 
 // 删除文件
-const handleRemoveFile = (fileTypeId: string, fileId: string, fileName: string) => {
+const handleRemoveFile = (_fileTypeId: string, fileId: string, fileName: string) => {
   ElMessageBox.confirm(
     `确定要删除文件「${fileName}」吗？删除后员工将无法下载此文件。`,
     '删除确认',
@@ -1244,24 +1244,6 @@ const getGenderText = (gender: string | null) => {
     female: '女',
   }
   return gender ? textMap[gender] || gender : '-'
-}
-
-// 获取状态类型（入职信息提交状态）
-const getStatusType = (status: string) => {
-  const typeMap: Record<string, any> = {
-    submitted: 'success',
-    draft: 'info',
-  }
-  return typeMap[status] || 'info'
-}
-
-// 获取状态文本（入职信息提交状态）
-const getStatusText = (status: string) => {
-  const textMap: Record<string, string> = {
-    submitted: '已提交',
-    draft: '草稿',
-  }
-  return textMap[status] || status
 }
 
 // 获取在职状态类型

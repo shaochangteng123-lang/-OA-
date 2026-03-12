@@ -313,7 +313,6 @@ import {
   List,
   Clock,
   Stamp,
-  Checked,
 } from '@element-plus/icons-vue'
 import SidebarHeader from './components/SidebarHeader.vue'
 import SidebarMenuItem from './components/SidebarMenuItem.vue'
@@ -356,11 +355,6 @@ const isAdmin = computed(() => {
 // 是否是总经理
 const isGeneralManager = computed(() => {
   return authStore.user?.role === 'general_manager'
-})
-
-// 是否是超级管理员
-const isSuperAdmin = computed(() => {
-  return authStore.user?.role === 'super_admin'
 })
 
 // 页面标题

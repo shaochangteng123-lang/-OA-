@@ -12,6 +12,7 @@ export interface User {
   status: 'active' | 'inactive'
   department: string | null
   position: string | null
+  employee_no: string | null
   bank_account_name: string | null
   bank_account_phone: string | null
   bank_name: string | null
@@ -21,7 +22,7 @@ export interface User {
   last_login_at: string | null
 }
 
-export interface UserRow extends User {}
+export type UserRow = User
 
 export interface Project {
   id: string

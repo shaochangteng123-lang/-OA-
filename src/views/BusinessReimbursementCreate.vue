@@ -100,7 +100,6 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入工具函数和常量
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
-import { UPLOAD_CONFIG } from '@/utils/reimbursement/constants'
 import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
 import { api } from '@/utils/api'
 

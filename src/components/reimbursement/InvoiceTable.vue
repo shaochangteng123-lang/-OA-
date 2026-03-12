@@ -1,6 +1,6 @@
 <template>
   <div class="invoice-table-wrapper">
-    <el-table :data="invoiceList" border class="invoice-table" :max-height="null">
+    <el-table :data="invoiceList" border class="invoice-table">
       <el-table-column prop="id" label="序号" width="50" align="center">
         <template #default="{ $index }">
           {{ $index + 1 }}

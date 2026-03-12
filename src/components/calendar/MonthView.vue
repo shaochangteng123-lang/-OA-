@@ -144,7 +144,7 @@ watch(clearSelectionSignal, () => {
 let miniCalendarClickTimer: ReturnType<typeof setTimeout> | null = null
 let miniCalendarFadeTimer: ReturnType<typeof setTimeout> | null = null
 
-watch(selectedDate, (newDate, oldDate) => {
+watch(selectedDate, (newDate, _oldDate) => {
   // 如果是双击触发的变化，不处理（双击有自己的高亮逻辑）
   if (doubleClickSelectedDate.value) return
 

@@ -189,7 +189,7 @@
                 <!-- 2. 审批历史记录 -->
                 <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
                   <el-timeline-item
-                    v-for="(record, index) in currentApprovalRecord.approvalHistory"
+                    v-for="record in currentApprovalRecord.approvalHistory"
                     :key="record.id"
                     :timestamp="record.actionTime"
                     placement="top"

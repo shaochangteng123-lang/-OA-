@@ -376,7 +376,7 @@ function getRoleTagType(role: string): ElementPlusTagType {
   const roleMap: Record<string, ElementPlusTagType> = {
     super_admin: 'danger',
     admin: 'warning',
-    general_manager: '',
+    general_manager: 'info',
     user: 'primary',
     guest: 'info',
   }

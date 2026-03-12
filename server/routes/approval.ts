@@ -19,29 +19,46 @@ router.get('/statistics', requireAdmin, (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    // 1. 待办数量（包括待审批和已通过待付款的报销）
-    const pendingCount = db.prepare(`
+    // 1. 待办数量（所有未完成的流程：待审批、待付款、付款中、待确认收款，排除商务报销）
+    const pendingApproval = db.prepare(`
       SELECT COUNT(*) as count FROM approval_instances ai
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE (ai.status = 'pending' OR (ai.status = 'approved' AND r.status = 'approved'))
+      WHERE ai.status != 'rejected'
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
       AND (ai.target_type != 'reimbursement' OR r.type != 'business')
+      AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
     `).get() as { count: number }
 
-    // 2. 审批通过但未付款的报销单数量（status = 'approved' 的报销单）
+    // 2. 按报销类型统计当月数量和金额（基础报销、大额报销、商务报销）
+    const typeStats = db.prepare(`
+      SELECT
+        r.type,
+        COUNT(*) as count,
+        COALESCE(SUM(r.total_amount - COALESCE(r.deduction_amount, 0)), 0) as amount
+      FROM reimbursements r
+      WHERE r.created_at >= ? AND r.created_at <= ?
+      GROUP BY r.type
+    `).all(monthStart, monthEnd) as Array<{ type: string; count: number; amount: number }>
+
+    const typeStatsMap: Record<string, { count: number; amount: number }> = {}
+    for (const stat of typeStats) {
+      typeStatsMap[stat.type] = { count: stat.count, amount: stat.amount }
+    }
+
+    // 3. 已通过未付款数量（兼容旧逻辑）
     const approvedUnpaid = db.prepare(`
       SELECT COUNT(*) as count FROM reimbursements
       WHERE status = 'approved'
     `).get() as { count: number }
 
-    // 3. 本月已付款数量（包括待确认收款和已完成）
+    // 4. 本月已付款数量（包括待确认收款和已完成）
     const paidThisMonth = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
       WHERE status IN ('paying', 'payment_uploaded', 'completed')
       AND pay_time >= ? AND pay_time <= ?
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
-    // 4. 本月已完成数量（员工已确认收款）
+    // 5. 本月已完成数量（员工已确认收款）
     const completedThisMonth = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
       WHERE status = 'completed'
@@ -51,13 +68,17 @@ router.get('/statistics', requireAdmin, (req, res) => {
     res.json({
       success: true,
       data: {
-        pendingCount: pendingCount.count,
+        pendingCount: pendingApproval.count,
         approvedUnpaid: approvedUnpaid.count,
         paidThisMonth: paidThisMonth.count,
         paidThisMonthAmount: paidThisMonth.amount,
         completedThisMonth: completedThisMonth.count,
         completedThisMonthAmount: completedThisMonth.amount,
         currentMonth: `${now.getFullYear()}年${now.getMonth() + 1}月`,
+        // 按类型统计当月数据
+        basicStats: typeStatsMap['basic'] || { count: 0, amount: 0 },
+        largeStats: typeStatsMap['large'] || { count: 0, amount: 0 },
+        businessStats: typeStatsMap['business'] || { count: 0, amount: 0 },
       },
     })
   } catch (error) {
@@ -340,10 +361,10 @@ router.get('/by-target', requireAuth, (req, res) => {
 // 获取待我审批的列表
 router.get('/pending', requireAdmin, (req, res) => {
   try {
-    // 待办列表包含：
-    // 1. 所有待审批的报销（status = 'pending'）
-    // 2. 所有已通过待付款的报销（status = 'approved'）
-    // 管理员不审批商务报销（type='business'），只审批基础报销和大额报销
+    // 待办列表包含除已完成(completed)外的所有状态：
+    // pending(待审批)、approved(待付款)、paying(付款中)、payment_uploaded(待确认收款)
+    // 排除商务报销（管理员不审批商务报销）
+    // 排序：待审批 → 待支付 → 待确认，同状态按提交时间倒序
     const instances = db.prepare(`
       SELECT
         ai.*,
@@ -351,15 +372,26 @@ router.get('/pending', requireAdmin, (req, res) => {
         u.avatar_url as applicant_avatar,
         r.title as reimbursement_title,
         r.total_amount as reimbursement_amount,
-        r.status as reimbursement_status
+        r.deduction_amount as reimbursement_deduction,
+        r.status as reimbursement_status,
+        r.user_id as reimbursement_user_id
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE (ai.status = 'pending' OR (ai.status = 'approved' AND r.status = 'approved'))
+      WHERE ai.status != 'rejected'
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
       AND (ai.target_type != 'reimbursement' OR r.type != 'business')
-      ORDER BY ai.submit_time DESC
-    `).all() as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_status: string | null }>
+      AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
+      ORDER BY
+        CASE
+          WHEN ai.status = 'pending' THEN 1
+          WHEN ai.status = 'approved' AND r.status = 'approved' THEN 2
+          WHEN r.status = 'paying' THEN 3
+          WHEN r.status = 'payment_uploaded' THEN 4
+          ELSE 5
+        END,
+        ai.submit_time DESC
+    `).all() as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_deduction: number | null; reimbursement_status: string | null; reimbursement_user_id: string | null }>
 
     res.json({
       success: true,
@@ -373,12 +405,14 @@ router.get('/pending', requireAdmin, (req, res) => {
         applicantAvatar: instance.applicant_avatar,
         currentStep: instance.current_step,
         status: instance.status,
+        reimbursementStatus: instance.reimbursement_status,
         submitTime: instance.submit_time,
         createdAt: instance.created_at,
         reimbursementInfo: instance.target_type === 'reimbursement' && instance.reimbursement_title ? {
           title: instance.reimbursement_title,
-          amount: instance.reimbursement_amount || 0,
+          amount: (instance.reimbursement_amount || 0) - (instance.reimbursement_deduction || 0),
         } : null,
+        reimbursementUserId: instance.reimbursement_user_id,
       })),
     })
   } catch (error) {
@@ -915,12 +949,9 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
       })
     }
 
-    let startDateStr: string
-    let endDateStr: string
+    const startDateStr: string = finalStartDate
+    const endDateStr: string = finalEndDate
     let period: string
-
-    startDateStr = finalStartDate
-    endDateStr = finalEndDate
 
     // 生成 period 文本，用于前端显示
     const [startY, startM, startD] = startDateStr.split('-')
@@ -1232,6 +1263,8 @@ router.get('/gm-completed', requireAuth, (req, res) => {
         r.completed_time,
         r.user_id,
         r.created_at as submit_time,
+        r.payment_proof_path,
+        r.payment_upload_time,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar
       FROM reimbursements r
@@ -1253,6 +1286,8 @@ router.get('/gm-completed', requireAuth, (req, res) => {
       completed_time: string | null
       user_id: string
       submit_time: string | null
+      payment_proof_path: string | null
+      payment_upload_time: string | null
       applicant_name: string
       applicant_avatar: string | null
     }>
@@ -1271,6 +1306,8 @@ router.get('/gm-completed', requireAuth, (req, res) => {
       completedTime: item.completed_time,
       submitTime: item.submit_time,
       userId: item.user_id,
+      paymentProofPath: item.payment_proof_path,
+      paymentUploadTime: item.payment_upload_time,
     }))
 
     res.json({
@@ -1413,6 +1450,229 @@ router.get('/gm-all', requireAuth, (req, res) => {
       success: false,
       message: '获取全部查询列表失败',
     })
+  }
+})
+
+// ==================== 发票管理 API ====================
+
+// 发票管理 - 查询发票列表
+router.get('/invoice-management', requireAdmin, (req, res) => {
+  try {
+    const { userId, type, reimbursementScope, startDate, endDate } = req.query
+
+    let whereClause = 'WHERE r.status IN (\'approved\', \'paying\', \'payment_uploaded\', \'completed\')'
+    const params: any[] = []
+
+    // 员工筛选
+    if (userId) {
+      whereClause += ' AND r.user_id = ?'
+      params.push(userId)
+    }
+
+    // 类型筛选（支持多选，逗号分隔）
+    if (type) {
+      const types = String(type).split(',').filter(t => t.trim())
+      if (types.length > 0) {
+        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
+        params.push(...types)
+      }
+    }
+
+    // 所属区域筛选（支持多选，逗号分隔）
+    if (reimbursementScope) {
+      const scopes = String(reimbursementScope).split(',').filter(s => s.trim())
+      if (scopes.length > 0) {
+        whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
+        params.push(...scopes)
+      }
+    }
+
+    // 日期范围筛选（按提交时间）
+    if (startDate) {
+      whereClause += ' AND r.submit_time >= ?'
+      params.push(startDate)
+    }
+
+    if (endDate) {
+      whereClause += ' AND r.submit_time <= ?'
+      params.push(endDate + ' 23:59:59')
+    }
+
+    // 查询发票列表
+    const invoices = db.prepare(`
+      SELECT
+        ri.id,
+        ri.reimbursement_id,
+        ri.amount,
+        ri.invoice_date,
+        ri.invoice_number,
+        ri.file_path,
+        ri.category,
+        ri.deducted_amount,
+        ri.seller,
+        ri.buyer,
+        ri.created_at,
+        r.type as reimbursement_type,
+        r.title as reimbursement_title,
+        r.user_id,
+        r.reimbursement_scope,
+        r.status as reimbursement_status,
+        r.submit_time,
+        u.name as user_name,
+        u.department as user_department
+      FROM reimbursement_invoices ri
+      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
+      LEFT JOIN users u ON r.user_id = u.id
+      ${whereClause}
+      ORDER BY ri.invoice_date DESC, ri.created_at DESC
+    `).all(...params) as Array<any>
+
+    // 类型映射
+    const typeMap: Record<string, string> = {
+      basic: '基础报销',
+      large: '大额报销',
+      business: '商务报销',
+    }
+
+    // 判断文件类型（发票 PDF 或收据图片）
+    const getFileType = (filePath: string) => {
+      const lowerPath = filePath.toLowerCase()
+      if (lowerPath.includes('receipt-')) {
+        return 'receipt' // 收据/无票
+      }
+      return 'invoice' // 发票
+    }
+
+    res.json({
+      success: true,
+      data: invoices.map(inv => ({
+        id: inv.id,
+        reimbursementId: inv.reimbursement_id,
+        amount: inv.amount,
+        invoiceDate: inv.invoice_date,
+        invoiceNumber: inv.invoice_number,
+        filePath: inv.file_path,
+        fileType: getFileType(inv.file_path),
+        category: inv.category,
+        deductedAmount: inv.deducted_amount || 0,
+        seller: inv.seller,
+        buyer: inv.buyer,
+        reimbursementType: inv.reimbursement_type,
+        reimbursementTypeName: typeMap[inv.reimbursement_type] || inv.reimbursement_type,
+        reimbursementTitle: inv.reimbursement_title,
+        reimbursementScope: inv.reimbursement_scope,
+        reimbursementStatus: inv.reimbursement_status,
+        submitTime: inv.submit_time,
+        userId: inv.user_id,
+        userName: inv.user_name,
+        userDepartment: inv.user_department,
+        createdAt: inv.created_at,
+      })),
+    })
+  } catch (error) {
+    console.error('查询发票列表失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '查询发票列表失败',
+    })
+  }
+})
+
+// 发票管理 - 批量下载发票（ZIP打包）
+router.post('/invoice-management/batch-download', requireAdmin, async (req, res) => {
+  try {
+    const { invoiceIds } = req.body
+
+    if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择要下载的发票',
+      })
+    }
+
+    // 查询发票信息
+    const placeholders = invoiceIds.map(() => '?').join(',')
+    const invoices = db.prepare(`
+      SELECT
+        ri.id,
+        ri.file_path,
+        ri.invoice_number,
+        ri.invoice_date,
+        ri.reimbursement_id,
+        r.type as reimbursement_type,
+        u.name as user_name
+      FROM reimbursement_invoices ri
+      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
+      LEFT JOIN users u ON r.user_id = u.id
+      WHERE ri.id IN (${placeholders})
+    `).all(...invoiceIds) as Array<any>
+
+    if (invoices.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: '未找到发票',
+      })
+    }
+
+    // 动态导入 archiver
+    const archiver = (await import('archiver')).default
+    const path = (await import('path')).default
+    const fs = (await import('fs')).default
+
+    // 设置响应头
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="invoices_${timestamp}.zip"`)
+
+    // 创建 ZIP 归档
+    const archive = archiver('zip', {
+      zlib: { level: 9 }, // 最高压缩级别
+    })
+
+    // 监听错误
+    archive.on('error', (err) => {
+      console.error('ZIP 创建失败:', err)
+      res.status(500).json({
+        success: false,
+        message: 'ZIP 创建失败',
+      })
+    })
+
+    // 将 ZIP 流输出到响应
+    archive.pipe(res)
+
+    // 添加文件到 ZIP
+    for (const inv of invoices) {
+      const filePath = path.join(process.cwd(), inv.file_path)
+
+      // 检查文件是否存在
+      if (!fs.existsSync(filePath)) {
+        console.warn(`文件不存在: ${filePath}`)
+        continue
+      }
+
+      // 生成文件名：员工姓名_发票日期_发票号码.扩展名
+      const ext = path.extname(inv.file_path)
+      const fileName = inv.invoice_number
+        ? `${inv.user_name}_${inv.invoice_date}_${inv.invoice_number}${ext}`
+        : `${inv.user_name}_${inv.invoice_date}_${inv.id}${ext}`
+
+      // 添加文件到 ZIP
+      archive.file(filePath, { name: fileName })
+    }
+
+    // 完成 ZIP 归档
+    await archive.finalize()
+
+    console.log(`✅ 批量下载发票成功: ${invoices.length} 个文件`)
+  } catch (error) {
+    console.error('批量下载发票失败:', error)
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: '批量下载发票失败',
+      })
+    }
   }
 })
 
@@ -1752,227 +2012,6 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
       success: false,
       message: '撤销审批失败',
     })
-  }
-})
-
-// ==================== 发票管理 API ====================
-
-// 发票管理 - 查询发票列表
-router.get('/invoice-management', requireAdmin, (req, res) => {
-  try {
-    const { userId, type, reimbursementScope, startDate, endDate } = req.query
-
-    let whereClause = 'WHERE r.status IN (\'approved\', \'paying\', \'payment_uploaded\', \'completed\')'
-    const params: any[] = []
-
-    // 员工筛选
-    if (userId) {
-      whereClause += ' AND r.user_id = ?'
-      params.push(userId)
-    }
-
-    // 类型筛选（支持多选，逗号分隔）
-    if (type) {
-      const types = String(type).split(',').filter(t => t.trim())
-      if (types.length > 0) {
-        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
-        params.push(...types)
-      }
-    }
-
-    // 所属区域筛选（支持多选，逗号分隔）
-    if (reimbursementScope) {
-      const scopes = String(reimbursementScope).split(',').filter(s => s.trim())
-      if (scopes.length > 0) {
-        whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
-        params.push(...scopes)
-      }
-    }
-
-    // 日期范围筛选（按发票日期）
-    if (startDate) {
-      whereClause += ' AND ri.invoice_date >= ?'
-      params.push(startDate)
-    }
-
-    if (endDate) {
-      whereClause += ' AND ri.invoice_date <= ?'
-      params.push(endDate)
-    }
-
-    // 查询发票列表
-    const invoices = db.prepare(`
-      SELECT
-        ri.id,
-        ri.reimbursement_id,
-        ri.amount,
-        ri.invoice_date,
-        ri.invoice_number,
-        ri.file_path,
-        ri.category,
-        ri.deducted_amount,
-        ri.seller,
-        ri.buyer,
-        ri.created_at,
-        r.type as reimbursement_type,
-        r.title as reimbursement_title,
-        r.user_id,
-        r.reimbursement_scope,
-        r.status as reimbursement_status,
-        u.name as user_name,
-        u.department as user_department
-      FROM reimbursement_invoices ri
-      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
-      LEFT JOIN users u ON r.user_id = u.id
-      ${whereClause}
-      ORDER BY ri.invoice_date DESC, ri.created_at DESC
-    `).all(...params) as Array<any>
-
-    // 类型映射
-    const typeMap: Record<string, string> = {
-      basic: '基础报销',
-      large: '大额报销',
-      business: '商务报销',
-    }
-
-    // 判断文件类型（发票 PDF 或收据图片）
-    const getFileType = (filePath: string) => {
-      const lowerPath = filePath.toLowerCase()
-      if (lowerPath.includes('receipt-')) {
-        return 'receipt' // 收据/无票
-      }
-      return 'invoice' // 发票
-    }
-
-    res.json({
-      success: true,
-      data: invoices.map(inv => ({
-        id: inv.id,
-        reimbursementId: inv.reimbursement_id,
-        amount: inv.amount,
-        invoiceDate: inv.invoice_date,
-        invoiceNumber: inv.invoice_number,
-        filePath: inv.file_path,
-        fileType: getFileType(inv.file_path),
-        category: inv.category,
-        deductedAmount: inv.deducted_amount || 0,
-        seller: inv.seller,
-        buyer: inv.buyer,
-        reimbursementType: inv.reimbursement_type,
-        reimbursementTypeName: typeMap[inv.reimbursement_type] || inv.reimbursement_type,
-        reimbursementTitle: inv.reimbursement_title,
-        reimbursementScope: inv.reimbursement_scope,
-        reimbursementStatus: inv.reimbursement_status,
-        userId: inv.user_id,
-        userName: inv.user_name,
-        userDepartment: inv.user_department,
-        createdAt: inv.created_at,
-      })),
-    })
-  } catch (error) {
-    console.error('查询发票列表失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '查询发票列表失败',
-    })
-  }
-})
-
-// 发票管理 - 批量下载发票（ZIP打包）
-router.post('/invoice-management/batch-download', requireAdmin, async (req, res) => {
-  try {
-    const { invoiceIds } = req.body
-
-    if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: '请选择要下载的发票',
-      })
-    }
-
-    // 查询发票信息
-    const placeholders = invoiceIds.map(() => '?').join(',')
-    const invoices = db.prepare(`
-      SELECT
-        ri.id,
-        ri.file_path,
-        ri.invoice_number,
-        ri.invoice_date,
-        ri.reimbursement_id,
-        r.type as reimbursement_type,
-        u.name as user_name
-      FROM reimbursement_invoices ri
-      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
-      LEFT JOIN users u ON r.user_id = u.id
-      WHERE ri.id IN (${placeholders})
-    `).all(...invoiceIds) as Array<any>
-
-    if (invoices.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: '未找到发票',
-      })
-    }
-
-    // 动态导入 archiver
-    const archiver = (await import('archiver')).default
-    const path = (await import('path')).default
-    const fs = (await import('fs')).default
-
-    // 设置响应头
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19)
-    res.setHeader('Content-Type', 'application/zip')
-    res.setHeader('Content-Disposition', `attachment; filename="invoices_${timestamp}.zip"`)
-
-    // 创建 ZIP 归档
-    const archive = archiver('zip', {
-      zlib: { level: 9 }, // 最高压缩级别
-    })
-
-    // 监听错误
-    archive.on('error', (err) => {
-      console.error('ZIP 创建失败:', err)
-      res.status(500).json({
-        success: false,
-        message: 'ZIP 创建失败',
-      })
-    })
-
-    // 将 ZIP 流输出到响应
-    archive.pipe(res)
-
-    // 添加文件到 ZIP
-    for (const inv of invoices) {
-      const filePath = path.join(process.cwd(), inv.file_path)
-
-      // 检查文件是否存在
-      if (!fs.existsSync(filePath)) {
-        console.warn(`文件不存在: ${filePath}`)
-        continue
-      }
-
-      // 生成文件名：员工姓名_发票日期_发票号码.扩展名
-      const ext = path.extname(inv.file_path)
-      const fileName = inv.invoice_number
-        ? `${inv.user_name}_${inv.invoice_date}_${inv.invoice_number}${ext}`
-        : `${inv.user_name}_${inv.invoice_date}_${inv.id}${ext}`
-
-      // 添加文件到 ZIP
-      archive.file(filePath, { name: fileName })
-    }
-
-    // 完成 ZIP 归档
-    await archive.finalize()
-
-    console.log(`✅ 批量下载发票成功: ${invoices.length} 个文件`)
-  } catch (error) {
-    console.error('批量下载发票失败:', error)
-    if (!res.headersSent) {
-      res.status(500).json({
-        success: false,
-        message: '批量下载发票失败',
-      })
-    }
   }
 })
 

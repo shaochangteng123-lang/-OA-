@@ -450,7 +450,7 @@ function handleUpdateDisplayDays(days: number) {
 }
 
 // 优化模块19：处理全天状态变化，更新框选范围
-function handleAllDayChange(allDay: boolean, startDate: string, endDate: string) {
+function handleAllDayChange(allDay: boolean, startDate: string, _endDate: string) {
   allDaySignal.value = { allDay, date: startDate }
 }
 

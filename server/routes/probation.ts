@@ -1,4 +1,3 @@
-/// <reference path="../types/express-session.d.ts" />
 import { Router } from 'express'
 import multer from 'multer'
 import fs from 'fs'
@@ -384,7 +383,7 @@ router.get('/my-status', requireAuth, (req, res) => {
     }
 
     // 获取转正申请
-    let confirmation = db.prepare(`
+    const confirmation = db.prepare(`
       SELECT * FROM probation_confirmations WHERE employee_id = ?
     `).get(profile.id) as ProbationConfirmation | undefined
 

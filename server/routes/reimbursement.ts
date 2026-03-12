@@ -1870,6 +1870,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
           reimbursement_scope as reimbursementScope,
+          reimbursement_month as reimbursementMonth,
+          service_target as serviceTarget,
           created_at as createTime, updated_at as updateTime
         FROM reimbursements
         WHERE id = ?
@@ -1891,6 +1893,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
           reimbursement_scope as reimbursementScope,
+          reimbursement_month as reimbursementMonth,
+          service_target as serviceTarget,
           created_at as createTime, updated_at as updateTime
         FROM reimbursements
         WHERE id = ? AND user_id = ?

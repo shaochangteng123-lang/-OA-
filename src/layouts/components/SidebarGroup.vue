@@ -35,14 +35,14 @@ const props = defineProps<{
   groupKey: string // 用于标识不同的分组
 }>()
 
-const emit = defineEmits<{
+defineEmits<{
   'update:expanded': [value: boolean]
   'update:locked': [value: boolean]
 }>()
 
 // 从父组件接收展开和锁定状态
 const isExpanded = defineModel<boolean>('expanded', { default: false })
-const isLocked = defineModel<boolean>('locked', { default: false })
+defineModel<boolean>('locked', { default: false })
 
 // 点击标题切换展开/折叠
 const handleHeaderClick = () => {

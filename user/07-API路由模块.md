@@ -348,6 +348,11 @@ app.use(helmet())
 
 ## 更新日志
 
+- 2026-03-12: 优化审批统计接口和待办列表接口
+  - GET /api/approval/statistics 新增 basicStats/largeStats/businessStats 按类型当月统计
+  - GET /api/approval/pending 返回除已完成外所有状态，按待审批→待支付→待确认排序，新增 reimbursementStatus/reimbursementUserId 字段
+- 2026-03-12: 安全修复 - 修复 approval.ts 中 prefer-const 错误（日期查询变量声明方式）
+- 2026-03-12: 修复报销单详情接口 GET /api/reimbursement/:id 缺失 reimbursement_month 和 service_target 字段的问题
 - 2026-01-31: 优化转正管理 API，确保管理员端与用户端数据一致（入职日期、试用期截止日期动态计算）
 - 2026-01-23: 添加报销管理路由，支持发票上传和OCR识别功能
 - 2026-01-22: 创建文档，描述 API 路由模块核心功能

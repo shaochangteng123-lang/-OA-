@@ -391,7 +391,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Clock, CircleCheck, Wallet, Warning, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
+import { Refresh, Search, Clock, CircleCheck, Wallet, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
 
 const router = useRouter()
 
@@ -786,57 +786,6 @@ const handleConfirmReceipt = async () => {
   } finally {
     confirmingReceipt.value = false
   }
-}
-
-// 审批通过
-const handleApprove = async () => {
-  if (!currentApprovalRecord.value) return
-
-  try {
-    await ElMessageBox.confirm('确认通过该报销申请？', '审批确认', {
-      confirmButtonText: '确认',
-      cancelButtonText: '取消',
-      type: 'success',
-    })
-
-    approving.value = true
-
-    const response = await fetch(`/api/reimbursement/${currentApprovalRecord.value.id}/approve`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      credentials: 'include',
-      body: JSON.stringify({
-        action: 'approve',
-      }),
-    })
-
-    const result = await response.json()
-
-    if (result.success) {
-      ElMessage.success('审批通过')
-      approvalDialogVisible.value = false
-      // 刷新数据
-      await fetchStatistics()
-      await fetchRecordList()
-    } else {
-      ElMessage.error(result.message || '审批失败')
-    }
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      console.error('审批失败:', error)
-      ElMessage.error('审批失败')
-    }
-  } finally {
-    approving.value = false
-  }
-}
-
-// 拒绝
-const handleReject = () => {
-  rejectForm.reason = ''
-  rejectDialogVisible.value = true
 }
 
 // 确认拒绝

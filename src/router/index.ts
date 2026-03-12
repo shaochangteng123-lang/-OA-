@@ -10,6 +10,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: false },
   },
   {
+    path: '/invoice-print',
+    name: 'InvoicePrint',
+    component: () => import('@/views/InvoicePrint.vue'),
+    meta: { requiresAuth: true, skipOnboardingCheck: true },
+  },
+  {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
     meta: { requiresAuth: true },

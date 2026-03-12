@@ -430,9 +430,9 @@ const formatDateTime = (date: string | null | undefined) => {
 }
 
 // 获取状态类型
-const getStatusType = (status: string | undefined) => {
+const getStatusType = (status: string | undefined): 'success' | 'warning' | 'danger' | 'info' | 'primary' => {
   if (!status) return 'info'
-  const typeMap: Record<string, string> = {
+  const typeMap: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'primary'> = {
     pending: 'info',
     submitted: 'warning',
     approved: 'success',
