@@ -886,11 +886,12 @@
               >
                 <div class="timeline-content">
                   <div class="timeline-title">
-                    {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                    {{ record.approverName || record.approverUsername || '管理员' }}
                   </div>
                   <div class="timeline-desc">
-                    {{ record.approverName || record.approverUsername || '管理员' }}
-                    {{ record.action === 'approve' ? '审批通过' : '拒绝了申请' }}
+                    <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
+                      {{ record.action === 'approve' ? '审批通过' : '审批驳回' }}
+                    </el-tag>
                   </div>
                   <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
                     拒绝原因：{{ record.comment }}
