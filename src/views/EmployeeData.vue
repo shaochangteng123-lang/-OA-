@@ -299,7 +299,7 @@
                       <el-option label="待提交" value="pending" />
                       <el-option label="待审批" value="submitted" />
                       <el-option label="已通过" value="approved" />
-                      <el-option label="已拒绝" value="rejected" />
+                      <el-option label="已驳回" value="rejected" />
                     </el-select>
                   </div>
                 </div>
@@ -350,7 +350,7 @@
                           通过
                         </el-button>
                         <el-button link type="danger" size="small" @click="handleRejectProbation(row)">
-                          拒绝
+                          驳回
                         </el-button>
                       </template>
                     </template>
@@ -864,15 +864,15 @@ const handleApproveProbation = (row: ProbationConfirmationWithEmployee) => {
   }).catch(() => {})
 }
 
-// 拒绝申请
+// 驳回申请
 const handleRejectProbation = (row: ProbationConfirmationWithEmployee) => {
-  ElMessageBox.prompt('请输入拒绝原因', '拒绝申请', {
-    confirmButtonText: '确定拒绝',
+  ElMessageBox.prompt('请输入驳回原因', '驳回申请', {
+    confirmButtonText: '确定驳回',
     cancelButtonText: '取消',
-    inputPlaceholder: '拒绝原因（必填）',
+    inputPlaceholder: '驳回原因（必填）',
     inputValidator: (value) => {
       if (!value || !value.trim()) {
-        return '请输入拒绝原因'
+        return '请输入驳回原因'
       }
       return true
     },
@@ -880,7 +880,7 @@ const handleRejectProbation = (row: ProbationConfirmationWithEmployee) => {
     try {
       const res = await probationStore.rejectConfirmation(row.id, value)
       if (res.success) {
-        ElMessage.success('已拒绝申请')
+        ElMessage.success('已驳回申请')
       } else {
         ElMessage.error(res.message || '操作失败')
       }

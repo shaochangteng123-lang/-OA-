@@ -213,8 +213,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePendingStore } from '@/stores/pending'
 import axios from 'axios'
 import dayjs from 'dayjs'
+
+const pendingStore = usePendingStore()
 
 // 类型定义
 interface ProbationDocument {
@@ -389,6 +392,8 @@ const handleSubmitApply = async () => {
     await axios.post('/api/probation/apply')
     ElMessage.success('转正申请已提交')
     fetchMyStatus()
+    // 刷新菜单栏角标
+    pendingStore.refreshPendingCounts()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error(error.response?.data?.message || '提交失败')

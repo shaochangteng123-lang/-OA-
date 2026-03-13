@@ -882,19 +882,19 @@
                 :key="record.id"
                 :timestamp="formatDate(record.actionTime)"
                 placement="top"
-                :type="record.action === 'approve' ? 'success' : 'danger'"
+                :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'"
               >
                 <div class="timeline-content">
                   <div class="timeline-title">
                     {{ record.approverName || record.approverUsername || '管理员' }}
                   </div>
                   <div class="timeline-desc">
-                    <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
-                      {{ record.action === 'approve' ? '审批通过' : '审批驳回' }}
+                    <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
+                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
                     </el-tag>
                   </div>
                   <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
-                    拒绝原因：{{ record.comment }}
+                    驳回原因：{{ record.comment }}
                   </div>
                 </div>
               </el-timeline-item>

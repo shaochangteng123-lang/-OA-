@@ -14,18 +14,18 @@
         <div class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
-          <!-- 拒绝原因提示（已拒绝状态显示） -->
+          <!-- 驳回原因提示（已驳回状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
-              title="审批被拒绝"
+              title="审批被驳回"
               type="error"
               :closable="false"
               show-icon
             >
               <template #default>
                 <div class="reject-reason-content">
-                  <p><strong>拒绝原因：</strong>{{ rejectReason }}</p>
-                  <p v-if="!isReadonly" class="reject-tip">您可以根据拒绝原因修改后重新提交审批。</p>
+                  <p><strong>驳回原因：</strong>{{ rejectReason }}</p>
+                  <p v-if="!isReadonly" class="reject-tip">您可以根据驳回原因修改后重新提交审批。</p>
                 </div>
               </template>
             </el-alert>
@@ -150,7 +150,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, CircleCheckFilled, Document, ZoomIn } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -357,9 +357,7 @@ async function handleSubmit(): Promise<void> {
 
 // 加载报销单详情
 async function loadDetail(): Promise<void> {
-  console.log('🔍 loadDetail 开始, reimbursementId:', reimbursement.reimbursementId.value)
   const data = await reimbursement.loadReimbursementDetail()
-  console.log('🔍 loadDetail 返回数据:', data)
   if (!data) return
 
   // 设置表单数据
@@ -384,7 +382,7 @@ async function loadDetail(): Promise<void> {
   }
 
   // 加载发票数据
-  if (data.invoices) {
+  if (data.invoices && Array.isArray(data.invoices)) {
     invoice.loadInvoices(data.invoices)
   }
 
@@ -405,22 +403,39 @@ async function loadDetail(): Promise<void> {
   if ((data as any).deductionAmount !== undefined) {
     approvalDeductionAmount.value = (data as any).deductionAmount || 0
   }
-
-  console.log('📋 商务报销单详情加载完成:', {
-    status: data.status,
-    rejectReason: (data as any).rejectReason,
-    isRejected: data.status === 'rejected',
-    deductionAmount: approvalDeductionAmount.value
-  })
 }
 
 // 组件挂载
 onMounted(async () => {
+  // 清空之前的数据，防止组件复用时显示旧数据
+  invoice.clearInvoices()
+
   await fetchScopeOptions()
   if (reimbursement.reimbursementId.value) {
     await loadDetail()
   }
 })
+
+// 监听路由参数变化（Vue Router 复用组件时 onMounted 不会再次触发）
+watch(
+  () => reimbursement.reimbursementId.value,
+  async (newId, oldId) => {
+    if (newId && newId !== oldId) {
+      invoice.clearInvoices()
+      formData.category = ''
+      formData.client = ''
+      formData.description = ''
+      reimbursementMonthDisplay.value = ''
+      reimbursementScope.value = ''
+      serviceTarget.value = ''
+      rejectReason.value = ''
+      approvalDeductionAmount.value = 0
+      paymentProofPath.value = ''
+      payTime.value = ''
+      await loadDetail()
+    }
+  }
+)
 </script>
 
 <style scoped>

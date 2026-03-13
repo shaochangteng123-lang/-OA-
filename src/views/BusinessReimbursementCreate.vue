@@ -162,7 +162,7 @@ const handleBack = () => {
       })
       .catch(() => {})
   } else {
-    router.push('/basic-reimbursement')
+    router.push('/business-reimbursement')
   }
 }
 
@@ -226,7 +226,7 @@ const handleSaveDraft = async () => {
 
     if (result.success) {
       ElMessage.success('草稿保存成功')
-      router.push('/business-reimbursement')
+      router.push({ path: '/business-reimbursement', query: { refresh: Date.now().toString() } })
     } else {
       ElMessage.error(result.message || '保存草稿失败')
     }
@@ -282,7 +282,7 @@ const handleSubmit = async () => {
 
     if (result.success) {
       ElMessage.success('提交成功')
-      router.push('/business-reimbursement')
+      router.push({ path: '/business-reimbursement', query: { refresh: Date.now().toString() } })
     } else {
       ElMessage.error(result.message || '提交失败')
     }

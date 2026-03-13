@@ -18,7 +18,7 @@
               <el-select v-model="filterForm.status" placeholder="全部状态" clearable>
                 <el-option label="待审批" value="pending" />
                 <el-option label="已批准" value="approved" />
-                <el-option label="已拒绝" value="rejected" />
+                <el-option label="已驳回" value="rejected" />
                 <el-option label="已取消" value="cancelled" />
               </el-select>
             </el-form-item>
@@ -227,7 +227,7 @@ const getStatusText = (status: string) => {
   const textMap: Record<string, string> = {
     pending: '待审批',
     approved: '已批准',
-    rejected: '已拒绝',
+    rejected: '已驳回',
     cancelled: '已取消',
   }
   return textMap[status] || status

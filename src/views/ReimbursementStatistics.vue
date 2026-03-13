@@ -23,7 +23,7 @@
                 <el-icon :size="28"><Wallet /></el-icon>
               </div>
               <div class="stat-info">
-                <div class="stat-label">已审批未付款</div>
+                <div class="stat-label">待付款</div>
                 <div class="stat-value">{{ statistics.approved.count }}</div>
                 <div class="stat-amount">¥{{ statistics.approved.amount.toFixed(2) }}</div>
               </div>
@@ -83,9 +83,8 @@
             <el-form-item label="状态">
               <el-select v-model="filterForm.status" placeholder="全部" clearable>
                 <el-option label="待审批" value="pending" />
-                <el-option label="已审批未付款" value="approved" />
-                <el-option label="已拒绝" value="rejected" />
-                <el-option label="付款中" value="paying" />
+                <el-option label="已驳回" value="rejected" />
+                <el-option label="待付款" value="approved" />
                 <el-option label="待确认" value="payment_uploaded" />
                 <el-option label="已完成" value="completed" />
               </el-select>
@@ -169,20 +168,20 @@
           </el-table-column>
         </el-table>
 
-        <!-- 拒绝原因弹窗 -->
+        <!-- 驳回原因弹窗 -->
         <el-dialog
           v-model="rejectDialogVisible"
-          title="拒绝原因"
+          title="驳回原因"
           width="500px"
           :close-on-click-modal="false"
         >
           <el-form :model="rejectForm" label-width="80px">
-            <el-form-item label="拒绝原因" required>
+            <el-form-item label="驳回原因" required>
               <el-input
                 v-model="rejectForm.reason"
                 type="textarea"
                 :rows="4"
-                placeholder="请输入拒绝原因"
+                placeholder="请输入驳回原因"
                 maxlength="200"
                 show-word-limit
               />
@@ -190,7 +189,7 @@
           </el-form>
           <template #footer>
             <el-button @click="rejectDialogVisible = false">取消</el-button>
-            <el-button type="danger" :loading="approving" @click="confirmReject">确认拒绝</el-button>
+            <el-button type="danger" :loading="approving" @click="confirmReject">确认驳回</el-button>
           </template>
         </el-dialog>
 
@@ -261,9 +260,9 @@
                 >
                   <div class="timeline-content">
                     <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 驳回了申请</div>
                     <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
-                      拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                      驳回原因：{{ currentApprovalRecord.rejectReason }}
                     </div>
                   </div>
                 </el-timeline-item>
@@ -392,8 +391,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search, Clock, CircleCheck, Wallet, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
+import { usePendingStore } from '@/stores/pending'
 
 const router = useRouter()
+const pendingStore = usePendingStore()
 
 // 报销范围/区域数据
 interface ScopeOption {
@@ -522,7 +523,7 @@ const loading = ref(false)
 const approvalDialogVisible = ref(false)
 const currentApprovalRecord = ref<any>(null)
 
-// 拒绝原因弹窗
+// 驳回原因弹窗
 const rejectDialogVisible = ref(false)
 const rejectForm = reactive({
   reason: '',
@@ -775,6 +776,8 @@ const handleConfirmReceipt = async () => {
       // 刷新数据
       await fetchStatistics()
       await fetchRecordList()
+      // 刷新待办计数
+      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(result.message || '确认收款失败')
     }
@@ -788,12 +791,12 @@ const handleConfirmReceipt = async () => {
   }
 }
 
-// 确认拒绝
+// 确认驳回
 const confirmReject = async () => {
   if (!currentApprovalRecord.value) return
 
   if (!rejectForm.reason.trim()) {
-    ElMessage.warning('请输入拒绝原因')
+    ElMessage.warning('请输入驳回原因')
     return
   }
 
@@ -815,7 +818,7 @@ const confirmReject = async () => {
     const result = await response.json()
 
     if (result.success) {
-      ElMessage.success('已拒绝')
+      ElMessage.success('已驳回')
       rejectDialogVisible.value = false
       approvalDialogVisible.value = false
       // 刷新数据
@@ -825,7 +828,7 @@ const confirmReject = async () => {
       ElMessage.error(result.message || '操作失败')
     }
   } catch (error) {
-    console.error('拒绝失败:', error)
+    console.error('驳回失败:', error)
     ElMessage.error('操作失败')
   } finally {
     approving.value = false
@@ -847,8 +850,8 @@ const getStatusText = (status: string) => {
   const statusMap: Record<string, string> = {
     draft: '草稿',
     pending: '待审批',
-    approved: '已审批未付款',
-    rejected: '已拒绝',
+    approved: '待付款',
+    rejected: '已驳回',
     paying: '付款中',
     payment_uploaded: '待确认',
     completed: '已完成',
@@ -861,8 +864,8 @@ const getStatusType = (status: string) => {
   const typeMap: Record<string, any> = {
     draft: 'info',              // 草稿 - 灰色
     pending: 'warning',         // 待审批 - 黄色
-    approved: '',               // 已审批未付款 - 使用自定义颜色
-    rejected: 'danger',         // 已拒绝 - 红色
+    approved: '',               // 待付款 - 使用自定义颜色
+    rejected: 'danger',         // 已驳回 - 红色
     paying: '',                 // 付款中 - 使用自定义颜色
     payment_uploaded: '',       // 待确认 - 使用自定义颜色
     completed: 'success',       // 已完成 - 绿色
@@ -873,7 +876,7 @@ const getStatusType = (status: string) => {
 // 获取状态自定义颜色（用于区分相似状态）
 const getStatusColor = (status: string) => {
   const colorMap: Record<string, string> = {
-    approved: '#409eff',        // 已审批未付款 - 蓝色
+    approved: '#409eff',        // 待付款 - 蓝色
     paying: '#9b59b6',          // 付款中 - 紫色
     payment_uploaded: '#17a2b8', // 待确认 - 青色
   }

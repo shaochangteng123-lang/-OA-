@@ -7,7 +7,7 @@
       </div>
     </div>
 
-    <el-card v-loading="loading">
+    <el-card v-loading="loading" shadow="never" class="no-border-card">
       <!-- 报销单信息 -->
       <div class="section">
         <h3 class="section-title">报销单信息</h3>
@@ -128,11 +128,13 @@ import { ElMessage } from 'element-plus'
 import { ArrowLeft, UploadFilled, Document, ZoomIn, Delete } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { api } from '@/utils/api'
+import { usePendingStore } from '@/stores/pending'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 
 const router = useRouter()
 const route = useRoute()
+const pendingStore = usePendingStore()
 
 interface ReimbursementInfo {
   id: string
@@ -315,8 +317,16 @@ async function handleSubmit() {
 
     if (res.data.success) {
       ElMessage.success('付款回单上传成功，等待用户确认收款')
-      // 付款成功后返回已付款tab
-      router.push('/approval?tab=paid')
+      // 刷新菜单栏角标
+      pendingStore.refreshPendingCounts()
+      // 付款成功后返回来源页面
+      const from = route.query.from as string
+      const tab = route.query.tab as string
+      if (from) {
+        router.push(tab ? `${from}?tab=${tab}` : from)
+      } else {
+        router.push('/approval?tab=pending')
+      }
     } else {
       ElMessage.error(res.data.message || '付款失败')
     }
@@ -340,11 +350,15 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
+/* 容器填满可用空间，去除边距 */
 .approval-payment {
   height: calc(100vh - 60px);
   margin: -24px -45px;
   padding: 24px;
+}
+
+.no-border-card {
+  border: none;
 }
 
 .section {

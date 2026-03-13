@@ -21,18 +21,18 @@
         <div v-if="currentStep === 2" class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
-          <!-- 拒绝原因提示（已拒绝状态显示） -->
+          <!-- 驳回原因提示（已驳回状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
-              title="审批被拒绝"
+              title="审批被驳回"
               type="error"
               :closable="false"
               show-icon
             >
               <template #default>
                 <div class="reject-reason-content">
-                  <p><strong>拒绝原因：</strong>{{ rejectReason }}</p>
-                  <p v-if="!isReadonly" class="reject-tip">您可以根据拒绝原因修改后重新提交审批。</p>
+                  <p><strong>驳回原因：</strong>{{ rejectReason }}</p>
+                  <p v-if="!isReadonly" class="reject-tip">您可以根据驳回原因修改后重新提交审批。</p>
                 </div>
               </template>
             </el-alert>
@@ -49,17 +49,33 @@
               <el-input :model-value="displayMonth" disabled />
             </el-form-item>
 
-            <el-form-item label="发票上传" prop="files">
-              <InvoiceUploader
-                v-model="invoice.fileList.value"
-                :max-files="5"
-                :disabled="isReadonly"
-                theme-color="#667eea"
-                @file-change="handleFileChange"
-                @delete-file="handleDeleteFile"
-                @exceed="() => ElMessage.warning('超出最大上传数量限制')"
-              />
-            </el-form-item>
+            <div class="upload-layout">
+              <div class="upload-left">
+                <el-form-item label="发票上传" prop="files">
+                  <InvoiceUploader
+                    v-model="invoice.fileList.value"
+                    :max-files="5"
+                    :disabled="isReadonly"
+                    theme-color="#667eea"
+                    @file-change="handleFileChange"
+                    @delete-file="handleDeleteFile"
+                    @exceed="() => ElMessage.warning('超出最大上传数量限制')"
+                  />
+                </el-form-item>
+              </div>
+
+              <div class="upload-right">
+                <el-form-item label="无票上传">
+                  <ReceiptUploader
+                    v-model="receiptFileList"
+                    :disabled="isReadonly"
+                    theme-color="#67c23a"
+                    @file-change="handleReceiptChange"
+                    @delete-file="handleDeleteReceipt"
+                  />
+                </el-form-item>
+              </div>
+            </div>
 
             <!-- 发票明细表格 -->
             <el-form-item label="发票明细">
@@ -99,7 +115,8 @@
             </el-form-item>
           </el-form>
 
-          <!-- 付款回单区域（已付款状态显示） -->
+          <!-- 付款回单区域已隐藏，如需显示请取消注释 -->
+          <!--
           <div v-if="isPaid && paymentProofPath" class="payment-proof-section">
             <h3 class="section-title">
               <el-icon color="#67C23A"><CircleCheckFilled /></el-icon>
@@ -111,11 +128,9 @@
                 已付款
               </div>
               <div class="payment-proof-content" @click="handlePreviewPaymentProof">
-                <!-- 图片类型 -->
                 <template v-if="isPaymentProofImage">
                   <img :src="paymentProofPath" class="payment-proof-image" alt="付款回单" />
                 </template>
-                <!-- PDF类型 -->
                 <template v-else>
                   <div class="payment-proof-pdf">
                     <el-icon :size="48" color="#409EFF"><Document /></el-icon>
@@ -132,6 +147,7 @@
               </div>
             </div>
           </div>
+          -->
 
           <!-- 付款回单预览对话框 -->
           <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
@@ -147,7 +163,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, CircleCheckFilled, Document, ZoomIn } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -157,6 +173,7 @@ import { zhCN } from 'date-fns/locale'
 // 导入模块化组件
 import TypeSelector from '@/components/reimbursement/TypeSelector.vue'
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
+import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入 composables
@@ -179,6 +196,9 @@ const formData = reactive({
   description: '',
 })
 
+// 无票上传文件列表
+const receiptFileList = ref<any[]>([])
+
 // 表单引用
 const formRef = ref<FormInstance>()
 
@@ -190,7 +210,7 @@ const paymentProofPath = ref('')
 const payTime = ref('')
 const paymentProofDialogVisible = ref(false)
 
-// 拒绝原因
+// 驳回原因
 const rejectReason = ref('')
 
 // 审批核减金额
@@ -235,13 +255,32 @@ const isPaymentProofImage = computed(() => {
 
 // 格式化付款时间
 function formatPayTime(dateStr: string): string {
-  return format(new Date(dateStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  if (!dateStr) return ''
+  try {
+    const date = new Date(dateStr)
+    if (isNaN(date.getTime())) return ''
+    return format(date, 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  } catch (error) {
+    console.error('日期格式化失败:', dateStr, error)
+    return ''
+  }
 }
 
 // 预览付款回单
 function handlePreviewPaymentProof(): void {
   paymentProofDialogVisible.value = true
 }
+
+function isImageFilePath(filePath?: string): boolean {
+  if (!filePath) return false
+  const normalizedPath = filePath.toLowerCase()
+  return normalizedPath.endsWith('.jpg')
+    || normalizedPath.endsWith('.jpeg')
+    || normalizedPath.endsWith('.png')
+    || normalizedPath.endsWith('.gif')
+    || normalizedPath.endsWith('.bmp')
+    || normalizedPath.endsWith('.webp')
+  }
 
 // 选择报销类型后进入下一步
 function handleTypeSelect(type: string): void {
@@ -256,13 +295,33 @@ async function handleFileChange(file: any, fileList: any[]): Promise<void> {
   await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
 }
 
+// 处理无票上传变化
+async function handleReceiptChange(file: any, fileList: any[]): Promise<void> {
+  await invoice.handleReceiptChange(file, fileList)
+  receiptFileList.value = fileList
+  await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
+}
+
 // 处理删除文件
 function handleDeleteFile(file: any): void {
   invoice.deleteInvoiceByFile(file.uid)
 }
 
+// 处理删除无票文件
+function handleDeleteReceipt(file: any): void {
+  const index = receiptFileList.value.findIndex(item => item.uid === file.uid)
+  if (index > -1) {
+    receiptFileList.value.splice(index, 1)
+  }
+  invoice.deleteInvoiceByFile(file.uid)
+}
+
 // 处理删除发票
 function handleDeleteInvoice(invoiceItem: any): void {
+  const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
+  if (receiptIndex > -1) {
+    receiptFileList.value.splice(receiptIndex, 1)
+  }
   invoice.deleteInvoiceById(invoiceItem.id)
 }
 
@@ -274,6 +333,7 @@ function clearFormData(): void {
   formData.description = ''
   // 清除发票列表
   invoice.clearInvoices()
+  receiptFileList.value = []
   // 重置表单验证
   formRef.value?.resetFields()
 }
@@ -366,13 +426,15 @@ async function loadDetail(): Promise<void> {
   const data = await reimbursement.loadReimbursementDetail()
   if (!data) return
 
+  console.log('📋 BasicReimbursementDetail - 加载详情数据:', {
+    hasInvoices: !!data.invoices,
+    invoicesCount: data.invoices?.length,
+    invoices: data.invoices,
+    status: (data as any).status,
+  })
+
   // 设置报销类型
   selectedType.value = data.category || ''
-  console.log('📋 加载报销类型:', {
-    category: data.category,
-    selectedType: selectedType.value,
-    isEmpty: !selectedType.value
-  })
 
   // 设置表单数据
   formData.description = data.description || ''
@@ -383,8 +445,38 @@ async function loadDetail(): Promise<void> {
   }
 
   // 加载发票数据
-  if (data.invoices) {
+  if (data.invoices && Array.isArray(data.invoices)) {
+    console.log('📋 开始加载发票数据，发票数量:', data.invoices.length)
+
+    // 加载所有发票到 invoiceList（这会同时设置 fileList，包含所有发票的 uid）
     invoice.loadInvoices(data.invoices)
+
+    console.log('📋 loadInvoices 调用后，invoiceList 数量:', invoice.invoiceList.value.length)
+    console.log('📋 loadInvoices 调用后，fileList 数量:', invoice.fileList.value.length)
+
+    // 分离 PDF 发票和收据（图片）的 fileList
+    // 注意：不要重新创建 fileList，而是从已经创建好的 fileList 中筛选
+    const allFiles = invoice.fileList.value
+    const pdfFiles: any[] = []
+    const receiptFiles: any[] = []
+
+    allFiles.forEach((file, index) => {
+      const invoiceItem = data.invoices[index]
+      if (invoiceItem && isImageFilePath(invoiceItem.filePath)) {
+        receiptFiles.push(file)
+      } else {
+        pdfFiles.push(file)
+      }
+    })
+
+    // 更新 fileList（只保留 PDF 发票）
+    invoice.fileList.value = pdfFiles
+    // 设置收据 fileList
+    receiptFileList.value = receiptFiles
+
+    console.log('📋 文件分离后，invoiceList 数量:', invoice.invoiceList.value.length)
+    console.log('📋 文件分离后，pdfFiles 数量:', pdfFiles.length)
+    console.log('📋 文件分离后，receiptFiles 数量:', receiptFiles.length)
   }
 
   // 加载付款回单数据
@@ -395,7 +487,7 @@ async function loadDetail(): Promise<void> {
     payTime.value = (data as any).payTime
   }
 
-  // 加载拒绝原因
+  // 加载驳回原因
   if ((data as any).rejectReason) {
     rejectReason.value = (data as any).rejectReason
   }
@@ -405,19 +497,15 @@ async function loadDetail(): Promise<void> {
     approvalDeductionAmount.value = (data as any).deductionAmount || 0
   }
 
-  console.log('📋 报销单详情加载完成:', {
-    status: data.status,
-    rejectReason: (data as any).rejectReason,
-    isRejected: data.status === 'rejected',
-    deductionAmount: approvalDeductionAmount.value
-  })
-
   // 查看或编辑已有报销单时，直接进入第二步
   currentStep.value = 2
 }
 
 // 组件挂载
 onMounted(async () => {
+  // 清空之前的数据，防止组件复用时显示旧数据
+  invoice.clearInvoices()
+
   // 如果是编辑/查看模式，先加载详情，然后获取额度时排除当前报销单
   if (reimbursement.reimbursementId.value) {
     await loadDetail()
@@ -428,6 +516,26 @@ onMounted(async () => {
     await invoice.fetchMonthlyUsedQuota()
   }
 })
+
+// 监听路由参数变化（Vue Router 复用组件时 onMounted 不会再次触发）
+watch(
+  () => reimbursement.reimbursementId.value,
+  async (newId, oldId) => {
+    if (newId && newId !== oldId) {
+      invoice.clearInvoices()
+      selectedType.value = ''
+      formData.description = ''
+      reimbursementMonthDisplay.value = ''
+      rejectReason.value = ''
+      approvalDeductionAmount.value = 0
+      paymentProofPath.value = ''
+      payTime.value = ''
+      receiptFileList.value = []
+      await loadDetail()
+      await invoice.fetchMonthlyUsedQuota(newId)
+    }
+  }
+)
 </script>
 
 <style scoped>
@@ -488,7 +596,7 @@ onMounted(async () => {
   border-bottom: 2px solid #409eff;
 }
 
-/* 拒绝原因区域样式 */
+/* 驳回原因区域样式 */
 .reject-reason-section {
   max-width: 1100px;
   margin: 0 auto 24px;
@@ -515,6 +623,40 @@ onMounted(async () => {
   padding: 24px;
   background: #f5f7fa;
   border-radius: 8px;
+}
+
+.upload-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.upload-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-right {
+  width: 450px;
+  flex-shrink: 0;
+}
+
+.upload-layout .el-form-item {
+  margin-bottom: 0;
+}
+
+.upload-layout :deep(.el-form-item__label) {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+.upload-layout :deep(.el-form-item__content) {
+  line-height: 32px;
+}
+
+.upload-layout :deep(.upload-header) {
+  min-height: 48px;
 }
 
 .form-actions-item {

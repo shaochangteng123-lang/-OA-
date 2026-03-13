@@ -193,18 +193,18 @@
                     :key="record.id"
                     :timestamp="record.actionTime"
                     placement="top"
-                    :type="record.action === 'approve' ? 'success' : 'danger'"
+                    :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'"
                   >
                     <div class="timeline-content">
                       <div class="timeline-title">
-                        {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
                       </div>
                       <div class="timeline-desc">
                         {{ record.approverName || record.approverUsername || '管理员' }}
-                        {{ record.action === 'approve' ? '审批通过' : '拒绝了申请' }}
+                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '驳回了申请' : '修改后再次提交审批' }}
                       </div>
                       <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
-                        拒绝原因：{{ record.comment }}
+                        驳回原因：{{ record.comment }}
                       </div>
                     </div>
                   </el-timeline-item>
@@ -231,9 +231,9 @@
                   >
                     <div class="timeline-content">
                       <div class="timeline-title">管理员审批</div>
-                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
+                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 驳回了申请</div>
                       <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
-                        拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                        驳回原因：{{ currentApprovalRecord.rejectReason }}
                       </div>
                     </div>
                   </el-timeline-item>
