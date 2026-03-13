@@ -476,12 +476,14 @@
                 >
                   <div class="timeline-content">
                     <div class="timeline-title">
-                      {{ record.approverName }}
+                      {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
                     </div>
                     <div class="timeline-desc">
-                      <el-tag :type="record.action === 'approve' ? 'success' : 'danger'" size="small" effect="dark">
-                        {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
-                      </el-tag>
+                      {{ record.approverName || record.approverUsername || '管理员' }}
+                      {{ record.action === 'approve' ? '审批通过' : '拒绝了申请' }}
+                    </div>
+                    <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
+                      拒绝原因：{{ record.comment }}
                     </div>
                   </div>
                 </el-timeline-item>
@@ -507,9 +509,9 @@
                 >
                   <div class="timeline-content">
                     <div class="timeline-title">总经理审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 拒绝了申请</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 驳回了申请</div>
                     <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
-                      <div class="reject-reason-label">拒绝原因：</div>
+                      <div class="reject-reason-label">驳回原因：</div>
                       <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
                     </div>
                   </div>
@@ -701,10 +703,12 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { User, Check, Close, View, Clock, SuccessFilled, List, Document, ZoomIn, Search, Download } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { usePendingStore } from '@/stores/pending'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 
 const router = useRouter()
+const pendingStore = usePendingStore()
 
 interface ApprovalItem {
   id: string
@@ -1396,6 +1400,8 @@ async function handleApprove(row: ApprovalItem) {
       ElMessage.success('审批通过')
       await fetchPendingList()
       await fetchStatistics()
+      // 刷新菜单栏角标
+      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(response.data.message || '审批失败')
     }
@@ -1432,6 +1438,8 @@ async function confirmReject() {
         rejectDialogVisible.value = false
         await fetchPendingList()
         await fetchStatistics()
+        // 刷新菜单栏角标
+        pendingStore.refreshPendingCounts()
       } else {
         ElMessage.error(response.data.message || '驳回失败')
       }
@@ -1678,7 +1686,7 @@ onMounted(async () => {
   color: #c0c4cc;
 }
 
-/* 拒绝原因样式 */
+/* 驳回原因样式 */
 .reject-reason-box {
   margin-top: 12px;
   padding: 12px;
