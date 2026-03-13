@@ -32,6 +32,15 @@ function formatDateTime(isoString: string | null): string {
   return `${get('year')}-${get('month')}-${get('day')}-${get('hour')}:${get('minute')}:${get('second')}`
 }
 
+// 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
+function normalizeReimbursementTitle(title: string): string {
+  const match = title.match(/^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/)
+  if (match) {
+    return `${match[1]}-${match[2]}`
+  }
+  return title
+}
+
 // 确保上传目录存在
 const uploadsDir = path.join(process.cwd(), 'uploads')
 const tempDir = path.join(uploadsDir, 'temp')
@@ -194,7 +203,7 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 查询数据库中是否已存在该发票号码（排除已删除和已拒绝的报销单）
+    // 查询数据库中是否已存在该发票号码（排除已删除和已驳回的报销单）
     const existing = db.prepare(`
       SELECT ri.invoice_number, r.id as reimbursement_id, r.title, r.status, r.applicant_name
       FROM reimbursement_invoices ri
@@ -246,7 +255,7 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
     const { calculateReimbursementMonth } = await import('../utils/reimbursement.js')
     const currentReimbursementMonth = calculateReimbursementMonth(now, 'basic')
 
-    // 查询当前报销月份所有已提交(非草稿、非拒绝)的基础报销单中的运输/交通/汽油/柴油类发票
+    // 查询当前报销月份所有已提交(非草稿、非驳回)的基础报销单中的运输/交通/汽油/柴油类发票
     // 如果提供了 excludeId，则排除该报销单（用于编辑模式）
     let sql = `
       SELECT COALESCE(SUM(ri.amount), 0) as used_amount
@@ -769,14 +778,22 @@ router.get('/records', requireAuth, async (req, res) => {
         r.completed_time as completedTime,
         r.payment_proof_path as paymentProofPath,
         r.receipt_confirmed_by as receiptConfirmedBy,
+        r.reject_reason as rejectReason,
         r.reimbursement_month as reimbursementMonth,
         r.created_at as createTime,
         (SELECT GROUP_CONCAT(DISTINCT category) FROM reimbursement_invoices WHERE reimbursement_id = r.id AND category IS NOT NULL) as invoiceCategories
       FROM reimbursements r
       ${whereClause}
       ORDER BY
-        CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END,
-        CASE WHEN r.status = 'completed' THEN r.completed_time ELSE r.created_at END DESC
+        CASE r.status
+          WHEN 'pending' THEN 1
+          WHEN 'rejected' THEN 2
+          WHEN 'approved' THEN 3
+          WHEN 'payment_uploaded' THEN 4
+          WHEN 'completed' THEN 5
+          ELSE 6
+        END,
+        r.submit_time ASC
       LIMIT ? OFFSET ?
     `
     params.push(parseInt(pageSize as string), offset)
@@ -794,6 +811,7 @@ router.get('/records', requireAuth, async (req, res) => {
 
       return {
         ...item,
+        title: normalizeReimbursementTitle(item.title || ''),
         invoiceCategory,
         submitTime: formatDateTime(item.submitTime),
         approveTime: formatDateTime(item.approveTime),
@@ -1099,8 +1117,12 @@ router.get('/list', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 构建查询条件（排除已删除的数据）
-    let whereClause = 'WHERE user_id = ? AND (is_deleted IS NULL OR is_deleted = 0)'
+    // 构建查询条件
+    // 默认视图排除已删除数据，指定日期范围查询时包含已删除数据
+    const hasDateRange = startDate && endDate
+    let whereClause = hasDateRange
+      ? 'WHERE user_id = ?'
+      : 'WHERE user_id = ? AND (is_deleted IS NULL OR is_deleted = 0)'
     const params: any[] = [userId]
 
     if (type) {
@@ -1162,22 +1184,33 @@ router.get('/list', requireAuth, async (req, res) => {
     const countResult = db.prepare(countQuery).get(...params) as { total: number }
     const total = countResult.total
 
-    // 查询列表（按创建时间降序，新的在上）
+    // 查询列表（按创建时间升序，创建时间早的在下方，时间晚的在上方）
     const offset = (parseInt(page as string) - 1) * parseInt(pageSize as string)
     const listQuery = `
       SELECT
         r.id, r.type, r.category, r.title,
-        (r.total_amount - COALESCE(r.deduction_amount, 0)) as amount,
+        r.total_amount as amount,
         r.total_amount as originalAmount,
         COALESCE(r.deduction_amount, 0) as deductionAmount,
         r.status,
         r.business_type as businessType, r.client,
         r.reimbursement_scope as reimbursementScope,
         r.submit_time as submitTime, r.created_at as createTime,
+        COALESCE(r.is_deleted, 0) as isDeleted,
         (SELECT GROUP_CONCAT(DISTINCT category) FROM reimbursement_invoices WHERE reimbursement_id = r.id AND category IS NOT NULL) as invoiceCategories
       FROM reimbursements r
       ${whereClause}
-      ORDER BY r.created_at DESC
+      ORDER BY
+        CASE r.status
+          WHEN 'draft' THEN 1
+          WHEN 'pending' THEN 2
+          WHEN 'rejected' THEN 3
+          WHEN 'approved' THEN 4
+          WHEN 'payment_uploaded' THEN 5
+          WHEN 'completed' THEN 6
+          ELSE 7
+        END,
+        r.created_at ASC
       LIMIT ? OFFSET ?
     `
     params.push(parseInt(pageSize as string), offset)
@@ -1218,6 +1251,7 @@ router.get('/list', requireAuth, async (req, res) => {
 
       return {
         ...item,
+        title: normalizeReimbursementTitle(item.title || ''),
         category: categoryMap[item.category] || item.category || '',
         invoiceCategory,
         submitTime: formatDateTime(item.submitTime),
@@ -1326,6 +1360,7 @@ router.get('/pending-list', requireAuth, async (req, res) => {
 
     const listWithCategoryLabel = list.map((item: any) => ({
       ...item,
+      title: normalizeReimbursementTitle(item.title || ''),
       category: categoryMap[item.category] || item.category || '',
       submitTime: formatDateTime(item.submitTime),
     }))
@@ -1355,7 +1390,7 @@ router.get('/pending-list', requireAuth, async (req, res) => {
 router.post('/:id/approve', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const { action, reason } = req.body // action: 'approve' | 'reject', reason: 拒绝原因
+    const { action, reason } = req.body // action: 'approve' | 'reject', reason: 驳回原因
     const currentUserId = req.session.user?.id
     const currentUserName = req.session.user?.name
     const currentUserRole = req.session.user?.role
@@ -1430,7 +1465,7 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
 
     res.json({
       success: true,
-      message: action === 'approve' ? '审批通过' : '已拒绝',
+      message: action === 'approve' ? '审批通过' : '已驳回',
     })
   } catch (error) {
     console.error('审批报销单失败:', error)
@@ -1858,7 +1893,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       reimbursement = db.prepare(`
         SELECT
           id, type, category, title,
-          (total_amount - COALESCE(deduction_amount, 0)) as amount,
+          total_amount as amount,
           total_amount as totalAmount,
           COALESCE(deduction_amount, 0) as deductionAmount,
           status,
@@ -1881,7 +1916,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       reimbursement = db.prepare(`
         SELECT
           id, type, category, title,
-          (total_amount - COALESCE(deduction_amount, 0)) as amount,
+          total_amount as amount,
           total_amount as totalAmount,
           COALESCE(deduction_amount, 0) as deductionAmount,
           status,
@@ -1919,11 +1954,14 @@ router.get('/:id', requireAuth, async (req, res) => {
       ORDER BY created_at ASC
     `).all(id)
 
-    // 查询审批历史记录
+    console.log('📋 查询报销单详情 - ID:', id, '发票数量:', invoices.length)
+
+    // 查询审批历史记录（包括所有历史审批实例的记录，不仅限于当前实例）
     const approvalHistory = db.prepare(`
       SELECT
         ar.id, ar.action, ar.comment, ar.action_time as actionTime,
-        u.name as approverName, u.username as approverUsername
+        u.name as approverName, u.username as approverUsername,
+        ai.status as instanceStatus
       FROM approval_records ar
       LEFT JOIN approval_instances ai ON ar.instance_id = ai.id
       LEFT JOIN users u ON ar.approver_id = u.id
@@ -1941,6 +1979,8 @@ router.get('/:id', requireAuth, async (req, res) => {
       id,
       status: (reimbursement as any).status,
       rejectReason: (reimbursement as any).rejectReason,
+      invoicesCount: invoices.length,
+      reimbursementScope: (reimbursement as any).reimbursementScope,
       approvalHistoryCount: formattedApprovalHistory.length
     })
 
@@ -2081,7 +2121,7 @@ router.put('/:id', requireAuth, async (req, res) => {
       )
     }
 
-    // 如果是从草稿状态或被拒绝状态提交审批（status 变为 pending），创建审批实例
+    // 如果是从草稿状态或被驳回状态提交审批（status 变为 pending），创建审批实例
     const oldReimbursement = existingReimbursement as any
     if ((oldReimbursement.status === 'draft' || oldReimbursement.status === 'rejected') && status === 'pending') {
       // 大额报销金额验证：总金额必须超过1000元
@@ -2092,7 +2132,7 @@ router.put('/:id', requireAuth, async (req, res) => {
         })
       }
 
-      // 更新提交时间，清除拒绝原因
+      // 更新提交时间，清除驳回原因
       db.prepare('UPDATE reimbursements SET submit_time = ?, reject_reason = NULL WHERE id = ?').run(timestamp, id)
 
       // 检查是否已有pending状态的审批实例
@@ -2149,6 +2189,67 @@ router.put('/:id', requireAuth, async (req, res) => {
 })
 
 /**
+ * 撤回报销单
+ * POST /api/reimbursement/:id/withdraw
+ * 仅待审批状态可撤回，撤回后状态回到草稿
+ */
+router.post('/:id/withdraw', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const userId = req.session.user?.id
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: '未登录',
+      })
+    }
+
+    const { db } = await import('../db/index.js')
+
+    // 检查报销单是否存在且属于当前用户
+    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId) as any
+
+    if (!reimbursement) {
+      return res.status(404).json({
+        success: false,
+        message: '报销单不存在或无权操作',
+      })
+    }
+
+    // 仅待审批状态可撤回
+    if (reimbursement.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: '只有待审批状态的报销单可以撤回',
+      })
+    }
+
+    const now = new Date().toISOString()
+
+    // 将报销单状态改回草稿
+    db.prepare('UPDATE reimbursements SET status = ?, updated_at = ? WHERE id = ?').run('draft', now, id)
+
+    // 将对应的审批实例状态改为 withdrawn
+    db.prepare(`
+      UPDATE approval_instances SET status = 'withdrawn', updated_at = ?
+      WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
+    `).run(now, id)
+
+    res.json({
+      success: true,
+      message: '撤回成功',
+    })
+  } catch (error) {
+    console.error('撤回报销单失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '撤回报销单失败',
+    })
+  }
+})
+
+/**
  * 删除报销单（软删除）
  * DELETE /api/reimbursement/:id
  * 用户删除只是标记删除，管理员在审批中心仍可查看
@@ -2190,6 +2291,57 @@ router.delete('/:id', requireAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: '删除报销单失败',
+    })
+  }
+})
+
+/**
+ * 恢复已删除的报销单
+ * POST /api/reimbursement/:id/restore
+ */
+router.post('/:id/restore', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const userId = req.session.user?.id
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: '未登录',
+      })
+    }
+
+    const { db } = await import('../db/index.js')
+
+    // 检查报销单是否存在且属于当前用户
+    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId) as any
+
+    if (!reimbursement) {
+      return res.status(404).json({
+        success: false,
+        message: '报销单不存在或无权操作',
+      })
+    }
+
+    if (!reimbursement.is_deleted) {
+      return res.status(400).json({
+        success: false,
+        message: '该报销单未被删除',
+      })
+    }
+
+    const now = new Date().toISOString()
+    db.prepare('UPDATE reimbursements SET is_deleted = 0, deleted_at = NULL, updated_at = ? WHERE id = ?').run(now, id)
+
+    res.json({
+      success: true,
+      message: '恢复成功',
+    })
+  } catch (error) {
+    console.error('恢复报销单失败:', error)
+    res.status(500).json({
+      success: false,
+      message: '恢复报销单失败',
     })
   }
 })

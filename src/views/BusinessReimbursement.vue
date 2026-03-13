@@ -32,8 +32,8 @@
               <el-select v-model="filterForm.status" placeholder="全部状态" clearable style="width: 140px">
                 <el-option label="草稿" value="draft" />
                 <el-option label="待审批" value="pending" />
-                <el-option label="已审批未付款" value="approved" />
-                <el-option label="已拒绝" value="rejected" />
+                <el-option label="待付款" value="approved" />
+                <el-option label="已驳回" value="rejected" />
                 <el-option label="待确认" value="payment_uploaded" />
                 <el-option label="已完成" value="completed" />
               </el-select>
@@ -193,43 +193,69 @@
                   </div>
                 </el-timeline-item>
 
-                <!-- 2. 管理员审批 -->
-                <el-timeline-item
-                  v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                  :timestamp="currentApprovalRecord.approveTime"
-                  placement="top"
-                  type="success"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
-                  </div>
-                </el-timeline-item>
-                <el-timeline-item
-                  v-else-if="currentApprovalRecord.status === 'rejected'"
-                  :timestamp="currentApprovalRecord.approveTime"
-                  placement="top"
-                  type="danger"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
-                    <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
-                      拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                <!-- 2. 审批历史记录 -->
+                <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
+                  <el-timeline-item
+                    v-for="record in currentApprovalRecord.approvalHistory"
+                    :key="record.id"
+                    :timestamp="record.actionTime"
+                    placement="top"
+                    :type="record.action === 'approve' ? 'success' : 'danger'"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">
+                        {{ record.action === 'approve' ? '审批通过' : '审批拒绝' }}
+                      </div>
+                      <div class="timeline-desc">
+                        {{ record.approverName || record.approverUsername || '管理员' }}
+                        {{ record.action === 'approve' ? '审批通过' : '拒绝了申请' }}
+                      </div>
+                      <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
+                        拒绝原因：{{ record.comment }}
+                      </div>
                     </div>
-                  </div>
-                </el-timeline-item>
-                <el-timeline-item
-                  v-else-if="currentApprovalRecord.status === 'pending'"
-                  timestamp="待审批"
-                  placement="top"
-                  type="warning"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">等待管理员审批...</div>
-                  </div>
-                </el-timeline-item>
+                  </el-timeline-item>
+                </template>
+
+                <!-- 如果没有审批历史，显示当前状态 -->
+                <template v-else>
+                  <el-timeline-item
+                    v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                    :timestamp="currentApprovalRecord.approveTime"
+                    placement="top"
+                    type="success"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
+                    </div>
+                  </el-timeline-item>
+                  <el-timeline-item
+                    v-else-if="currentApprovalRecord.status === 'rejected'"
+                    :timestamp="currentApprovalRecord.approveTime"
+                    placement="top"
+                    type="danger"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 拒绝了申请</div>
+                      <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
+                        拒绝原因：{{ currentApprovalRecord.rejectReason }}
+                      </div>
+                    </div>
+                  </el-timeline-item>
+                  <el-timeline-item
+                    v-else-if="currentApprovalRecord.status === 'pending'"
+                    timestamp="待审批"
+                    placement="top"
+                    type="warning"
+                  >
+                    <div class="timeline-content">
+                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-desc">等待管理员审批...</div>
+                    </div>
+                  </el-timeline-item>
+                </template>
 
                 <!-- 3. 财务付款 -->
                 <el-timeline-item
@@ -334,8 +360,10 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { usePendingStore } from '@/stores/pending'
 
 const router = useRouter()
+const pendingStore = usePendingStore()
 
 // 筛选表单
 const filterForm = reactive({
@@ -444,8 +472,8 @@ const getStatusType = (status: string) => {
   const typeMap: Record<string, any> = {
     draft: 'info',              // 草稿 - 灰色
     pending: 'warning',         // 待审批 - 黄色
-    approved: '',               // 已审批未付款 - 使用自定义颜色
-    rejected: 'danger',         // 已拒绝 - 红色
+    approved: '',               // 待付款 - 使用自定义颜色
+    rejected: 'danger',         // 已驳回 - 红色
     paying: '',                 // 付款中 - 使用自定义颜色
     payment_uploaded: '',       // 待确认 - 使用自定义颜色
     completed: 'success',       // 已完成 - 绿色
@@ -456,7 +484,7 @@ const getStatusType = (status: string) => {
 // 获取状态自定义颜色（用于区分相似状态）
 const getStatusColor = (status: string) => {
   const colorMap: Record<string, string> = {
-    approved: '#409eff',        // 已审批未付款 - 蓝色
+    approved: '#409eff',        // 待付款 - 蓝色
     paying: '#9b59b6',          // 付款中 - 紫色
     payment_uploaded: '#17a2b8', // 待确认 - 青色
   }
@@ -468,8 +496,8 @@ const getStatusText = (status: string) => {
   const textMap: Record<string, string> = {
     draft: '草稿',
     pending: '待审批',
-    approved: '已审批未付款',
-    rejected: '已拒绝',
+    approved: '待付款',
+    rejected: '已驳回',
     paying: '付款中',
     payment_uploaded: '待确认',
     completed: '已完成',
@@ -509,7 +537,7 @@ const getScopeText = (scope: string | undefined) => {
   return scopeMap.value[scope] || scope
 }
 
-// 判断是否可以编辑（只有草稿和已拒绝状态可以编辑）
+// 判断是否可以编辑（只有草稿和已驳回状态可以编辑）
 const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
@@ -689,6 +717,8 @@ const handleConfirmReceipt = async () => {
       approvalDialogVisible.value = false
       // 刷新列表
       fetchList()
+      // 刷新待办计数
+      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(result.message || '确认收款失败')
     }

@@ -11,6 +11,22 @@ import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 
 const router = Router()
 
+// 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
+function normalizeReimbursementTitle(title: string): string {
+  const match = title.match(/^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/)
+  if (match) {
+    return `${match[1]}-${match[2]}`
+  }
+  return title
+}
+
+// 格式化发票分类：去重并用顿号分隔
+function formatInvoiceCategories(categories: string | null): string {
+  if (!categories) return ''
+  const unique = [...new Set(categories.split(','))]
+  return unique.join('、')
+}
+
 // 获取审批统计数据
 router.get('/statistics', requireAdmin, (req, res) => {
   try {
@@ -34,7 +50,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
       SELECT
         r.type,
         COUNT(*) as count,
-        COALESCE(SUM(r.total_amount - COALESCE(r.deduction_amount, 0)), 0) as amount
+        COALESCE(SUM(r.total_amount), 0) as amount
       FROM reimbursements r
       WHERE r.created_at >= ? AND r.created_at <= ?
       GROUP BY r.type
@@ -97,7 +113,8 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
       SELECT
         r.*,
         u.name as applicant_name,
-        u.avatar_url as applicant_avatar
+        u.avatar_url as applicant_avatar,
+        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.status = 'approved'
@@ -109,8 +126,8 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
       data: reimbursements.map(r => ({
         id: r.id,
         type: r.type,
-        title: r.title,
-        amount: r.total_amount - (r.deduction_amount || 0),
+        title: normalizeReimbursementTitle(r.title || ''),
+        amount: r.total_amount,
         totalAmount: r.total_amount,
         deductionAmount: r.deduction_amount || 0,
         status: r.status,
@@ -118,6 +135,8 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
         applicantAvatar: r.applicant_avatar,
         approveTime: r.approve_time,
         userId: r.user_id,
+        reimbursementScope: r.reimbursement_scope,
+        invoiceCategories: formatInvoiceCategories(r.invoice_categories),
       })),
     })
   } catch (error) {
@@ -141,7 +160,8 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
       SELECT
         r.*,
         u.name as applicant_name,
-        u.avatar_url as applicant_avatar
+        u.avatar_url as applicant_avatar,
+        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.status IN ('paying', 'payment_uploaded', 'completed')
@@ -154,8 +174,8 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
       data: reimbursements.map(r => ({
         id: r.id,
         type: r.type,
-        title: r.title,
-        amount: r.total_amount - (r.deduction_amount || 0),
+        title: normalizeReimbursementTitle(r.title || ''),
+        amount: r.total_amount,
         totalAmount: r.total_amount,
         deductionAmount: r.deduction_amount || 0,
         status: r.status,
@@ -169,6 +189,8 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
         paymentProofPath: r.payment_proof_path,
         receiptConfirmedBy: r.receipt_confirmed_by,
         userId: r.user_id,
+        reimbursementScope: r.reimbursement_scope,
+        invoiceCategories: formatInvoiceCategories(r.invoice_categories),
       })),
     })
   } catch (error) {
@@ -205,8 +227,8 @@ router.get('/completed-this-month', requireAdmin, (req, res) => {
       data: reimbursements.map(r => ({
         id: r.id,
         type: r.type,
-        title: r.title,
-        amount: r.total_amount - (r.deduction_amount || 0),
+        title: normalizeReimbursementTitle(r.title || ''),
+        amount: r.total_amount,
         totalAmount: r.total_amount,
         deductionAmount: r.deduction_amount || 0,
         status: r.status,
@@ -298,7 +320,7 @@ router.get('/by-target', requireAuth, (req, res) => {
       })
     }
 
-    // 查询审批实例
+    // 查询最新的审批实例
     const instance = db.prepare(`
       SELECT * FROM approval_instances
       WHERE target_id = ? AND target_type = ?
@@ -316,17 +338,18 @@ router.get('/by-target', requireAuth, (req, res) => {
       })
     }
 
-    // 获取审批记录
+    // 获取所有历史审批记录（包括所有审批实例的记录，不仅限于当前实例）
     const records = db.prepare(`
       SELECT
         ar.*,
         u.name as approver_name,
         u.avatar_url as approver_avatar
       FROM approval_records ar
+      LEFT JOIN approval_instances ai ON ar.instance_id = ai.id
       LEFT JOIN users u ON ar.approver_id = u.id
-      WHERE ar.instance_id = ?
+      WHERE ai.target_id = ? AND ai.target_type = ?
       ORDER BY ar.action_time ASC
-    `).all(instance.id) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
+    `).all(targetId, targetType) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
 
     res.json({
       success: true,
@@ -365,6 +388,66 @@ router.get('/pending', requireAdmin, (req, res) => {
     // pending(待审批)、approved(待付款)、paying(付款中)、payment_uploaded(待确认收款)
     // 排除商务报销（管理员不审批商务报销）
     // 排序：待审批 → 待支付 → 待确认，同状态按提交时间倒序
+
+    // 筛选参数
+    const { userId, type, status, startDate, endDate } = req.query as {
+      userId?: string
+      type?: string       // 逗号分隔的类型列表，如 "basic,large"
+      status?: string     // 单个状态值
+      startDate?: string
+      endDate?: string
+    }
+
+    const conditions: string[] = [
+      `ai.status NOT IN ('rejected', 'withdrawn')`,
+      `(ai.target_type != 'reimbursement' OR r.id IS NOT NULL)`,
+    ]
+    const params: unknown[] = []
+
+    // 类型筛选包含 business 时不排除商务报销，否则默认排除
+    if (type) {
+      const types = type.split(',').filter(Boolean)
+      if (types.length > 0) {
+        const placeholders = types.map(() => '?').join(',')
+        conditions.push(`r.type IN (${placeholders})`)
+        params.push(...types)
+      }
+    } else {
+      conditions.push(`(ai.target_type != 'reimbursement' OR r.type != 'business')`)
+    }
+
+    // 状态筛选为 completed 时不排除已完成，否则默认排除
+    if (status === 'completed') {
+      conditions.push(`r.status = 'completed'`)
+    } else {
+      conditions.push(`(ai.target_type != 'reimbursement' OR r.status != 'completed')`)
+      if (status === 'pending') {
+        conditions.push(`ai.status = 'pending'`)
+      } else if (status === 'approved') {
+        conditions.push(`ai.status = 'approved' AND r.status = 'approved'`)
+      } else if (status === 'payment_uploaded') {
+        conditions.push(`r.status = 'payment_uploaded'`)
+      }
+    }
+
+    // 员工筛选
+    if (userId) {
+      conditions.push(`ai.applicant_id = ?`)
+      params.push(userId)
+    }
+
+    // 日期筛选（按提交时间）
+    if (startDate) {
+      conditions.push(`ai.submit_time >= ?`)
+      params.push(startDate)
+    }
+    if (endDate) {
+      conditions.push(`ai.submit_time <= ?`)
+      params.push(endDate + ' 23:59:59')
+    }
+
+    const whereClause = conditions.join(' AND ')
+
     const instances = db.prepare(`
       SELECT
         ai.*,
@@ -374,24 +457,25 @@ router.get('/pending', requireAdmin, (req, res) => {
         r.total_amount as reimbursement_amount,
         r.deduction_amount as reimbursement_deduction,
         r.status as reimbursement_status,
-        r.user_id as reimbursement_user_id
+        r.user_id as reimbursement_user_id,
+        r.type as reimbursement_type,
+        r.reimbursement_scope as reimbursement_scope,
+        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status != 'rejected'
-      AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
-      AND (ai.target_type != 'reimbursement' OR r.type != 'business')
-      AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
+      WHERE ${whereClause}
       ORDER BY
         CASE
           WHEN ai.status = 'pending' THEN 1
           WHEN ai.status = 'approved' AND r.status = 'approved' THEN 2
           WHEN r.status = 'paying' THEN 3
           WHEN r.status = 'payment_uploaded' THEN 4
-          ELSE 5
+          WHEN r.status = 'completed' THEN 5
+          ELSE 6
         END,
-        ai.submit_time DESC
-    `).all() as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_deduction: number | null; reimbursement_status: string | null; reimbursement_user_id: string | null }>
+        ai.submit_time ASC
+    `).all(...params) as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_deduction: number | null; reimbursement_status: string | null; reimbursement_user_id: string | null; reimbursement_type: string | null; reimbursement_scope: string | null; invoice_categories: string | null }>
 
     res.json({
       success: true,
@@ -409,10 +493,13 @@ router.get('/pending', requireAdmin, (req, res) => {
         submitTime: instance.submit_time,
         createdAt: instance.created_at,
         reimbursementInfo: instance.target_type === 'reimbursement' && instance.reimbursement_title ? {
-          title: instance.reimbursement_title,
-          amount: (instance.reimbursement_amount || 0) - (instance.reimbursement_deduction || 0),
+          title: normalizeReimbursementTitle(instance.reimbursement_title),
+          amount: (instance.reimbursement_amount || 0),
         } : null,
         reimbursementUserId: instance.reimbursement_user_id,
+        reimbursementType: instance.reimbursement_type,
+        reimbursementScope: instance.reimbursement_scope,
+        invoiceCategories: formatInvoiceCategories(instance.invoice_categories),
       })),
     })
   } catch (error) {
@@ -647,7 +734,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
           id: item.id,
           type: item.type,
           typeName: typeMap[item.type] || item.type,
-          title: item.title,
+          title: normalizeReimbursementTitle(item.title || ''),
           amount: item.amount,
           status: item.status,
           statusName: statusMap[item.status] || item.status,
@@ -726,7 +813,8 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
-        u.department as applicant_department
+        u.department as applicant_department,
+        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
@@ -744,8 +832,8 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
     const statusMap: Record<string, string> = {
       draft: '草稿',
       pending: '待审批',
-      approved: '已审批未付款',
-      rejected: '已拒绝',
+      approved: '待付款',
+      rejected: '已驳回',
       paying: '付款中',
       payment_uploaded: '待确认',
       completed: '已完成',
@@ -759,13 +847,13 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
       data: reimbursements.map(r => {
         const isPaid = paidStatuses.includes(r.status)
         // amount：已付款的显示实际转账金额，未付款的显示0
-        const paidAmount = isPaid ? (r.total_amount - (r.deduction_amount || 0)) : 0
+        const paidAmount = isPaid ? Math.max(0, r.total_amount) : 0
 
         return {
           id: r.id,
           type: r.type,
           typeName: typeMap[r.type] || r.type,
-          title: r.title,
+          title: normalizeReimbursementTitle(r.title || ''),
           amount: paidAmount,
           totalAmount: r.total_amount,
           deductionAmount: r.deduction_amount || 0,
@@ -785,6 +873,7 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
           receiptConfirmedBy: r.receipt_confirmed_by,
           reimbursementMonth: r.reimbursement_month,
           reimbursementScope: r.reimbursement_scope,
+          invoiceCategories: formatInvoiceCategories(r.invoice_categories),
           createdAt: r.created_at,
           userId: r.user_id,
         }
@@ -869,15 +958,15 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
         }
       }
 
-      employeeSummary[userId].totalAmount += r.total_amount - (r.deduction_amount || 0)
+      employeeSummary[userId].totalAmount += r.total_amount
       employeeSummary[userId].count += 1
-      grandTotal += r.total_amount - (r.deduction_amount || 0)
+      grandTotal += r.total_amount
 
       employeeSummary[userId].details.push({
         id: r.id,
         type: r.type,
         typeName: typeMap[r.type] || r.type,
-        title: r.title,
+        title: normalizeReimbursementTitle(r.title || ''),
         amount: r.total_amount - (r.deduction_amount || 0),
         status: r.status,
         statusName: statusMap[r.status] || r.status,
@@ -1050,7 +1139,7 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
         id: d.id,
         type: d.type,
         typeName: typeMap[d.type] || d.type,
-        title: d.title,
+        title: normalizeReimbursementTitle(d.title || ''),
         originalAmount: d.original_amount || d.total_amount + deductionAmount,
         deductionAmount: deductionAmount,
         deductionReason: d.deduction_reason,
@@ -1183,7 +1272,7 @@ router.get('/gm-pending', requireAuth, (req, res) => {
       INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
       WHERE ai.status = 'pending'
       AND r.type = 'business'
-      ORDER BY ai.submit_time DESC
+      ORDER BY ai.submit_time ASC
     `).all() as Array<{
       id: string
       target_type: string
@@ -1212,7 +1301,7 @@ router.get('/gm-pending', requireAuth, (req, res) => {
       submitTime: item.submit_time,
       createdAt: item.created_at,
       reimbursementInfo: {
-        title: item.reimbursement_title,
+        title: normalizeReimbursementTitle(item.reimbursement_title),
         amount: item.reimbursement_amount,
       },
     }))
@@ -1295,7 +1384,7 @@ router.get('/gm-completed', requireAuth, (req, res) => {
     const result = reimbursements.map((item) => ({
       id: item.id,
       type: item.type,
-      title: item.title,
+      title: normalizeReimbursementTitle(item.title || ''),
       amount: item.total_amount,
       status: item.status,
       applicantName: item.applicant_name,
@@ -1392,7 +1481,8 @@ router.get('/gm-all', requireAuth, (req, res) => {
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
-        u.department as applicant_department
+        u.department as applicant_department,
+        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
@@ -1410,8 +1500,8 @@ router.get('/gm-all', requireAuth, (req, res) => {
     const statusMap: Record<string, string> = {
       draft: '草稿',
       pending: '待审批',
-      approved: '已审批未付款',
-      rejected: '已拒绝',
+      approved: '待付款',
+      rejected: '已驳回',
       paying: '付款中',
       payment_uploaded: '待确认',
       completed: '已完成',
@@ -1421,7 +1511,7 @@ router.get('/gm-all', requireAuth, (req, res) => {
       id: item.id,
       type: item.type,
       typeName: typeMap[item.type] || item.type,
-      title: item.title,
+      title: normalizeReimbursementTitle(item.title || ''),
       amount: item.total_amount,
       status: item.status,
       statusName: statusMap[item.status] || item.status,
@@ -1458,9 +1548,9 @@ router.get('/gm-all', requireAuth, (req, res) => {
 // 发票管理 - 查询发票列表
 router.get('/invoice-management', requireAdmin, (req, res) => {
   try {
-    const { userId, type, reimbursementScope, startDate, endDate } = req.query
+    const { userId, type, fileType, reimbursementScope, startDate, endDate } = req.query
 
-    let whereClause = 'WHERE r.status IN (\'approved\', \'paying\', \'payment_uploaded\', \'completed\')'
+    let whereClause = 'WHERE r.status IN (\'payment_uploaded\', \'completed\')'
     const params: any[] = []
 
     // 员工筛选
@@ -1484,6 +1574,15 @@ router.get('/invoice-management', requireAdmin, (req, res) => {
       if (scopes.length > 0) {
         whereClause += ` AND r.reimbursement_scope IN (${scopes.map(() => '?').join(',')})`
         params.push(...scopes)
+      }
+    }
+
+    // 文件类型筛选（receipt=收据, invoice=发票）
+    if (fileType) {
+      if (fileType === 'receipt') {
+        whereClause += " AND LOWER(ri.file_path) LIKE '%receipt-%'"
+      } else if (fileType === 'invoice') {
+        whereClause += " AND LOWER(ri.file_path) NOT LIKE '%receipt-%'"
       }
     }
 
@@ -1559,7 +1658,7 @@ router.get('/invoice-management', requireAdmin, (req, res) => {
         buyer: inv.buyer,
         reimbursementType: inv.reimbursement_type,
         reimbursementTypeName: typeMap[inv.reimbursement_type] || inv.reimbursement_type,
-        reimbursementTitle: inv.reimbursement_title,
+        reimbursementTitle: normalizeReimbursementTitle(inv.reimbursement_title || ''),
         reimbursementScope: inv.reimbursement_scope,
         reimbursementStatus: inv.reimbursement_status,
         submitTime: inv.submit_time,
@@ -1677,6 +1776,87 @@ router.post('/invoice-management/batch-download', requireAdmin, async (req, res)
 })
 
 // 获取审批详情
+// 获取待办计数（必须在 /:id 之前定义，避免被通配路由拦截）
+router.get('/pending-counts', requireAuth, (req, res) => {
+  try {
+    const userId = req.session.userId
+    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+
+    if (!user) {
+      return res.status(401).json({ success: false, message: '用户不存在' })
+    }
+
+    const data: Record<string, any> = {}
+
+    // Admin/Super Admin: 审批中心待办（排除商务报销）
+    if (user.role === 'admin' || user.role === 'super_admin') {
+      const approvalPending = db.prepare(`
+        SELECT COUNT(*) as count FROM approval_instances ai
+        LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+        WHERE ai.status NOT IN ('rejected', 'withdrawn')
+        AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
+        AND (ai.target_type != 'reimbursement' OR r.type != 'business')
+        AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
+      `).get() as { count: number }
+      data.approvalPending = approvalPending.count
+
+      // Admin: 转正待审批（status='submitted'）
+      const probationPending = db.prepare(`
+        SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'submitted'
+      `).get() as { count: number }
+      data.probationPending = probationPending.count
+    }
+
+    // General Manager: 商务报销待审批
+    if (user.role === 'general_manager') {
+      const gmPending = db.prepare(`
+        SELECT COUNT(*) as count
+        FROM approval_instances ai
+        INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+        WHERE ai.status = 'pending'
+        AND r.type = 'business'
+      `).get() as { count: number }
+      data.gmApprovalPending = gmPending.count
+    }
+
+    // 所有用户: 自己的报销待确认收款（按类型分）
+    const myReimbursementPending = db.prepare(`
+      SELECT type, COUNT(*) as count FROM reimbursements
+      WHERE user_id = ? AND status = 'payment_uploaded'
+      GROUP BY type
+    `).all(userId) as Array<{ type: string; count: number }>
+
+    const reimbursementMap: Record<string, number> = {}
+    for (const item of myReimbursementPending) {
+      reimbursementMap[item.type] = item.count
+    }
+    data.myReimbursementBasic = reimbursementMap['basic'] || 0
+    data.myReimbursementLarge = reimbursementMap['large'] || 0
+    data.myReimbursementBusiness = reimbursementMap['business'] || 0
+
+    // 所有用户: 转正待提交（试用期且未提交申请）
+    const profile = db.prepare(`
+      SELECT ep.id, ep.employment_status FROM employee_profiles ep
+      WHERE ep.user_id = ?
+    `).get(userId) as { id: string; employment_status: string } | undefined
+
+    if (profile && profile.employment_status === 'probation') {
+      const confirmation = db.prepare(`
+        SELECT status FROM probation_confirmations WHERE employee_id = ?
+      `).get(profile.id) as { status: string } | undefined
+
+      data.myProbationPending = !confirmation || confirmation.status === 'pending'
+    } else {
+      data.myProbationPending = false
+    }
+
+    res.json({ success: true, data })
+  } catch (error) {
+    console.error('获取待办计数失败:', error)
+    res.status(500).json({ success: false, message: '获取待办计数失败' })
+  }
+})
+
 router.get('/:id', requireAuth, (req, res) => {
   try {
     const { id } = req.params
@@ -1891,7 +2071,7 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
         SET status = 'rejected', approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
         WHERE id = ?
       `).run(now, userName || '系统', comment, now, instance.target_id)
-      console.log('✅ 同步更新报销单状态为已拒绝:', instance.target_id)
+      console.log('✅ 同步更新报销单状态为已驳回:', instance.target_id)
     }
 
     console.log('✅ 审批驳回:', { instanceId: id, approverId: userId, reason: comment })
@@ -2015,4 +2195,7 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
   }
 })
 
+// ==================== 统一待办计数接口 ====================
+
+// 获取当前用户所有待办计数（菜单栏角标用）
 export default router

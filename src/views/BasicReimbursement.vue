@@ -31,8 +31,8 @@
               <el-select v-model="filterForm.status" placeholder="全部状态" clearable style="width: 140px">
                 <el-option label="草稿" value="draft" />
                 <el-option label="待审批" value="pending" />
-                <el-option label="已审批未付款" value="approved" />
-                <el-option label="已拒绝" value="rejected" />
+                <el-option label="待付款" value="approved" />
+                <el-option label="已驳回" value="rejected" />
                 <el-option label="待确认" value="payment_uploaded" />
                 <el-option label="已完成" value="completed" />
               </el-select>
@@ -352,8 +352,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
+import { usePendingStore } from '@/stores/pending'
 
 const router = useRouter()
+const pendingStore = usePendingStore()
 
 // 筛选表单
 const filterForm = reactive({
@@ -511,8 +513,8 @@ const getStatusType = (status: string) => {
   const typeMap: Record<string, any> = {
     draft: 'info',              // 草稿 - 灰色
     pending: 'warning',         // 待审批 - 黄色
-    approved: '',               // 已审批未付款 - 使用自定义颜色
-    rejected: 'danger',         // 已拒绝 - 红色
+    approved: '',               // 待付款 - 使用自定义颜色
+    rejected: 'danger',         // 已驳回 - 红色
     paying: '',                 // 付款中 - 使用自定义颜色
     payment_uploaded: '',       // 待确认 - 使用自定义颜色
     completed: 'success',       // 已完成 - 绿色
@@ -523,7 +525,7 @@ const getStatusType = (status: string) => {
 // 获取状态自定义颜色（用于区分相似状态）
 const getStatusColor = (status: string) => {
   const colorMap: Record<string, string> = {
-    approved: '#409eff',        // 已审批未付款 - 蓝色
+    approved: '#409eff',        // 待付款 - 蓝色
     paying: '#9b59b6',          // 付款中 - 紫色
     payment_uploaded: '#17a2b8', // 待确认 - 青色
   }
@@ -535,8 +537,8 @@ const getStatusText = (status: string) => {
   const textMap: Record<string, string> = {
     draft: '草稿',
     pending: '待审批',
-    approved: '已审批未付款',
-    rejected: '已拒绝',
+    approved: '待付款',
+    rejected: '已驳回',
     paying: '付款中',
     payment_uploaded: '待确认',
     completed: '已完成',
@@ -544,7 +546,7 @@ const getStatusText = (status: string) => {
   return textMap[status] || status
 }
 
-// 判断是否可以编辑（只有草稿和已拒绝状态可以编辑）
+// 判断是否可以编辑（只有草稿和已驳回状态可以编辑）
 const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
@@ -674,6 +676,8 @@ const handleConfirmReceipt = async () => {
       approvalDialogVisible.value = false
       // 刷新列表
       fetchReimbursementList()
+      // 刷新待办计数
+      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(result.message || '确认收款失败')
     }
