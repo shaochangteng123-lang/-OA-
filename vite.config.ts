@@ -32,7 +32,6 @@ export default defineConfig({
     strictPort: true,
     hmr: {
       clientPort: 8899,
-      host: 'localhost',
     },
     watch: {
       ignored: ['**/CLAUDE.md', '**/node_modules/**', '**/dist/**'],

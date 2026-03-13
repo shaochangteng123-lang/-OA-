@@ -520,23 +520,28 @@ export function useInvoice() {
    * 加载已有发票数据
    */
   function loadInvoices(invoices: any[]): void {
+    if (!invoices || invoices.length === 0) return
+
+    // el-upload 要求 uid 为数字类型，使用时间戳 + 索引生成唯一数字 uid
+    const baseUid = Date.now()
+
     invoiceList.value = invoices.map((inv, index) => ({
       id: index + 1,
-      amount: inv.amount,
-      invoiceDate: inv.invoiceDate,
-      invoiceNumber: inv.invoiceNumber,
-      category: inv.category,
-      filePath: inv.filePath,
-      fileUid: `existing-${index}`,
+      amount: inv.amount || 0,
+      invoiceDate: inv.invoiceDate || '',
+      invoiceNumber: inv.invoiceNumber || '',
+      category: inv.category || '',
+      filePath: inv.filePath || '',
+      fileUid: baseUid + index,
       deductedAmount: inv.deductedAmount || 0,
-      actualAmount: inv.actualAmount || inv.amount,
+      actualAmount: inv.actualAmount || inv.amount || 0,
     }))
 
     fileList.value = invoices.map((inv, index) => ({
-      uid: `existing-${index}`,
-      name: inv.filePath.split('/').pop() || '发票文件',
-      url: inv.filePath,
-      serverPath: inv.filePath,
+      uid: baseUid + index,
+      name: (inv.filePath || '').split('/').pop() || '发票文件',
+      url: inv.filePath || '',
+      serverPath: inv.filePath || '',
       status: 'success',
     }))
 

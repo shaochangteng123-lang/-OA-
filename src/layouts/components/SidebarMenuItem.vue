@@ -1,12 +1,14 @@
 <template>
   <router-link v-slot="{ navigate, isExactActive }" :to="path" custom>
     <div class="menu-item-wrapper" @click="navigate">
-      <el-tooltip :content="label" placement="right" :disabled="!collapsed" :show-after="300">
+      <el-tooltip :content="tooltipText" placement="right" :disabled="!collapsed" :show-after="300">
         <div :class="['menu-item', { active: isExactActive, collapsed: collapsed }]">
           <i class="menu-icon">
             <el-icon :size="18">
               <component :is="icon" />
             </el-icon>
+            <!-- 折叠时显示小红点，根据类型区分颜色 -->
+            <span v-if="badge && collapsed" :class="['badge-dot', `badge-dot--${badgeType || 'danger'}`]"></span>
           </i>
           <span v-if="!collapsed" class="menu-text">{{ label }}</span>
           <el-badge v-if="badge && !collapsed" :value="badge" :type="badgeType" />
@@ -17,16 +19,25 @@
 </template>
 
 <script setup lang="ts">
-import type { Component } from 'vue'
+import { computed, type Component } from 'vue'
 
-defineProps<{
+const props = defineProps<{
   path: string
   label: string
   icon: Component
   badge?: string | number
   badgeType?: 'primary' | 'success' | 'warning' | 'danger' | 'info'
   collapsed: boolean
+  tooltipContent?: string
 }>()
+
+// 折叠状态下 tooltip 显示待办数量
+const tooltipText = computed(() => {
+  if (props.badge) {
+    return `${props.label}（${props.badge}）`
+  }
+  return props.tooltipContent || props.label
+})
 </script>
 
 <style scoped>
@@ -83,6 +94,38 @@ defineProps<{
   flex-shrink: 0;
   width: 18px;
   height: 18px;
+  position: relative;
+}
+
+/* 折叠状态下的小红点 */
+.badge-dot {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid #ffffff;
+}
+
+.badge-dot--danger {
+  background: #f56c6c;
+}
+
+.badge-dot--warning {
+  background: #e6a23c;
+}
+
+.badge-dot--primary {
+  background: #409eff;
+}
+
+.badge-dot--success {
+  background: #67c23a;
+}
+
+.badge-dot--info {
+  background: #909399;
 }
 
 .menu-text {

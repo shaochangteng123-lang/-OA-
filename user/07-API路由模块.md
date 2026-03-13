@@ -96,6 +96,19 @@ PUT    /api/users/:id/status      // 启用/禁用用户
 ```typescript
 POST   /api/reimbursement/upload-invoice  // 上传发票并进行OCR识别
 POST   /api/reimbursement/compress-pdf    // 压缩PDF文件
+GET    /api/reimbursement/list            // 获取报销单列表（默认显示最近一个月，按创建时间升序）
+GET    /api/reimbursement/records         // 获取报销记录（报销统计用，显示所有历史数据）
+GET    /api/reimbursement/statistics      // 获取报销统计数据
+GET    /api/reimbursement/:id             // 获取报销单详情
+POST   /api/reimbursement                 // 创建报销单
+PUT    /api/reimbursement/:id             // 更新报销单
+DELETE /api/reimbursement/:id             // 删除报销单
+```
+
+**数据显示规则：**
+- `/api/reimbursement/list`：默认显示最近一个月的数据，按创建时间升序排列（早的在下，晚的在上）
+- `/api/reimbursement/records`：显示所有历史数据，用于报销统计页面
+- 基础报销、大额报销、商务报销页面使用 `/list` 端点，超过一个月的历史数据需在报销统计中查看
 ```
 
 ## 中间件
@@ -348,6 +361,29 @@ app.use(helmet())
 
 ## 更新日志
 
+- 2026-03-13: 审批中心API新增报销类型和报销范围字段
+  - GET /api/approval/pending 返回新增 invoiceCategories（发票分类聚合）、reimbursementScope 字段
+  - GET /api/approval/approved-unpaid 返回新增 invoiceCategories、reimbursementScope 字段
+  - GET /api/approval/paid-this-month 返回新增 invoiceCategories、reimbursementScope 字段
+- 2026-03-13: 新增报销单恢复接口 POST /api/reimbursement/:id/restore
+  - 已删除的报销单可恢复，清除 is_deleted 标记和 deleted_at 时间
+  - 前端已删除报销单操作列显示"查看"和"恢复"按钮
+- 2026-03-13: 新增报销单撤回接口 POST /api/reimbursement/:id/withdraw
+  - 仅待审批（pending）状态的报销单可撤回，撤回后状态回到草稿（draft）
+  - 同时将对应审批实例状态改为 withdrawn，管理员审批页面不再显示已撤回的报销单
+  - 审批待办查询和计数接口排除 withdrawn 状态
+- 2026-03-13: 统一报销事由标题格式为 YYYY年MM月-基础报销/大额报销/商务报销
+  - 在 reimbursement.ts 和 approval.ts 中添加 normalizeReimbursementTitle 函数
+  - 所有返回报销列表的接口自动格式化 title 字段，兼容旧数据
+- 2026-03-13: 优化报销列表排序和数据显示规则
+  - GET /api/reimbursement/list 改为按创建时间升序排列（早的在下，晚的在上）
+  - 默认显示最近一个月的数据，超过一个月的历史数据需在报销统计中查看
+  - 更新基础报销、大额报销、商务报销页面的提示信息
+- 2026-03-13: GET /api/approval/pending 新增筛选参数支持
+  - 支持 userId（员工）、type（类型，逗号分隔）、status（状态）、startDate/endDate（日期范围）
+- 2026-03-12: 新增统一待办计数接口 GET /api/approval/pending-counts
+  - 根据用户角色返回所有待办数量（审批中心、转正、报销待确认收款等）
+  - 一次请求返回全部数据，避免前端多次请求
 - 2026-03-12: 优化审批统计接口和待办列表接口
   - GET /api/approval/statistics 新增 basicStats/largeStats/businessStats 按类型当月统计
   - GET /api/approval/pending 返回除已完成外所有状态，按待审批→待支付→待确认排序，新增 reimbursementStatus/reimbursementUserId 字段

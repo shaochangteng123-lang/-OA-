@@ -23,7 +23,7 @@
       </el-table-column>
       <el-table-column prop="invoiceNumber" label="发票号码" min-width="300" align="center">
         <template #default="{ row }">
-          <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-block; max-width: 100%;">{{ row.invoiceNumber || '' }}</span>
+          <span style="white-space: nowrap;">{{ row.invoiceNumber || '' }}</span>
         </template>
       </el-table-column>
       <el-table-column label="缩略图" width="110" align="center">
@@ -236,35 +236,10 @@ const transportFuelActual = computed(() => {
     return (totalCents - deductionCents) / 100
   }
 
-  // 否则使用月度限额逻辑（提交前的预估）
-  // 使用分（cents）来避免浮点数精度问题
-  const remainingQuotaCents = Math.max(0, Math.round((1500 - props.monthlyUsedQuota) * 100))
-  const transportFuelSubtotalCents = Math.round(transportFuelSubtotal.value * 100)
-
-  let transportFuelActualCents = 0
-  if (transportFuelSubtotalCents <= remainingQuotaCents) {
-    transportFuelActualCents = transportFuelSubtotalCents
-  } else {
-    transportFuelActualCents = remainingQuotaCents
-  }
-
-  // 计算其他类别发票的总金额（不受限额限制）
-  const otherCategoriesTotalCents = props.invoiceList.reduce((acc, item) => {
-    const category = item.category?.toLowerCase() || ''
-    const isTransportOrFuel =
-      category.includes('运输') ||
-      category.includes('交通') ||
-      category.includes('汽油') ||
-      category.includes('柴油')
-
-    if (!isTransportOrFuel) {
-      return acc + Math.round(item.amount * 100)
-    }
-    return acc
-  }, 0)
-
-  // 返回运输类实际报销金额 + 其他类别总金额（转换回元）
-  return (transportFuelActualCents + otherCategoriesTotalCents) / 100
+  // 否则使用：总金额 - 核减金额（提交前的预估）
+  const totalCents = Math.round(totalAmountNumber.value * 100)
+  const deductedCents = Math.round(totalDeductedAmountNumber.value * 100)
+  return (totalCents - deductedCents) / 100
 })
 
 // 是否显示金额警告

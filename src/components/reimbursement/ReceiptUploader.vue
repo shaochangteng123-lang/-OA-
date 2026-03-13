@@ -60,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { Plus, Upload, Picture, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -83,20 +83,13 @@ const emit = defineEmits<{
   (e: 'delete-file', file: any): void
 }>()
 
-// 文件列表
-const fileList = ref<any[]>([])
+// 文件列表 - 使用 computed 直接桥接父组件和 el-upload，避免双 watch 同步问题
+const fileList = computed({
+  get: () => props.modelValue || [],
+  set: (val) => emit('update:modelValue', val),
+})
 const uploadRef = ref()
 const isDragging = ref(false)
-
-// 同步外部值
-watch(() => props.modelValue, (val) => {
-  fileList.value = val || []
-}, { immediate: true, deep: true })
-
-// 同步内部值到外部
-watch(fileList, (val) => {
-  emit('update:modelValue', val)
-}, { deep: true })
 
 // 拖拽进入
 function handleDragOver(_e: DragEvent): void {

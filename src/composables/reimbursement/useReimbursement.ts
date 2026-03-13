@@ -108,8 +108,8 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
 
       if (result.success) {
         ElMessage.success(isDraft ? '草稿保存成功' : '提交成功')
-        // 使用 goBack 方法返回，这样可以正确返回到来源页面
-        goBack()
+        // 提交审批成功后需要刷新列表，草稿保存不需要
+        goBack(!isDraft)
         return true
       } else {
         ElMessage.error(result.message || `${isDraft ? '保存' : '提交'}失败`)
@@ -155,6 +155,12 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
 
       if (result.success && result.data) {
         reimbursementStatus.value = result.data.status || ''
+        console.log('🔍 loadReimbursementDetail 成功:', {
+          id: reimbursementId.value,
+          hasInvoices: !!result.data.invoices,
+          invoicesCount: result.data.invoices?.length,
+          status: result.data.status,
+        })
         return result.data
       } else {
         ElMessage.error(result.message || '获取报销单详情失败')
@@ -174,14 +180,32 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
   /**
    * 返回列表页
    */
-  function goBack(): void {
+  function goBack(shouldRefresh: boolean = false): void {
     // 如果有来源页面参数，返回到来源页面
     if (fromPage.value) {
-      // 如果有tab参数，拼接到返回URL中
-      const returnUrl = fromTab.value ? `${fromPage.value}?tab=${fromTab.value}` : fromPage.value
-      router.push(returnUrl)
+      // 构建返回URL，如果需要刷新则添加refresh参数
+      const query: Record<string, string> = {}
+      if (fromTab.value) {
+        query.tab = fromTab.value
+      }
+      if (shouldRefresh) {
+        query.refresh = Date.now().toString()
+      }
+
+      router.push({
+        path: fromPage.value,
+        query: Object.keys(query).length > 0 ? query : undefined
+      })
     } else {
-      router.push(listRoute)
+      // 如果需要刷新，添加refresh参数
+      if (shouldRefresh) {
+        router.push({
+          path: listRoute,
+          query: { refresh: Date.now().toString() }
+        })
+      } else {
+        router.push(listRoute)
+      }
     }
   }
 

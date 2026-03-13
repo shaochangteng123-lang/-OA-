@@ -55,6 +55,7 @@
             :sidebar-collapsed="sidebarCollapsed"
             group-key="finance"
             v-model:expanded="groupStates.finance.expanded"
+            :has-badge="financeGroupHasBadge"
           >
             <SidebarMenuItem
               path="/basic-reimbursement"
@@ -62,6 +63,8 @@
               :icon="Money"
               :collapsed="sidebarCollapsed"
               tooltip-content="基础报销"
+              :badge="basicReimbursementBadge"
+              badge-type="warning"
             />
             <SidebarMenuItem
               path="/large-reimbursement"
@@ -69,6 +72,8 @@
               :icon="Wallet"
               :collapsed="sidebarCollapsed"
               tooltip-content="大额报销"
+              :badge="largeReimbursementBadge"
+              badge-type="warning"
             />
             <SidebarMenuItem
               path="/business-reimbursement"
@@ -76,6 +81,8 @@
               :icon="Briefcase"
               :collapsed="sidebarCollapsed"
               tooltip-content="商务报销"
+              :badge="businessReimbursementBadge"
+              badge-type="warning"
             />
             <SidebarMenuItem
               path="/reimbursement-statistics"
@@ -121,6 +128,7 @@
             :sidebar-collapsed="sidebarCollapsed"
             group-key="hr"
             v-model:expanded="groupStates.hr.expanded"
+            :has-badge="hrGroupHasBadge"
           >
             <SidebarMenuItem
               path="/onboarding"
@@ -135,6 +143,8 @@
               :icon="UserFilled"
               :collapsed="sidebarCollapsed"
               tooltip-content="转正"
+              :badge="probationBadge"
+              badge-type="warning"
             />
             <SidebarMenuItem
               path="/resignation"
@@ -288,6 +298,7 @@
 import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { usePendingStore } from '@/stores/pending'
 import { api } from '@/utils/api'
 import { ElMessage } from 'element-plus'
 import {
@@ -322,6 +333,7 @@ import TopBar from './components/TopBar.vue'
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+const pendingStore = usePendingStore()
 
 // 侧边栏折叠状态 - 默认折叠，默认不锁定
 const sidebarCollapsed = ref(true)
@@ -355,6 +367,50 @@ const isAdmin = computed(() => {
 // 是否是总经理
 const isGeneralManager = computed(() => {
   return authStore.user?.role === 'general_manager'
+})
+
+// 计算各分组是否有待办事项
+const financeGroupHasBadge = computed(() => {
+  const counts = pendingStore.counts
+  // 用户的报销待确认
+  const userReimbursement = counts.myReimbursementBasic + counts.myReimbursementLarge + counts.myReimbursementBusiness
+  // 管理员的审批待办
+  const adminApproval = isAdmin.value ? counts.approvalPending : 0
+  // 总经理的审批待办
+  const gmApproval = isGeneralManager.value ? counts.gmApprovalPending : 0
+  return userReimbursement > 0 || adminApproval > 0 || gmApproval > 0
+})
+
+const hrGroupHasBadge = computed(() => {
+  const counts = pendingStore.counts
+  // 用户的转正待提交
+  const userProbation = counts.myProbationPending
+  // 管理员的转正待审批
+  const adminProbation = isAdmin.value ? counts.probationPending : 0
+  return userProbation || adminProbation > 0
+})
+
+// 计算各个报销类型的待办数量
+const basicReimbursementBadge = computed(() => {
+  return pendingStore.counts.myReimbursementBasic > 0 ? pendingStore.counts.myReimbursementBasic : undefined
+})
+
+const largeReimbursementBadge = computed(() => {
+  return pendingStore.counts.myReimbursementLarge > 0 ? pendingStore.counts.myReimbursementLarge : undefined
+})
+
+const businessReimbursementBadge = computed(() => {
+  return pendingStore.counts.myReimbursementBusiness > 0 ? pendingStore.counts.myReimbursementBusiness : undefined
+})
+
+const probationBadge = computed(() => {
+  if (isAdmin.value && pendingStore.counts.probationPending > 0) {
+    return pendingStore.counts.probationPending
+  }
+  if (pendingStore.counts.myProbationPending) {
+    return 1
+  }
+  return undefined
 })
 
 // 页面标题
@@ -488,6 +544,10 @@ onMounted(() => {
   if (isGeneralManager.value) {
     loadGMPendingApprovalCount()
   }
+
+  // 启动待办事项轮询
+  pendingStore.fetchPendingCounts()
+  pendingStore.startPolling()
 })
 
 // 获取待审批数量
@@ -520,6 +580,8 @@ onUnmounted(() => {
     clearTimeout(collapseTimer)
     collapseTimer = null
   }
+  // 停止待办事项轮询
+  pendingStore.stopPolling()
 })
 </script>
 

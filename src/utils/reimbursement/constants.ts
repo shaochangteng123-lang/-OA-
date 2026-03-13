@@ -58,7 +58,7 @@ export const STATUS_TEXT_MAP: Record<string, string> = {
   draft: '待提交',
   pending: '待审批',
   approved: '已通过',
-  rejected: '已拒绝',
+  rejected: '已驳回',
 }
 
 // 状态颜色映射

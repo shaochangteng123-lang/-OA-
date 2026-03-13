@@ -4,11 +4,16 @@
       <!-- 横线始终显示，宽度随侧边栏变化 -->
       <div class="group-divider-line" :class="{ collapsed: sidebarCollapsed }"></div>
 
+      <!-- 侧边栏折叠时：横线右侧显示小红点 -->
+      <span v-if="sidebarCollapsed && hasBadge" class="group-badge-dot"></span>
+
       <!-- 标题文字叠加在横线上方 -->
       <transition name="title-fade">
         <div v-if="!titleCollapsed && title" key="title" class="group-title">
           <span class="title-text">{{ title }}</span>
           <div class="title-actions">
+            <!-- 分组收起时：标题旁显示小红点 -->
+            <span v-if="hasBadge && !isExpanded" class="group-title-badge-dot"></span>
             <!-- 折叠/展开图标 -->
             <el-icon class="collapse-icon" :class="{ rotated: !isExpanded }">
               <ArrowDown />
@@ -33,6 +38,7 @@ const props = defineProps<{
   titleCollapsed: boolean // 控制标题显示
   sidebarCollapsed: boolean // 控制横线宽度
   groupKey: string // 用于标识不同的分组
+  hasBadge?: boolean // 分组内是否有待办提示
 }>()
 
 defineEmits<{
@@ -90,6 +96,19 @@ const handleHeaderClick = () => {
   width: 32px;
 }
 
+/* 折叠状态下分组横线右侧的小红点 */
+.group-badge-dot {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 8px;
+  height: 8px;
+  background: #f56c6c;
+  border-radius: 50%;
+  z-index: 2;
+}
+
 /* 展开状态：计算宽度（侧边栏220px - 左右padding 32px = 188px） */
 .group-divider-line:not(.collapsed) {
   width: 188px;
@@ -136,6 +155,15 @@ const handleHeaderClick = () => {
 
 .collapse-icon.rotated {
   transform: rotate(-90deg);
+}
+
+/* 分组标题旁的小红点（侧边栏展开、分组收起时） */
+.group-title-badge-dot {
+  width: 8px;
+  height: 8px;
+  background: #f56c6c;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
 /* 标题淡入：展开完成后延迟显示，带字间距动画 */

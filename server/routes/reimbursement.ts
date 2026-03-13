@@ -2169,6 +2169,24 @@ router.put('/:id', requireAuth, async (req, res) => {
         )
 
         console.log('✅ 草稿提交审批，创建审批实例:', { approvalInstanceId, reimbursementId: id, type: approvalType })
+
+        // 如果是从驳回状态重新提交，添加一条"再次提交"的审批记录
+        if (oldReimbursement.status === 'rejected') {
+          const recordId = nanoid()
+          db.prepare(`
+            INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            recordId,
+            approvalInstanceId,
+            1,
+            userId,
+            'resubmit',
+            '申请人修改后再次提交审批',
+            timestamp
+          )
+          console.log('✅ 添加再次提交记录:', { recordId, approvalInstanceId })
+        }
       }
     }
 
