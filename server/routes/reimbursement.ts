@@ -12,24 +12,19 @@ import { db } from '../db/index.js'
 
 const router = Router()
 
-// 格式化时间为中国时间 YYYY-MM-DD-HH:mm:ss
+// 格式化时间为中国时间，格式：YYYY-MM-DD HH:mm
+// 不依赖 Intl，避免 Alpine 容器 small-icu 导致乱码
 function formatDateTime(isoString: string | null): string {
   if (!isoString) return ''
   const date = new Date(isoString)
-  // 使用 Intl.DateTimeFormat 确保转换为中国时区
-  const formatter = new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  })
-  const parts = formatter.formatToParts(date)
-  const get = (type: string) => parts.find(p => p.type === type)?.value || ''
-  return `${get('year')}-${get('month')}-${get('day')}-${get('hour')}:${get('minute')}:${get('second')}`
+  // UTC 时间加 8 小时得到中国时间
+  const cnTime = new Date(date.getTime() + 8 * 60 * 60 * 1000)
+  const y = cnTime.getUTCFullYear()
+  const m = String(cnTime.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(cnTime.getUTCDate()).padStart(2, '0')
+  const h = String(cnTime.getUTCHours()).padStart(2, '0')
+  const min = String(cnTime.getUTCMinutes()).padStart(2, '0')
+  return `${y}-${m}-${d} ${h}:${min}`
 }
 
 // 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
@@ -203,12 +198,12 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 查询数据库中是否已存在该发票号码（排除已删除和已驳回的报销单）
+    // 查询数据库中是否已存在该发票号码（排除已驳回和已软删除的报销单）
     const existing = db.prepare(`
       SELECT ri.invoice_number, r.id as reimbursement_id, r.title, r.status, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
-      WHERE ri.invoice_number = ? AND r.status NOT IN ('rejected', 'deleted')
+      WHERE ri.invoice_number = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
       LIMIT 1
     `).get(invoiceNumber) as any
 
@@ -372,8 +367,10 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
 
     // 移动文件到正式目录
     // 优先使用前端传递的原始文件名，否则尝试解码
-    const decodedFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
-    const finalFileName = `invoice-${Date.now()}-${decodedFileName}`
+    const rawFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+    // 路径清洗：只取文件名部分，防止路径穿越攻击
+    const safeFileName = path.basename(rawFileName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+    const finalFileName = `invoice-${Date.now()}-${safeFileName}`
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(finalFilePath, finalPath)
 
@@ -473,8 +470,10 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     }
 
     // 移动文件到正式目录
-    const decodedFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
-    const finalFileName = `receipt-${Date.now()}-${decodedFileName}`
+    const rawReceiptName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+    // 路径清洗：只取文件名部分，防止路径穿越攻击
+    const safeReceiptName = path.basename(rawReceiptName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+    const finalFileName = `receipt-${Date.now()}-${safeReceiptName}`
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(tempFilePath, finalPath)
 
@@ -540,9 +539,14 @@ router.post('/compress-pdf', requireAuth, upload.single('pdf'), async (req, res)
     fs.unlinkSync(inputPath)
     fs.unlinkSync(outputPath)
 
+    // 清洗文件名，防止特殊字符导致响应头异常
+    const safeOriginalName = path.basename(req.file.originalname).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+    // 使用 RFC 5987 编码确保中文文件名兼容
+    const encodedFileName = encodeURIComponent(`compressed-${safeOriginalName}`)
+
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="compressed-${req.file.originalname}"`,
+      'Content-Disposition': `attachment; filename="compressed-${safeOriginalName}"; filename*=UTF-8''${encodedFileName}`,
       'Content-Length': compressedBuffer.length,
     })
 
@@ -623,11 +627,11 @@ router.get('/statistics', requireAuth, async (req, res) => {
       WHERE ${baseCondition} AND status = 'rejected'
     `).get(...baseParams) as { count: number; amount: number }
 
-    // 已完成统计（包括 paying, payment_uploaded, completed 状态）
+    // 已完成统计（包括 payment_uploaded, completed 状态）
     const completedStats = db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
       FROM reimbursements
-      WHERE ${baseCondition} AND status IN ('paying', 'payment_uploaded', 'completed')
+      WHERE ${baseCondition} AND status IN ('payment_uploaded', 'completed')
     `).get(...baseParams) as { count: number; amount: number }
 
     const totalStats = db.prepare(`
@@ -637,8 +641,8 @@ router.get('/statistics', requireAuth, async (req, res) => {
     `).get(...baseParams) as { count: number; amount: number }
 
     // 查询核减金额统计（仅基础报销，每年1月1日清零，且只统计已审批通过的报销单）
-    let deductedCondition = 'r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?, ?)'
-    const deductedParams: any[] = [userId, 'basic', 'approved', 'paying', 'payment_uploaded', 'completed']
+    let deductedCondition = 'r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?)'
+    const deductedParams: any[] = [userId, 'basic', 'approved', 'payment_uploaded', 'completed']
 
     // 添加日期范围筛选
     if (startDate) {
@@ -863,12 +867,12 @@ router.post('/create', requireAuth, async (req, res) => {
       })
     }
 
-    // 验证状态值
-    const validStatuses = ['draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paying', 'payment_uploaded', 'completed', 'rejected']
-    if (!validStatuses.includes(status)) {
+    // 验证状态值：普通用户只能创建草稿或提交审批
+    const allowedStatuses = ['draft', 'pending']
+    if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
-        message: '无效的状态值',
+        message: '无效的状态值，只能创建草稿或提交审批',
       })
     }
 
@@ -887,7 +891,7 @@ router.post('/create', requireAuth, async (req, res) => {
         WHERE r.user_id = ?
         AND r.type = 'basic'
         AND r.reimbursement_month = ?
-        AND r.status != 'rejected'
+        AND r.status NOT IN ('draft', 'rejected')
         AND (
           LOWER(i.category) LIKE '%运输%'
           OR LOWER(i.category) LIKE '%交通%'
@@ -980,6 +984,17 @@ router.post('/create', requireAuth, async (req, res) => {
     }, 0)
     const totalAmount = totalAmountCents / 100
 
+    // 如果状态是 pending（提交审批），提前进行业务规则校验
+    if (status === 'pending') {
+      // 大额报销金额验证：总金额必须超过1000元
+      if (type === 'large' && totalAmount < 1000) {
+        return res.status(400).json({
+          success: false,
+          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
+        })
+      }
+    }
+
     // 生成报销单ID
     const now = new Date()
     const dateStr = now.toISOString().split('T')[0].replace(/-/g, '')
@@ -991,95 +1006,127 @@ router.post('/create', requireAuth, async (req, res) => {
     // 计算报销月份（只有基础报销使用特殊规则）
     const reimbursementMonth = calculateReimbursementMonth(now, type)
 
-    // 插入报销单主记录
-    const insertReimbursement = db.prepare(`
-      INSERT INTO reimbursements (
-        id, type, category, title, total_amount, status, description,
-        business_type, client, user_id, applicant_name,
-        submit_time, reimbursement_month, reimbursement_scope, service_target, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
+    // === 所有校验在写库前完成 ===
 
-    insertReimbursement.run(
-      reimbursementId,
-      type,
-      category || null,
-      title,
-      totalAmount,
-      status, // 使用传入的状态值（draft 或 pending）
-      description || null,
-      businessType || null,
-      client || serviceTarget || null, // 如果 client 为空，使用 serviceTarget
-      userId,
-      userName,
-      timestamp,
-      reimbursementMonth,
-      reimbursementScope || null,
-      serviceTarget || null,
-      timestamp,
-      timestamp
-    )
-
-    // 插入发票明细
-    const insertInvoice = db.prepare(`
-      INSERT INTO reimbursement_invoices (
-        id, reimbursement_id, amount, invoice_date, invoice_number,
-        file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    for (const invoice of processedInvoices) {
-      const invoiceId = `INV${Date.now()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`
-      insertInvoice.run(
-        invoiceId,
-        reimbursementId,
-        invoice.amount || 0,
-        invoice.invoiceDate || timestamp.split('T')[0],
-        invoice.invoiceNumber || null,
-        invoice.filePath || '',
-        invoice.seller || null,
-        invoice.buyer || null,
-        invoice.taxAmount || 0,
-        invoice.invoiceCode || null,
-        invoice.category || null,
-        invoice.deductedAmount || 0,
-        timestamp
-      )
+    // 校验本次请求内发票号码不重复
+    const invoiceNumbers = processedInvoices
+      .map((inv: any) => inv.invoiceNumber)
+      .filter((n: any) => n)
+    const uniqueNumbers = new Set(invoiceNumbers)
+    if (uniqueNumbers.size < invoiceNumbers.length) {
+      return res.status(400).json({
+        success: false,
+        message: '提交的发票中存在重复的发票号码',
+      })
     }
 
-    // 如果状态是 pending（提交审批），创建审批实例
-    if (status === 'pending') {
-      // 大额报销金额验证：总金额必须超过1000元
-      if (type === 'large' && totalAmount < 1000) {
-        return res.status(400).json({
-          success: false,
-          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
-        })
+    // 校验发票号码在数据库中的唯一性 —— 移入事务内，利用 SQLite 写锁防并发
+
+    // === 使用 BEGIN IMMEDIATE 立即获取写锁，防并发 ===
+    try {
+      db.exec('BEGIN IMMEDIATE')
+
+      // 事务内校验发票号码唯一性（已持有写锁，并发安全）
+      for (const invoiceNumber of uniqueNumbers) {
+        const existing = db.prepare(`
+          SELECT ri.invoice_number FROM reimbursement_invoices ri
+          JOIN reimbursements r ON ri.reimbursement_id = r.id
+          WHERE ri.invoice_number = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+          LIMIT 1
+        `).get(invoiceNumber)
+        if (existing) {
+          db.exec('ROLLBACK')
+          return res.status(400).json({
+            success: false,
+            message: `发票号码 ${invoiceNumber} 已存在，请勿重复提交`,
+          })
+        }
       }
 
-      const approvalInstanceId = nanoid()
-
-      // 确定审批类型
-      const approvalType = type === 'basic' ? 'reimbursement_basic' :
-                          type === 'large' ? 'reimbursement_large' :
-                          'reimbursement_business'
-
+      // 插入报销单主记录
       db.prepare(`
-        INSERT INTO approval_instances (
-          id, flow_id, type, target_id, target_type, applicant_id,
-          current_step, status, submit_time, created_at, updated_at
-        ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
+        INSERT INTO reimbursements (
+          id, type, category, title, total_amount, status, description,
+          business_type, client, user_id, applicant_name,
+          submit_time, reimbursement_month, reimbursement_scope, service_target, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        approvalInstanceId,
-        approvalType,
         reimbursementId,
+        type,
+        category || null,
+        title,
+        totalAmount,
+        status,
+        description || null,
+        businessType || null,
+        client || serviceTarget || null,
         userId,
+        userName,
         timestamp,
+        reimbursementMonth,
+        reimbursementScope || null,
+        serviceTarget || null,
         timestamp,
         timestamp
       )
 
-      console.log('✅ 创建审批实例:', { approvalInstanceId, reimbursementId, type: approvalType })
+      // 插入发票明细
+      const insertInvoice = db.prepare(`
+        INSERT INTO reimbursement_invoices (
+          id, reimbursement_id, amount, invoice_date, invoice_number,
+          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+
+      for (const invoice of processedInvoices) {
+        const invoiceId = `INV${Date.now()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`
+        insertInvoice.run(
+          invoiceId,
+          reimbursementId,
+          invoice.amount || 0,
+          invoice.invoiceDate || timestamp.split('T')[0],
+          invoice.invoiceNumber || null,
+          invoice.filePath || '',
+          invoice.seller || null,
+          invoice.buyer || null,
+          invoice.taxAmount || 0,
+          invoice.invoiceCode || null,
+          invoice.category || null,
+          invoice.deductedAmount || 0,
+          timestamp
+        )
+      }
+
+      // 如果状态是 pending（提交审批），创建审批实例
+      if (status === 'pending') {
+        const approvalInstanceId = nanoid()
+
+        const approvalType = type === 'basic' ? 'reimbursement_basic' :
+                            type === 'large' ? 'reimbursement_large' :
+                            'reimbursement_business'
+
+        db.prepare(`
+          INSERT INTO approval_instances (
+            id, flow_id, type, target_id, target_type, applicant_id,
+            current_step, status, submit_time, created_at, updated_at
+          ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
+        `).run(
+          approvalInstanceId,
+          approvalType,
+          reimbursementId,
+          userId,
+          timestamp,
+          timestamp,
+          timestamp
+        )
+
+        console.log('✅ 创建审批实例:', { approvalInstanceId, reimbursementId, type: approvalType })
+      }
+
+      db.exec('COMMIT')
+    } catch (txError: any) {
+      try { db.exec('ROLLBACK') } catch { /* 已回滚则忽略 */ }
+      throw txError
     }
 
     res.json({
@@ -1476,157 +1523,6 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
   }
 })
 
-/**
- * 财务开始付款
- * POST /api/reimbursement/:id/start-payment
- */
-router.post('/:id/start-payment', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
-    }
-
-    // 检查是否为管理员
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限操作',
-      })
-    }
-
-    const { db } = await import('../db/index.js')
-
-    // 检查报销单是否存在
-    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
-
-    if (!reimbursement) {
-      return res.status(404).json({
-        success: false,
-        message: '报销单不存在',
-      })
-    }
-
-    // 检查报销单状态是否为已审批通过
-    if (reimbursement.status !== 'approved') {
-      return res.status(400).json({
-        success: false,
-        message: '只有已审批通过的报销单才能开始付款',
-      })
-    }
-
-    const now = new Date().toISOString()
-
-    db.prepare(`
-      UPDATE reimbursements
-      SET status = 'paying', pay_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(now, now, id)
-
-    console.log(`✅ 报销单开始付款: ${id}`)
-
-    res.json({
-      success: true,
-      message: '已标记为付款中',
-    })
-  } catch (error) {
-    console.error('标记付款失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '操作失败',
-    })
-  }
-})
-
-/**
- * 财务上传付款凭证
- * POST /api/reimbursement/:id/upload-payment-proof
- */
-router.post('/:id/upload-payment-proof', requireAuth, upload.single('paymentProof'), async (req, res) => {
-  try {
-    const { id } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
-    }
-
-    // 检查是否为管理员
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限操作',
-      })
-    }
-
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: '请上传付款凭证',
-      })
-    }
-
-    const { db } = await import('../db/index.js')
-
-    // 检查报销单是否存在
-    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
-
-    if (!reimbursement) {
-      return res.status(404).json({
-        success: false,
-        message: '报销单不存在',
-      })
-    }
-
-    // 检查报销单状态是否为付款中
-    if (reimbursement.status !== 'paying') {
-      return res.status(400).json({
-        success: false,
-        message: '只有付款中的报销单才能上传付款凭证',
-      })
-    }
-
-    // 移动文件到正式目录
-    const finalFileName = `payment-proof-${id}-${Date.now()}.pdf`
-    const finalPath = path.join(invoicesDir, finalFileName)
-    fs.renameSync(req.file.path, finalPath)
-
-    const paymentProofPath = `/uploads/invoices/${finalFileName}`
-    const now = new Date().toISOString()
-
-    db.prepare(`
-      UPDATE reimbursements
-      SET status = 'payment_uploaded', payment_proof_path = ?, payment_upload_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(paymentProofPath, now, now, id)
-
-    console.log(`✅ 付款凭证上传成功: ${id}`)
-
-    res.json({
-      success: true,
-      message: '付款凭证上传成功',
-      data: {
-        paymentProofPath,
-      },
-    })
-  } catch (error) {
-    console.error('上传付款凭证失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '上传失败',
-    })
-  }
-})
 
 /**
  * 上传付款回单并完成付款（合并接口）
@@ -1682,8 +1578,10 @@ router.post('/:id/complete-with-proof', requireAuth, uploadPaymentProof.single('
 
     // 移动文件到正式目录
     // 优先使用前端传递的原始文件名，否则尝试解码
-    const decodedPaymentFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
-    const finalFileName = `payment-proof-${id}-${Date.now()}-${decodedPaymentFileName}`
+    const rawPaymentFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+    // 路径清洗：只取文件名部分，防止路径穿越攻击
+    const safePaymentFileName = path.basename(rawPaymentFileName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+    const finalFileName = `payment-proof-${id}-${Date.now()}-${safePaymentFileName}`
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(req.file.path, finalPath)
 
@@ -1725,74 +1623,6 @@ router.post('/:id/complete-with-proof', requireAuth, uploadPaymentProof.single('
     res.status(500).json({
       success: false,
       message: '上传失败',
-    })
-  }
-})
-
-/**
- * 确认付款完成
- * POST /api/reimbursement/:id/complete-payment
- */
-router.post('/:id/complete-payment', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
-    }
-
-    // 检查是否为管理员
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限操作',
-      })
-    }
-
-    const { db } = await import('../db/index.js')
-
-    // 检查报销单是否存在
-    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
-
-    if (!reimbursement) {
-      return res.status(404).json({
-        success: false,
-        message: '报销单不存在',
-      })
-    }
-
-    // 检查报销单状态是否为已上传付款凭证
-    if (reimbursement.status !== 'payment_uploaded') {
-      return res.status(400).json({
-        success: false,
-        message: '只有已上传付款凭证的报销单才能确认完成',
-      })
-    }
-
-    const now = new Date().toISOString()
-
-    db.prepare(`
-      UPDATE reimbursements
-      SET status = 'completed', completed_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(now, now, id)
-
-    console.log(`✅ 报销单付款完成: ${id}`)
-
-    res.json({
-      success: true,
-      message: '付款已完成',
-    })
-  } catch (error) {
-    console.error('确认付款完成失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '操作失败',
     })
   }
 })
@@ -1884,8 +1714,9 @@ router.get('/:id', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 管理员和总经理可以查看所有报销单，普通用户只能查看自己的
-    const isAdmin = userRole === 'super_admin' || userRole === 'admin' || userRole === 'general_manager'
+    // 管理员可以查看所有报销单，总经理只能查看商务报销，普通用户只能查看自己的
+    const isAdmin = userRole === 'super_admin' || userRole === 'admin'
+    const isGM = userRole === 'general_manager'
 
     let reimbursement
     if (isAdmin) {
@@ -1911,6 +1742,29 @@ router.get('/:id', requireAuth, async (req, res) => {
         FROM reimbursements
         WHERE id = ?
       `).get(id)
+    } else if (isGM) {
+      // 总经理只能查看商务报销
+      reimbursement = db.prepare(`
+        SELECT
+          id, type, category, title,
+          total_amount as amount,
+          total_amount as totalAmount,
+          COALESCE(deduction_amount, 0) as deductionAmount,
+          status,
+          description, business_type as businessType, client,
+          user_id as userId, applicant_name as applicant,
+          submit_time as submitTime, approve_time as approveTime,
+          approver, pay_time as payTime, payment_proof_path as paymentProofPath,
+          payment_upload_time as paymentUploadTime, completed_time as completedTime,
+          receipt_confirmed_by as receiptConfirmedBy,
+          reject_reason as rejectReason,
+          reimbursement_scope as reimbursementScope,
+          reimbursement_month as reimbursementMonth,
+          service_target as serviceTarget,
+          created_at as createTime, updated_at as updateTime
+        FROM reimbursements
+        WHERE id = ? AND (type = 'business' OR user_id = ?)
+      `).get(id, userId)
     } else {
       // 普通用户只能查看自己的报销单
       reimbursement = db.prepare(`
@@ -2038,19 +1892,10 @@ router.put('/:id', requireAuth, async (req, res) => {
       })
     }
 
-    // 验证状态值
-    const validStatuses = ['draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paying', 'payment_uploaded', 'completed', 'rejected']
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        success: false,
-        message: '无效的状态值',
-      })
-    }
-
     const { db } = await import('../db/index.js')
 
     // 检查报销单是否存在且属于当前用户
-    const existingReimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId)
+    const existingReimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId) as any
 
     if (!existingReimbursement) {
       return res.status(404).json({
@@ -2059,135 +1904,291 @@ router.put('/:id', requireAuth, async (req, res) => {
       })
     }
 
+    // 验证状态值：只能修改草稿或已驳回的单据
+    const allowedStatuses = ['draft', 'rejected']
+    if (!allowedStatuses.includes(existingReimbursement.status)) {
+      return res.status(403).json({
+        success: false,
+        message: '只能修改草稿或已驳回的报销单',
+      })
+    }
+
+    // 用户只能将状态改为 draft 或 pending
+    const allowedNewStatuses = ['draft', 'pending']
+    if (!allowedNewStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: '无效的状态值，只能保存草稿或提交审批',
+      })
+    }
+
+    // 如果是基础报销，需要重新计算核减金额（与创建逻辑一致，不信任客户端传入的核减值）
+    let processedInvoices = invoices
+    // 计算报销月份（跨月编辑时需要同步更新）
+    const reimbursementMonth = calculateReimbursementMonth(new Date(), existingReimbursement.type)
+
+    if (existingReimbursement.type === 'basic') {
+      // 获取当月已使用的运输/交通/汽油/柴油类发票额度（排除当前报销单自身）
+      // 口径与前端 transport-fuel-quota 一致：排除草稿和已驳回
+      const monthlyUsedResult = db.prepare(`
+        SELECT COALESCE(SUM(i.amount), 0) as used_amount
+        FROM reimbursement_invoices i
+        INNER JOIN reimbursements r ON i.reimbursement_id = r.id
+        WHERE r.user_id = ?
+        AND r.type = 'basic'
+        AND r.reimbursement_month = ?
+        AND r.status NOT IN ('draft', 'rejected')
+        AND r.id != ?
+        AND (
+          LOWER(i.category) LIKE '%运输%'
+          OR LOWER(i.category) LIKE '%交通%'
+          OR LOWER(i.category) LIKE '%汽油%'
+          OR LOWER(i.category) LIKE '%柴油%'
+        )
+      `).get(userId, reimbursementMonth, id) as { used_amount: number }
+
+      const monthlyUsedQuota = monthlyUsedResult?.used_amount || 0
+      const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota)
+
+      // 计算本次提交的运输/交通/汽油/柴油类发票总额
+      let transportFuelTotal = 0
+      const transportFuelInvoices: any[] = []
+
+      processedInvoices = invoices.map((inv: any) => {
+        const category = (inv.category || '').toLowerCase()
+        const isTransportOrFuel =
+          category.includes('运输') ||
+          category.includes('交通') ||
+          category.includes('汽油') ||
+          category.includes('柴油')
+
+        if (isTransportOrFuel) {
+          transportFuelInvoices.push(inv)
+          transportFuelTotal += inv.amount || 0
+        }
+
+        return { ...inv, deductedAmount: 0 }
+      })
+
+      // 如果运输/交通/汽油/柴油类发票总额超过剩余额度，需要核减
+      if (transportFuelTotal > remainingQuota) {
+        const deductionAmountCents = Math.round((transportFuelTotal - remainingQuota) * 100)
+        const transportFuelTotalCents = Math.round(transportFuelTotal * 100)
+
+        let accumulatedDeductionCents = 0
+        const transportInvoices: any[] = []
+
+        processedInvoices.forEach((inv: any) => {
+          const category = (inv.category || '').toLowerCase()
+          const isTransportOrFuel =
+            category.includes('运输') ||
+            category.includes('交通') ||
+            category.includes('汽油') ||
+            category.includes('柴油')
+
+          if (isTransportOrFuel) {
+            transportInvoices.push(inv)
+          }
+        })
+
+        processedInvoices = processedInvoices.map((inv: any) => {
+          const category = (inv.category || '').toLowerCase()
+          const isTransportOrFuel =
+            category.includes('运输') ||
+            category.includes('交通') ||
+            category.includes('汽油') ||
+            category.includes('柴油')
+
+          if (isTransportOrFuel && transportFuelTotalCents > 0) {
+            const invAmountCents = Math.round((inv.amount || 0) * 100)
+            const ratio = invAmountCents / transportFuelTotalCents
+            let invoiceDeductionCents = Math.round(deductionAmountCents * ratio)
+
+            const isLastTransportInvoice = transportInvoices[transportInvoices.length - 1] === inv
+            if (isLastTransportInvoice) {
+              invoiceDeductionCents = deductionAmountCents - accumulatedDeductionCents
+            }
+
+            accumulatedDeductionCents += invoiceDeductionCents
+            return { ...inv, deductedAmount: invoiceDeductionCents / 100 }
+          }
+
+          return inv
+        })
+      }
+    }
+
     // 计算总金额（使用实际报销金额，即扣除核减后的金额）
     // 使用分（cents）来避免浮点数精度问题
-    const totalAmountCents = invoices.reduce((sum: number, inv: any) => {
-      const actualAmount = inv.actualAmount || inv.amount || 0
-      const actualCents = Math.round(actualAmount * 100)
+    const totalAmountCents = processedInvoices.reduce((sum: number, inv: any) => {
+      const amountCents = Math.round((inv.amount || 0) * 100)
+      const deductedCents = Math.round((inv.deductedAmount || 0) * 100)
+      const actualCents = amountCents - deductedCents
       return sum + actualCents
     }, 0)
     const totalAmount = totalAmountCents / 100
 
-    const timestamp = new Date().toISOString()
-
-    // 更新报销单主记录
-    const updateReimbursement = db.prepare(`
-      UPDATE reimbursements
-      SET category = ?, title = ?, total_amount = ?, status = ?,
-          description = ?, business_type = ?, client = ?, updated_at = ?
-      WHERE id = ? AND user_id = ?
-    `)
-
-    updateReimbursement.run(
-      category || null,
-      title,
-      totalAmount,
-      status,
-      description || null,
-      businessType || null,
-      client || null,
-      timestamp,
-      id,
-      userId
-    )
-
-    // 删除旧的发票明细
-    db.prepare('DELETE FROM reimbursement_invoices WHERE reimbursement_id = ?').run(id)
-
-    // 插入新的发票明细
-    const insertInvoice = db.prepare(`
-      INSERT INTO reimbursement_invoices (
-        id, reimbursement_id, amount, invoice_date, invoice_number,
-        file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    for (const invoice of invoices) {
-      const invoiceId = `INV${Date.now()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`
-      insertInvoice.run(
-        invoiceId,
-        id,
-        invoice.amount || 0,
-        invoice.invoiceDate || timestamp.split('T')[0],
-        invoice.invoiceNumber || null,
-        invoice.filePath || '',
-        invoice.seller || null,
-        invoice.buyer || null,
-        invoice.taxAmount || 0,
-        invoice.invoiceCode || null,
-        invoice.category || null,
-        invoice.deductedAmount || 0,
-        timestamp
-      )
-    }
-
-    // 如果是从草稿状态或被驳回状态提交审批（status 变为 pending），创建审批实例
-    const oldReimbursement = existingReimbursement as any
-    if ((oldReimbursement.status === 'draft' || oldReimbursement.status === 'rejected') && status === 'pending') {
+    // 如果是提交审批（status 变为 pending），提前进行业务规则校验
+    if (status === 'pending') {
       // 大额报销金额验证：总金额必须超过1000元
-      if (oldReimbursement.type === 'large' && totalAmount < 1000) {
+      if (existingReimbursement.type === 'large' && totalAmount < 1000) {
         return res.status(400).json({
           success: false,
           message: '大额报销适用于发票总金额超过 1000 元的报销申请',
         })
       }
+    }
 
-      // 更新提交时间，清除驳回原因
-      db.prepare('UPDATE reimbursements SET submit_time = ?, reject_reason = NULL WHERE id = ?').run(timestamp, id)
+    const timestamp = new Date().toISOString()
 
-      // 检查是否已有pending状态的审批实例
-      const existingApproval = db.prepare(`
-        SELECT id FROM approval_instances
-        WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
-      `).get(id)
+    // === 所有校验在写库前完成 ===
 
-      if (!existingApproval) {
-        const { nanoid } = await import('nanoid')
-        const approvalInstanceId = nanoid()
+    // 校验本次请求内发票号码不重复
+    const invoiceNumbers = processedInvoices
+      .map((inv: any) => inv.invoiceNumber)
+      .filter((n: any) => n)
+    const uniqueNumbers = new Set(invoiceNumbers)
+    if (uniqueNumbers.size < invoiceNumbers.length) {
+      return res.status(400).json({
+        success: false,
+        message: '提交的发票中存在重复的发票号码',
+      })
+    }
 
-        // 获取报销单类型
-        const reimbursement = db.prepare('SELECT type FROM reimbursements WHERE id = ?').get(id) as any
+    // 发票号码数据库唯一性校验移入事务内，利用 SQLite 写锁防并发
 
-        // 确定审批类型
-        const approvalType = reimbursement.type === 'basic' ? 'reimbursement_basic' :
-                            reimbursement.type === 'large' ? 'reimbursement_large' :
-                            'reimbursement_business'
+    // === 使用 BEGIN IMMEDIATE 立即获取写锁，防并发 ===
+    try {
+      db.exec('BEGIN IMMEDIATE')
 
-        db.prepare(`
-          INSERT INTO approval_instances (
-            id, flow_id, type, target_id, target_type, applicant_id,
-            current_step, status, submit_time, created_at, updated_at
-          ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
-        `).run(
-          approvalInstanceId,
-          approvalType,
+      // 事务内校验发票号码唯一性（已持有写锁，排除当前报销单自身）
+      for (const invoiceNumber of uniqueNumbers) {
+        const existing = db.prepare(`
+          SELECT ri.invoice_number FROM reimbursement_invoices ri
+          JOIN reimbursements r ON ri.reimbursement_id = r.id
+          WHERE ri.invoice_number = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+          LIMIT 1
+        `).get(invoiceNumber, id)
+        if (existing) {
+          db.exec('ROLLBACK')
+          return res.status(400).json({
+            success: false,
+            message: `发票号码 ${invoiceNumber} 已存在，请勿重复提交`,
+          })
+        }
+      }
+
+      // 更新报销单主记录（包括 reimbursement_month，跨月编辑时同步更新）
+      db.prepare(`
+        UPDATE reimbursements
+        SET category = ?, title = ?, total_amount = ?, status = ?,
+            description = ?, business_type = ?, client = ?, reimbursement_month = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+      `).run(
+        category || null,
+        title,
+        totalAmount,
+        status,
+        description || null,
+        businessType || null,
+        client || null,
+        reimbursementMonth,
+        timestamp,
+        id,
+        userId
+      )
+
+      // 删除旧的发票明细
+      db.prepare('DELETE FROM reimbursement_invoices WHERE reimbursement_id = ?').run(id)
+
+      // 插入新的发票明细
+      const insertInvoice = db.prepare(`
+        INSERT INTO reimbursement_invoices (
+          id, reimbursement_id, amount, invoice_date, invoice_number,
+          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+
+      for (const invoice of processedInvoices) {
+        const invoiceId = `INV${Date.now()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`
+        insertInvoice.run(
+          invoiceId,
           id,
-          userId,
-          timestamp,
-          timestamp,
+          invoice.amount || 0,
+          invoice.invoiceDate || timestamp.split('T')[0],
+          invoice.invoiceNumber || null,
+          invoice.filePath || '',
+          invoice.seller || null,
+          invoice.buyer || null,
+          invoice.taxAmount || 0,
+          invoice.invoiceCode || null,
+          invoice.category || null,
+          invoice.deductedAmount || 0,
           timestamp
         )
+      }
 
-        console.log('✅ 草稿提交审批，创建审批实例:', { approvalInstanceId, reimbursementId: id, type: approvalType })
+      // 如果是从草稿状态或被驳回状态提交审批（status 变为 pending），创建审批实例
+      const oldReimbursement = existingReimbursement as any
+      if ((oldReimbursement.status === 'draft' || oldReimbursement.status === 'rejected') && status === 'pending') {
+        // 更新提交时间，清除驳回原因
+        db.prepare('UPDATE reimbursements SET submit_time = ?, reject_reason = NULL WHERE id = ?').run(timestamp, id)
 
-        // 如果是从驳回状态重新提交，添加一条"再次提交"的审批记录
-        if (oldReimbursement.status === 'rejected') {
-          const recordId = nanoid()
+        // 检查是否已有pending状态的审批实例
+        const existingApproval = db.prepare(`
+          SELECT id FROM approval_instances
+          WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
+        `).get(id)
+
+        if (!existingApproval) {
+          const approvalInstanceId = nanoid()
+
+          // 确定审批类型
+          const approvalType = existingReimbursement.type === 'basic' ? 'reimbursement_basic' :
+                              existingReimbursement.type === 'large' ? 'reimbursement_large' :
+                              'reimbursement_business'
+
           db.prepare(`
-            INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO approval_instances (
+              id, flow_id, type, target_id, target_type, applicant_id,
+              current_step, status, submit_time, created_at, updated_at
+            ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
           `).run(
-            recordId,
             approvalInstanceId,
-            1,
+            approvalType,
+            id,
             userId,
-            'resubmit',
-            '申请人修改后再次提交审批',
+            timestamp,
+            timestamp,
             timestamp
           )
+
+          console.log('✅ 草稿提交审批，创建审批实例:', { approvalInstanceId, reimbursementId: id, type: approvalType })
+
+          // 如果是从驳回状态重新提交，添加一条"再次提交"的审批记录
+          if (oldReimbursement.status === 'rejected') {
+            const recordId = nanoid()
+            db.prepare(`
+              INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              recordId,
+              approvalInstanceId,
+              1,
+              userId,
+              'resubmit',
+              '申请人修改后再次提交审批',
+              timestamp
+            )
           console.log('✅ 添加再次提交记录:', { recordId, approvalInstanceId })
         }
       }
+    }
+
+      db.exec('COMMIT')
+    } catch (txError: any) {
+      try { db.exec('ROLLBACK') } catch { /* 已回滚则忽略 */ }
+      throw txError
     }
 
     res.json({
@@ -2348,8 +2349,43 @@ router.post('/:id/restore', requireAuth, async (req, res) => {
       })
     }
 
-    const now = new Date().toISOString()
-    db.prepare('UPDATE reimbursements SET is_deleted = 0, deleted_at = NULL, updated_at = ? WHERE id = ?').run(now, id)
+    // === 使用 BEGIN IMMEDIATE 立即获取写锁，防并发 ===
+    try {
+      db.exec('BEGIN IMMEDIATE')
+
+      // 事务内校验：检查该报销单的发票号是否已被其他有效报销单占用
+      const invoices = db.prepare('SELECT invoice_number FROM reimbursement_invoices WHERE reimbursement_id = ?').all(id) as any[]
+      const conflictInvoices: string[] = []
+      for (const inv of invoices) {
+        if (!inv.invoice_number) continue
+        const conflict = db.prepare(`
+          SELECT ri.invoice_number, r.title, r.applicant_name
+          FROM reimbursement_invoices ri
+          JOIN reimbursements r ON ri.reimbursement_id = r.id
+          WHERE ri.invoice_number = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+          LIMIT 1
+        `).get(inv.invoice_number, id) as any
+        if (conflict) {
+          conflictInvoices.push(`${inv.invoice_number}（已被「${conflict.applicant_name}」的报销单「${conflict.title}」使用）`)
+        }
+      }
+
+      if (conflictInvoices.length > 0) {
+        db.exec('ROLLBACK')
+        return res.status(409).json({
+          success: false,
+          message: `无法恢复，以下发票号已被其他有效报销单占用：${conflictInvoices.join('、')}`,
+        })
+      }
+
+      const now = new Date().toISOString()
+      db.prepare('UPDATE reimbursements SET is_deleted = 0, deleted_at = NULL, updated_at = ? WHERE id = ?').run(now, id)
+
+      db.exec('COMMIT')
+    } catch (txError) {
+      try { db.exec('ROLLBACK') } catch { /* 忽略 */ }
+      throw txError
+    }
 
     res.json({
       success: true,

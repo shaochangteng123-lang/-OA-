@@ -194,7 +194,10 @@ function getTypeLabel(type?: string): string {
 
 // 格式化日期
 function formatDate(dateStr: string) {
-  return format(new Date(dateStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  if (!dateStr) return '-'
+  // 兼容旧格式 "YYYY-MM-DD HH:mm:ss"，替换空格为T确保跨浏览器解析
+  const safeStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T')
+  return format(new Date(safeStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
 }
 
 // 格式化文件大小
@@ -278,15 +281,7 @@ function handleRemoveFile() {
 
 // 返回上一级页面
 function handleBack() {
-  const from = route.query.from as string
-  const tab = route.query.tab as string
-  if (from) {
-    // 如果有tab参数，拼接到返回URL中
-    const returnUrl = tab ? `${from}?tab=${tab}` : from
-    router.push(returnUrl)
-  } else {
-    router.back()
-  }
+  router.back()
 }
 
 // 提交付款
@@ -318,7 +313,7 @@ async function handleSubmit() {
     if (res.data.success) {
       ElMessage.success('付款回单上传成功，等待用户确认收款')
       // 刷新菜单栏角标
-      pendingStore.refreshPendingCounts()
+      await pendingStore.refreshPendingCounts()
       // 付款成功后返回来源页面
       const from = route.query.from as string
       const tab = route.query.tab as string
@@ -410,6 +405,9 @@ onUnmounted(() => {
   overflow: hidden;
   background: #fff;
   transition: all 0.3s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .file-display-card:hover {
@@ -426,14 +424,20 @@ onUnmounted(() => {
   width: 100%;
   min-height: 200px;
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .display-image {
-  width: 100%;
-  height: 100%;
-  min-height: 200px;
+  max-width: 400px;
+  max-height: 300px;
+  width: auto;
+  height: auto;
   object-fit: contain;
   background: #f5f7fa;
+  margin: 0 auto;
+  display: block;
 }
 
 .delete-button {

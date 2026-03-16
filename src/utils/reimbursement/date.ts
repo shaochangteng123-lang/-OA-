@@ -31,10 +31,11 @@ export function formatReimbursementMonth(monthStr: string): string {
 /**
  * 标准化报销事由标题格式
  * 将各种格式统一为：YYYY年MM月-基础报销/大额报销/商务报销
- * 例如："2026年03月报销-基础报销" → "2026年03月-基础报销"
+ * 例如："2026年03月大额报销" → "2026年03月-大额报销"
+ *       "2026年03月报销-基础报销" → "2026年03月-基础报销"
  */
 export function normalizeReimbursementTitle(title: string): string {
-  const match = title.match(/^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/)
+  const match = title.match(/^(\d{4}年\d{2}月).*?(基础报销|大额报销|商务报销)$/)
   if (match) {
     return `${match[1]}-${match[2]}`
   }

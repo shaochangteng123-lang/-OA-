@@ -3,7 +3,6 @@
     <el-card class="page-card">
       <template #header>
         <div class="card-header">
-          <h2>商务报销</h2>
           <el-button type="primary" :icon="Plus" @click="handleCreate">
             新建商务报销单
           </el-button>
@@ -71,7 +70,11 @@
               {{ (pagination.page - 1) * pagination.pageSize + $index + 1 }}
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="商务活动" min-width="200" align="center" />
+          <el-table-column prop="title" label="商务活动" min-width="200" align="center">
+            <template #default="{ row }">
+              {{ normalizeReimbursementTitle(row.title) }}
+            </template>
+          </el-table-column>
           <el-table-column prop="category" label="商务类型" width="180" align="center">
             <template #default="{ row }">
               <span>{{ row.invoiceCategory || row.category || '-' }}</span>
@@ -121,6 +124,15 @@
                 {{ row.status === 'rejected' ? '修改并重新提交' : '修改' }}
               </el-button>
               <el-button
+                v-if="row.status === 'pending'"
+                link
+                type="warning"
+                size="small"
+                @click="handleWithdraw(row)"
+              >
+                撤回
+              </el-button>
+              <el-button
                 v-if="canDelete(row.status)"
                 link
                 type="danger"
@@ -160,7 +172,7 @@
               <el-descriptions :column="2" border>
                 <el-descriptions-item label="报销单号">{{ currentApprovalRecord.id }}</el-descriptions-item>
                 <el-descriptions-item label="报销类型">{{ currentApprovalRecord.category || '商务报销' }}</el-descriptions-item>
-                <el-descriptions-item label="报销事由" :span="2">{{ currentApprovalRecord.title }}</el-descriptions-item>
+                <el-descriptions-item label="报销事由" :span="2">{{ normalizeReimbursementTitle(currentApprovalRecord.title) }}</el-descriptions-item>
                 <el-descriptions-item label="申请人">{{ currentApprovalRecord.applicant }}</el-descriptions-item>
                 <el-descriptions-item label="报销金额">
                   <span class="amount-highlight">¥{{ currentApprovalRecord.amount?.toFixed(2) }}</span>
@@ -204,11 +216,12 @@
                   >
                     <div class="timeline-content">
                       <div class="timeline-title">
-                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
+                        {{ record.approverName || record.approverUsername || '管理员' }}
                       </div>
                       <div class="timeline-desc">
-                        {{ record.approverName || record.approverUsername || '管理员' }}
-                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '驳回了申请' : '修改后再次提交审批' }}
+                        <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
+                          {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
+                        </el-tag>
                       </div>
                       <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
                         驳回原因：{{ record.comment }}
@@ -220,7 +233,7 @@
                 <!-- 如果没有审批历史，显示当前状态 -->
                 <template v-else>
                   <el-timeline-item
-                    v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                    v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                     :timestamp="currentApprovalRecord.approveTime"
                     placement="top"
                     type="success"
@@ -257,16 +270,42 @@
                   </el-timeline-item>
                 </template>
 
+                <!-- 驳回重新提交后，等待审批的下一步 -->
+                <el-timeline-item
+                  v-if="currentApprovalRecord.status === 'pending' && currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0"
+                  timestamp="待审批"
+                  placement="top"
+                  type="warning"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">管理员审批</div>
+                    <div class="timeline-desc">等待管理员审批...</div>
+                  </div>
+                </el-timeline-item>
+
+                <!-- 驳回后的下一步 -->
+                <el-timeline-item
+                  v-if="currentApprovalRecord.status === 'rejected'"
+                  timestamp="待重新提交"
+                  placement="top"
+                  type="warning"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">重新提交</div>
+                    <div class="timeline-desc">等待员工修改后重新提交...</div>
+                  </div>
+                </el-timeline-item>
+
                 <!-- 3. 财务付款 -->
                 <el-timeline-item
-                  v-if="!isDeductionOnly && ['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                  :timestamp="currentApprovalRecord.payTime || ''"
+                  v-if="!isDeductionOnly && ['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.payTime || '')"
                   placement="top"
-                  :type="currentApprovalRecord.status === 'paying' ? 'warning' : 'success'"
+                  :type="currentApprovalRecord.status === 'approved' ? 'warning' : 'success'"
                 >
                   <div class="timeline-content">
                     <div class="timeline-title">财务付款</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.status === 'paying' ? '等待财务付款...' : '财务已付款' }}</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.status === 'approved' ? '等待财务付款...' : '财务已付款' }}</div>
                   </div>
                 </el-timeline-item>
 
@@ -301,7 +340,31 @@
                   </div>
                 </el-timeline-item>
 
-                <!-- 5. 付款完成 -->
+                <!-- 5. 员工确认收款 -->
+                <el-timeline-item
+                  v-if="!isDeductionOnly && currentApprovalRecord.status === 'completed' && currentApprovalRecord.receiptConfirmedBy"
+                  :timestamp="currentApprovalRecord.completedTime || ''"
+                  placement="top"
+                  type="success"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">确认收款</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.receiptConfirmedBy }}已确认收款</div>
+                  </div>
+                </el-timeline-item>
+                <el-timeline-item
+                  v-else-if="!isDeductionOnly && currentApprovalRecord.status === 'payment_uploaded'"
+                  timestamp="待确认收款"
+                  placement="top"
+                  type="warning"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">确认收款</div>
+                    <div class="timeline-desc">等待员工确认收款...</div>
+                  </div>
+                </el-timeline-item>
+
+                <!-- 6. 流程完成 -->
                 <el-timeline-item
                   v-if="currentApprovalRecord.status === 'completed'"
                   :timestamp="currentApprovalRecord.completedTime || ''"
@@ -309,12 +372,9 @@
                   type="success"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">{{ isDeductionOnly ? '已计算到核减金额' : '付款完成' }}</div>
+                    <div class="timeline-title">{{ isDeductionOnly ? '已计算到核减金额' : '流程完成' }}</div>
                     <div class="timeline-desc">
                       {{ isDeductionOnly ? '核减金额已记录，报销流程已完成' : '报销流程已完成' }}
-                    </div>
-                    <div v-if="!isDeductionOnly && currentApprovalRecord.receiptConfirmedBy" class="timeline-desc" style="margin-top: 4px; color: #67c23a;">
-                      {{ currentApprovalRecord.receiptConfirmedBy }}已确认收款
                     </div>
                   </div>
                 </el-timeline-item>
@@ -361,6 +421,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { usePendingStore } from '@/stores/pending'
+import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 
 const router = useRouter()
 const pendingStore = usePendingStore()
@@ -474,7 +535,6 @@ const getStatusType = (status: string) => {
     pending: 'warning',         // 待审批 - 黄色
     approved: '',               // 待付款 - 使用自定义颜色
     rejected: 'danger',         // 已驳回 - 红色
-    paying: '',                 // 付款中 - 使用自定义颜色
     payment_uploaded: '',       // 待确认 - 使用自定义颜色
     completed: 'success',       // 已完成 - 绿色
   }
@@ -485,7 +545,6 @@ const getStatusType = (status: string) => {
 const getStatusColor = (status: string) => {
   const colorMap: Record<string, string> = {
     approved: '#409eff',        // 待付款 - 蓝色
-    paying: '#9b59b6',          // 付款中 - 紫色
     payment_uploaded: '#17a2b8', // 待确认 - 青色
   }
   return colorMap[status] || ''
@@ -498,7 +557,6 @@ const getStatusText = (status: string) => {
     pending: '待审批',
     approved: '待付款',
     rejected: '已驳回',
-    paying: '付款中',
     payment_uploaded: '待确认',
     completed: '已完成',
   }
@@ -542,9 +600,9 @@ const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
 
-// 判断是否可以删除（所有状态均可删除）
-const canDelete = (_status: string) => {
-  return true
+// 判断是否可以删除（只有草稿和已完成状态可以删除）
+const canDelete = (status: string) => {
+  return status === 'draft' || status === 'completed'
 }
 
 // 获取报销单列表
@@ -715,10 +773,10 @@ const handleConfirmReceipt = async () => {
     if (result.success) {
       ElMessage.success('已确认收款，报销流程完成')
       approvalDialogVisible.value = false
+      // 立即刷新待办计数
+      await pendingStore.refreshPendingCounts()
       // 刷新列表
       fetchList()
-      // 刷新待办计数
-      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(result.message || '确认收款失败')
     }
@@ -738,6 +796,34 @@ const handleEdit = (row: any) => {
     path: `/business-reimbursement/${row.id}`,
     query: { from: '/business-reimbursement' }
   })
+}
+
+// 撤回
+const handleWithdraw = (row: any) => {
+  ElMessageBox.confirm('确定要撤回该报销单吗？撤回后将回到草稿状态。', '确认撤回', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
+    .then(async () => {
+      try {
+        const response = await fetch(`/api/reimbursement/${row.id}/withdraw`, {
+          method: 'POST',
+          credentials: 'include',
+        })
+        const result = await response.json()
+        if (result.success) {
+          ElMessage.success('撤回成功')
+          // 刷新页面以更新列表
+          window.location.reload()
+        } else {
+          ElMessage.error(result.message || '撤回失败')
+        }
+      } catch {
+        ElMessage.error('撤回失败')
+      }
+    })
+    .catch(() => {})
 }
 
 // 删除
@@ -816,7 +902,7 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
 }
 

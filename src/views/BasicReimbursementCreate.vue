@@ -136,11 +136,11 @@ const handleBack = () => {
       type: 'warning',
     })
       .then(() => {
-        router.push('/basic-reimbursement')
+        router.back()
       })
       .catch(() => {})
   } else {
-    router.push('/basic-reimbursement')
+    router.back()
   }
 }
 

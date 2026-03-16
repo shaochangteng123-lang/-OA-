@@ -14,6 +14,26 @@
         <div class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
+          <!-- 加载状态提示 -->
+          <div v-if="reimbursement.loading.value && !dataLoaded" style="text-align: center; padding: 40px 0; color: #909399;">
+            <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+            <p>正在加载报销单数据...</p>
+          </div>
+
+          <!-- 加载错误提示 -->
+          <div v-if="reimbursement.loadError.value" style="margin-bottom: 20px;">
+            <el-alert
+              :title="'数据加载失败: ' + reimbursement.loadError.value"
+              type="error"
+              :closable="false"
+              show-icon
+            >
+              <template #default>
+                <el-button type="primary" size="small" @click="retryLoad" style="margin-top: 8px;">重新加载</el-button>
+              </template>
+            </el-alert>
+          </div>
+
           <!-- 驳回原因提示（已驳回状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
@@ -95,7 +115,8 @@
             </el-form-item>
           </el-form>
 
-          <!-- 付款回单区域（已付款状态显示） -->
+          <!-- 付款回单区域已隐藏 -->
+          <!--
           <div v-if="isPaid && paymentProofPath" class="payment-proof-section">
             <h3 class="section-title">
               <el-icon color="#67C23A"><CircleCheckFilled /></el-icon>
@@ -107,11 +128,9 @@
                 已付款
               </div>
               <div class="payment-proof-content" @click="handlePreviewPaymentProof">
-                <!-- 图片类型 -->
                 <template v-if="isPaymentProofImage">
                   <img :src="paymentProofPath" class="payment-proof-image" alt="付款回单" />
                 </template>
-                <!-- PDF类型 -->
                 <template v-else>
                   <div class="payment-proof-pdf">
                     <el-icon :size="48" color="#409EFF"><Document /></el-icon>
@@ -128,6 +147,7 @@
               </div>
             </div>
           </div>
+          -->
 
           <!-- 付款回单预览对话框 -->
           <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
@@ -145,10 +165,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, CircleCheckFilled, Document, ZoomIn } from '@element-plus/icons-vue'
+import { ArrowLeft, Loading } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import { format } from 'date-fns'
-import { zhCN } from 'date-fns/locale'
 
 // 导入模块化组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
@@ -190,6 +208,9 @@ const rejectReason = ref('')
 
 // 审批核减金额
 const approvalDeductionAmount = ref(0)
+
+// 数据是否已加载
+const dataLoaded = ref(false)
 
 // 报销范围/区域
 const reimbursementScope = ref('')
@@ -233,12 +254,6 @@ const pageTitle = computed(() => {
   return '新建大额报销单'
 })
 
-// 是否已付款
-const isPaid = computed(() => {
-  const status = reimbursement.reimbursementStatus.value
-  return status === 'completed' || status === 'payment_uploaded' || status === 'paying'
-})
-
 // 是否已拒绝
 const isRejected = computed(() => {
   return reimbursement.reimbursementStatus.value === 'rejected'
@@ -250,16 +265,6 @@ const isPaymentProofImage = computed(() => {
   const path = paymentProofPath.value.toLowerCase()
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
-
-// 格式化付款时间
-function formatPayTime(dateStr: string): string {
-  return format(new Date(dateStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
-}
-
-// 预览付款回单
-function handlePreviewPaymentProof(): void {
-  paymentProofDialogVisible.value = true
-}
 
 // 处理文件变化
 function handleFileChange(file: any, fileList: any[]): void {
@@ -346,45 +351,60 @@ async function handleSubmit(): Promise<void> {
 
 // 加载报销单详情
 async function loadDetail(): Promise<void> {
-  const data = await reimbursement.loadReimbursementDetail()
-  if (!data) return
+  try {
+    const data = await reimbursement.loadReimbursementDetail()
+    if (!data) return
 
-  // 设置表单数据
-  formData.category = data.category || ''
-  formData.description = data.description || ''
+    // 设置表单数据
+    formData.category = data.category || ''
+    formData.description = data.description || ''
 
-  // 设置报销月份（使用接口返回的真实月份）
-  if ((data as any).reimbursementMonth) {
-    reimbursementMonthDisplay.value = (data as any).reimbursementMonth
+    // 设置报销月份（使用接口返回的真实月份）
+    if ((data as any).reimbursementMonth) {
+      reimbursementMonthDisplay.value = (data as any).reimbursementMonth
+    }
+
+    // 设置报销范围/区域
+    if ((data as any).reimbursementScope) {
+      const scopeValue = (data as any).reimbursementScope
+      // 先存原始值，scopeMap 可能还没加载完
+      reimbursementScope.value = scopeMap.value[scopeValue] || scopeValue
+    }
+
+    // 加载发票数据
+    if (data.invoices && Array.isArray(data.invoices)) {
+      invoice.loadInvoices(data.invoices)
+    }
+
+    // 加载付款回单数据
+    if ((data as any).paymentProofPath) {
+      paymentProofPath.value = (data as any).paymentProofPath
+    }
+    if ((data as any).payTime) {
+      payTime.value = (data as any).payTime
+    }
+
+    // 加载拒绝原因
+    if ((data as any).rejectReason) {
+      rejectReason.value = (data as any).rejectReason
+    }
+
+    // 加载审批核减金额
+    if ((data as any).deductionAmount !== undefined) {
+      approvalDeductionAmount.value = (data as any).deductionAmount || 0
+    }
+
+    dataLoaded.value = true
+  } catch (error) {
+    console.error('❌ [大额] loadDetail 异常:', error)
+    ElMessage.error('加载报销单数据失败')
   }
+}
 
-  // 设置报销范围/区域
-  if ((data as any).reimbursementScope) {
-    const scopeValue = (data as any).reimbursementScope
-    reimbursementScope.value = scopeMap.value[scopeValue] || scopeValue
-  }
-
-  // 加载发票数据
-  if (data.invoices && Array.isArray(data.invoices)) {
-    invoice.loadInvoices(data.invoices)
-  }
-
-  // 加载付款回单数据
-  if ((data as any).paymentProofPath) {
-    paymentProofPath.value = (data as any).paymentProofPath
-  }
-  if ((data as any).payTime) {
-    payTime.value = (data as any).payTime
-  }
-
-  // 加载拒绝原因
-  if ((data as any).rejectReason) {
-    rejectReason.value = (data as any).rejectReason
-  }
-
-  // 加载审批核减金额
-  if ((data as any).deductionAmount !== undefined) {
-    approvalDeductionAmount.value = (data as any).deductionAmount || 0
+// 重新加载
+async function retryLoad(): Promise<void> {
+  if (reimbursement.reimbursementId.value) {
+    await loadDetail()
   }
 }
 
@@ -393,9 +413,22 @@ onMounted(async () => {
   // 清空之前的数据，防止组件复用时显示旧数据
   invoice.clearInvoices()
 
-  await fetchScopeOptions()
-  if (reimbursement.reimbursementId.value) {
-    await loadDetail()
+  try {
+    if (reimbursement.reimbursementId.value) {
+      // 并行加载 scope 配置和详情数据，避免 fetchScopeOptions 阻塞详情加载
+      await Promise.all([
+        fetchScopeOptions().catch(() => {}),
+        loadDetail(),
+      ])
+      // 两者都完成后，用 scopeMap 修正 scope 显示名称
+      if (reimbursementScope.value && scopeMap.value[reimbursementScope.value]) {
+        reimbursementScope.value = scopeMap.value[reimbursementScope.value]
+      }
+    } else {
+      await fetchScopeOptions()
+    }
+  } catch (error) {
+    console.error('❌ [大额] onMounted 异常:', error)
   }
 })
 
@@ -423,7 +456,7 @@ watch(
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
   min-height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: -24px;
   padding: 0;
   position: relative;
 }
@@ -439,7 +472,7 @@ watch(
 
 .page-card :deep(.el-card__body) {
   flex: 1;
-  padding: 24px;
+  padding: 24px 0;
   overflow: visible !important;
 }
 
@@ -471,7 +504,7 @@ watch(
 .step-content {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 16px 20px;
+  padding: 16px 24px;
 }
 
 .step-title {
@@ -511,7 +544,7 @@ watch(
 .reimbursement-form {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 24px 24px 24px 16px;
   background: #f5f7fa;
   border-radius: 8px;
 }
@@ -537,6 +570,7 @@ watch(
   gap: 16px;
   width: 100%;
 }
+
 
 /* 付款回单区域样式 */
 .payment-proof-section {

@@ -148,11 +148,11 @@ const handleBack = () => {
       type: 'warning',
     })
       .then(() => {
-        router.push('/large-reimbursement')
+        router.back()
       })
       .catch(() => {})
   } else {
-    router.push('/large-reimbursement')
+    router.back()
   }
 }
 

@@ -21,6 +21,26 @@
         <div v-if="currentStep === 2" class="step-content">
           <h3 class="step-title">填写报销信息</h3>
 
+          <!-- 加载状态提示 -->
+          <div v-if="reimbursement.loading.value && !dataLoaded" style="text-align: center; padding: 40px 0; color: #909399;">
+            <el-icon class="is-loading" :size="24"><Loading /></el-icon>
+            <p>正在加载报销单数据...</p>
+          </div>
+
+          <!-- 加载错误提示 -->
+          <div v-if="reimbursement.loadError.value" style="margin-bottom: 20px;">
+            <el-alert
+              :title="'数据加载失败: ' + reimbursement.loadError.value"
+              type="error"
+              :closable="false"
+              show-icon
+            >
+              <template #default>
+                <el-button type="primary" size="small" @click="retryLoad" style="margin-top: 8px;">重新加载</el-button>
+              </template>
+            </el-alert>
+          </div>
+
           <!-- 驳回原因提示（已驳回状态显示） -->
           <div v-if="isRejected && rejectReason" class="reject-reason-section">
             <el-alert
@@ -165,10 +185,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, CircleCheckFilled, Document, ZoomIn } from '@element-plus/icons-vue'
+import { ArrowLeft, Loading } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
-import { format } from 'date-fns'
-import { zhCN } from 'date-fns/locale'
 
 // 导入模块化组件
 import TypeSelector from '@/components/reimbursement/TypeSelector.vue'
@@ -216,6 +234,9 @@ const rejectReason = ref('')
 // 审批核减金额
 const approvalDeductionAmount = ref(0)
 
+// 数据是否已加载
+const dataLoaded = ref(false)
+
 // 报销月份（从详情接口获取真实值，新建时使用当前月份）
 const reimbursementMonthDisplay = ref('')
 
@@ -235,12 +256,6 @@ const pageTitle = computed(() => {
 // 选中类型的标签
 const selectedTypeLabel = computed(() => getTypeLabel(selectedType.value))
 
-// 是否已付款
-const isPaid = computed(() => {
-  const status = reimbursement.reimbursementStatus.value
-  return status === 'completed' || status === 'payment_uploaded' || status === 'paying'
-})
-
 // 是否已拒绝
 const isRejected = computed(() => {
   return reimbursement.reimbursementStatus.value === 'rejected'
@@ -252,24 +267,6 @@ const isPaymentProofImage = computed(() => {
   const path = paymentProofPath.value.toLowerCase()
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
-
-// 格式化付款时间
-function formatPayTime(dateStr: string): string {
-  if (!dateStr) return ''
-  try {
-    const date = new Date(dateStr)
-    if (isNaN(date.getTime())) return ''
-    return format(date, 'yyyy-MM-dd HH:mm', { locale: zhCN })
-  } catch (error) {
-    console.error('日期格式化失败:', dateStr, error)
-    return ''
-  }
-}
-
-// 预览付款回单
-function handlePreviewPaymentProof(): void {
-  paymentProofDialogVisible.value = true
-}
 
 function isImageFilePath(filePath?: string): boolean {
   if (!filePath) return false
@@ -423,82 +420,84 @@ async function handleSubmit(): Promise<void> {
 
 // 加载报销单详情
 async function loadDetail(): Promise<void> {
-  const data = await reimbursement.loadReimbursementDetail()
-  if (!data) return
+  try {
+    const data = await reimbursement.loadReimbursementDetail()
+    if (!data) return
 
-  console.log('📋 BasicReimbursementDetail - 加载详情数据:', {
-    hasInvoices: !!data.invoices,
-    invoicesCount: data.invoices?.length,
-    invoices: data.invoices,
-    status: (data as any).status,
-  })
-
-  // 设置报销类型
-  selectedType.value = data.category || ''
-
-  // 设置表单数据
-  formData.description = data.description || ''
-
-  // 设置报销月份（使用接口返回的真实月份）
-  if ((data as any).reimbursementMonth) {
-    reimbursementMonthDisplay.value = (data as any).reimbursementMonth
-  }
-
-  // 加载发票数据
-  if (data.invoices && Array.isArray(data.invoices)) {
-    console.log('📋 开始加载发票数据，发票数量:', data.invoices.length)
-
-    // 加载所有发票到 invoiceList（这会同时设置 fileList，包含所有发票的 uid）
-    invoice.loadInvoices(data.invoices)
-
-    console.log('📋 loadInvoices 调用后，invoiceList 数量:', invoice.invoiceList.value.length)
-    console.log('📋 loadInvoices 调用后，fileList 数量:', invoice.fileList.value.length)
-
-    // 分离 PDF 发票和收据（图片）的 fileList
-    // 注意：不要重新创建 fileList，而是从已经创建好的 fileList 中筛选
-    const allFiles = invoice.fileList.value
-    const pdfFiles: any[] = []
-    const receiptFiles: any[] = []
-
-    allFiles.forEach((file, index) => {
-      const invoiceItem = data.invoices[index]
-      if (invoiceItem && isImageFilePath(invoiceItem.filePath)) {
-        receiptFiles.push(file)
-      } else {
-        pdfFiles.push(file)
-      }
+    console.log('📋 BasicReimbursementDetail - 加载详情数据:', {
+      hasInvoices: !!data.invoices,
+      invoicesCount: data.invoices?.length,
+      status: (data as any).status,
     })
 
-    // 更新 fileList（只保留 PDF 发票）
-    invoice.fileList.value = pdfFiles
-    // 设置收据 fileList
-    receiptFileList.value = receiptFiles
+    // 设置报销类型
+    selectedType.value = data.category || ''
 
-    console.log('📋 文件分离后，invoiceList 数量:', invoice.invoiceList.value.length)
-    console.log('📋 文件分离后，pdfFiles 数量:', pdfFiles.length)
-    console.log('📋 文件分离后，receiptFiles 数量:', receiptFiles.length)
-  }
+    // 设置表单数据
+    formData.description = data.description || ''
 
-  // 加载付款回单数据
-  if ((data as any).paymentProofPath) {
-    paymentProofPath.value = (data as any).paymentProofPath
-  }
-  if ((data as any).payTime) {
-    payTime.value = (data as any).payTime
-  }
+    // 设置报销月份（使用接口返回的真实月份）
+    if ((data as any).reimbursementMonth) {
+      reimbursementMonthDisplay.value = (data as any).reimbursementMonth
+    }
 
-  // 加载驳回原因
-  if ((data as any).rejectReason) {
-    rejectReason.value = (data as any).rejectReason
-  }
+    // 加载发票数据
+    if (data.invoices && Array.isArray(data.invoices)) {
+      // 加载所有发票到 invoiceList
+      invoice.loadInvoices(data.invoices)
 
-  // 加载审批核减金额
-  if ((data as any).deductionAmount !== undefined) {
-    approvalDeductionAmount.value = (data as any).deductionAmount || 0
-  }
+      // 分离 PDF 发票和收据（图片）的 fileList
+      const allFiles = invoice.fileList.value
+      const pdfFiles: any[] = []
+      const receiptFiles: any[] = []
 
-  // 查看或编辑已有报销单时，直接进入第二步
-  currentStep.value = 2
+      allFiles.forEach((file, index) => {
+        const invoiceItem = data.invoices[index]
+        if (invoiceItem && isImageFilePath(invoiceItem.filePath)) {
+          receiptFiles.push(file)
+        } else {
+          pdfFiles.push(file)
+        }
+      })
+
+      // 更新 fileList（只保留 PDF 发票）
+      invoice.fileList.value = pdfFiles
+      // 设置收据 fileList
+      receiptFileList.value = receiptFiles
+    }
+
+    // 加载付款回单数据
+    if ((data as any).paymentProofPath) {
+      paymentProofPath.value = (data as any).paymentProofPath
+    }
+    if ((data as any).payTime) {
+      payTime.value = (data as any).payTime
+    }
+
+    // 加载驳回原因
+    if ((data as any).rejectReason) {
+      rejectReason.value = (data as any).rejectReason
+    }
+
+    // 加载审批核减金额
+    if ((data as any).deductionAmount !== undefined) {
+      approvalDeductionAmount.value = (data as any).deductionAmount || 0
+    }
+
+    // 查看或编辑已有报销单时，直接进入第二步
+    currentStep.value = 2
+    dataLoaded.value = true
+  } catch (error) {
+    console.error('❌ [基础] loadDetail 异常:', error)
+    ElMessage.error('加载报销单数据失败')
+  }
+}
+
+// 重新加载
+async function retryLoad(): Promise<void> {
+  if (reimbursement.reimbursementId.value) {
+    await loadDetail()
+  }
 }
 
 // 组件挂载
@@ -506,14 +505,18 @@ onMounted(async () => {
   // 清空之前的数据，防止组件复用时显示旧数据
   invoice.clearInvoices()
 
-  // 如果是编辑/查看模式，先加载详情，然后获取额度时排除当前报销单
-  if (reimbursement.reimbursementId.value) {
-    await loadDetail()
-    // 获取当月已使用额度（排除当前报销单）
-    await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
-  } else {
-    // 新建模式，直接获取当月已使用额度
-    await invoice.fetchMonthlyUsedQuota()
+  try {
+    // 如果是编辑/查看模式，先加载详情，然后获取额度时排除当前报销单
+    if (reimbursement.reimbursementId.value) {
+      await loadDetail()
+      // 获取当月已使用额度（排除当前报销单）
+      await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
+    } else {
+      // 新建模式，直接获取当月已使用额度
+      await invoice.fetchMonthlyUsedQuota()
+    }
+  } catch (error) {
+    console.error('❌ [基础] onMounted 异常:', error)
   }
 })
 
@@ -542,7 +545,7 @@ watch(
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .reimbursement-detail-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: -24px;
   padding: 0;
   position: relative;
 }
@@ -584,7 +587,7 @@ watch(
 .step-content {
   max-width: 1400px;
   margin: 0 auto;
-  padding: 16px 20px;
+  padding: 16px 24px;
 }
 
 .step-title {
@@ -620,7 +623,7 @@ watch(
 .reimbursement-form {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 24px 24px 24px 16px;
   background: #f5f7fa;
   border-radius: 8px;
 }

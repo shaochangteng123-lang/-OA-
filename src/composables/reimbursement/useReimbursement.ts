@@ -10,7 +10,7 @@ import type { InvoiceItem } from './useInvoice'
 export type ReimbursementType = 'basic' | 'large' | 'business'
 
 // 报销单状态
-export type ReimbursementStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'paying' | 'payment_uploaded' | 'completed'
+export type ReimbursementStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'payment_uploaded' | 'completed'
 
 // 报销单数据
 export interface ReimbursementData {
@@ -138,39 +138,62 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
     return saveReimbursement({ ...data, status: 'pending' }, false)
   }
 
+  // 加载错误信息（用于页面显示）
+  const loadError = ref('')
+
   /**
    * 加载报销单详情
    */
   async function loadReimbursementDetail(): Promise<ReimbursementData | null> {
-    if (!reimbursementId.value) return null
+    loadError.value = ''
+
+    if (!reimbursementId.value) {
+      console.warn('⚠️ loadReimbursementDetail: reimbursementId 为空，跳过加载')
+      loadError.value = '报销单ID为空'
+      return null
+    }
 
     loading.value = true
 
     try {
+      // 添加超时控制，防止请求挂起
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 15000)
+
       const response = await fetch(`/api/reimbursement/${reimbursementId.value}`, {
         credentials: 'include',
+        signal: controller.signal,
       })
+      clearTimeout(timeoutId)
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error('❌ loadReimbursementDetail HTTP错误:', response.status, errorText)
+        loadError.value = `HTTP ${response.status}`
+        ElMessage.error(`获取报销单详情失败: HTTP ${response.status}`)
+        return null
+      }
 
       const result: ApiResponse<ReimbursementData> = await response.json()
 
       if (result.success && result.data) {
         reimbursementStatus.value = result.data.status || ''
-        console.log('🔍 loadReimbursementDetail 成功:', {
-          id: reimbursementId.value,
-          hasInvoices: !!result.data.invoices,
-          invoicesCount: result.data.invoices?.length,
-          status: result.data.status,
-        })
         return result.data
       } else {
+        console.error('❌ loadReimbursementDetail 业务错误:', result.message)
+        loadError.value = result.message || '获取详情失败'
         ElMessage.error(result.message || '获取报销单详情失败')
-        router.push(listRoute)
         return null
       }
-    } catch (error) {
-      console.error('获取报销单详情失败:', error)
-      ElMessage.error('获取报销单详情失败')
-      router.push(listRoute)
+    } catch (error: any) {
+      console.error('❌ loadReimbursementDetail 异常:', error)
+      if (error.name === 'AbortError') {
+        loadError.value = '请求超时'
+        ElMessage.error('获取报销单详情超时，请刷新重试')
+      } else {
+        loadError.value = error.message || '网络异常'
+        ElMessage.error('获取报销单详情失败')
+      }
       return null
     } finally {
       loading.value = false
@@ -181,31 +204,20 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
    * 返回列表页
    */
   function goBack(shouldRefresh: boolean = false): void {
-    // 如果有来源页面参数，返回到来源页面
-    if (fromPage.value) {
-      // 构建返回URL，如果需要刷新则添加refresh参数
-      const query: Record<string, string> = {}
-      if (fromTab.value) {
-        query.tab = fromTab.value
-      }
+    // 如果有来源页面和tab参数，需要用 push 带上 tab 以恢复正确的标签页
+    if (fromPage.value && fromTab.value) {
+      const query: Record<string, string> = { tab: fromTab.value }
       if (shouldRefresh) {
         query.refresh = Date.now().toString()
       }
-
-      router.push({
-        path: fromPage.value,
-        query: Object.keys(query).length > 0 ? query : undefined
-      })
+      router.push({ path: fromPage.value, query })
+    } else if (shouldRefresh) {
+      // 需要刷新时，跳转到指定页面
+      const targetPath = fromPage.value || listRoute
+      router.push({ path: targetPath, query: { refresh: Date.now().toString() } })
     } else {
-      // 如果需要刷新，添加refresh参数
-      if (shouldRefresh) {
-        router.push({
-          path: listRoute,
-          query: { refresh: Date.now().toString() }
-        })
-      } else {
-        router.push(listRoute)
-      }
+      // 普通返回，使用浏览器历史回退
+      router.back()
     }
   }
 
@@ -221,6 +233,7 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
     // 状态
     reimbursementStatus,
     loading,
+    loadError,
     reimbursementId,
     pageMode,
     isReadonly,

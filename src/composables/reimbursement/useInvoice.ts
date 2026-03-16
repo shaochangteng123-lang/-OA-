@@ -520,6 +520,11 @@ export function useInvoice() {
    * 加载已有发票数据
    */
   function loadInvoices(invoices: any[]): void {
+    console.log('📦 loadInvoices 被调用:', {
+      invoices: invoices,
+      length: invoices?.length,
+      isArray: Array.isArray(invoices),
+    })
     if (!invoices || invoices.length === 0) return
 
     // el-upload 要求 uid 为数字类型，使用时间戳 + 索引生成唯一数字 uid

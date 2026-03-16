@@ -299,7 +299,6 @@ import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
-import { api } from '@/utils/api'
 import { ElMessage } from 'element-plus'
 import {
   Calendar,
@@ -355,9 +354,9 @@ const groupStates = reactive<Record<string, GroupState>>({
   system: { expanded: false },
 })
 
-// 待审批数量
-const pendingApprovalCount = ref(0)
-const gmPendingApprovalCount = ref(0)
+// 待审批数量（从 pendingStore 获取）
+const pendingApprovalCount = computed(() => pendingStore.counts.approvalPending)
+const gmPendingApprovalCount = computed(() => pendingStore.counts.gmApprovalPending)
 
 // 是否是管理员
 const isAdmin = computed(() => {
@@ -374,11 +373,13 @@ const financeGroupHasBadge = computed(() => {
   const counts = pendingStore.counts
   // 用户的报销待确认
   const userReimbursement = counts.myReimbursementBasic + counts.myReimbursementLarge + counts.myReimbursementBusiness
+  // 用户的报销已驳回
+  const userRejected = (counts.myReimbursementBasicRejected || 0) + (counts.myReimbursementLargeRejected || 0) + (counts.myReimbursementBusinessRejected || 0)
   // 管理员的审批待办
   const adminApproval = isAdmin.value ? counts.approvalPending : 0
   // 总经理的审批待办
   const gmApproval = isGeneralManager.value ? counts.gmApprovalPending : 0
-  return userReimbursement > 0 || adminApproval > 0 || gmApproval > 0
+  return userReimbursement > 0 || userRejected > 0 || adminApproval > 0 || gmApproval > 0
 })
 
 const hrGroupHasBadge = computed(() => {
@@ -390,17 +391,26 @@ const hrGroupHasBadge = computed(() => {
   return userProbation || adminProbation > 0
 })
 
-// 计算各个报销类型的待办数量
+// 计算各个报销类型的待办数量（包含待确认收款和已驳回）
 const basicReimbursementBadge = computed(() => {
-  return pendingStore.counts.myReimbursementBasic > 0 ? pendingStore.counts.myReimbursementBasic : undefined
+  const pending = pendingStore.counts.myReimbursementBasic || 0
+  const rejected = pendingStore.counts.myReimbursementBasicRejected || 0
+  const total = pending + rejected
+  return total > 0 ? total : undefined
 })
 
 const largeReimbursementBadge = computed(() => {
-  return pendingStore.counts.myReimbursementLarge > 0 ? pendingStore.counts.myReimbursementLarge : undefined
+  const pending = pendingStore.counts.myReimbursementLarge || 0
+  const rejected = pendingStore.counts.myReimbursementLargeRejected || 0
+  const total = pending + rejected
+  return total > 0 ? total : undefined
 })
 
 const businessReimbursementBadge = computed(() => {
-  return pendingStore.counts.myReimbursementBusiness > 0 ? pendingStore.counts.myReimbursementBusiness : undefined
+  const pending = pendingStore.counts.myReimbursementBusiness || 0
+  const rejected = pendingStore.counts.myReimbursementBusinessRejected || 0
+  const total = pending + rejected
+  return total > 0 ? total : undefined
 })
 
 const probationBadge = computed(() => {
@@ -446,7 +456,13 @@ const pageTitle = computed(() => {
     '/system-settings': '系统设置',
     '/user-settings': '用户设置',
   }
-  return routeTitles[route.path] !== undefined ? routeTitles[route.path] : '工作日志管理系统'
+
+  // 检查是否是报销单详情页面（带 ID 参数的路由）
+  if (route.path.match(/^\/(basic|large|business)-reimbursement\/.+$/)) {
+    return ''
+  }
+
+  return routeTitles[route.path] !== undefined ? routeTitles[route.path] : ''
 })
 
 // 切换锁定状态
@@ -535,44 +551,10 @@ onMounted(() => {
   sidebarCollapsed.value = !isPinned.value
   groupTitlesVisible.value = isPinned.value
 
-  // 如果是管理员，获取待审批数量
-  if (isAdmin.value) {
-    loadPendingApprovalCount()
-  }
-
-  // 如果是总经理，获取待审批数量
-  if (isGeneralManager.value) {
-    loadGMPendingApprovalCount()
-  }
-
-  // 启动待办事项轮询
+  // 启动待办事项轮询（统一管理所有待办数量）
   pendingStore.fetchPendingCounts()
   pendingStore.startPolling()
 })
-
-// 获取待审批数量
-async function loadPendingApprovalCount() {
-  try {
-    const res = await api.get('/api/approval/statistics')
-    if (res.data.success) {
-      pendingApprovalCount.value = res.data.data.pendingCount || 0
-    }
-  } catch {
-    // 静默失败，不影响页面加载
-  }
-}
-
-// 获取总经理待审批数量
-async function loadGMPendingApprovalCount() {
-  try {
-    const res = await api.get('/api/approval/gm-statistics')
-    if (res.data.success) {
-      gmPendingApprovalCount.value = res.data.data.pendingCount || 0
-    }
-  } catch {
-    // 静默失败，不影响页面加载
-  }
-}
 
 onUnmounted(() => {
   // 清理定时器

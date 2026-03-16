@@ -391,9 +391,9 @@ const handleSubmitApply = async () => {
 
     await axios.post('/api/probation/apply')
     ElMessage.success('转正申请已提交')
+    // 立即刷新菜单栏角标
+    await pendingStore.refreshPendingCounts()
     fetchMyStatus()
-    // 刷新菜单栏角标
-    pendingStore.refreshPendingCounts()
   } catch (error: any) {
     if (error !== 'cancel') {
       ElMessage.error(error.response?.data?.message || '提交失败')

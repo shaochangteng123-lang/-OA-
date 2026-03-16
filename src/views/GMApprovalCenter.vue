@@ -63,7 +63,7 @@
       </el-card>
     </div>
 
-    <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+    <el-tabs v-model="activeTab" @tab-change="handleTabChange" class="no-transition-tabs">
       <!-- 待审批 -->
       <el-tab-pane label="待审批" name="pending">
         <el-card>
@@ -73,7 +73,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="150" align="center">
+            <el-table-column label="申请人" width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -83,10 +83,10 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="200">
+            <el-table-column label="标题/金额" min-width="180" align="center">
               <template #default="{ row }">
                 <div v-if="row.reimbursementInfo">
-                  <div>{{ row.reimbursementInfo.title }}</div>
+                  <div>{{ normalizeReimbursementTitle(row.reimbursementInfo.title) }}</div>
                   <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
                     ¥{{ row.reimbursementInfo.amount.toFixed(2) }}
                   </div>
@@ -94,7 +94,34 @@
                 <div v-else>-</div>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="180" align="center">
+            <el-table-column label="报销类型" width="100" align="center">
+              <template #default>
+                <el-tag type="primary" size="small">商务报销</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="报销范围/区域" width="150" align="center">
+              <template #default="{ row }">
+                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="客户/对象" width="150" align="center">
+              <template #default="{ row }">
+                {{ row.client || row.serviceTarget || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="130" align="center">
+              <template #default="{ row }">
+                <el-tag
+                  :type="getStatusTagType(row.reimbursementStatus) as any"
+                  :color="getStatusColor(row.reimbursementStatus)"
+                  :style="getStatusColor(row.reimbursementStatus) ? { color: '#fff', borderColor: getStatusColor(row.reimbursementStatus) } : {}"
+                  size="small"
+                >
+                  {{ getStatusLabel(row.reimbursementStatus) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="提交时间" width="160" align="center">
               <template #default="{ row }">
                 {{ formatDate(row.submitTime) }}
               </template>
@@ -144,7 +171,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="150" align="center">
+            <el-table-column label="申请人" width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -154,24 +181,44 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="200">
+            <el-table-column label="标题/金额" min-width="180" align="center">
               <template #default="{ row }">
-                <div>{{ row.title }}</div>
+                <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
                   ¥{{ row.amount.toFixed(2) }}
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="审批时间" width="180" align="center">
-              <template #default="{ row }">
-                {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
+            <el-table-column label="报销类型" width="100" align="center">
+              <template #default>
+                <el-tag type="primary" size="small">商务报销</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120" align="center">
+            <el-table-column label="报销范围/区域" width="150" align="center">
               <template #default="{ row }">
-                <el-tag :type="getStatusTagType(row.status) as any" size="small">
+                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="客户/对象" width="150" align="center">
+              <template #default="{ row }">
+                {{ row.client || row.serviceTarget || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="130" align="center">
+              <template #default="{ row }">
+                <el-tag
+                  :type="getStatusTagType(row.status) as any"
+                  :color="getStatusColor(row.status)"
+                  :style="getStatusColor(row.status) ? { color: '#fff', borderColor: getStatusColor(row.status) } : {}"
+                  size="small"
+                >
                   {{ getStatusLabel(row.status) }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="审批时间" width="160" align="center">
+              <template #default="{ row }">
+                {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
             <el-table-column label="操作" width="180" align="center" fixed="right">
@@ -262,7 +309,7 @@
                   clearable
                   style="width: 130px"
                 >
-                  <el-option label="付款中" value="paying" />
+                  <el-option label="待付款" value="approved" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
                 </el-select>
@@ -296,12 +343,12 @@
 
           <!-- 列表 -->
           <el-table :data="allList" border stripe empty-text="请设置筛选条件后点击查询" v-loading="allListLoading">
-            <el-table-column label="序号" width="60" align="center">
+            <el-table-column label="序号" width="60" align="center" header-align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120" align="center">
+            <el-table-column label="申请人" width="120" align="center" header-align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="28">
@@ -311,39 +358,49 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="100" align="center">
+            <el-table-column label="标题/金额" min-width="180" align="center" header-align="center">
+              <template #default="{ row }">
+                <div>{{ normalizeReimbursementTitle(row.title) }}</div>
+                <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
+                  ¥{{ row.amount.toFixed(2) }}
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="报销类型" width="120" align="center" header-align="center">
               <template #default="{ row }">
                 <el-tag :type="getTypeTagType(row.type)" size="small">
                   {{ row.typeName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="180">
-              <template #default="{ row }">
-                <div>{{ row.title }}</div>
-                <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
-                  ¥{{ row.amount.toFixed(2) }}
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="所属区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" width="150" align="center" header-align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120" align="center">
+            <el-table-column label="客户/对象" width="150" align="center" header-align="center">
               <template #default="{ row }">
-                <el-tag :type="getStatusTagType(row.status) as any" size="small">
-                  {{ row.statusName }}
+                {{ row.client || row.serviceTarget || '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="130" align="center" header-align="center">
+              <template #default="{ row }">
+                <el-tag
+                  :type="getStatusTagType(row.status) as any"
+                  :color="getStatusColor(row.status)"
+                  :style="getStatusColor(row.status) ? { color: '#fff', borderColor: getStatusColor(row.status) } : {}"
+                  size="small"
+                >
+                  {{ getStatusLabel(row.status) }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="160" align="center">
+            <el-table-column label="审批时间" width="160" align="center" header-align="center">
               <template #default="{ row }">
-                {{ row.submitTime ? formatDate(row.submitTime) : '-' }}
+                {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right" align="center">
+            <el-table-column label="操作" width="180" fixed="right" align="center" header-align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -414,13 +471,18 @@
           <el-descriptions :column="2" border>
             <el-descriptions-item label="报销单号">{{ currentApprovalRecord.targetId }}</el-descriptions-item>
             <el-descriptions-item label="报销类型">商务报销</el-descriptions-item>
-            <el-descriptions-item label="报销事由" :span="2">{{ currentApprovalRecord.title }}</el-descriptions-item>
+            <el-descriptions-item label="报销事由" :span="2">{{ normalizeReimbursementTitle(currentApprovalRecord.title) }}</el-descriptions-item>
             <el-descriptions-item label="申请人">{{ currentApprovalRecord.applicantName }}</el-descriptions-item>
             <el-descriptions-item label="报销金额">
               <span class="amount-highlight">¥{{ currentApprovalRecord.amount.toFixed(2) }}</span>
             </el-descriptions-item>
             <el-descriptions-item label="当前状态">
-              <el-tag :type="getStatusTagType(currentApprovalRecord.status) as any" size="small">
+              <el-tag
+                :type="getStatusTagType(currentApprovalRecord.status) as any"
+                :color="getStatusColor(currentApprovalRecord.status)"
+                :style="getStatusColor(currentApprovalRecord.status) ? { color: '#fff', borderColor: getStatusColor(currentApprovalRecord.status) } : {}"
+                size="small"
+              >
                 {{ getStatusLabel(currentApprovalRecord.status) }}
               </el-tag>
             </el-descriptions-item>
@@ -476,7 +538,7 @@
                 >
                   <div class="timeline-content">
                     <div class="timeline-title">
-                      {{ record.approverName || record.approverUsername || '管理员' }}
+                      {{ record.approverName || '管理员' }}
                     </div>
                     <div class="timeline-desc">
                       <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
@@ -492,7 +554,7 @@
               <!-- 如果没有审批记录，显示简化版本 -->
               <template v-else>
                 <el-timeline-item
-                  v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                   :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
                   placement="top"
                   type="success"
@@ -519,25 +581,51 @@
                 </el-timeline-item>
               </template>
 
-              <!-- 3. 财务付款：approved及之后的状态才显示 -->
+              <!-- 驳回重新提交后，等待审批的下一步 -->
               <el-timeline-item
-                v-if="['approved', 'paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                :timestamp="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '') : '待处理'"
+                v-if="currentApprovalRecord.status === 'pending' && approvalRecords.length > 0"
+                timestamp="待审批"
                 placement="top"
-                :type="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
+                type="warning"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title" :class="{ 'timeline-pending': !['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">财务付款</div>
+                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-desc">等待管理员审批...</div>
+                </div>
+              </el-timeline-item>
+
+              <!-- 驳回后的下一步 -->
+              <el-timeline-item
+                v-if="currentApprovalRecord.status === 'rejected'"
+                timestamp="待重新提交"
+                placement="top"
+                type="warning"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">重新提交</div>
+                  <div class="timeline-desc">等待员工修改后重新提交...</div>
+                </div>
+              </el-timeline-item>
+
+              <!-- 3. 财务付款：approved及之后的状态才显示 -->
+              <el-timeline-item
+                v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '') : '待处理'"
+                placement="top"
+                :type="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title" :class="{ 'timeline-pending': !['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">财务付款</div>
                   <div class="timeline-desc">
-                    <template v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">财务已付款</template>
+                    <template v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">财务已付款</template>
                     <template v-else>等待财务付款...</template>
                   </div>
                 </div>
               </el-timeline-item>
 
-              <!-- 4. 上传付款凭证：paying及之后的状态才显示 -->
+              <!-- 4. 上传付款凭证：payment_uploaded及之后的状态才显示 -->
               <el-timeline-item
-                v-if="['paying', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                 :timestamp="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.paymentUploadTime ? formatDate(currentApprovalRecord.paymentUploadTime) : '') : '待处理'"
                 placement="top"
                 :type="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
@@ -638,13 +726,13 @@
         <div v-if="allExportData.byScope && allExportData.byScope.length > 0" class="export-scope-summary">
           <h4>报销范围汇总</h4>
           <el-table :data="allExportData.byScope" border size="small" style="margin-top: 10px;">
-            <el-table-column prop="scopeName" label="报销范围" min-width="150" />
-            <el-table-column label="报销笔数" width="100" align="right">
+            <el-table-column prop="scopeName" label="报销范围" min-width="150" align="center" />
+            <el-table-column label="报销笔数" width="100" align="center">
               <template #default="{ row }">
                 {{ row.count }} 笔
               </template>
             </el-table-column>
-            <el-table-column label="报销金额" width="120" align="right">
+            <el-table-column label="报销金额" width="120" align="center">
               <template #default="{ row }">
                 ¥{{ row.amount.toFixed(2) }}
               </template>
@@ -670,15 +758,23 @@
                 </div>
               </template>
               <el-table :data="emp.details" border size="small">
-                <el-table-column prop="typeName" label="类型" width="100" />
-                <el-table-column prop="title" label="报销事由" min-width="150" />
-                <el-table-column label="金额" width="100" align="right">
+                <el-table-column prop="typeName" label="类型" width="100" align="center" />
+                <el-table-column prop="title" label="报销事由" min-width="150" align="center">
+                  <template #default="{ row }">
+                    {{ normalizeReimbursementTitle(row.title) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="金额" width="100" align="center">
                   <template #default="{ row }">
                     ¥{{ row.amount.toFixed(2) }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="statusName" label="状态" width="100" />
-                <el-table-column prop="submitTime" label="提交时间" width="180" />
+                <el-table-column prop="statusName" label="状态" width="100" align="center" />
+                <el-table-column label="提交时间" width="180" align="center">
+                  <template #default="{ row }">
+                    {{ formatDate(row.submitTime) }}
+                  </template>
+                </el-table-column>
               </el-table>
             </el-collapse-item>
           </el-collapse>
@@ -699,16 +795,18 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { User, Check, Close, View, Clock, SuccessFilled, List, Document, ZoomIn, Search, Download } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 import { usePendingStore } from '@/stores/pending'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 
 const router = useRouter()
+const route = useRoute()
 const pendingStore = usePendingStore()
 
 interface ApprovalItem {
@@ -728,6 +826,11 @@ interface ApprovalItem {
     title: string
     amount: number
   }
+  reimbursementType?: string
+  reimbursementScope?: string
+  client?: string
+  serviceTarget?: string
+  reimbursementStatus?: string
   paymentUploadTime?: string
   paymentProofPath?: string
 }
@@ -750,6 +853,8 @@ interface ReimbursementItem {
   submitTime: string
   userId: string
   reimbursementScope?: string
+  client?: string
+  serviceTarget?: string
   createdAt: string
   paymentProofPath?: string
   paymentUploadTime?: string
@@ -801,7 +906,14 @@ interface Employee {
   name: string
 }
 
-const activeTab = ref('pending')
+// 使用 computed 直接绑定 URL 参数，确保标签页状态始终与 URL 同步
+const activeTab = computed({
+  get: () => (route.query.tab as string) || 'pending',
+  set: (value: string) => {
+    router.replace({ query: { ...route.query, tab: value } })
+  }
+})
+const isMounted = ref(false)
 const pendingList = ref<ApprovalItem[]>([])
 const completedList = ref<ReimbursementItem[]>([])
 const allList = ref<ReimbursementItem[]>([])
@@ -1007,16 +1119,27 @@ const isPaymentProofImage = computed(() => {
 // 格式化日期
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
-  return format(new Date(dateStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  // 兼容旧格式 "YYYY-MM-DD HH:mm:ss"，替换空格为T确保跨浏览器解析
+  const safeStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T')
+  return format(new Date(safeStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
 }
 
-// 切换标签页
+// 切换标签页（通过统计卡片点击）
 function switchTab(tab: string) {
-  activeTab.value = tab
+  activeTab.value = tab  // 这会触发 computed setter，自动更新 URL
+  // 手动触发数据加载
+  if (tab === 'pending') {
+    fetchPendingList()
+  } else if (tab === 'completed') {
+    fetchCompletedList()
+  }
 }
 
-// 标签页切换处理
+// 标签页切换处理（el-tabs 的 @tab-change 事件）
 function handleTabChange(tab: any) {
+  // 跳过 el-tabs 初始化时自动触发的 tab-change 事件
+  if (!isMounted.value) return
+  // activeTab 的 setter 已经处理了 URL 更新，这里只需加载数据
   if (tab === 'pending') {
     fetchPendingList()
   } else if (tab === 'completed') {
@@ -1239,7 +1362,7 @@ function handleDownloadAllExcel() {
         detail.title,
         detail.amount.toFixed(2),
         detail.statusName,
-        detail.submitTime || '',
+        formatDate(detail.submitTime),
       ])
     })
   })
@@ -1289,7 +1412,7 @@ async function fetchEmployeeList() {
 
 // 查看报销单详情
 function handleViewReimbursement(row: ApprovalItem) {
-  router.push(`/business-reimbursement/${row.targetId}?mode=view&from=/gm-approval`)
+  router.push(`/business-reimbursement/${row.targetId}?mode=view`)
 }
 
 // 查看已审批报销单详情
@@ -1300,7 +1423,7 @@ function handleViewReimbursementDetail(row: ReimbursementItem) {
     business: '/business-reimbursement',
   }
   const basePath = routeMap[row.type] || '/business-reimbursement'
-  router.push(`${basePath}/${row.id}?mode=view&from=/gm-approval`)
+  router.push(`${basePath}/${row.id}?mode=view`)
 }
 
 // 加载审批记录
@@ -1381,7 +1504,7 @@ async function handleViewApprovalProcess(row: ApprovalItem | ReimbursementItem) 
 function handleGoToReimbursementDetail() {
   if (!currentApprovalRecord.value) return
   approvalProcessDialogVisible.value = false
-  router.push(`/business-reimbursement/${currentApprovalRecord.value.targetId}?mode=view&from=/gm-approval`)
+  router.push(`/business-reimbursement/${currentApprovalRecord.value.targetId}?mode=view`)
 }
 
 // 通过审批
@@ -1399,10 +1522,10 @@ async function handleApprove(row: ApprovalItem) {
 
     if (response.data.success) {
       ElMessage.success('审批通过')
+      // 立即刷新菜单栏角标
+      await pendingStore.refreshPendingCounts()
       await fetchPendingList()
       await fetchStatistics()
-      // 刷新菜单栏角标
-      pendingStore.refreshPendingCounts()
     } else {
       ElMessage.error(response.data.message || '审批失败')
     }
@@ -1437,10 +1560,10 @@ async function confirmReject() {
       if (response.data.success) {
         ElMessage.success('已驳回')
         rejectDialogVisible.value = false
+        // 立即刷新菜单栏角标
+        await pendingStore.refreshPendingCounts()
         await fetchPendingList()
         await fetchStatistics()
-        // 刷新菜单栏角标
-        pendingStore.refreshPendingCounts()
       } else {
         ElMessage.error(response.data.message || '驳回失败')
       }
@@ -1456,23 +1579,32 @@ async function confirmReject() {
 // 获取状态标签类型
 function getStatusTagType(status: string) {
   const typeMap: Record<string, string> = {
+    draft: 'info',
     pending: 'warning',
-    approved: 'success',
-    paying: 'primary',
-    payment_uploaded: 'info',
+    approved: '',
+    payment_uploaded: '',
     completed: 'success',
     rejected: 'danger',
   }
   return typeMap[status] || 'info'
 }
 
+// 获取状态自定义颜色（用于区分相似状态）
+function getStatusColor(status: string) {
+  const colorMap: Record<string, string> = {
+    approved: '#409eff',
+    payment_uploaded: '#17a2b8',
+  }
+  return colorMap[status] || ''
+}
+
 // 获取状态标签文本
 function getStatusLabel(status: string) {
   const labelMap: Record<string, string> = {
+    draft: '草稿',
     pending: '待审批',
-    approved: '已通过待付款',
-    paying: '付款中',
-    payment_uploaded: '已付款待确认',
+    approved: '待付款',
+    payment_uploaded: '待确认',
     completed: '已完成',
     rejected: '已驳回',
   }
@@ -1493,12 +1625,32 @@ function getTypeTagType(type: string): 'success' | 'warning' | 'danger' | 'info'
 onMounted(async () => {
   await fetchScopeOptions()
   await fetchStatistics()
-  await fetchPendingList()
   await fetchEmployeeList()
+  // 根据当前 tab 加载对应数据
+  if (activeTab.value === 'completed') {
+    await fetchCompletedList()
+  } else if (activeTab.value === 'all') {
+    await fetchAllList()
+  } else {
+    await fetchPendingList()
+  }
+  // 数据加载完成后才允许 tab-change 事件处理
+  await nextTick()
+  isMounted.value = true
 })
 </script>
 
 <style scoped lang="scss">
+// 禁用标签页切换动画，防止返回时出现视觉跳转
+.no-transition-tabs {
+  :deep(.el-tabs__active-bar) {
+    transition: none !important;
+  }
+  :deep(.el-tabs__nav-wrap::after) {
+    transition: none !important;
+  }
+}
+
 .gm-approval-center {
   .statistics-section {
     display: grid;
@@ -1508,8 +1660,9 @@ onMounted(async () => {
 
     .stat-card {
       cursor: pointer;
-      transition: all 0.3s;
-      border: 2px solid transparent;
+      transition: all 0.3s ease;
+      border: 1px solid #ebeef5;
+      border-radius: 8px;
 
       &:hover {
         transform: translateY(-4px);
@@ -1517,14 +1670,17 @@ onMounted(async () => {
 
       &.active {
         border-color: var(--el-color-primary);
+        border-width: 2px;
       }
 
       &.pending-card.active {
         border-color: #e6a23c;
+        border-width: 2px;
       }
 
       &.completed-card.active {
         border-color: #67c23a;
+        border-width: 2px;
       }
 
       .stat-content {

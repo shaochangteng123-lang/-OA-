@@ -204,19 +204,19 @@ const routes: RouteRecordRaw[] = [
         path: '/approval',
         name: 'ApprovalCenter',
         component: () => import('@/views/ApprovalCenter.vue'),
-        meta: { title: '审批中心' },
+        meta: { title: '审批中心', requiresAdmin: true },
       },
       {
         path: '/gm-approval',
         name: 'GMApprovalCenter',
         component: () => import('@/views/GMApprovalCenter.vue'),
-        meta: { title: '审批中心' },
+        meta: { title: '审批中心', requiresRole: ['super_admin', 'admin', 'general_manager'] },
       },
       {
         path: '/approval/payment/:id',
         name: 'ApprovalPayment',
         component: () => import('@/views/ApprovalPayment.vue'),
-        meta: { title: '付款' },
+        meta: { title: '付款', requiresAdmin: true },
       },
     ],
   },
@@ -278,6 +278,15 @@ router.beforeEach(async (to, _from, next) => {
     if (to.meta.requiresAdmin) {
       const role = authStore.user?.role
       if (role !== 'super_admin' && role !== 'admin') {
+        next({ name: 'Home' })
+        return
+      }
+    }
+
+    // 检查是否需要特定角色权限
+    if (to.meta.requiresRole) {
+      const role = authStore.user?.role
+      if (!role || !(to.meta.requiresRole as string[]).includes(role)) {
         next({ name: 'Home' })
         return
       }

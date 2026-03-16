@@ -386,7 +386,7 @@ export function initDatabase() {
       type TEXT NOT NULL CHECK(type IN ('basic', 'large', 'business')),
       title TEXT NOT NULL,
       total_amount REAL NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paying', 'payment_uploaded', 'completed', 'rejected')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed', 'rejected')),
       description TEXT,
       business_type TEXT,
       client TEXT,
@@ -431,6 +431,7 @@ export function initDatabase() {
     { name: 'deduction_amount', type: 'REAL DEFAULT 0' }, // 核减金额
     { name: 'deduction_reason', type: 'TEXT' },         // 核减原因
     { name: 'original_amount', type: 'REAL' },          // 原始申请金额（核减前）
+    { name: 'reimbursement_month', type: 'TEXT' },      // 报销月份（YYYY-MM）
   ]
 
   for (const column of newColumns) {
@@ -443,6 +444,19 @@ export function initDatabase() {
         console.error(`❌ 添加 ${column.name} 字段失败:`, error)
       }
     }
+  }
+
+  // 迁移历史 paying 状态数据到 approved（paying 状态已废弃）
+  try {
+    const migrated = db.prepare(`
+      UPDATE reimbursements SET status = 'approved', updated_at = datetime('now')
+      WHERE status = 'paying'
+    `).run()
+    if (migrated.changes > 0) {
+      console.log(`✅ 已将 ${migrated.changes} 条 paying 状态记录迁移为 approved`)
+    }
+  } catch (error) {
+    // 忽略迁移错误（如表尚未创建等边界情况）
   }
 
   db.exec(`
@@ -474,6 +488,15 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_reimbursement_id ON reimbursement_invoices(reimbursement_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_invoice_number ON reimbursement_invoices(invoice_number);
   `)
+
+  // 发票号码唯一性通过应用层校验（check-invoice-duplicate 接口），
+  // 不使用数据库唯一索引，因为软删除的报销单关联的发票仍在表中
+  // 如果之前创建了唯一索引，需要删除以避免冲突
+  try {
+    db.exec(`DROP INDEX IF EXISTS idx_unique_invoice_number`)
+  } catch {
+    // 忽略
+  }
 
   // 添加 category 和 deducted_amount 字段到 reimbursement_invoices 表
   const invoiceColumns = [
