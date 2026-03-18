@@ -74,17 +74,33 @@
               />
             </el-form-item>
 
-            <el-form-item label="发票上传" prop="files">
-              <InvoiceUploader
-                v-model="invoice.fileList.value"
-                :max-files="10"
-                :disabled="isReadonly"
-                theme-color="#67c23a"
-                @file-change="handleFileChange"
-                @delete-file="handleDeleteFile"
-                @exceed="() => ElMessage.warning('超出最大上传数量限制')"
-              />
-            </el-form-item>
+            <div class="upload-layout">
+              <div class="upload-left">
+                <el-form-item label="发票上传" prop="files">
+                  <InvoiceUploader
+                    v-model="invoice.fileList.value"
+                    :max-files="10"
+                    :disabled="isReadonly"
+                    theme-color="#67c23a"
+                    @file-change="handleFileChange"
+                    @delete-file="handleDeleteFile"
+                    @exceed="() => ElMessage.warning('超出最大上传数量限制')"
+                  />
+                </el-form-item>
+              </div>
+
+              <div class="upload-right">
+                <el-form-item label="无票上传">
+                  <ReceiptUploader
+                    v-model="receiptFileList"
+                    :disabled="isReadonly"
+                    theme-color="#67c23a"
+                    @file-change="handleReceiptChange"
+                    @delete-file="handleDeleteReceipt"
+                  />
+                </el-form-item>
+              </div>
+            </div>
 
             <!-- 发票明细表格 -->
             <el-form-item label="发票明细">
@@ -122,8 +138,7 @@
             </el-form-item>
           </el-form>
 
-          <!-- 付款回单区域已隐藏 -->
-          <!--
+          <!-- 付款回单区域 -->
           <div v-if="isPaid && paymentProofPath" class="payment-proof-section">
             <h3 class="section-title">
               <el-icon color="#67C23A"><CircleCheckFilled /></el-icon>
@@ -150,11 +165,10 @@
                 </div>
               </div>
               <div v-if="payTime" class="payment-time">
-                付款时间：{{ formatPayTime(payTime) }}
+                付款时间：{{ payTime }}
               </div>
             </div>
           </div>
-          -->
 
           <!-- 付款回单预览对话框 -->
           <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
@@ -177,6 +191,7 @@ import type { FormInstance, FormRules } from 'element-plus'
 
 // 导入模块化组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
+import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入 composables
@@ -197,6 +212,9 @@ const formData = reactive({
 
 // 表单引用
 const formRef = ref<FormInstance>()
+
+// 无票上传文件列表
+const receiptFileList = ref<any[]>([])
 
 // 表单验证规则
 const formRules: FormRules = {
@@ -275,6 +293,12 @@ const isRejected = computed(() => {
   return reimbursement.reimbursementStatus.value === 'rejected'
 })
 
+// 判断是否已付款（用于显示付款回单）
+const isPaid = computed(() => {
+  const status = reimbursement.reimbursementStatus.value
+  return status === 'payment_uploaded' || status === 'completed'
+})
+
 // 判断付款回单是否为图片
 const isPaymentProofImage = computed(() => {
   if (!paymentProofPath.value) return false
@@ -282,9 +306,31 @@ const isPaymentProofImage = computed(() => {
   return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
 })
 
+// 预览付款回单
+function handlePreviewPaymentProof(): void {
+  paymentProofDialogVisible.value = true
+}
+
+function isImageFilePath(filePath?: string): boolean {
+  if (!filePath) return false
+  const normalizedPath = filePath.toLowerCase()
+  return normalizedPath.endsWith('.jpg')
+    || normalizedPath.endsWith('.jpeg')
+    || normalizedPath.endsWith('.png')
+    || normalizedPath.endsWith('.gif')
+    || normalizedPath.endsWith('.bmp')
+    || normalizedPath.endsWith('.webp')
+}
+
 // 处理文件变化
 function handleFileChange(file: any, fileList: any[]): void {
   invoice.handleFileChange(file, fileList)
+}
+
+// 处理无票上传变化
+async function handleReceiptChange(file: any, fileList: any[]): Promise<void> {
+  await invoice.handleReceiptChange(file, fileList)
+  receiptFileList.value = fileList
 }
 
 // 处理删除文件
@@ -292,8 +338,21 @@ function handleDeleteFile(file: any): void {
   invoice.deleteInvoiceByFile(file.uid)
 }
 
+// 处理删除无票文件
+function handleDeleteReceipt(file: any): void {
+  const index = receiptFileList.value.findIndex(item => item.uid === file.uid)
+  if (index > -1) {
+    receiptFileList.value.splice(index, 1)
+  }
+  invoice.deleteInvoiceByFile(file.uid)
+}
+
 // 处理删除发票
 function handleDeleteInvoice(invoiceItem: any): void {
+  const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
+  if (receiptIndex > -1) {
+    receiptFileList.value.splice(receiptIndex, 1)
+  }
   invoice.deleteInvoiceById(invoiceItem.id)
 }
 
@@ -390,6 +449,23 @@ async function loadDetail(): Promise<void> {
     // 加载发票数据
     if (data.invoices && Array.isArray(data.invoices)) {
       invoice.loadInvoices(data.invoices)
+
+      // 分离 PDF 发票和收据（图片）的 fileList
+      const allFiles = invoice.fileList.value
+      const pdfFiles: any[] = []
+      const receiptFiles: any[] = []
+
+      allFiles.forEach((file, index) => {
+        const invoiceItem = data.invoices[index]
+        if (invoiceItem && isImageFilePath(invoiceItem.filePath)) {
+          receiptFiles.push(file)
+        } else {
+          pdfFiles.push(file)
+        }
+      })
+
+      invoice.fileList.value = pdfFiles
+      receiptFileList.value = receiptFiles
     }
 
     // 加载付款回单数据
@@ -464,6 +540,7 @@ watch(
       approvalDeductionAmount.value = 0
       paymentProofPath.value = ''
       payTime.value = ''
+      receiptFileList.value = []
       await loadDetail()
     }
   }
@@ -565,6 +642,40 @@ watch(
   padding: 24px 24px 24px 16px;
   background: #f5f7fa;
   border-radius: 8px;
+}
+
+.upload-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.upload-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-right {
+  width: 450px;
+  flex-shrink: 0;
+}
+
+.upload-layout .el-form-item {
+  margin-bottom: 0;
+}
+
+.upload-layout :deep(.el-form-item__label) {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+.upload-layout :deep(.el-form-item__content) {
+  line-height: 32px;
+}
+
+.upload-layout :deep(.upload-header) {
+  min-height: 48px;
 }
 
 .form-actions-item {

@@ -3,6 +3,7 @@ import multer from 'multer'
 import { PDFDocument } from 'pdf-lib'
 import fs from 'fs'
 import path from 'path'
+import crypto from 'crypto'
 import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
@@ -318,6 +319,28 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     const fileSize = req.file.size
     const maxSize = 5 * 1024 * 1024 // 5MB
 
+    // 先计算文件哈希，快速查重（在 OCR 之前）
+    const fileBuffer = fs.readFileSync(tempFilePath)
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
+    console.log('🔑 文件哈希:', fileHash)
+
+    const existingByHash = db.prepare(`
+      SELECT ri.file_hash, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.file_hash = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingByHash) {
+      // 清理临时文件
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingByHash.applicant_name} 已上传此发票，请勿重复上传`,
+      })
+    }
+
     let finalFilePath = tempFilePath
     let compressed = false
 
@@ -389,6 +412,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       data: {
         fileName: finalFileName,
         filePath: `/uploads/invoices/${finalFileName}`,
+        fileHash,
         compressed,
         ocrResult,
       },
@@ -428,6 +452,28 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     const tempFilePath = req.file.path
     console.log('📸 收到收据上传:', req.file.originalname)
 
+    // 先计算文件哈希，快速查重（在 OCR 之前）
+    const fileBuffer = fs.readFileSync(tempFilePath)
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
+    console.log('🔑 文件哈希:', fileHash)
+
+    const existingByHash = db.prepare(`
+      SELECT ri.file_hash, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.file_hash = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingByHash) {
+      // 清理临时文件
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingByHash.applicant_name} 已上传此支付截图，请勿重复上传`,
+      })
+    }
+
     // 进行OCR识别
     console.log('🔍 开始OCR识别支付截图...')
     const ocrResult = await recognizeReceipt(tempFilePath)
@@ -444,7 +490,7 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
           r.created_at
         FROM reimbursement_invoices ri
         JOIN reimbursements r ON ri.reimbursement_id = r.id
-        WHERE ri.invoice_number = ?
+        WHERE ri.invoice_number = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
         LIMIT 1
       `).get(ocrResult.transactionNo) as {
         invoice_number: string
@@ -483,6 +529,7 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
       data: {
         fileName: finalFileName,
         filePath: `/uploads/invoices/${finalFileName}`,
+        fileHash,
         ocrResult: {
           amount: ocrResult.amount,
           date: ocrResult.date,
@@ -1074,8 +1121,8 @@ router.post('/create', requireAuth, async (req, res) => {
       const insertInvoice = db.prepare(`
         INSERT INTO reimbursement_invoices (
           id, reimbursement_id, amount, invoice_date, invoice_number,
-          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
 
       for (const invoice of processedInvoices) {
@@ -1093,6 +1140,7 @@ router.post('/create', requireAuth, async (req, res) => {
           invoice.invoiceCode || null,
           invoice.category || null,
           invoice.deductedAmount || 0,
+          invoice.fileHash || null,
           timestamp
         )
       }
@@ -1588,6 +1636,14 @@ router.post('/:id/complete-with-proof', requireAuth, uploadPaymentProof.single('
     const paymentProofPath = `/uploads/invoices/${finalFileName}`
     const now = new Date().toISOString()
 
+    // 查询该报销单对应的审批实例
+    const approvalInstance = db.prepare(`
+      SELECT id FROM approval_instances
+      WHERE target_id = ? AND target_type = 'reimbursement'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(id) as { id: string } | undefined
+
     // 更新为已上传付款凭证状态，等待用户确认收款
     db.prepare(`
       UPDATE reimbursements
@@ -1598,6 +1654,25 @@ router.post('/:id/complete-with-proof', requireAuth, uploadPaymentProof.single('
           updated_at = ?
       WHERE id = ?
     `).run(paymentProofPath, now, now, now, id)
+
+    // 创建审批记录，记录付款回单上传动作
+    if (approvalInstance) {
+      const { nanoid } = await import('nanoid')
+      const recordId = nanoid()
+      db.prepare(`
+        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        recordId,
+        approvalInstance.id,
+        99,
+        currentUserId,
+        'payment_uploaded',
+        '管理员已上传付款回单',
+        now
+      )
+      console.log(`✅ 创建付款回单审批记录: ${recordId}`)
+    }
 
     console.log(`✅ 付款回单上传成功，等待用户确认收款: ${id}`)
 
@@ -2105,8 +2180,8 @@ router.put('/:id', requireAuth, async (req, res) => {
       const insertInvoice = db.prepare(`
         INSERT INTO reimbursement_invoices (
           id, reimbursement_id, amount, invoice_date, invoice_number,
-          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
 
       for (const invoice of processedInvoices) {
@@ -2124,6 +2199,7 @@ router.put('/:id', requireAuth, async (req, res) => {
           invoice.invoiceCode || null,
           invoice.category || null,
           invoice.deductedAmount || 0,
+          invoice.fileHash || null,
           timestamp
         )
       }

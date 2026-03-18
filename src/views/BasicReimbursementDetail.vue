@@ -135,8 +135,7 @@
             </el-form-item>
           </el-form>
 
-          <!-- 付款回单区域已隐藏，如需显示请取消注释 -->
-          <!--
+          <!-- 付款回单区域 -->
           <div v-if="isPaid && paymentProofPath" class="payment-proof-section">
             <h3 class="section-title">
               <el-icon color="#67C23A"><CircleCheckFilled /></el-icon>
@@ -163,11 +162,10 @@
                 </div>
               </div>
               <div v-if="payTime" class="payment-time">
-                付款时间：{{ formatPayTime(payTime) }}
+                付款时间：{{ payTime }}
               </div>
             </div>
           </div>
-          -->
 
           <!-- 付款回单预览对话框 -->
           <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
@@ -261,6 +259,12 @@ const isRejected = computed(() => {
   return reimbursement.reimbursementStatus.value === 'rejected'
 })
 
+// 判断是否已付款（用于显示付款回单）
+const isPaid = computed(() => {
+  const status = reimbursement.reimbursementStatus.value
+  return status === 'payment_uploaded' || status === 'completed'
+})
+
 // 判断付款回单是否为图片
 const isPaymentProofImage = computed(() => {
   if (!paymentProofPath.value) return false
@@ -278,6 +282,11 @@ function isImageFilePath(filePath?: string): boolean {
     || normalizedPath.endsWith('.bmp')
     || normalizedPath.endsWith('.webp')
   }
+
+// 预览付款回单
+function handlePreviewPaymentProof(): void {
+  paymentProofDialogVisible.value = true
+}
 
 // 选择报销类型后进入下一步
 function handleTypeSelect(type: string): void {

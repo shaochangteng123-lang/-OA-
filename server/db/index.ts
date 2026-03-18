@@ -487,6 +487,7 @@ export function initDatabase() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_reimbursement_id ON reimbursement_invoices(reimbursement_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_invoice_number ON reimbursement_invoices(invoice_number);
+    CREATE INDEX IF NOT EXISTS idx_reimbursement_invoices_file_hash ON reimbursement_invoices(file_hash);
   `)
 
   // 发票号码唯一性通过应用层校验（check-invoice-duplicate 接口），
@@ -502,6 +503,7 @@ export function initDatabase() {
   const invoiceColumns = [
     { name: 'category', type: 'TEXT' },           // 发票类型（运输服务、汽油等）
     { name: 'deducted_amount', type: 'REAL DEFAULT 0' },  // 核减金额
+    { name: 'file_hash', type: 'TEXT' },           // 文件哈希，用于上传前快速查重
   ]
 
   for (const column of invoiceColumns) {

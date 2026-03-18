@@ -42,14 +42,29 @@
               />
             </el-form-item>
 
-            <el-form-item label="发票上传" required>
-              <InvoiceUploader
-                v-model="invoice.fileList.value"
-                theme-color="#667eea"
-                @file-change="handleFileChange"
-                @delete-file="handleDeleteFile"
-              />
-            </el-form-item>
+            <div class="upload-layout">
+              <div class="upload-left">
+                <el-form-item label="发票上传" required>
+                  <InvoiceUploader
+                    v-model="invoice.fileList.value"
+                    theme-color="#67c23a"
+                    @file-change="handleFileChange"
+                    @delete-file="handleDeleteFile"
+                  />
+                </el-form-item>
+              </div>
+
+              <div class="upload-right">
+                <el-form-item label="无票上传">
+                  <ReceiptUploader
+                    v-model="receiptFileList"
+                    theme-color="#67c23a"
+                    @file-change="handleReceiptChange"
+                    @delete-file="handleDeleteReceipt"
+                  />
+                </el-form-item>
+              </div>
+            </div>
 
             <el-form-item label="发票明细">
               <InvoiceTable
@@ -96,6 +111,7 @@ import type { FormInstance } from 'element-plus'
 
 // 导入报销相关组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
+import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入工具函数和常量
@@ -120,6 +136,9 @@ const submitting = ref(false)
 
 // 创建发票管理实例
 const invoice = useInvoice()
+
+// 无票上传文件列表
+const receiptFileList = ref<any[]>([])
 
 // 级联选择器配置
 const scopeOptions = ref<any[]>([])
@@ -178,7 +197,26 @@ const handleDeleteFile = (file: any) => {
 
 // 处理删除发票
 const handleDeleteInvoice = (invoiceItem: any) => {
+  const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
+  if (receiptIndex > -1) {
+    receiptFileList.value.splice(receiptIndex, 1)
+  }
   invoice.deleteInvoiceById(invoiceItem.id)
+}
+
+// 处理无票上传变化
+const handleReceiptChange = async (file: any, fileList: any[]) => {
+  await invoice.handleReceiptChange(file, fileList)
+  receiptFileList.value = fileList
+}
+
+// 处理删除无票文件
+const handleDeleteReceipt = (file: any) => {
+  const index = receiptFileList.value.findIndex(item => item.uid === file.uid)
+  if (index > -1) {
+    receiptFileList.value.splice(index, 1)
+  }
+  invoice.deleteInvoiceByFile(file.uid)
 }
 
 // 保存草稿
@@ -370,6 +408,40 @@ onMounted(() => {
 
 .reimbursement-form :deep(.el-form-item__content) {
   width: 100%;
+}
+
+.upload-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.upload-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.upload-right {
+  width: 450px;
+  flex-shrink: 0;
+}
+
+.upload-layout .el-form-item {
+  margin-bottom: 0;
+}
+
+.upload-layout :deep(.el-form-item__label) {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 32px;
+}
+
+.upload-layout :deep(.el-form-item__content) {
+  line-height: 32px;
+}
+
+.upload-layout :deep(.upload-header) {
+  min-height: 48px;
 }
 
 .form-actions {

@@ -26,6 +26,8 @@
     "update:holidays": "tsx server/scripts/update-holidays.ts",
     "create:admin": "tsx server/scripts/create-admin.ts",
     "clear:reimbursement": "tsx server/scripts/clear-reimbursement-data.ts",
+    "clean:reimbursement-test": "tsx server/scripts/clean-reimbursement-test-data.ts",
+    "test:ocr": "tsx server/scripts/test-receipt-ocr-performance.ts",
     "prepare": "husky",
     "docker": "./docker-quick-start.sh",
     "docker:quick": "./docker-quick-start.sh",

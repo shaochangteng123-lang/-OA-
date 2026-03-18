@@ -503,6 +503,7 @@
                 <div class="timeline-content">
                   <div class="timeline-title">员工提交</div>
                   <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
+                  <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
                 </div>
               </el-timeline-item>
 
@@ -524,13 +525,14 @@
                 <div class="timeline-content">
                   <div class="timeline-title">员工提交</div>
                   <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
+                  <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
                 </div>
               </el-timeline-item>
 
               <!-- 2. 审批记录 -->
               <template v-if="approvalRecords.length > 0">
                 <el-timeline-item
-                  v-for="record in approvalRecords"
+                  v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
                   :key="record.id"
                   :timestamp="formatDate(record.actionTime)"
                   placement="top"
@@ -888,6 +890,7 @@ interface ApprovalProcessRecord {
   completedTime?: string
   paymentProofPath?: string
   receiptConfirmedBy?: string
+  description?: string
 }
 
 interface ApprovalRecordItem {
@@ -1438,6 +1441,30 @@ async function loadApprovalRecords(reimbursementId: string) {
 
     if (res.data.success && res.data.data) {
       approvalRecords.value = res.data.data.records || []
+
+      // 用最新的报销单状态覆盖弹窗数据
+      if (currentApprovalRecord.value && res.data.data.reimbursementStatus) {
+        currentApprovalRecord.value.status = res.data.data.reimbursementStatus
+        if (res.data.data.paymentProofPath) {
+          currentApprovalRecord.value.paymentProofPath = res.data.data.paymentProofPath
+        }
+        if (res.data.data.payTime) {
+          currentApprovalRecord.value.payTime = res.data.data.payTime
+        }
+        if (res.data.data.paymentUploadTime) {
+          currentApprovalRecord.value.paymentUploadTime = res.data.data.paymentUploadTime
+        }
+        if (res.data.data.completedTime) {
+          currentApprovalRecord.value.completedTime = res.data.data.completedTime
+        }
+        if (res.data.data.receiptConfirmedBy) {
+          currentApprovalRecord.value.receiptConfirmedBy = res.data.data.receiptConfirmedBy
+        }
+        // 更新详细说明
+        if (res.data.data.reimbursementDescription) {
+          currentApprovalRecord.value.description = res.data.data.reimbursementDescription
+        }
+      }
     }
   } catch (error) {
     console.error('加载审批记录失败:', error)
@@ -1449,9 +1476,6 @@ async function loadApprovalRecords(reimbursementId: string) {
 async function handleViewApprovalProcess(row: ApprovalItem | ReimbursementItem) {
   const isApprovalItem = 'targetId' in row
   const reimbursementId = isApprovalItem ? row.targetId : row.id
-
-  // 加载审批记录
-  await loadApprovalRecords(reimbursementId)
 
   if (isApprovalItem) {
     // 待审批项
@@ -1473,6 +1497,7 @@ async function handleViewApprovalProcess(row: ApprovalItem | ReimbursementItem) 
       completedTime: '',
       paymentProofPath: row.paymentProofPath || '',
       receiptConfirmedBy: '',
+      description: '',
     }
   } else {
     // 已审批项
@@ -1494,8 +1519,12 @@ async function handleViewApprovalProcess(row: ApprovalItem | ReimbursementItem) 
       completedTime: row.completedTime || '',
       paymentProofPath: row.paymentProofPath || '',
       receiptConfirmedBy: '',
+      description: '',
     }
   }
+
+  // 加载审批记录（会用最新状态覆盖）
+  await loadApprovalRecords(reimbursementId)
 
   approvalProcessDialogVisible.value = true
 }
@@ -1837,6 +1866,17 @@ onMounted(async () => {
 .timeline-desc {
   font-size: 14px;
   color: #606266;
+}
+
+.timeline-description {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .timeline-pending {

@@ -20,6 +20,7 @@ export interface InvoiceItem {
   category?: string // 报销类型
   filePath: string
   fileUid: string | number
+  fileHash?: string // 文件哈希，用于查重
   deductedAmount?: number // 核减金额
   actualAmount?: number // 实际报销金额
 }
@@ -38,6 +39,7 @@ export interface UploadResponse {
   message?: string
   data?: {
     filePath: string
+    fileHash?: string
     ocrResult?: OcrResult
   }
 }
@@ -195,6 +197,7 @@ export function useInvoice() {
           invoiceNumber: invoiceNumber || '',
           category: type || '', // 添加报销类型
           filePath: result.data.filePath || '',
+          fileHash: result.data.fileHash || '',
           fileUid: file.uid,
         })
 
@@ -293,6 +296,7 @@ export function useInvoice() {
           invoiceNumber: invoiceNumber || `RECEIPT-${Date.now()}`,
           category: type || '无票报销', // 添加报销类型
           filePath: result.data.filePath || '',
+          fileHash: result.data.fileHash || '',
           fileUid: file.uid,
         })
 
@@ -537,6 +541,7 @@ export function useInvoice() {
       invoiceNumber: inv.invoiceNumber || '',
       category: inv.category || '',
       filePath: inv.filePath || '',
+      fileHash: inv.fileHash || '',
       fileUid: baseUid + index,
       deductedAmount: inv.deductedAmount || 0,
       actualAmount: inv.actualAmount || inv.amount || 0,
@@ -572,6 +577,7 @@ export function useInvoice() {
       invoiceNumber: inv.invoiceNumber,
       category: inv.category,
       filePath: inv.filePath,
+      fileHash: inv.fileHash || '',
       deductedAmount: inv.deductedAmount || 0,
       actualAmount: inv.actualAmount || inv.amount,
     }))

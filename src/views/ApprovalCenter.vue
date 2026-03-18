@@ -873,13 +873,14 @@
               <div class="timeline-content">
                 <div class="timeline-title">员工提交</div>
                 <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
+                <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
               </div>
             </el-timeline-item>
 
             <!-- 2. 管理员审批 -->\n            <!-- 如果有审批记录，显示详细记录 -->
             <template v-if="approvalRecords.length > 0">
               <el-timeline-item
-                v-for="record in approvalRecords"
+                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
                 :key="record.id"
                 :timestamp="formatDate(record.actionTime)"
                 placement="top"
@@ -1630,6 +1631,7 @@ interface ApprovalProcessRecord {
   completedTime?: string
   paymentProofPath?: string
   receiptConfirmedBy?: string
+  description?: string
 }
 
 interface ApprovalRecordItem {
@@ -2176,10 +2178,7 @@ function handleViewReimbursement(item: ApprovalItem) {
 
 // 查看待审批报销单的审批流程
 async function handleViewApprovalProcessFromPending(item: ApprovalItem) {
-  // 加载审批记录
-  await loadApprovalRecords(item.targetId)
-
-  // 设置当前审批记录信息
+  // 先设置当前审批记录信息
   currentApprovalRecord.value = {
     id: item.id,
     targetId: item.targetId, // 报销单ID
@@ -2198,17 +2197,18 @@ async function handleViewApprovalProcessFromPending(item: ApprovalItem) {
     completedTime: '',
     paymentProofPath: '',
     receiptConfirmedBy: '',
+    description: '',
   }
+
+  // 加载审批记录（会用最新状态覆盖）
+  await loadApprovalRecords(item.targetId)
 
   approvalProcessDialogVisible.value = true
 }
 
 // 查看已通过未付款报销单的审批流程
 async function handleViewApprovalProcessFromUnpaid(item: ReimbursementItem) {
-  // 加载审批记录
-  await loadApprovalRecords(item.id)
-
-  // 设置当前审批记录信息
+  // 先设置当前审批记录信息
   currentApprovalRecord.value = {
     id: item.id,
     targetId: item.id, // 报销单ID（已通过未付款的item.id就是报销单ID）
@@ -2227,7 +2227,11 @@ async function handleViewApprovalProcessFromUnpaid(item: ReimbursementItem) {
     completedTime: item.completedTime || '',
     paymentProofPath: item.paymentProofPath || '',
     receiptConfirmedBy: item.receiptConfirmedBy || '',
+    description: '',
   }
+
+  // 加载审批记录（会用最新状态覆盖）
+  await loadApprovalRecords(item.id)
 
   approvalProcessDialogVisible.value = true
 }
@@ -2326,6 +2330,7 @@ async function handleViewApprovalProcessFromAll(row: AllReimbursementItem) {
     completedTime: row.completedTime,
     paymentProofPath: row.paymentProofPath,
     receiptConfirmedBy: row.receiptConfirmedBy,
+    description: '',
   }
 
   // 加载审批记录
@@ -2346,6 +2351,30 @@ async function loadApprovalRecords(reimbursementId: string) {
 
     if (res.data.success && res.data.data) {
       approvalRecords.value = res.data.data.records || []
+
+      // 用最新的报销单状态覆盖弹窗数据
+      if (currentApprovalRecord.value && res.data.data.reimbursementStatus) {
+        currentApprovalRecord.value.status = res.data.data.reimbursementStatus
+        if (res.data.data.paymentProofPath) {
+          currentApprovalRecord.value.paymentProofPath = res.data.data.paymentProofPath
+        }
+        if (res.data.data.payTime) {
+          currentApprovalRecord.value.payTime = res.data.data.payTime
+        }
+        if (res.data.data.paymentUploadTime) {
+          currentApprovalRecord.value.paymentUploadTime = res.data.data.paymentUploadTime
+        }
+        if (res.data.data.completedTime) {
+          currentApprovalRecord.value.completedTime = res.data.data.completedTime
+        }
+        if (res.data.data.receiptConfirmedBy) {
+          currentApprovalRecord.value.receiptConfirmedBy = res.data.data.receiptConfirmedBy
+        }
+        // 更新详细说明
+        if (res.data.data.reimbursementDescription) {
+          currentApprovalRecord.value.description = res.data.data.reimbursementDescription
+        }
+      }
     }
   } catch (error) {
     console.error('加载审批记录失败:', error)
@@ -3427,6 +3456,17 @@ onMounted(() => {
   color: #606266;
 }
 
+.timeline-description {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 /* 驳回原因样式 */
 .reject-reason-box {
   margin-top: 12px;
@@ -3519,7 +3559,7 @@ onMounted(() => {
   padding: 40px 0;
 }
 
-/* 付款回单预览 */
+/* 时间线中的付款回单预览 */
 .payment-proof-preview {
   margin-top: 12px;
 }

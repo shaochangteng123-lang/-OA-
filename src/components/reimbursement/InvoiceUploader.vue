@@ -147,25 +147,12 @@ function handleDrop(e: DragEvent): void {
     validFiles.push(file)
   }
 
-  // 手动触发上传
-  if (validFiles.length > 0) {
+  // 手动触发 el-upload 的文件添加
+  // 通过 uploadRef 调用 el-upload 的 handleStart 方法
+  if (validFiles.length > 0 && uploadRef.value) {
     validFiles.forEach(file => {
-      // 创建文件对象
-      const fileObj = {
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        uid: Date.now() + Math.random(),
-        status: 'ready',
-        raw: file,
-      }
-
-      // 添加到文件列表
-      const newFileList = [...fileList.value, fileObj]
-      fileList.value = newFileList
-
-      // 触发文件变化事件
-      emit('file-change', fileObj, newFileList)
+      // 使用 el-upload 的内部方法添加文件，这样只会触发一次 on-change
+      uploadRef.value.handleStart(file)
     })
   }
 }

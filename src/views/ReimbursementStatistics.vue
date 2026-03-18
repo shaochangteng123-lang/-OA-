@@ -241,6 +241,7 @@
                   <div class="timeline-content">
                     <div class="timeline-title">员工提交</div>
                     <div class="timeline-desc">{{ currentApprovalRecord.applicant }} 提交了报销申请</div>
+                    <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
                   </div>
                 </el-timeline-item>
 
@@ -1217,12 +1218,23 @@ onMounted(() => {
   color: #606266;
 }
 
+.timeline-description {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
 .timeline-desc.reject-reason {
   color: #f56c6c;
   margin-top: 4px;
 }
 
-/* 付款回单预览 */
+/* 时间线中的付款回单预览 */
 .payment-proof-preview {
   margin-top: 12px;
 }

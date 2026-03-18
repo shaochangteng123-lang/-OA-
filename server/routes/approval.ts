@@ -404,6 +404,12 @@ router.get('/by-target', requireAuth, (req, res) => {
       ORDER BY ar.action_time ASC
     `).all(targetId, targetType) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
 
+    // 获取报销单最新状态（用于前端实时展示）
+    const reimbursement = db.prepare(`
+      SELECT status, description, payment_proof_path, pay_time, payment_upload_time, completed_time, receipt_confirmed_by
+      FROM reimbursements WHERE id = ?
+    `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null } | undefined
+
     res.json({
       success: true,
       data: {
@@ -423,6 +429,13 @@ router.get('/by-target', requireAuth, (req, res) => {
           comment: record.comment,
           actionTime: formatDateTime(record.action_time),
         })),
+        reimbursementStatus: reimbursement?.status,
+        reimbursementDescription: reimbursement?.description,
+        paymentProofPath: reimbursement?.payment_proof_path,
+        payTime: reimbursement?.pay_time ? formatDateTime(reimbursement.pay_time) : null,
+        paymentUploadTime: reimbursement?.payment_upload_time ? formatDateTime(reimbursement.payment_upload_time) : null,
+        completedTime: reimbursement?.completed_time ? formatDateTime(reimbursement.completed_time) : null,
+        receiptConfirmedBy: reimbursement?.receipt_confirmed_by,
       },
     })
   } catch (error) {
