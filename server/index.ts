@@ -34,7 +34,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 const app = express()
-const PORT = process.env.PORT || 3000
+const PORT = Number(process.env.PORT) || 3000
 const NODE_ENV = process.env.NODE_ENV || 'development'
 
 // Initialize database and seed data

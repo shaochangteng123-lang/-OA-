@@ -8,6 +8,7 @@ import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
 import { recognizeReceipt } from '../services/receiptOcr.js'
+import { recognizePaymentProof } from '../services/paymentProofOcr.js'
 import { calculateReimbursementMonth } from '../utils/reimbursement.js'
 import { db } from '../db/index.js'
 
@@ -57,23 +58,18 @@ const upload = multer({
   },
 })
 
-// 配置 multer 用于付款回单上传（支持图片和PDF）
+// 配置 multer 用于付款回单上传（仅支持JPG和PNG图片）
 const uploadPaymentProof = multer({
   dest: tempDir,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB
   },
   fileFilter: (req, file, cb) => {
-    const allowedMimeTypes = [
-      'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-    ]
+    const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png']
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 PDF、JPG、PNG 格式的文件'))
+      cb(new Error('付款回单只支持 JPG/PNG 格式'))
     }
   },
 })
@@ -167,19 +163,14 @@ async function recognizeInvoice(filePath: string): Promise<{
       throw error
     }
 
-    // 如果是其他识别失败（如文本提取失败），返回默认值供用户手动填写
-    console.warn('⚠️  OCR 识别失败，返回默认值，请手动核对发票信息')
-
-    const randomAmount = (Math.random() * 1000 + 100).toFixed(2)
-    const daysAgo = Math.floor(Math.random() * 30)
-    const invoiceDate = new Date()
-    invoiceDate.setDate(invoiceDate.getDate() - daysAgo)
+    // OCR 识别失败，返回零值供用户手动填写
+    console.warn('⚠️  OCR 识别失败，返回空值，请手动核对发票信息')
 
     return {
-      amount: parseFloat(randomAmount),
-      date: invoiceDate.toISOString().split('T')[0],
-      invoiceNumber: 'MANUAL-' + Date.now(),
-      seller: '请手动填写',
+      amount: 0,
+      date: '',
+      invoiceNumber: '',
+      seller: '',
       isValidInvoice: true,
     }
   }
@@ -636,7 +627,7 @@ router.get('/statistics', requireAuth, async (req, res) => {
     const { db } = await import('../db/index.js')
 
     // 构建基础条件
-    let baseCondition = 'user_id = ?'
+    let baseCondition = 'user_id = ? AND COALESCE(is_deleted, 0) = 0'
     const baseParams: any[] = [userId]
 
     // 添加类型筛选
@@ -1189,7 +1180,7 @@ router.post('/create', requireAuth, async (req, res) => {
     console.error('错误详情:', error instanceof Error ? error.message : error)
     res.status(500).json({
       success: false,
-      message: '创建报销单失败: ' + (error instanceof Error ? error.message : String(error)),
+      message: '创建报销单失败',
     })
   }
 })
@@ -1399,7 +1390,7 @@ router.get('/pending-list', requireAuth, async (req, res) => {
     const { db } = await import('../db/index.js')
 
     // 构建查询条件
-    let whereClause = "WHERE status IN ('pending', 'pending_first', 'pending_second', 'pending_final')"
+    let whereClause = "WHERE status IN ('pending', 'pending_first', 'pending_second', 'pending_final') AND COALESCE(is_deleted, 0) = 0"
     const params: any[] = []
 
     if (type) {
@@ -1573,132 +1564,248 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
 
 
 /**
- * 上传付款回单并完成付款（合并接口）
+ * 上传单张付款回单并进行OCR识别验证（不提交，仅验证）
+ * POST /api/reimbursement/:id/verify-proof
+ */
+router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('paymentProof'), async (req, res) => {
+  try {
+    const { id } = req.params
+    const currentUserRole = req.session.user?.role
+
+    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
+      return res.status(403).json({ success: false, message: '无权限操作' })
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: '请上传付款回单' })
+    }
+
+    const { db } = await import('../db/index.js')
+    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
+    if (!reimbursement) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(404).json({ success: false, message: '报销单不存在' })
+    }
+
+    // 获取收款信息（优先 employee_profiles）
+    const profileBankInfo = db.prepare(`
+      SELECT bank_account_name, bank_account_number
+      FROM employee_profiles WHERE user_id = ?
+    `).get(reimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
+
+    const userBankInfo = (profileBankInfo && (profileBankInfo.bank_account_name || profileBankInfo.bank_account_number))
+      ? profileBankInfo
+      : db.prepare(`
+          SELECT bank_account_name, bank_account_number FROM users WHERE id = ?
+        `).get(reimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
+
+    // OCR 识别
+    let ocrResult
+    try {
+      ocrResult = await recognizePaymentProof(req.file.path)
+    } catch (ocrError: any) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(400).json({
+        success: false,
+        message: ocrError.message || '此不是付款回单，请重新上传',
+      })
+    }
+
+    // 验证收款人和账号（任一匹配即通过）
+    const ocrTextNoSpace = (ocrResult.rawText || '').replace(/\s+/g, '')
+
+    console.log('🔍 verify-proof 验证信息:', {
+      expectedName: userBankInfo?.bank_account_name,
+      expectedAccount: userBankInfo?.bank_account_number,
+      ocrPayee: ocrResult.payee,
+      ocrAccount: ocrResult.payeeAccount,
+      ocrAmount: ocrResult.amount,
+    })
+
+    // 检查账号是否匹配
+    let accountMatched = false
+    if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+      const expectedAccount = userBankInfo.bank_account_number.replace(/\s+/g, '')
+      const ocrAccount = ocrResult.payeeAccount.replace(/\s+/g, '')
+      if (expectedAccount === ocrAccount) {
+        accountMatched = true
+      } else if (expectedAccount.endsWith(ocrAccount) || ocrAccount.endsWith(expectedAccount)) {
+        accountMatched = true
+      } else if (expectedAccount.length === ocrAccount.length && expectedAccount.slice(1) === ocrAccount.slice(1)) {
+        console.log('✅ 账号仅首位不同，OCR可能误识别首位数字')
+        accountMatched = true
+      }
+    }
+
+    // 检查收款人姓名是否在全文中出现
+    let nameFound = false
+    if (userBankInfo?.bank_account_name) {
+      const expectedName = userBankInfo.bank_account_name.trim()
+      nameFound = ocrTextNoSpace.includes(expectedName)
+    }
+
+    console.log('🔍 verify-proof 匹配结果:', { accountMatched, nameFound })
+
+    // 账号匹配 OR 姓名匹配，任一通过即可
+    if (!accountMatched && !nameFound) {
+      const reasons: string[] = []
+      if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+        reasons.push(`收款账号不一致：报销单为"${userBankInfo.bank_account_number}"，付款回单为"${ocrResult.payeeAccount}"`)
+      } else if (!ocrResult.payeeAccount) {
+        reasons.push('无法识别付款回单中的收款账号')
+      }
+      if (userBankInfo?.bank_account_name) {
+        reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
+      } else {
+        reasons.push('用户未设置收款人姓名')
+      }
+      console.warn('⚠️ verify-proof 验证失败:', reasons)
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(400).json({
+        success: false,
+        message: '付款回单验证失败',
+        warnings: reasons,
+      })
+    }
+
+    // 验证通过，保留临时文件，返回识别结果
+    const tempFileName = path.basename(req.file.path)
+
+    res.json({
+      success: true,
+      message: '付款回单验证通过',
+      data: {
+        tempFileName,
+        ocrResult: {
+          payer: ocrResult.payer,
+          payee: ocrResult.payee,
+          payeeAccount: ocrResult.payeeAccount,
+          amount: ocrResult.amount,
+        },
+        originalFileName: req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8'),
+      },
+    })
+  } catch (error) {
+    console.error('❌ 付款回单验证失败:', error)
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+    }
+    res.status(500).json({ success: false, message: '验证失败' })
+  }
+})
+
+/**
+ * 提交已验证的付款回单（支持多张回单）
  * POST /api/reimbursement/:id/complete-with-proof
  */
-router.post('/:id/complete-with-proof', requireAuth, uploadPaymentProof.single('paymentProof'), async (req, res) => {
+router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
+  console.log('🔵 收到付款回单提交请求')
+
   try {
     const { id } = req.params
     const currentUserId = req.session.user?.id
     const currentUserRole = req.session.user?.role
 
     if (!currentUserId) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
+      return res.status(401).json({ success: false, message: '未登录' })
     }
 
-    // 检查是否为管理员
     if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限操作',
-      })
+      return res.status(403).json({ success: false, message: '无权限操作' })
     }
 
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: '请上传付款回单',
-      })
+    // 接收已验证的文件列表：[{ tempFileName, originalFileName, amount }]
+    const { verifiedFiles } = req.body
+    if (!verifiedFiles || !Array.isArray(verifiedFiles) || verifiedFiles.length === 0) {
+      return res.status(400).json({ success: false, message: '请上传付款回单' })
     }
 
     const { db } = await import('../db/index.js')
 
-    // 检查报销单是否存在
     const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
-
     if (!reimbursement) {
-      return res.status(404).json({
-        success: false,
-        message: '报销单不存在',
-      })
+      return res.status(404).json({ success: false, message: '报销单不存在' })
     }
 
-    // 检查报销单状态是否为已审批通过
     if (reimbursement.status !== 'approved') {
+      return res.status(400).json({ success: false, message: '只有已审批通过的报销单才能付款' })
+    }
+
+    // 验证金额总和
+    const totalOcrAmount = verifiedFiles.reduce((sum: number, f: any) => sum + (f.amount || 0), 0)
+    const expectedAmount = parseFloat(reimbursement.total_amount)
+    if (Math.abs(expectedAmount - totalOcrAmount) > 0.01) {
       return res.status(400).json({
         success: false,
-        message: '只有已审批通过的报销单才能付款',
+        message: `回单金额总和 ¥${totalOcrAmount.toFixed(2)} 与报销金额 ¥${expectedAmount.toFixed(2)} 不一致`,
       })
     }
 
-    // 移动文件到正式目录
-    // 优先使用前端传递的原始文件名，否则尝试解码
-    const rawPaymentFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
-    // 路径清洗：只取文件名部分，防止路径穿越攻击
-    const safePaymentFileName = path.basename(rawPaymentFileName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
-    const finalFileName = `payment-proof-${id}-${Date.now()}-${safePaymentFileName}`
-    const finalPath = path.join(invoicesDir, finalFileName)
-    fs.renameSync(req.file.path, finalPath)
+    // 移动所有临时文件到正式目录
+    const paymentProofPaths: string[] = []
+    for (const file of verifiedFiles) {
+      const tempPath = path.join(tempDir, path.basename(file.tempFileName))
+      if (!fs.existsSync(tempPath)) {
+        return res.status(400).json({ success: false, message: `文件 ${file.originalFileName} 已过期，请重新上传` })
+      }
+      const safeFileName = path.basename(file.originalFileName || 'proof').replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+      const finalFileName = `payment-proof-${id}-${Date.now()}-${safeFileName}`
+      const finalPath = path.join(invoicesDir, finalFileName)
+      fs.renameSync(tempPath, finalPath)
+      paymentProofPaths.push(`/uploads/invoices/${finalFileName}`)
+    }
 
-    const paymentProofPath = `/uploads/invoices/${finalFileName}`
+    const paymentProofPath = paymentProofPaths.join(',')
     const now = new Date().toISOString()
 
-    // 查询该报销单对应的审批实例
+    // 查询审批实例
     const approvalInstance = db.prepare(`
       SELECT id FROM approval_instances
       WHERE target_id = ? AND target_type = 'reimbursement'
-      ORDER BY created_at DESC
-      LIMIT 1
+      ORDER BY created_at DESC LIMIT 1
     `).get(id) as { id: string } | undefined
 
-    // 更新为已上传付款凭证状态，等待用户确认收款
+    // 自动创建单笔付款批次（统一批次机制）
+    const batchId = nanoid()
+    const batchNo = generateBatchNo()
+
+    db.prepare(`
+      INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, payment_proof_path, pay_time, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
+    `).run(batchId, batchNo, expectedAmount, currentUserId, paymentProofPath, now, now, now)
+
+    // 更新报销单状态
     db.prepare(`
       UPDATE reimbursements
       SET status = 'payment_uploaded',
           payment_proof_path = ?,
+          payment_batch_id = ?,
           pay_time = ?,
           payment_upload_time = ?,
           updated_at = ?
       WHERE id = ?
-    `).run(paymentProofPath, now, now, now, id)
+    `).run(paymentProofPath, batchId, now, now, now, id)
 
-    // 创建审批记录，记录付款回单上传动作
+    // 创建审批记录
     if (approvalInstance) {
       const { nanoid } = await import('nanoid')
       const recordId = nanoid()
       db.prepare(`
         INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        recordId,
-        approvalInstance.id,
-        99,
-        currentUserId,
-        'payment_uploaded',
-        '管理员已上传付款回单',
-        now
-      )
-      console.log(`✅ 创建付款回单审批记录: ${recordId}`)
+      `).run(recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', '管理员已上传付款回单', now)
     }
 
-    console.log(`✅ 付款回单上传成功，等待用户确认收款: ${id}`)
+    console.log(`✅ 付款回单提交成功: ${id}, 共 ${paymentProofPaths.length} 张回单`)
 
     res.json({
       success: true,
       message: '付款回单上传成功，等待用户确认收款',
-      data: {
-        paymentProofPath,
-      },
+      data: { paymentProofPath },
     })
   } catch (error) {
-    console.error('上传付款回单失败:', error)
-
-    // 清理临时文件
-    if (req.file?.path) {
-      try {
-        fs.unlinkSync(req.file.path)
-      } catch (e) {
-        console.error('清理临时文件失败:', e)
-      }
-    }
-
-    res.status(500).json({
-      success: false,
-      message: '上传失败',
-    })
+    console.error('❌ 提交付款回单失败:', error)
+    res.status(500).json({ success: false, message: '提交失败' })
   }
 })
 
@@ -1813,7 +1920,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           reimbursement_scope as reimbursementScope,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
-          created_at as createTime, updated_at as updateTime
+          created_at as createTime, updated_at as updateTime,
+          payment_batch_id as paymentBatchId
         FROM reimbursements
         WHERE id = ?
       `).get(id)
@@ -1836,7 +1944,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           reimbursement_scope as reimbursementScope,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
-          created_at as createTime, updated_at as updateTime
+          created_at as createTime, updated_at as updateTime,
+          payment_batch_id as paymentBatchId
         FROM reimbursements
         WHERE id = ? AND (type = 'business' OR user_id = ?)
       `).get(id, userId)
@@ -1859,7 +1968,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           reimbursement_scope as reimbursementScope,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
-          created_at as createTime, updated_at as updateTime
+          created_at as createTime, updated_at as updateTime,
+          payment_batch_id as paymentBatchId
         FROM reimbursements
         WHERE id = ? AND user_id = ?
       `).get(id, userId)
@@ -2241,8 +2351,19 @@ router.put('/:id', requireAuth, async (req, res) => {
 
           console.log('✅ 草稿提交审批，创建审批实例:', { approvalInstanceId, reimbursementId: id, type: approvalType })
 
-          // 如果是从驳回状态重新提交，添加一条"再次提交"的审批记录
-          if (oldReimbursement.status === 'rejected') {
+          // 判断是否为再次提交：直接从驳回状态提交，或从草稿状态但之前有驳回记录
+          let isResubmit = oldReimbursement.status === 'rejected'
+          if (!isResubmit && oldReimbursement.status === 'draft') {
+            const rejectedInstance = db.prepare(`
+              SELECT id FROM approval_instances
+              WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'rejected'
+            `).get(id)
+            if (rejectedInstance) {
+              isResubmit = true
+            }
+          }
+
+          if (isResubmit) {
             const recordId = nanoid()
             db.prepare(`
               INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
@@ -2322,14 +2443,15 @@ router.post('/:id/withdraw', requireAuth, async (req, res) => {
 
     const now = new Date().toISOString()
 
-    // 将报销单状态改回草稿
-    db.prepare('UPDATE reimbursements SET status = ?, updated_at = ? WHERE id = ?').run('draft', now, id)
-
-    // 将对应的审批实例状态改为 withdrawn
-    db.prepare(`
-      UPDATE approval_instances SET status = 'withdrawn', updated_at = ?
-      WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
-    `).run(now, id)
+    // 使用事务确保报销单和审批实例状态一致
+    const withdrawTransaction = db.transaction(() => {
+      db.prepare('UPDATE reimbursements SET status = ?, updated_at = ? WHERE id = ?').run('draft', now, id)
+      db.prepare(`
+        UPDATE approval_instances SET status = 'withdrawn', updated_at = ?
+        WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
+      `).run(now, id)
+    })
+    withdrawTransaction()
 
     res.json({
       success: true,
@@ -2473,6 +2595,488 @@ router.post('/:id/restore', requireAuth, async (req, res) => {
       success: false,
       message: '恢复报销单失败',
     })
+  }
+})
+
+// ==================== 批量付款相关接口 ====================
+
+/**
+ * 生成付款批次号
+ */
+function generateBatchNo(): string {
+  const now = new Date()
+  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '')
+  const random = nanoid(6).toUpperCase()
+  return `PAY${dateStr}${random}`
+}
+
+/**
+ * 创建批量付款批次
+ * POST /api/reimbursement/payment-batch/create
+ */
+router.post('/payment-batch/create', requireAuth, async (req, res) => {
+  try {
+    const currentUserId = req.session.user?.id
+    const currentUserRole = req.session.user?.role
+
+    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
+      return res.status(403).json({ success: false, message: '无权限操作' })
+    }
+
+    const { reimbursementIds } = req.body
+    if (!reimbursementIds || !Array.isArray(reimbursementIds) || reimbursementIds.length === 0) {
+      return res.status(400).json({ success: false, message: '请选择报销单' })
+    }
+
+    // 查询所有选中的报销单
+    const placeholders = reimbursementIds.map(() => '?').join(',')
+    const reimbursements = db.prepare(`
+      SELECT id, user_id, total_amount, status, applicant_name, type, title
+      FROM reimbursements
+      WHERE id IN (${placeholders}) AND (is_deleted = 0 OR is_deleted IS NULL)
+    `).all(...reimbursementIds) as any[]
+
+    if (reimbursements.length !== reimbursementIds.length) {
+      return res.status(400).json({ success: false, message: '部分报销单不存在' })
+    }
+
+    // 校验：所有报销单必须是 approved 状态
+    const notApproved = reimbursements.filter(r => r.status !== 'approved')
+    if (notApproved.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `以下报销单未审批通过：${notApproved.map(r => r.id).join(', ')}`,
+      })
+    }
+
+    // 校验：所有报销单必须属于同一收款人
+    const userIds = [...new Set(reimbursements.map(r => r.user_id))]
+    if (userIds.length > 1) {
+      return res.status(400).json({ success: false, message: '批量付款只能选择同一收款人的报销单' })
+    }
+
+    // 校验：所有报销单必须属于同一报销类型
+    const types = [...new Set(reimbursements.map(r => r.type))]
+    if (types.length > 1) {
+      return res.status(400).json({ success: false, message: '请选择同一报销类型进行付款' })
+    }
+
+    const totalAmount = reimbursements.reduce((sum, r) => sum + parseFloat(r.total_amount), 0)
+    const batchId = nanoid()
+    const batchNo = generateBatchNo()
+    const now = new Date().toISOString()
+
+    db.prepare(`
+      INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `).run(batchId, batchNo, totalAmount, currentUserId, now, now)
+
+    // 关联报销单到批次
+    const updateStmt = db.prepare(`
+      UPDATE reimbursements SET payment_batch_id = ?, updated_at = ? WHERE id = ?
+    `)
+    for (const r of reimbursements) {
+      updateStmt.run(batchId, now, r.id)
+    }
+
+    console.log(`✅ 创建付款批次: ${batchNo}, 包含 ${reimbursements.length} 笔, 合计 ¥${totalAmount.toFixed(2)}`)
+
+    res.json({
+      success: true,
+      message: '付款批次创建成功',
+      data: {
+        batchId,
+        batchNo,
+        totalAmount,
+        reimbursements: reimbursements.map(r => ({
+          id: r.id,
+          title: r.title,
+          type: r.type,
+          amount: r.total_amount,
+          applicant: r.applicant_name,
+        })),
+      },
+    })
+  } catch (error) {
+    console.error('❌ 创建付款批次失败:', error)
+    res.status(500).json({ success: false, message: '创建失败' })
+  }
+})
+
+/**
+ * 验证批量付款回单（OCR + 收款人匹配）
+ * POST /api/reimbursement/payment-batch/:batchId/verify-proof
+ */
+router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentProof.single('paymentProof'), async (req, res) => {
+  try {
+    const { batchId } = req.params
+    const currentUserRole = req.session.user?.role
+
+    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
+      return res.status(403).json({ success: false, message: '无权限操作' })
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: '请上传付款回单' })
+    }
+
+    // 查询批次信息
+    const batch = db.prepare('SELECT * FROM payment_batches WHERE id = ?').get(batchId) as any
+    if (!batch) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(404).json({ success: false, message: '付款批次不存在' })
+    }
+
+    // 获取批次关联的报销单，取收款人信息
+    const firstReimbursement = db.prepare(`
+      SELECT user_id FROM reimbursements WHERE payment_batch_id = ? LIMIT 1
+    `).get(batchId) as any
+
+    if (!firstReimbursement) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(400).json({ success: false, message: '批次未关联报销单' })
+    }
+
+    // 获取收款信息（复用现有逻辑）
+    const profileBankInfo = db.prepare(`
+      SELECT bank_account_name, bank_account_number
+      FROM employee_profiles WHERE user_id = ?
+    `).get(firstReimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
+
+    const userBankInfo = (profileBankInfo && (profileBankInfo.bank_account_name || profileBankInfo.bank_account_number))
+      ? profileBankInfo
+      : db.prepare(`
+          SELECT bank_account_name, bank_account_number FROM users WHERE id = ?
+        `).get(firstReimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
+
+    // OCR 识别
+    let ocrResult
+    try {
+      ocrResult = await recognizePaymentProof(req.file.path)
+    } catch (ocrError: any) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(400).json({
+        success: false,
+        message: ocrError.message || '此不是付款回单，请重新上传',
+      })
+    }
+
+    // 验证收款人和账号（复用现有逻辑）
+    const ocrTextNoSpace = (ocrResult.rawText || '').replace(/\s+/g, '')
+
+    let accountMatched = false
+    if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+      const expectedAccount = userBankInfo.bank_account_number.replace(/\s+/g, '')
+      const ocrAccount = ocrResult.payeeAccount.replace(/\s+/g, '')
+      if (expectedAccount === ocrAccount) {
+        accountMatched = true
+      } else if (expectedAccount.endsWith(ocrAccount) || ocrAccount.endsWith(expectedAccount)) {
+        accountMatched = true
+      } else if (expectedAccount.length === ocrAccount.length && expectedAccount.slice(1) === ocrAccount.slice(1)) {
+        accountMatched = true
+      }
+    }
+
+    let nameFound = false
+    if (userBankInfo?.bank_account_name) {
+      const expectedName = userBankInfo.bank_account_name.trim()
+      nameFound = ocrTextNoSpace.includes(expectedName)
+    }
+
+    if (!accountMatched && !nameFound) {
+      const reasons: string[] = []
+      if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+        reasons.push(`收款账号不一致：期望"${userBankInfo.bank_account_number}"，回单为"${ocrResult.payeeAccount}"`)
+      } else if (!ocrResult.payeeAccount) {
+        reasons.push('无法识别付款回单中的收款账号')
+      }
+      if (userBankInfo?.bank_account_name) {
+        reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
+      } else {
+        reasons.push('用户未设置收款人姓名')
+      }
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+      return res.status(400).json({
+        success: false,
+        message: '付款回单验证失败',
+        warnings: reasons,
+      })
+    }
+
+    const tempFileName = path.basename(req.file.path)
+
+    res.json({
+      success: true,
+      message: '付款回单验证通过',
+      data: {
+        tempFileName,
+        ocrResult: {
+          payer: ocrResult.payer,
+          payee: ocrResult.payee,
+          payeeAccount: ocrResult.payeeAccount,
+          amount: ocrResult.amount,
+        },
+        originalFileName: req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8'),
+      },
+    })
+  } catch (error) {
+    console.error('❌ 批量付款回单验证失败:', error)
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path) } catch (_) {}
+    }
+    res.status(500).json({ success: false, message: '验证失败' })
+  }
+})
+
+/**
+ * 提交批量付款回单
+ * POST /api/reimbursement/payment-batch/:batchId/complete
+ */
+router.post('/payment-batch/:batchId/complete', requireAuth, async (req, res) => {
+  try {
+    const { batchId } = req.params
+    const currentUserId = req.session.user?.id
+    const currentUserRole = req.session.user?.role
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: '未登录' })
+    }
+
+    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
+      return res.status(403).json({ success: false, message: '无权限操作' })
+    }
+
+    const { verifiedFiles } = req.body
+    if (!verifiedFiles || !Array.isArray(verifiedFiles) || verifiedFiles.length === 0) {
+      return res.status(400).json({ success: false, message: '请上传付款回单' })
+    }
+
+    // 查询批次
+    const batch = db.prepare('SELECT * FROM payment_batches WHERE id = ?').get(batchId) as any
+    if (!batch) {
+      return res.status(404).json({ success: false, message: '付款批次不存在' })
+    }
+
+    if (batch.status !== 'pending') {
+      return res.status(400).json({ success: false, message: '该批次已完成付款' })
+    }
+
+    // 查询批次关联的报销单
+    const reimbursements = db.prepare(`
+      SELECT id, status, total_amount FROM reimbursements
+      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+    `).all(batchId) as any[]
+
+    // 校验所有报销单状态
+    const notApproved = reimbursements.filter(r => r.status !== 'approved')
+    if (notApproved.length > 0) {
+      return res.status(400).json({ success: false, message: '部分报销单状态异常' })
+    }
+
+    // 验证回单金额总和与批次金额
+    const totalOcrAmount = verifiedFiles.reduce((sum: number, f: any) => sum + (f.amount || 0), 0)
+    const expectedAmount = parseFloat(batch.total_amount)
+    if (Math.abs(expectedAmount - totalOcrAmount) > 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: `回单金额总和 ¥${totalOcrAmount.toFixed(2)} 与批次金额 ¥${expectedAmount.toFixed(2)} 不一致`,
+      })
+    }
+
+    // 移动临时文件到正式目录
+    const paymentProofPaths: string[] = []
+    for (const file of verifiedFiles) {
+      const tempPath = path.join(tempDir, path.basename(file.tempFileName))
+      if (!fs.existsSync(tempPath)) {
+        return res.status(400).json({ success: false, message: `文件 ${file.originalFileName} 已过期，请重新上传` })
+      }
+      const safeFileName = path.basename(file.originalFileName || 'proof').replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+      const finalFileName = `payment-proof-batch-${batch.batch_no}-${Date.now()}-${safeFileName}`
+      const finalPath = path.join(invoicesDir, finalFileName)
+      fs.renameSync(tempPath, finalPath)
+      paymentProofPaths.push(`/uploads/invoices/${finalFileName}`)
+    }
+
+    const paymentProofPath = paymentProofPaths.join(',')
+    const now = new Date().toISOString()
+
+    // 更新批次状态
+    db.prepare(`
+      UPDATE payment_batches
+      SET status = 'uploaded', payment_proof_path = ?, pay_time = ?, updated_at = ?
+      WHERE id = ?
+    `).run(paymentProofPath, now, now, batchId)
+
+    // 更新所有关联报销单状态
+    const updateReimbursement = db.prepare(`
+      UPDATE reimbursements
+      SET status = 'payment_uploaded', payment_proof_path = ?, pay_time = ?, payment_upload_time = ?, updated_at = ?
+      WHERE id = ?
+    `)
+
+    for (const r of reimbursements) {
+      updateReimbursement.run(paymentProofPath, now, now, now, r.id)
+
+      // 为每个报销单创建审批记录
+      const approvalInstance = db.prepare(`
+        SELECT id FROM approval_instances
+        WHERE target_id = ? AND target_type = 'reimbursement'
+        ORDER BY created_at DESC LIMIT 1
+      `).get(r.id) as { id: string } | undefined
+
+      if (approvalInstance) {
+        const recordId = nanoid()
+        const comment = reimbursements.length > 1
+          ? `管理员已批量付款（批次 ${batch.batch_no}，共 ${reimbursements.length} 笔，合计 ¥${expectedAmount.toFixed(2)}）`
+          : '管理员已上传付款回单'
+        db.prepare(`
+          INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', comment, now)
+      }
+    }
+
+    console.log(`✅ 批量付款完成: ${batch.batch_no}, 共 ${reimbursements.length} 笔, 合计 ¥${expectedAmount.toFixed(2)}`)
+
+    res.json({
+      success: true,
+      message: `付款成功，共 ${reimbursements.length} 笔报销单`,
+      data: { batchNo: batch.batch_no, paymentProofPath },
+    })
+  } catch (error) {
+    console.error('❌ 批量付款提交失败:', error)
+    res.status(500).json({ success: false, message: '提交失败' })
+  }
+})
+
+/**
+ * 批量确认收款（按批次）
+ * POST /api/reimbursement/payment-batch/:batchId/confirm-receipt
+ */
+router.post('/payment-batch/:batchId/confirm-receipt', requireAuth, async (req, res) => {
+  try {
+    const { batchId } = req.params
+    const currentUserId = req.session.user?.id
+    const currentUserName = req.session.user?.name
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: '未登录' })
+    }
+
+    // 查询批次
+    const batch = db.prepare('SELECT * FROM payment_batches WHERE id = ?').get(batchId) as any
+    if (!batch) {
+      return res.status(404).json({ success: false, message: '付款批次不存在' })
+    }
+
+    if (batch.status !== 'uploaded') {
+      return res.status(400).json({ success: false, message: '该批次尚未完成付款' })
+    }
+
+    // 查询批次关联的报销单
+    const reimbursements = db.prepare(`
+      SELECT id, user_id, status FROM reimbursements
+      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+    `).all(batchId) as any[]
+
+    // 校验：当前用户必须是报销单的申请人
+    const notOwned = reimbursements.filter(r => r.user_id !== currentUserId)
+    if (notOwned.length > 0) {
+      return res.status(403).json({ success: false, message: '无权操作此批次的报销单' })
+    }
+
+    // 只更新 payment_uploaded 状态的报销单
+    const toConfirm = reimbursements.filter(r => r.status === 'payment_uploaded')
+    if (toConfirm.length === 0) {
+      return res.status(400).json({ success: false, message: '没有需要确认的报销单' })
+    }
+
+    const now = new Date().toISOString()
+
+    const updateStmt = db.prepare(`
+      UPDATE reimbursements
+      SET status = 'completed', completed_time = ?, receipt_confirmed_by = ?, updated_at = ?
+      WHERE id = ?
+    `)
+
+    for (const r of toConfirm) {
+      updateStmt.run(now, currentUserName || '用户', now, r.id)
+    }
+
+    // 更新批次状态
+    db.prepare(`
+      UPDATE payment_batches SET status = 'confirmed', updated_at = ? WHERE id = ?
+    `).run(now, batchId)
+
+    console.log(`✅ 批量确认收款: ${batch.batch_no}, 共 ${toConfirm.length} 笔`)
+
+    res.json({
+      success: true,
+      message: `已确认收款，共 ${toConfirm.length} 笔报销单`,
+    })
+  } catch (error) {
+    console.error('❌ 批量确认收款失败:', error)
+    res.status(500).json({ success: false, message: '操作失败' })
+  }
+})
+
+/**
+ * 获取付款批次详情
+ * GET /api/reimbursement/payment-batch/:batchId
+ */
+router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
+  try {
+    const { batchId } = req.params
+    const currentUserId = req.session.user?.id
+    const currentUserRole = req.session.user?.role
+
+    const batch = db.prepare(`
+      SELECT pb.*, u.name as payerName
+      FROM payment_batches pb
+      LEFT JOIN users u ON pb.payer_id = u.id
+      WHERE pb.id = ?
+    `).get(batchId) as any
+
+    if (!batch) {
+      return res.status(404).json({ success: false, message: '付款批次不存在' })
+    }
+
+    // 查询关联的报销单
+    const reimbursements = db.prepare(`
+      SELECT id, type, title, total_amount as amount, status, applicant_name as applicant
+      FROM reimbursements
+      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+    `).all(batchId) as any[]
+
+    // 权限：管理员可查看所有，普通用户只能查看自己的
+    const isAdmin = ['super_admin', 'admin'].includes(currentUserRole || '')
+    if (!isAdmin) {
+      const ownedReimbursement = db.prepare(`
+        SELECT id FROM reimbursements WHERE payment_batch_id = ? AND user_id = ? LIMIT 1
+      `).get(batchId, currentUserId) as any
+      if (!ownedReimbursement) {
+        return res.status(403).json({ success: false, message: '无权查看此批次' })
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        id: batch.id,
+        batchNo: batch.batch_no,
+        totalAmount: batch.total_amount,
+        paymentProofPath: batch.payment_proof_path,
+        payerName: batch.payerName,
+        payTime: batch.pay_time,
+        status: batch.status,
+        createdAt: batch.created_at,
+        remark: batch.remark,
+        reimbursements,
+      },
+    })
+  } catch (error) {
+    console.error('❌ 获取付款批次详情失败:', error)
+    res.status(500).json({ success: false, message: '获取失败' })
   }
 })
 

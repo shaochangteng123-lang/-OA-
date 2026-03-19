@@ -367,6 +367,8 @@ export function useInvoice() {
       console.error('获取月度额度失败:', error)
       monthlyUsedQuota.value = 0
     }
+    // 额度更新后重新计算核减金额
+    recalculateDeductions()
   }
 
   /**

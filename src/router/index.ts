@@ -218,6 +218,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/ApprovalPayment.vue'),
         meta: { title: '付款', requiresAdmin: true },
       },
+      {
+        path: '/approval/batch-payment/:batchId',
+        name: 'BatchPayment',
+        component: () => import('@/views/ApprovalPayment.vue'),
+        meta: { title: '批量付款', requiresAdmin: true },
+      },
     ],
   },
   {

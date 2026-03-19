@@ -14,8 +14,9 @@ FROM ${NODE_IMAGE} AS base
 # 配置 Alpine 镜像源（使用阿里云镜像）
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# 安装 better-sqlite3 原生编译所需依赖
-RUN apk add --no-cache python3 make g++ sqlite sqlite-libs
+# 安装 better-sqlite3 和 canvas 原生编译所需依赖
+RUN apk add --no-cache python3 make g++ sqlite sqlite-libs \
+    cairo-dev pango-dev libjpeg-turbo-dev giflib-dev librsvg-dev pixman-dev
 
 WORKDIR /app
 
@@ -28,7 +29,7 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 
 # 安装所有依赖（构建需要 devDependencies）
-RUN npm ci --prefer-offline --ignore-scripts
+RUN npm ci --prefer-offline --ignore-scripts --legacy-peer-deps
 
 # ==========================================
 # 阶段3：生产依赖（并行构建）
@@ -38,8 +39,9 @@ FROM base AS prod-deps
 COPY package.json package-lock.json ./
 
 # 仅安装生产依赖 + 重新编译原生模块
-RUN npm ci --omit=dev --prefer-offline --ignore-scripts \
-    && npm rebuild better-sqlite3
+RUN npm ci --omit=dev --prefer-offline --ignore-scripts --legacy-peer-deps \
+    && npm rebuild better-sqlite3 \
+    && npm rebuild canvas
 
 # ==========================================
 # 阶段4：构建阶段
@@ -68,8 +70,10 @@ LABEL description="YuliLog 工作日志管理系统"
 # 配置 Alpine 镜像源（使用阿里云镜像）
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# 安装运行时依赖
+# 安装运行时依赖（含 canvas、poppler、中文字体）
 RUN apk add --no-cache sqlite dumb-init wget \
+    cairo pango libjpeg-turbo giflib librsvg pixman \
+    poppler-utils poppler-data font-noto-cjk \
     && rm -rf /var/cache/apk/* \
     && addgroup -g 1001 -S nodejs \
     && adduser -S yulilog -u 1001 -G nodejs

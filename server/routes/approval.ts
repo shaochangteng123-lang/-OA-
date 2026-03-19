@@ -134,6 +134,36 @@ router.get('/statistics', requireAdmin, (req, res) => {
 // 获取已通过未付款的报销单列表
 router.get('/approved-unpaid', requireAdmin, (req, res) => {
   try {
+    const { userId, type, status, startDate, endDate } = req.query as Record<string, string>
+    const conditions: string[] = []
+    const params: any[] = []
+
+    // 默认只查 approved，如果传了 status 则按传入的查
+    if (status) {
+      conditions.push('r.status = ?')
+      params.push(status)
+    } else {
+      conditions.push(`r.status = 'approved'`)
+    }
+
+    if (userId) {
+      conditions.push('r.user_id = ?')
+      params.push(userId)
+    }
+    if (type) {
+      const types = (type as string).split(',')
+      conditions.push(`r.type IN (${types.map(() => '?').join(',')})`)
+      params.push(...types)
+    }
+    if (startDate) {
+      conditions.push('r.approve_time >= ?')
+      params.push(startDate + 'T00:00:00')
+    }
+    if (endDate) {
+      conditions.push('r.approve_time <= ?')
+      params.push(endDate + 'T23:59:59')
+    }
+
     const reimbursements = db.prepare(`
       SELECT
         r.*,
@@ -142,9 +172,9 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
         (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
-      WHERE r.status = 'approved'
+      WHERE ${conditions.join(' AND ')}
       ORDER BY r.approve_time DESC
-    `).all() as Array<any>
+    `).all(...params) as Array<any>
 
     res.json({
       success: true,
@@ -176,10 +206,42 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
 // 获取本月已付款列表
 router.get('/paid-this-month', requireAdmin, (req, res) => {
   try {
-    // 获取当月的开始和结束时间
-    const now = new Date()
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
+    const { userId, type, status, startDate, endDate } = req.query as Record<string, string>
+
+    const conditions = [`r.status IN ('payment_uploaded', 'completed')`]
+    const params: any[] = []
+
+    // 如果没有传日期参数，默认查当月
+    if (!startDate && !endDate) {
+      const now = new Date()
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
+      conditions.push('r.pay_time >= ? AND r.pay_time <= ?')
+      params.push(monthStart, monthEnd)
+    } else {
+      if (startDate) {
+        conditions.push('r.pay_time >= ?')
+        params.push(startDate + 'T00:00:00')
+      }
+      if (endDate) {
+        conditions.push('r.pay_time <= ?')
+        params.push(endDate + 'T23:59:59')
+      }
+    }
+
+    if (userId) {
+      conditions.push('r.user_id = ?')
+      params.push(userId)
+    }
+    if (type) {
+      const types = (type as string).split(',')
+      conditions.push(`r.type IN (${types.map(() => '?').join(',')})`)
+      params.push(...types)
+    }
+    if (status) {
+      conditions.push('r.status = ?')
+      params.push(status)
+    }
 
     const reimbursements = db.prepare(`
       SELECT
@@ -189,10 +251,9 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
         (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
-      WHERE r.status IN ('payment_uploaded', 'completed')
-      AND r.pay_time >= ? AND r.pay_time <= ?
+      WHERE ${conditions.join(' AND ')}
       ORDER BY r.pay_time DESC
-    `).all(monthStart, monthEnd) as Array<any>
+    `).all(...params) as Array<any>
 
     res.json({
       success: true,

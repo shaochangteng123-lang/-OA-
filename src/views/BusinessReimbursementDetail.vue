@@ -144,24 +144,43 @@
               <el-icon color="#67C23A"><CircleCheckFilled /></el-icon>
               付款回单
             </h3>
+            <!-- 批量付款批次信息 -->
+            <div v-if="batchInfo" class="batch-info-card">
+              <div class="batch-info-header">
+                <el-tag type="warning" size="small">批量付款</el-tag>
+                <span class="batch-no">批次号：{{ batchInfo.batchNo }}</span>
+              </div>
+              <div class="batch-info-detail">
+                本次付款合计 <strong>¥{{ batchInfo.totalAmount.toFixed(2) }}</strong>，包含 {{ batchInfo.reimbursementCount }} 笔报销：
+              </div>
+              <div class="batch-reimbursement-list">
+                <div v-for="r in batchInfo.reimbursements" :key="r.id" class="batch-reimbursement-item">
+                  <span class="batch-r-id">{{ r.id }}</span>
+                  <span class="batch-r-title">{{ r.title }}</span>
+                  <span class="batch-r-amount">¥{{ parseFloat(r.amount).toFixed(2) }}</span>
+                </div>
+              </div>
+            </div>
             <div class="payment-proof-card">
               <div class="payment-status-badge">
                 <el-icon><CircleCheckFilled /></el-icon>
                 已付款
               </div>
-              <div class="payment-proof-content" @click="handlePreviewPaymentProof">
-                <template v-if="isPaymentProofImage">
-                  <img :src="paymentProofPath" class="payment-proof-image" alt="付款回单" />
-                </template>
-                <template v-else>
-                  <div class="payment-proof-pdf">
-                    <el-icon :size="48" color="#409EFF"><Document /></el-icon>
-                    <span class="pdf-label">付款回单.pdf</span>
+              <div class="payment-proof-content">
+                <div v-for="(proofUrl, idx) in paymentProofPaths" :key="idx" class="payment-proof-item" @click="handlePreviewPaymentProof(proofUrl)">
+                  <template v-if="isImagePath(proofUrl)">
+                    <img :src="proofUrl" class="payment-proof-image" alt="付款回单" />
+                  </template>
+                  <template v-else>
+                    <div class="payment-proof-pdf">
+                      <el-icon :size="48" color="#409EFF"><Document /></el-icon>
+                      <span class="pdf-label">付款回单.pdf</span>
+                    </div>
+                  </template>
+                  <div class="preview-overlay">
+                    <el-icon :size="24"><ZoomIn /></el-icon>
+                    <span>点击查看大图</span>
                   </div>
-                </template>
-                <div class="preview-overlay">
-                  <el-icon :size="24"><ZoomIn /></el-icon>
-                  <span>点击查看大图</span>
                 </div>
               </div>
               <div v-if="payTime" class="payment-time">
@@ -173,8 +192,8 @@
           <!-- 付款回单预览对话框 -->
           <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
             <div class="preview-dialog-content">
-              <img v-if="isPaymentProofImage" :src="paymentProofPath" class="preview-dialog-image" alt="付款回单" />
-              <iframe v-else :src="paymentProofPath" class="preview-dialog-pdf" />
+              <img v-if="isPaymentProofImage" :src="previewingProofUrl" class="preview-dialog-image" alt="付款回单" />
+              <iframe v-else :src="previewingProofUrl" class="preview-dialog-pdf" />
             </div>
           </el-dialog>
         </div>
@@ -228,8 +247,18 @@ const formRules: FormRules = {
 
 // 付款回单相关
 const paymentProofPath = ref('')
+// 支持多张回单（逗号分隔）
+const paymentProofPaths = computed(() => {
+  if (!paymentProofPath.value) return []
+  return paymentProofPath.value.split(',').filter(Boolean)
+})
+const previewingProofUrl = ref('')
 const payTime = ref('')
 const paymentProofDialogVisible = ref(false)
+
+// 批次信息
+const paymentBatchId = ref('')
+const batchInfo = ref<{ batchNo: string; totalAmount: number; reimbursementCount: number; reimbursements: any[] } | null>(null)
 
 // 拒绝原因
 const rejectReason = ref('')
@@ -299,15 +328,16 @@ const isPaid = computed(() => {
   return status === 'payment_uploaded' || status === 'completed'
 })
 
-// 判断付款回单是否为图片
-const isPaymentProofImage = computed(() => {
-  if (!paymentProofPath.value) return false
-  const path = paymentProofPath.value.toLowerCase()
-  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
-})
+// 判断路径是否为图片
+function isImagePath(p: string): boolean {
+  const lower = p.toLowerCase()
+  return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+}
+const isPaymentProofImage = computed(() => paymentProofPaths.value.length > 0 && paymentProofPaths.value.every(isImagePath))
 
 // 预览付款回单
-function handlePreviewPaymentProof(): void {
+function handlePreviewPaymentProof(url?: string): void {
+  previewingProofUrl.value = url || paymentProofPaths.value[0] || ''
   paymentProofDialogVisible.value = true
 }
 
@@ -476,6 +506,24 @@ async function loadDetail(): Promise<void> {
       payTime.value = (data as any).payTime
     }
 
+    // 加载批次信息
+    if ((data as any).paymentBatchId) {
+      paymentBatchId.value = (data as any).paymentBatchId
+      try {
+        const batchRes = await api.get(`/api/reimbursement/payment-batch/${paymentBatchId.value}`)
+        if (batchRes.data.success && batchRes.data.data.reimbursements.length > 1) {
+          batchInfo.value = {
+            batchNo: batchRes.data.data.batchNo,
+            totalAmount: batchRes.data.data.totalAmount,
+            reimbursementCount: batchRes.data.data.reimbursements.length,
+            reimbursements: batchRes.data.data.reimbursements,
+          }
+        }
+      } catch (e) {
+        // 批次信息加载失败不影响主流程
+      }
+    }
+
     // 加载拒绝原因
     if ((data as any).rejectReason) {
       rejectReason.value = (data as any).rejectReason
@@ -540,6 +588,8 @@ watch(
       approvalDeductionAmount.value = 0
       paymentProofPath.value = ''
       payTime.value = ''
+      paymentBatchId.value = ''
+      batchInfo.value = null
       receiptFileList.value = []
       await loadDetail()
     }
@@ -700,6 +750,60 @@ watch(
   width: 100%;
 }
 
+/* 批次信息卡片 */
+.batch-info-card {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.batch-info-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.batch-no {
+  font-size: 13px;
+  color: #92400e;
+}
+
+.batch-info-detail {
+  font-size: 13px;
+  color: #78350f;
+  margin-bottom: 8px;
+}
+
+.batch-reimbursement-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-reimbursement-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: #92400e;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+
+.batch-r-id {
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.batch-r-amount {
+  margin-left: auto;
+  font-weight: 600;
+}
+
 /* 付款回单区域样式 */
 .payment-proof-section {
   max-width: 1200px;
@@ -746,16 +850,19 @@ watch(
 }
 
 .payment-proof-content {
-  position: relative;
-  min-height: 200px;
-  cursor: pointer;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-height: 200px;
   background: #f8fafc;
 }
 
-.payment-proof-content:hover .preview-overlay {
+.payment-proof-item {
+  position: relative;
+  cursor: pointer;
+}
+
+.payment-proof-item:hover .preview-overlay {
   opacity: 1;
 }
 

@@ -3,13 +3,41 @@
     <div class="yl-page-header">
       <div class="yl-page-title">
         <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
-        <h1>付款</h1>
+        <h1>{{ isBatchMode ? '批量付款' : '付款' }}</h1>
       </div>
     </div>
 
     <el-card v-loading="loading" shadow="never" class="no-border-card">
-      <!-- 报销单信息 -->
-      <div class="section">
+      <!-- 批量付款信息 -->
+      <div v-if="isBatchMode && batchInfo" class="section">
+        <h3 class="section-title">批量付款信息</h3>
+        <el-descriptions :column="2" border>
+          <el-descriptions-item label="批次号">{{ batchInfo.batchNo }}</el-descriptions-item>
+          <el-descriptions-item label="付款总额">
+            <span class="amount">¥{{ batchInfo.totalAmount?.toFixed(2) }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="报销单数量">{{ batchInfo.reimbursements?.length }} 笔</el-descriptions-item>
+          <el-descriptions-item label="收款人">{{ payeeInfo?.bankAccountName || '-' }}</el-descriptions-item>
+        </el-descriptions>
+
+        <el-table :data="batchInfo.reimbursements" border stripe style="margin-top: 12px;" size="small">
+          <el-table-column label="报销单号" prop="id" width="200" />
+          <el-table-column label="标题" prop="title" min-width="150" />
+          <el-table-column label="类型" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag :type="getTypeTagType(row.type)" size="small">{{ getTypeLabel(row.type) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="金额" width="120" align="right">
+            <template #default="{ row }">
+              ¥{{ parseFloat(row.amount).toFixed(2) }}
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <!-- 单笔报销单信息 -->
+      <div v-if="!isBatchMode" class="section">
         <h3 class="section-title">报销单信息</h3>
         <el-descriptions :column="2" border>
           <el-descriptions-item label="报销单号">{{ reimbursement?.id }}</el-descriptions-item>
@@ -41,53 +69,31 @@
       <!-- 上传付款回单 -->
       <div class="section">
         <h3 class="section-title">上传付款回单</h3>
+
         <div class="upload-container">
-          <!-- 已上传文件显示区域 -->
-          <div v-if="fileList.length > 0" class="file-display-area">
-            <div class="file-display-card">
-              <div class="file-content" @click="handlePreviewFile">
-                <!-- 图片预览 -->
-                <template v-if="isImageFile">
-                  <img :src="previewUrl" class="display-image" alt="付款回单" />
-                </template>
-                <!-- PDF 文件显示 -->
-                <template v-else>
-                  <div class="pdf-display">
-                    <el-icon :size="48" color="#409EFF"><Document /></el-icon>
-                    <div class="file-info">
-                      <span class="file-name">{{ fileList[0].name }}</span>
-                      <span class="file-size">{{ formatFileSize(fileList[0].size || 0) }}</span>
-                    </div>
-                  </div>
-                </template>
-                <div class="preview-overlay">
-                  <el-icon :size="24"><ZoomIn /></el-icon>
-                  <span>点击预览</span>
-                </div>
+          <!-- 已选择的回单列表 -->
+          <div v-if="fileItems.length > 0" class="proof-list">
+            <div v-for="(item, index) in fileItems" :key="index" class="proof-card">
+              <div class="proof-preview" @click="handlePreview(item)">
+                <img :src="item.previewUrl" class="proof-image" alt="付款回单" />
               </div>
-              <!-- 删除按钮 -->
-              <el-button
-                type="danger"
-                :icon="Delete"
-                circle
-                size="small"
-                class="delete-button"
-                @click="handleRemoveFile"
-              />
+              <div class="proof-info">
+                <div class="proof-name">{{ item.fileName }}</div>
+              </div>
+              <el-button type="danger" :icon="Delete" circle size="small" class="proof-delete" @click="handleRemoveFile(index)" :disabled="submitting" />
             </div>
           </div>
 
-          <!-- 上传区域（未上传时显示） -->
+          <!-- 上传区域 -->
           <el-upload
-            v-else
             class="upload-area"
             drag
+            multiple
             :auto-upload="false"
-            :limit="1"
             :show-file-list="false"
             :on-change="handleFileChange"
-            :on-exceed="handleExceed"
-            accept=".pdf,.jpg,.jpeg,.png"
+            accept=".jpg,.jpeg,.png"
+            :disabled="submitting"
           >
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">
@@ -95,7 +101,7 @@
             </div>
             <template #tip>
               <div class="el-upload__tip">
-                支持 PDF、JPG、PNG 格式，文件大小不超过 10MB
+                支持 JPG、PNG 格式，文件大小不超过 10MB，可上传多张回单
               </div>
             </template>
           </el-upload>
@@ -105,15 +111,25 @@
       <!-- 图片预览对话框 -->
       <el-dialog v-model="previewDialogVisible" title="付款回单预览" width="80%" :close-on-click-modal="true">
         <div class="preview-dialog-content">
-          <img v-if="isImageFile" :src="previewUrl" class="preview-dialog-image" alt="预览" />
-          <iframe v-else :src="previewUrl" class="preview-dialog-pdf" />
+          <img :src="previewDialogUrl" class="preview-dialog-image" alt="预览" />
         </div>
       </el-dialog>
+
+      <!-- 验证状态提示 -->
+      <div v-if="submitting" class="verify-status">
+        <el-icon class="is-loading" :size="20"><Loading /></el-icon>
+        <span>{{ submitStatusText }}</span>
+      </div>
 
       <!-- 操作按钮 -->
       <div class="action-buttons">
         <el-button @click="handleBack">取消</el-button>
-        <el-button type="primary" :loading="submitting" :disabled="!fileList.length" @click="handleSubmit">
+        <el-button
+          type="primary"
+          :loading="submitting"
+          :disabled="fileItems.length === 0 || submitting"
+          @click="handleSubmit"
+        >
           上传付款回单
         </el-button>
       </div>
@@ -125,7 +141,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, UploadFilled, Document, ZoomIn, Delete } from '@element-plus/icons-vue'
+import { ArrowLeft, UploadFilled, Delete, Loading } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { api } from '@/utils/api'
 import { usePendingStore } from '@/stores/pending'
@@ -154,78 +170,114 @@ interface PayeeInfo {
   bankAccountNumber: string
 }
 
+interface FileItem {
+  fileName: string
+  previewUrl: string
+  rawFile: File
+}
+
+interface BatchInfo {
+  batchId: string
+  batchNo: string
+  totalAmount: number
+  reimbursements: { id: string; title: string; type: string; amount: number; applicant: string }[]
+}
+
 const loading = ref(false)
 const submitting = ref(false)
+const submitStatusText = ref('')
 const reimbursement = ref<ReimbursementInfo | null>(null)
 const payeeInfo = ref<PayeeInfo | null>(null)
-const fileList = ref<UploadFile[]>([])
-const previewUrl = ref('')
+const fileItems = ref<FileItem[]>([])
 const previewDialogVisible = ref(false)
+const previewDialogUrl = ref('')
+const batchInfo = ref<BatchInfo | null>(null)
 
-// 判断是否为图片文件
-const isImageFile = computed(() => {
-  if (!fileList.value.length) return false
-  const file = fileList.value[0]
-  const name = file.name.toLowerCase()
-  return name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png')
-})
+// 判断是否为批量付款模式
+const isBatchMode = computed(() => !!route.params.batchId)
 
-// 获取类型标签
 function getTypeTagType(type?: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
   if (!type) return 'info'
   const typeMap: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'primary'> = {
-    basic: 'success',
-    large: 'warning',
-    business: 'danger',
+    basic: 'success', large: 'warning', business: 'danger',
   }
   return typeMap[type] || 'info'
 }
 
-// 获取类型文字
 function getTypeLabel(type?: string): string {
   if (!type) return '-'
   const typeMap: Record<string, string> = {
-    basic: '基础报销',
-    large: '大额报销',
-    business: '商务报销',
+    basic: '基础报销', large: '大额报销', business: '商务报销',
   }
   return typeMap[type] || type
 }
 
-// 格式化日期
 function formatDate(dateStr: string) {
   if (!dateStr) return '-'
-  // 兼容旧格式 "YYYY-MM-DD HH:mm:ss"，替换空格为T确保跨浏览器解析
-  const safeStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T')
-  return format(new Date(safeStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  try {
+    const safeStr = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T')
+    return format(new Date(safeStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
+  } catch {
+    return dateStr
+  }
 }
 
-// 格式化文件大小
-function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const k = 1024
-  const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
-}
-
-// 加载报销单和收款人信息
 async function loadData() {
+  if (isBatchMode.value) {
+    await loadBatchData()
+  } else {
+    await loadSingleData()
+  }
+}
+
+async function loadBatchData() {
+  const batchId = route.params.batchId as string
+  if (!batchId) {
+    ElMessage.error('缺少批次ID')
+    router.push('/approval')
+    return
+  }
+  loading.value = true
+  try {
+    const res = await api.get(`/api/reimbursement/payment-batch/${batchId}`)
+    if (res.data.success) {
+      batchInfo.value = res.data.data
+      // 获取收款人信息（批次内所有报销单属于同一收款人）
+      if (batchInfo.value && batchInfo.value.reimbursements.length > 0) {
+        // 从第一笔报销单获取 userId
+        const firstId = batchInfo.value.reimbursements[0].id
+        const reimbursementRes = await api.get(`/api/reimbursement/${firstId}`)
+        if (reimbursementRes.data.success) {
+          const payeeRes = await api.get(`/api/approval/payee-info/${reimbursementRes.data.data.userId}`)
+          if (payeeRes.data.success) {
+            payeeInfo.value = payeeRes.data.data
+          }
+        }
+      }
+    } else {
+      ElMessage.error(res.data.message || '获取批次信息失败')
+      router.push('/approval')
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '加载数据失败')
+    router.push('/approval')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadSingleData() {
   const id = route.params.id as string
   if (!id) {
     ElMessage.error('缺少报销单ID')
     router.push('/approval')
     return
   }
-
   loading.value = true
   try {
-    // 获取报销单信息
     const reimbursementRes = await api.get(`/api/reimbursement/${id}`)
     if (reimbursementRes.data.success) {
       reimbursement.value = reimbursementRes.data.data
-
-      // 获取收款人信息（通过报销单的userId获取用户银行信息）
       const payeeRes = await api.get(`/api/approval/payee-info/${reimbursementRes.data.data.userId}`)
       if (payeeRes.data.success) {
         payeeInfo.value = payeeRes.data.data
@@ -242,124 +294,189 @@ async function loadData() {
   }
 }
 
-// 处理文件变化
+// 选择文件 → 仅添加预览，不做验证
 function handleFileChange(file: UploadFile) {
-  // 验证文件大小（10MB）
+  if (file.status !== 'ready') return
   if (file.raw && file.raw.size > 10 * 1024 * 1024) {
     ElMessage.warning('文件大小不能超过10MB')
-    fileList.value = []
-    previewUrl.value = ''
     return
   }
-  fileList.value = [file]
-  // 生成预览URL
-  if (file.raw) {
-    previewUrl.value = URL.createObjectURL(file.raw)
-  }
+  if (!file.raw) return
+  fileItems.value.push({
+    fileName: file.name,
+    previewUrl: URL.createObjectURL(file.raw),
+    rawFile: file.raw,
+  })
 }
 
-// 处理超出限制
-function handleExceed() {
-  ElMessage.warning('只能上传一个文件')
+function handleRemoveFile(index: number) {
+  const item = fileItems.value[index]
+  if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+  fileItems.value.splice(index, 1)
 }
 
-// 预览文件
-function handlePreviewFile() {
-  if (previewUrl.value) {
-    previewDialogVisible.value = true
-  }
+function handlePreview(item: FileItem) {
+  previewDialogUrl.value = item.previewUrl
+  previewDialogVisible.value = true
 }
 
-// 删除文件
-function handleRemoveFile() {
-  if (previewUrl.value) {
-    URL.revokeObjectURL(previewUrl.value)
-  }
-  fileList.value = []
-  previewUrl.value = ''
-}
-
-// 返回上一级页面
 function handleBack() {
   router.back()
 }
 
-// 提交付款
+// 点击按钮 → 逐张验证 → 全部通过后提交
 async function handleSubmit() {
-  if (!fileList.value.length) {
+  if (fileItems.value.length === 0) {
     ElMessage.warning('请上传付款回单')
     return
   }
 
+  if (isBatchMode.value) {
+    await handleBatchSubmit()
+  } else {
+    await handleSingleSubmit()
+  }
+}
+
+async function handleBatchSubmit() {
+  const batchId = route.params.batchId as string
+  submitting.value = true
+
+  try {
+    // 第一步：逐张上传验证
+    const verifiedFiles: { tempFileName: string; originalFileName: string; amount: number }[] = []
+    const total = fileItems.value.length
+
+    for (let i = 0; i < total; i++) {
+      submitStatusText.value = `正在识别第 ${i + 1}/${total} 张回单...`
+      const file = fileItems.value[i]
+      const formData = new FormData()
+      formData.append('paymentProof', file.rawFile)
+      formData.append('originalFileName', file.fileName)
+
+      const res = await api.post(`/api/reimbursement/payment-batch/${batchId}/verify-proof`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+
+      if (res.data.success) {
+        verifiedFiles.push({
+          tempFileName: res.data.data.tempFileName,
+          originalFileName: res.data.data.originalFileName,
+          amount: res.data.data.ocrResult.amount,
+        })
+      } else {
+        ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        return
+      }
+    }
+
+    // 第二步：提交
+    submitStatusText.value = '正在提交...'
+    const completeRes = await api.post(`/api/reimbursement/payment-batch/${batchId}/complete`, { verifiedFiles })
+
+    if (completeRes.data.success) {
+      ElMessage.success('已上传回单，等待确认收款')
+      await pendingStore.refreshPendingCounts().catch(() => {})
+      navigateBack()
+    } else {
+      ElMessage.error(completeRes.data.message || '提交失败')
+    }
+  } catch (err: any) {
+    const warnings = err.response?.data?.warnings
+    if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+      ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+    } else {
+      ElMessage.error(err.response?.data?.message || '操作失败')
+    }
+  } finally {
+    submitting.value = false
+    submitStatusText.value = ''
+  }
+}
+
+async function handleSingleSubmit() {
   const id = route.params.id as string
   submitting.value = true
 
   try {
-    // 创建 FormData 上传文件
-    const formData = new FormData()
-    const file = fileList.value[0].raw
-    if (file) {
-      formData.append('paymentProof', file)
-      formData.append('originalFileName', file.name)
+    // 第一步：逐张上传验证
+    const verifiedFiles: { tempFileName: string; originalFileName: string; amount: number }[] = []
+    const total = fileItems.value.length
+
+    for (let i = 0; i < total; i++) {
+      submitStatusText.value = `正在识别第 ${i + 1}/${total} 张回单...`
+      const file = fileItems.value[i]
+      const formData = new FormData()
+      formData.append('paymentProof', file.rawFile)
+      formData.append('originalFileName', file.fileName)
+
+      const res = await api.post(`/api/reimbursement/${id}/verify-proof`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+
+      if (res.data.success) {
+        verifiedFiles.push({
+          tempFileName: res.data.data.tempFileName,
+          originalFileName: res.data.data.originalFileName,
+          amount: res.data.data.ocrResult.amount,
+        })
+      } else {
+        ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        return
+      }
     }
 
-    // 上传付款回单并标记已付款
-    const res = await api.post(`/api/reimbursement/${id}/complete-with-proof`, formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
+    // 第二步：提交
+    submitStatusText.value = '正在提交...'
+    const completeRes = await api.post(`/api/reimbursement/${id}/complete-with-proof`, { verifiedFiles })
 
-    if (res.data.success) {
-      ElMessage.success('付款回单上传成功，等待用户确认收款')
-      // 刷新菜单栏角标
-      await pendingStore.refreshPendingCounts()
-      // 付款成功后返回来源页面
-      const from = route.query.from as string
-      const tab = route.query.tab as string
-      if (from) {
-        router.push(tab ? `${from}?tab=${tab}` : from)
-      } else {
-        router.push('/approval?tab=pending')
-      }
+    if (completeRes.data.success) {
+      ElMessage.success('已上传回单，等待确认收款')
+      await pendingStore.refreshPendingCounts().catch(() => {})
+      navigateBack()
     } else {
-      ElMessage.error(res.data.message || '付款失败')
+      ElMessage.error(completeRes.data.message || '提交失败')
     }
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.message || '付款失败')
+    const warnings = err.response?.data?.warnings
+    if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+      ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+    } else {
+      ElMessage.error(err.response?.data?.message || '操作失败')
+    }
   } finally {
     submitting.value = false
+    submitStatusText.value = ''
   }
 }
 
-onMounted(() => {
-  loadData()
-})
-
-// 组件卸载时清理预览URL
-onUnmounted(() => {
-  if (previewUrl.value) {
-    URL.revokeObjectURL(previewUrl.value)
+function navigateBack() {
+  const from = route.query.from as string
+  const tab = route.query.tab as string
+  if (from) {
+    router.push(tab ? `${from}?tab=${tab}` : from)
+  } else {
+    router.push('/approval?tab=pending')
   }
+}
+
+onMounted(() => { loadData() })
+
+onUnmounted(() => {
+  fileItems.value.forEach(item => {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+  })
 })
 </script>
 
 <style scoped>
-/* 容器填满可用空间，去除边距 */
 .approval-payment {
   height: calc(100vh - 60px);
   margin: -24px -45px;
   padding: 24px;
 }
-
-.no-border-card {
-  border: none;
-}
-
-.section {
-  margin-bottom: 32px;
-}
-
+.no-border-card { border: none; }
+.section { margin-bottom: 32px; }
 .section-title {
   font-size: 16px;
   font-weight: 600;
@@ -368,184 +485,42 @@ onUnmounted(() => {
   padding-bottom: 8px;
   border-bottom: 1px solid #ebeef5;
 }
+.amount { color: #409eff; font-weight: 600; font-size: 16px; }
+.upload-container { display: flex; flex-direction: column; gap: 16px; }
+.upload-area { width: 100%; }
+.upload-area :deep(.el-upload-dragger) { width: 100%; }
 
-.amount {
-  color: #409eff;
-  font-weight: 600;
-  font-size: 16px;
-}
-
-.upload-area {
-  width: 100%;
-}
-
-.upload-area :deep(.el-upload-dragger) {
-  width: 100%;
-}
-
-.upload-container {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* 文件显示区域 */
-.file-display-area {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.file-display-card {
+.proof-list { display: flex; flex-wrap: wrap; gap: 16px; }
+.proof-card {
   position: relative;
-  width: 100%;
-  min-height: 200px;
-  border: 2px solid #409eff;
+  width: 180px;
+  border: 2px solid #dcdfe6;
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
   transition: all 0.3s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
-
-.file-display-card:hover {
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
-  transform: translateY(-2px);
-}
-
-.file-display-card:hover .preview-overlay {
-  opacity: 1;
-}
-
-.file-content {
-  position: relative;
+.proof-card:hover { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
+.proof-preview {
   width: 100%;
-  min-height: 200px;
+  height: 140px;
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.display-image {
-  max-width: 400px;
-  max-height: 300px;
-  width: auto;
-  height: auto;
-  object-fit: contain;
-  background: #f5f7fa;
-  margin: 0 auto;
-  display: block;
-}
-
-.delete-button {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 10;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-}
-
-.pdf-display {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 300px;
-  gap: 16px;
-  padding: 32px;
-}
-
-.file-info {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.file-name {
-  font-size: 16px;
-  font-weight: 500;
-  color: #303133;
-  text-align: center;
-  word-break: break-all;
-  max-width: 500px;
-}
-
-.file-size {
-  font-size: 14px;
-  color: #909399;
-}
-
-.file-actions {
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-}
-
-.preview-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  opacity: 0;
-  transition: opacity 0.3s;
-  gap: 8px;
-}
-
-.preview-overlay span {
-  font-size: 14px;
-  font-weight: 500;
-}
-
-/* 旧的预览样式（保留以防需要） */
-.file-preview-box {
-  border: 1px dashed #dcdfe6;
-  border-radius: 6px;
-  padding: 16px;
-  background: #fafafa;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.file-preview-item {
-  position: relative;
-  width: 120px;
-  height: 120px;
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
   overflow: hidden;
-  cursor: pointer;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: #fff;
+  background: #f5f7fa;
 }
-
-.file-preview-item:hover .preview-overlay {
-  opacity: 1;
+.proof-image { width: 100%; height: 100%; object-fit: cover; }
+.proof-info { padding: 6px 10px; }
+.proof-name {
+  font-size: 12px;
+  color: #606266;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-
-.preview-image {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.delete-btn {
-  flex-shrink: 0;
-}
+.proof-delete { position: absolute; top: 6px; right: 6px; z-index: 10; }
 
 .preview-dialog-content {
   display: flex;
@@ -553,19 +528,20 @@ onUnmounted(() => {
   align-items: center;
   min-height: 400px;
 }
+.preview-dialog-image { max-width: 100%; max-height: 70vh; object-fit: contain; }
 
-.preview-dialog-image {
-  max-width: 100%;
-  max-height: 70vh;
-  object-fit: contain;
+.verify-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  margin-top: 16px;
+  color: #409eff;
+  font-size: 14px;
+  background: #ecf5ff;
+  border-radius: 6px;
 }
-
-.preview-dialog-pdf {
-  width: 100%;
-  height: 70vh;
-  border: none;
-}
-
 .action-buttons {
   display: flex;
   justify-content: center;

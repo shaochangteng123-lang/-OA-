@@ -315,9 +315,9 @@
                     <div class="timeline-desc">财务已上传付款凭证</div>
                     <!-- 付款回单展示 -->
                     <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
-                      <div class="proof-card" @click="handlePreviewPaymentProof">
-                        <template v-if="isPaymentProofImage">
-                          <img :src="currentApprovalRecord.paymentProofPath" class="proof-image" alt="付款回单" />
+                      <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
+                        <template v-if="isImagePath(proofUrl)">
+                          <img :src="proofUrl" class="proof-image" alt="付款回单" />
                         </template>
                         <template v-else>
                           <div class="proof-pdf">
@@ -399,8 +399,8 @@
         <!-- 付款回单预览对话框 -->
         <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
           <div class="preview-dialog-content">
-            <img v-if="isPaymentProofImage && currentApprovalRecord?.paymentProofPath" :src="currentApprovalRecord.paymentProofPath" class="preview-dialog-image" alt="付款回单" />
-            <iframe v-else-if="currentApprovalRecord?.paymentProofPath" :src="currentApprovalRecord.paymentProofPath" class="preview-dialog-pdf" />
+            <img v-if="isImagePath(previewingProofUrl)" :src="previewingProofUrl" class="preview-dialog-image" alt="付款回单" />
+            <iframe v-else-if="previewingProofUrl" :src="previewingProofUrl" class="preview-dialog-pdf" />
           </div>
         </el-dialog>
       </div>
@@ -503,13 +503,13 @@ const confirmingReceipt = ref(false)
 
 // 付款回单预览
 const paymentProofDialogVisible = ref(false)
+const previewingProofUrl = ref('')
 
-// 判断付款回单是否为图片
-const isPaymentProofImage = computed(() => {
-  if (!currentApprovalRecord.value?.paymentProofPath) return false
-  const path = currentApprovalRecord.value.paymentProofPath.toLowerCase()
-  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
-})
+// 判断路径是否为图片
+function isImagePath(p: string): boolean {
+  const lower = p.toLowerCase()
+  return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+}
 
 // 判断是否为核减金额（报销金额为0，无需付款流程）
 const isDeductionOnly = computed(() => {
@@ -703,7 +703,8 @@ const handleGoToDetail = () => {
 }
 
 // 预览付款回单
-const handlePreviewPaymentProof = () => {
+const handlePreviewPaymentProof = (url?: string) => {
+  previewingProofUrl.value = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
   paymentProofDialogVisible.value = true
 }
 
@@ -712,7 +713,11 @@ const handleConfirmReceipt = async () => {
   if (!currentApprovalRecord.value) return
 
   try {
-    await ElMessageBox.confirm('确认已收到付款？确认后报销流程将完成。', '确认收款', {
+    const record = currentApprovalRecord.value
+    const confirmMsg = record.paymentBatchId
+      ? '确认已收到付款？该批次下所有报销单将一并确认完成。'
+      : '确认已收到付款？确认后报销流程将完成。'
+    await ElMessageBox.confirm(confirmMsg, '确认收款', {
       confirmButtonText: '确认收款',
       cancelButtonText: '取消',
       type: 'success',
@@ -720,7 +725,10 @@ const handleConfirmReceipt = async () => {
 
     confirmingReceipt.value = true
 
-    const response = await fetch(`/api/reimbursement/${currentApprovalRecord.value.id}/confirm-receipt`, {
+    const url = record.paymentBatchId
+      ? `/api/reimbursement/payment-batch/${record.paymentBatchId}/confirm-receipt`
+      : `/api/reimbursement/${record.id}/confirm-receipt`
+    const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -976,6 +984,9 @@ onMounted(() => {
 /* 付款回单预览 */
 .payment-proof-preview {
   margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .proof-card {

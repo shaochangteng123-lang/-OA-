@@ -379,6 +379,29 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_holidays_type ON holidays(type);
   `)
 
+  // 13.5. payment_batches 表 - 批量付款批次表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_batches (
+      id TEXT PRIMARY KEY,
+      batch_no TEXT UNIQUE NOT NULL,
+      total_amount REAL NOT NULL,
+      payment_proof_path TEXT,
+      payer_id TEXT NOT NULL,
+      pay_time TEXT,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'uploaded', 'confirmed')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      remark TEXT,
+      FOREIGN KEY (payer_id) REFERENCES users(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_payment_batches_batch_no ON payment_batches(batch_no);
+    CREATE INDEX IF NOT EXISTS idx_payment_batches_payer_id ON payment_batches(payer_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_batches_status ON payment_batches(status);
+  `)
+
   // 14. reimbursements 表 - 报销单主表
   db.exec(`
     CREATE TABLE IF NOT EXISTS reimbursements (
@@ -432,6 +455,7 @@ export function initDatabase() {
     { name: 'deduction_reason', type: 'TEXT' },         // 核减原因
     { name: 'original_amount', type: 'REAL' },          // 原始申请金额（核减前）
     { name: 'reimbursement_month', type: 'TEXT' },      // 报销月份（YYYY-MM）
+    { name: 'payment_batch_id', type: 'TEXT' },          // 付款批次ID
   ]
 
   for (const column of newColumns) {

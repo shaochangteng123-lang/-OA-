@@ -259,7 +259,84 @@
       <!-- 待付款 -->
       <el-tab-pane label="待付款" name="unpaid">
         <el-card>
-          <el-table :data="unpaidList" border stripe empty-text="暂无待付款记录">
+          <!-- 筛选条件 -->
+          <div class="filter-section">
+            <el-form :inline="true" :model="unpaidFilterForm" class="filter-form">
+              <el-form-item label="员工">
+                <el-select
+                  v-model="unpaidFilterForm.userId"
+                  placeholder="全部员工"
+                  clearable
+                  filterable
+                  style="width: 130px"
+                >
+                  <el-option
+                    v-for="emp in employeeList"
+                    :key="emp.id"
+                    :label="emp.name"
+                    :value="emp.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="类型">
+                <el-select
+                  v-model="unpaidFilterForm.type"
+                  placeholder="全部"
+                  clearable
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  style="width: 160px"
+                >
+                  <el-option value="basic" label="基础报销">
+                    <el-checkbox :model-value="unpaidFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
+                    基础报销
+                  </el-option>
+                  <el-option value="large" label="大额报销">
+                    <el-checkbox :model-value="unpaidFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
+                    大额报销
+                  </el-option>
+                  <el-option value="business" label="商务报销">
+                    <el-checkbox :model-value="unpaidFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
+                    商务报销
+                  </el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="状态">
+                <el-select
+                  v-model="unpaidFilterForm.status"
+                  placeholder="全部"
+                  clearable
+                  style="width: 130px"
+                >
+                  <el-option label="待审批" value="pending" />
+                  <el-option label="待付款" value="approved" />
+                  <el-option label="待确认" value="payment_uploaded" />
+                  <el-option label="已完成" value="completed" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="日期">
+                <el-date-picker
+                  v-model="unpaidFilterForm.dateRange"
+                  type="daterange"
+                  value-format="YYYY-MM-DD"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  range-separator="至"
+                  style="width: 260px"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :icon="Search" :loading="unpaidListLoading" @click="handleQueryUnpaidList">
+                  查询
+                </el-button>
+                <el-button @click="handleResetUnpaidFilter">重置</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+
+          <el-table :data="unpaidList" border stripe empty-text="暂无待付款记录" ref="unpaidTableRef" @selection-change="handleUnpaidSelectionChange" v-loading="unpaidListLoading">
+            <el-table-column type="selection" width="55" align="center" />
             <el-table-column label="序号" width="60" align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
@@ -330,13 +407,112 @@
               </template>
             </el-table-column>
           </el-table>
+
+          <!-- 批量付款操作栏 -->
+          <div v-if="selectedUnpaidItems.length > 0" class="batch-action-bar">
+            <div class="batch-info">
+              <span>已选 <strong>{{ selectedUnpaidItems.length }}</strong> 笔</span>
+              <span class="batch-amount">合计 <strong>¥{{ selectedUnpaidTotalAmount.toFixed(2) }}</strong></span>
+              <span v-if="!isSamePayee" class="batch-warning">
+                <el-icon><WarningFilled /></el-icon>
+                包含不同收款人，无法批量付款
+              </span>
+              <span v-else-if="!isSameType" class="batch-warning">
+                <el-icon><WarningFilled /></el-icon>
+                请选择同一报销类型进行付款
+              </span>
+            </div>
+            <el-button
+              type="success"
+              :icon="Money"
+              :disabled="!isSamePayee || !isSameType || batchPaymentLoading"
+              :loading="batchPaymentLoading"
+              @click="handleBatchPayment"
+            >
+              批量付款
+            </el-button>
+          </div>
         </el-card>
       </el-tab-pane>
 
       <!-- 已付款 -->
       <el-tab-pane label="已付款" name="paid">
         <el-card>
-          <el-table :data="paidList" border stripe empty-text="暂无已付款记录">
+          <!-- 筛选条件 -->
+          <div class="filter-section">
+            <el-form :inline="true" :model="paidFilterForm" class="filter-form">
+              <el-form-item label="员工">
+                <el-select
+                  v-model="paidFilterForm.userId"
+                  placeholder="全部员工"
+                  clearable
+                  filterable
+                  style="width: 130px"
+                >
+                  <el-option
+                    v-for="emp in employeeList"
+                    :key="emp.id"
+                    :label="emp.name"
+                    :value="emp.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="类型">
+                <el-select
+                  v-model="paidFilterForm.type"
+                  placeholder="全部"
+                  clearable
+                  multiple
+                  collapse-tags
+                  collapse-tags-tooltip
+                  style="width: 160px"
+                >
+                  <el-option value="basic" label="基础报销">
+                    <el-checkbox :model-value="paidFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
+                    基础报销
+                  </el-option>
+                  <el-option value="large" label="大额报销">
+                    <el-checkbox :model-value="paidFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
+                    大额报销
+                  </el-option>
+                  <el-option value="business" label="商务报销">
+                    <el-checkbox :model-value="paidFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
+                    商务报销
+                  </el-option>
+                </el-select>
+              </el-form-item>
+              <el-form-item label="状态">
+                <el-select
+                  v-model="paidFilterForm.status"
+                  placeholder="全部"
+                  clearable
+                  style="width: 130px"
+                >
+                  <el-option label="待确认收款" value="payment_uploaded" />
+                  <el-option label="已确认收款" value="completed" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="日期">
+                <el-date-picker
+                  v-model="paidFilterForm.dateRange"
+                  type="daterange"
+                  value-format="YYYY-MM-DD"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  range-separator="至"
+                  style="width: 260px"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :icon="Search" :loading="paidListLoading" @click="handleQueryPaidList">
+                  查询
+                </el-button>
+                <el-button @click="handleResetPaidFilter">重置</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+
+          <el-table :data="paidList" border stripe empty-text="暂无已付款记录" v-loading="paidListLoading">
             <el-table-column label="序号" width="60" align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
@@ -993,9 +1169,9 @@
                 <div class="timeline-desc">财务已上传付款凭证</div>
                 <!-- 付款回单展示 -->
                 <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
-                  <div class="proof-card" @click="handlePreviewPaymentProof">
-                    <template v-if="isPaymentProofImage">
-                      <img :src="currentApprovalRecord.paymentProofPath" class="proof-image" alt="付款回单" />
+                  <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
+                    <template v-if="isImagePath(proofUrl)">
+                      <img :src="proofUrl" class="proof-image" alt="付款回单" />
                     </template>
                     <template v-else>
                       <div class="proof-pdf">
@@ -1062,8 +1238,8 @@
     <!-- 付款回单预览对话框 -->
     <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
       <div class="preview-dialog-content">
-        <img v-if="isPaymentProofImage && currentApprovalRecord?.paymentProofPath" :src="currentApprovalRecord.paymentProofPath" class="preview-dialog-image" alt="付款回单" />
-        <iframe v-else-if="currentApprovalRecord?.paymentProofPath" :src="currentApprovalRecord.paymentProofPath" class="preview-dialog-pdf" />
+        <img v-if="isImagePath(previewingProofUrl)" :src="previewingProofUrl" class="preview-dialog-image" alt="付款回单" />
+        <iframe v-else-if="previewingProofUrl" :src="previewingProofUrl" class="preview-dialog-pdf" />
       </div>
     </el-dialog>
 
@@ -1295,7 +1471,7 @@ import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer } from '@element-plus/icons-vue'
+import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { usePendingStore } from '@/stores/pending'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
@@ -1381,7 +1557,78 @@ const pendingFilterForm = reactive({
   dateRange: null as [string, string] | null,
 })
 const unpaidList = ref<ReimbursementItem[]>([])
+const unpaidListLoading = ref(false)
 const paidList = ref<ReimbursementItem[]>([])
+const paidListLoading = ref(false)
+
+// 待付款筛选表单
+const unpaidFilterForm = reactive({
+  userId: '',
+  type: [] as string[],
+  status: '',
+  dateRange: null as [string, string] | null,
+})
+
+// 已付款筛选表单
+const paidFilterForm = reactive({
+  userId: '',
+  type: [] as string[],
+  status: '',
+  dateRange: null as [string, string] | null,
+})
+// 批量付款相关
+const unpaidTableRef = ref()
+const selectedUnpaidItems = ref<ReimbursementItem[]>([])
+const batchPaymentLoading = ref(false)
+
+const selectedUnpaidTotalAmount = computed(() => {
+  return selectedUnpaidItems.value.reduce((sum, item) => sum + item.amount, 0)
+})
+
+const isSamePayee = computed(() => {
+  if (selectedUnpaidItems.value.length === 0) return false
+  const userIds = [...new Set(selectedUnpaidItems.value.map(item => item.userId))]
+  return userIds.length === 1
+})
+
+const isSameType = computed(() => {
+  if (selectedUnpaidItems.value.length === 0) return false
+  const types = [...new Set(selectedUnpaidItems.value.map(item => item.type))]
+  return types.length === 1
+})
+
+function handleUnpaidSelectionChange(selection: ReimbursementItem[]) {
+  selectedUnpaidItems.value = selection
+}
+
+async function handleBatchPayment() {
+  if (!isSamePayee.value || !isSameType.value) return
+
+  const ids = selectedUnpaidItems.value.map(item => item.id)
+
+  if (ids.length === 1) {
+    // 单笔直接走原有付款流程
+    router.push(`/approval/payment/${ids[0]}?from=/approval&tab=unpaid`)
+    return
+  }
+
+  batchPaymentLoading.value = true
+  try {
+    const res = await api.post('/api/reimbursement/payment-batch/create', {
+      reimbursementIds: ids,
+    })
+    if (res.data.success) {
+      const batchId = res.data.data.batchId
+      router.push(`/approval/batch-payment/${batchId}?from=/approval&tab=unpaid`)
+    } else {
+      ElMessage.error(res.data.message || '创建付款批次失败')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '创建付款批次失败')
+  } finally {
+    batchPaymentLoading.value = false
+  }
+}
 const statistics = ref<Statistics>({
   pendingCount: 0,
   approvedUnpaid: 0,
@@ -1651,13 +1898,13 @@ const approvalRecords = ref<ApprovalRecordItem[]>([])
 
 // 付款回单预览
 const paymentProofDialogVisible = ref(false)
+const previewingProofUrl = ref('')
 
-// 判断付款回单是否为图片
-const isPaymentProofImage = computed(() => {
-  if (!currentApprovalRecord.value?.paymentProofPath) return false
-  const path = currentApprovalRecord.value.paymentProofPath.toLowerCase()
-  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')
-})
+// 判断路径是否为图片
+function isImagePath(p: string): boolean {
+  const lower = p.toLowerCase()
+  return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+}
 
 // 判断是否为核减金额（报销金额为0，无需付款流程）
 const isDeductionOnly = computed(() => {
@@ -2049,26 +2296,76 @@ function handleResetPendingFilter() {
 
 // 加载已通过未付款列表
 async function loadUnpaidList() {
+  unpaidListLoading.value = true
   try {
-    const res = await api.get('/api/approval/approved-unpaid')
+    const params: Record<string, string> = {}
+    if (unpaidFilterForm.userId) params.userId = unpaidFilterForm.userId
+    if (unpaidFilterForm.type.length > 0) params.type = unpaidFilterForm.type.join(',')
+    if (unpaidFilterForm.status) params.status = unpaidFilterForm.status
+    if (unpaidFilterForm.dateRange) {
+      params.startDate = unpaidFilterForm.dateRange[0]
+      params.endDate = unpaidFilterForm.dateRange[1]
+    }
+    const res = await api.get('/api/approval/approved-unpaid', { params })
     if (res.data.success) {
       unpaidList.value = res.data.data
     }
   } catch {
     console.error('加载已通过未付款列表失败')
+  } finally {
+    unpaidListLoading.value = false
   }
 }
 
 // 加载已付款列表
 async function loadPaidList() {
+  paidListLoading.value = true
   try {
-    const res = await api.get('/api/approval/paid-this-month')
+    const params: Record<string, string> = {}
+    if (paidFilterForm.userId) params.userId = paidFilterForm.userId
+    if (paidFilterForm.type.length > 0) params.type = paidFilterForm.type.join(',')
+    if (paidFilterForm.status) params.status = paidFilterForm.status
+    if (paidFilterForm.dateRange) {
+      params.startDate = paidFilterForm.dateRange[0]
+      params.endDate = paidFilterForm.dateRange[1]
+    }
+    const res = await api.get('/api/approval/paid-this-month', { params })
     if (res.data.success) {
       paidList.value = res.data.data
     }
   } catch {
     console.error('加载已付款列表失败')
+  } finally {
+    paidListLoading.value = false
   }
+}
+
+// 待付款查询
+function handleQueryUnpaidList() {
+  loadUnpaidList()
+}
+
+// 待付款重置
+function handleResetUnpaidFilter() {
+  unpaidFilterForm.userId = ''
+  unpaidFilterForm.type = []
+  unpaidFilterForm.status = ''
+  unpaidFilterForm.dateRange = null
+  loadUnpaidList()
+}
+
+// 已付款查询
+function handleQueryPaidList() {
+  loadPaidList()
+}
+
+// 已付款重置
+function handleResetPaidFilter() {
+  paidFilterForm.userId = ''
+  paidFilterForm.type = []
+  paidFilterForm.status = ''
+  paidFilterForm.dateRange = null
+  loadPaidList()
 }
 
 // 切换tab
@@ -2383,7 +2680,8 @@ async function loadApprovalRecords(reimbursementId: string) {
 }
 
 // 预览付款回单
-function handlePreviewPaymentProof() {
+function handlePreviewPaymentProof(url?: string) {
+  previewingProofUrl.value = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
   paymentProofDialogVisible.value = true
 }
 
@@ -3770,6 +4068,38 @@ onMounted(() => {
   font-size: 14px;
   color: #409eff;
   font-weight: 500;
+}
+
+/* 批量付款操作栏 */
+.batch-action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  margin-top: 12px;
+  background: #f0f9eb;
+  border: 1px solid #e1f3d8;
+  border-radius: 6px;
+}
+
+.batch-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 14px;
+  color: #606266;
+}
+
+.batch-amount {
+  color: #409eff;
+}
+
+.batch-warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #e6a23c;
+  font-size: 13px;
 }
 </style>
 
