@@ -52,7 +52,10 @@ api.interceptors.response.use(
           ElMessage.error('服务器错误，请稍后重试')
           break
         default:
-          ElMessage.error(error.response.data?.message || '请求失败')
+          // 400 错误由业务代码自行处理，不在拦截器中重复提示
+          if (error.response.status !== 400) {
+            ElMessage.error(error.response.data?.message || '请求失败')
+          }
       }
     } else if (error.request) {
       ElMessage.error('网络错误，请检查网络连接')

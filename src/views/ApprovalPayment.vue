@@ -71,21 +71,42 @@
         <h3 class="section-title">上传付款回单</h3>
 
         <div class="upload-container">
-          <!-- 已选择的回单列表 -->
-          <div v-if="fileItems.length > 0" class="proof-list">
+          <!-- 有文件时：缩略图 + 添加按钮横向排列，支持拖拽 -->
+          <div
+            v-if="fileItems.length > 0"
+            class="proof-grid"
+            :class="{ 'drag-over': isDragOver }"
+            @dragover.prevent="isDragOver = true"
+            @dragleave.prevent="isDragOver = false"
+            @drop.prevent="handleDrop"
+          >
             <div v-for="(item, index) in fileItems" :key="index" class="proof-card">
               <div class="proof-preview" @click="handlePreview(item)">
                 <img :src="item.previewUrl" class="proof-image" alt="付款回单" />
               </div>
-              <div class="proof-info">
-                <div class="proof-name">{{ item.fileName }}</div>
-              </div>
+              <div class="proof-name">{{ item.fileName }}</div>
               <el-button type="danger" :icon="Delete" circle size="small" class="proof-delete" @click="handleRemoveFile(index)" :disabled="submitting" />
             </div>
+            <!-- 添加更多按钮 -->
+            <el-upload
+              class="add-more-upload"
+              :auto-upload="false"
+              :show-file-list="false"
+              :on-change="handleFileChange"
+              accept=".jpg,.jpeg,.png"
+              multiple
+              :disabled="submitting"
+            >
+              <div class="add-more-btn">
+                <el-icon :size="28"><Plus /></el-icon>
+                <span>继续上传</span>
+              </div>
+            </el-upload>
           </div>
 
-          <!-- 上传区域 -->
+          <!-- 无文件时：标准拖拽上传区域 -->
           <el-upload
+            v-else
             class="upload-area"
             drag
             multiple
@@ -97,11 +118,11 @@
           >
             <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
             <div class="el-upload__text">
-              将文件拖到此处，或<em>点击上传</em>
+              将文件拖到此处，或<em>点击上传</em>，也可直接 Ctrl+V 粘贴
             </div>
             <template #tip>
               <div class="el-upload__tip">
-                支持 JPG、PNG 格式，文件大小不超过 10MB，可上传多张回单
+                支持 JPG、PNG 格式，文件大小不超过 10MB，可上传多张回单，支持复制粘贴
               </div>
             </template>
           </el-upload>
@@ -141,7 +162,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ArrowLeft, UploadFilled, Delete, Loading } from '@element-plus/icons-vue'
+import { ArrowLeft, UploadFilled, Delete, Loading, Plus } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { api } from '@/utils/api'
 import { usePendingStore } from '@/stores/pending'
@@ -192,6 +213,7 @@ const fileItems = ref<FileItem[]>([])
 const previewDialogVisible = ref(false)
 const previewDialogUrl = ref('')
 const batchInfo = ref<BatchInfo | null>(null)
+const isDragOver = ref(false)
 
 // 判断是否为批量付款模式
 const isBatchMode = computed(() => !!route.params.batchId)
@@ -315,6 +337,55 @@ function handleRemoveFile(index: number) {
   fileItems.value.splice(index, 1)
 }
 
+function handleDrop(e: DragEvent) {
+  isDragOver.value = false
+  if (submitting.value || !e.dataTransfer?.files) return
+  const acceptTypes = ['image/jpeg', 'image/png']
+  Array.from(e.dataTransfer.files).forEach(file => {
+    if (!acceptTypes.includes(file.type)) {
+      ElMessage.warning(`${file.name} 格式不支持，仅支持 JPG、PNG`)
+      return
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      ElMessage.warning(`${file.name} 超过10MB限制`)
+      return
+    }
+    fileItems.value.push({
+      fileName: file.name,
+      previewUrl: URL.createObjectURL(file),
+      rawFile: file,
+    })
+  })
+}
+
+// 粘贴上传
+function handlePaste(e: ClipboardEvent) {
+  if (submitting.value || !e.clipboardData?.items) return
+  const acceptTypes = ['image/jpeg', 'image/png']
+  const items = Array.from(e.clipboardData.items)
+  let added = 0
+  items.forEach(item => {
+    if (!acceptTypes.includes(item.type)) return
+    const file = item.getAsFile()
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) {
+      ElMessage.warning('粘贴的图片超过10MB限制')
+      return
+    }
+    const ext = file.type === 'image/png' ? '.png' : '.jpg'
+    const fileName = `粘贴图片_${format(new Date(), 'HHmmss')}${ext}`
+    fileItems.value.push({
+      fileName,
+      previewUrl: URL.createObjectURL(file),
+      rawFile: file,
+    })
+    added++
+  })
+  if (added > 0) {
+    ElMessage.success(`已粘贴 ${added} 张图片`)
+  }
+}
+
 function handlePreview(item: FileItem) {
   previewDialogUrl.value = item.previewUrl
   previewDialogVisible.value = true
@@ -356,6 +427,7 @@ async function handleBatchSubmit() {
 
       const res = await api.post(`/api/reimbursement/payment-batch/${batchId}/verify-proof`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
       })
 
       if (res.data.success) {
@@ -366,6 +438,7 @@ async function handleBatchSubmit() {
         })
       } else {
         ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        fileItems.value = []
         return
       }
     }
@@ -382,12 +455,16 @@ async function handleBatchSubmit() {
       ElMessage.error(completeRes.data.message || '提交失败')
     }
   } catch (err: any) {
-    const warnings = err.response?.data?.warnings
-    if (warnings && Array.isArray(warnings) && warnings.length > 0) {
-      ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
-    } else {
-      ElMessage.error(err.response?.data?.message || '操作失败')
+    // 400 错误由业务代码处理（拦截器已跳过），其他错误拦截器已提示
+    if (err.response?.status === 400) {
+      const warnings = err.response?.data?.warnings
+      if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+        ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+      } else {
+        ElMessage.error(err.response?.data?.message || '操作失败')
+      }
     }
+    fileItems.value = []
   } finally {
     submitting.value = false
     submitStatusText.value = ''
@@ -412,6 +489,7 @@ async function handleSingleSubmit() {
 
       const res = await api.post(`/api/reimbursement/${id}/verify-proof`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
       })
 
       if (res.data.success) {
@@ -422,6 +500,7 @@ async function handleSingleSubmit() {
         })
       } else {
         ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        fileItems.value = []
         return
       }
     }
@@ -438,12 +517,16 @@ async function handleSingleSubmit() {
       ElMessage.error(completeRes.data.message || '提交失败')
     }
   } catch (err: any) {
-    const warnings = err.response?.data?.warnings
-    if (warnings && Array.isArray(warnings) && warnings.length > 0) {
-      ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
-    } else {
-      ElMessage.error(err.response?.data?.message || '操作失败')
+    // 400 错误由业务代码处理（拦截器已跳过），其他错误拦截器已提示
+    if (err.response?.status === 400) {
+      const warnings = err.response?.data?.warnings
+      if (warnings && Array.isArray(warnings) && warnings.length > 0) {
+        ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+      } else {
+        ElMessage.error(err.response?.data?.message || '操作失败')
+      }
     }
+    fileItems.value = []
   } finally {
     submitting.value = false
     submitStatusText.value = ''
@@ -460,9 +543,13 @@ function navigateBack() {
   }
 }
 
-onMounted(() => { loadData() })
+onMounted(() => {
+  loadData()
+  document.addEventListener('paste', handlePaste)
+})
 
 onUnmounted(() => {
+  document.removeEventListener('paste', handlePaste)
   fileItems.value.forEach(item => {
     if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
   })
@@ -488,39 +575,69 @@ onUnmounted(() => {
 .amount { color: #409eff; font-weight: 600; font-size: 16px; }
 .upload-container { display: flex; flex-direction: column; gap: 16px; }
 .upload-area { width: 100%; }
+.upload-area :deep(.el-upload) { width: 100%; }
 .upload-area :deep(.el-upload-dragger) { width: 100%; }
 
-.proof-list { display: flex; flex-wrap: wrap; gap: 16px; }
-.proof-card {
-  position: relative;
-  width: 180px;
-  border: 2px solid #dcdfe6;
-  border-radius: 8px;
-  overflow: hidden;
-  background: #fff;
+.proof-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 20px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 6px;
+  background: #fafafa;
   transition: all 0.3s;
 }
-.proof-card:hover { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); }
-.proof-preview {
-  width: 100%;
-  height: 140px;
-  cursor: pointer;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f5f7fa;
+.proof-grid.drag-over {
+  border-color: #409eff;
+  background: #ecf5ff;
 }
+.proof-card {
+  position: relative;
+  width: 160px;
+}
+.proof-preview {
+  width: 160px;
+  height: 120px;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: pointer;
+  border: 1px solid #e4e7ed;
+  background: #fff;
+}
+.proof-preview:hover { box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12); }
 .proof-image { width: 100%; height: 100%; object-fit: cover; }
-.proof-info { padding: 6px 10px; }
 .proof-name {
   font-size: 12px;
-  color: #606266;
+  color: #909399;
+  margin-top: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.proof-delete { position: absolute; top: 6px; right: 6px; z-index: 10; }
+.proof-delete { position: absolute; top: -8px; right: -8px; z-index: 10; }
+
+.add-more-upload :deep(.el-upload) { width: 100%; height: 100%; }
+.add-more-btn {
+  width: 160px;
+  height: 120px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #909399;
+  cursor: pointer;
+  background: #fff;
+  transition: all 0.3s;
+  font-size: 13px;
+}
+.add-more-btn:hover {
+  border-color: #409eff;
+  color: #409eff;
+}
 
 .preview-dialog-content {
   display: flex;

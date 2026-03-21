@@ -70,10 +70,12 @@ LABEL description="YuliLog 工作日志管理系统"
 # 配置 Alpine 镜像源（使用阿里云镜像）
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 
-# 安装运行时依赖（含 canvas、poppler、中文字体）
+# 安装运行时依赖（含 canvas、poppler、中文字体、Python3 + OCR）
 RUN apk add --no-cache sqlite dumb-init wget \
     cairo pango libjpeg-turbo giflib librsvg pixman \
     poppler-utils poppler-data font-noto-cjk \
+    python3 py3-pip \
+    && pip3 install --no-cache-dir --break-system-packages rapidocr_onnxruntime \
     && rm -rf /var/cache/apk/* \
     && addgroup -g 1001 -S nodejs \
     && adduser -S yulilog -u 1001 -G nodejs
@@ -85,6 +87,7 @@ COPY --from=builder --chown=yulilog:nodejs /app/dist ./dist
 COPY --from=builder --chown=yulilog:nodejs /app/package.json ./
 COPY --from=prod-deps --chown=yulilog:nodejs /app/node_modules ./node_modules
 COPY --chown=yulilog:nodejs docker-entrypoint.sh ./
+COPY --chown=yulilog:nodejs server/scripts/paddle_ocr_worker.py ./server/scripts/
 
 # 创建数据目录和上传目录并设置权限
 RUN chmod +x docker-entrypoint.sh \

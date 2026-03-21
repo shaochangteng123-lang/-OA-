@@ -318,6 +318,30 @@
                   <div class="timeline-content">
                     <div class="timeline-title">上传付款凭证</div>
                     <div class="timeline-desc">财务已上传付款凭证</div>
+                    <!-- 批量付款金额对照 -->
+                    <div v-if="batchInfoForDialog" class="batch-amount-compare">
+                      <div class="batch-compare-header">
+                        <el-tag type="warning" size="small">批量付款</el-tag>
+                        <span class="batch-compare-no">批次号：{{ batchInfoForDialog.batchNo }}</span>
+                      </div>
+                      <div class="batch-compare-list">
+                        <div
+                          v-for="r in batchInfoForDialog.reimbursements"
+                          :key="r.id"
+                          class="batch-compare-item"
+                          :class="{ 'is-current': r.id === currentApprovalRecord.id }"
+                        >
+                          <span class="batch-compare-id">{{ r.id }}</span>
+                          <el-tag v-if="r.id === currentApprovalRecord.id" type="primary" size="small">本笔</el-tag>
+                          <span class="batch-compare-title">{{ r.title }}</span>
+                          <span class="batch-compare-amount">¥{{ parseFloat(r.amount).toFixed(2) }}</span>
+                        </div>
+                      </div>
+                      <div class="batch-compare-total">
+                        <span>回单付款总额</span>
+                        <span class="batch-compare-total-amount">¥{{ batchInfoForDialog.totalAmount.toFixed(2) }}</span>
+                      </div>
+                    </div>
                     <!-- 付款回单展示 -->
                     <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                       <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
@@ -506,6 +530,9 @@ const currentApprovalRecord = ref<any>(null)
 
 // 确认收款状态
 const confirmingReceipt = ref(false)
+
+// 批次信息（审批弹窗用）
+const batchInfoForDialog = ref<any>(null)
 
 // 付款回单预览
 const paymentProofDialogVisible = ref(false)
@@ -721,6 +748,21 @@ const handleView = async (row: any) => {
         ...result.data,
         applicant: result.data.applicantName || result.data.applicant || '申请人',
       }
+      // 如果有批量付款批次，获取批次详情
+      batchInfoForDialog.value = null
+      if (result.data.paymentBatchId) {
+        try {
+          const batchRes = await fetch(`/api/reimbursement/payment-batch/${result.data.paymentBatchId}`, {
+            credentials: 'include',
+          })
+          const batchResult = await batchRes.json()
+          if (batchResult.success && batchResult.data.reimbursements.length > 1) {
+            batchInfoForDialog.value = batchResult.data
+          }
+        } catch (e) {
+          // 批次信息加载失败不影响主流程
+        }
+      }
       approvalDialogVisible.value = true
     } else {
       ElMessage.error(result.message || '获取详情失败')
@@ -753,13 +795,33 @@ const handleConfirmReceipt = async () => {
 
   try {
     const record = currentApprovalRecord.value
-    const confirmMsg = record.paymentBatchId
-      ? '确认已收到付款？该批次下所有报销单将一并确认完成。'
-      : '确认已收到付款？确认后报销流程将完成。'
+    let confirmMsg: string
+    if (record.paymentBatchId && batchInfoForDialog.value) {
+      const batch = batchInfoForDialog.value
+      const items = batch.reimbursements.map((r: any) => {
+        const isCurrent = r.id === record.id
+        return `<div style="display:flex;justify-content:space-between;padding:4px 8px;background:${isCurrent ? 'rgba(64,158,255,0.08)' : '#f5f7fa'};border-radius:4px;margin-bottom:4px;${isCurrent ? 'border:1px solid rgba(64,158,255,0.3);' : ''}">
+          <span>${r.id}${isCurrent ? ' <span style="color:#409eff;font-weight:600;">(本笔)</span>' : ''}</span>
+          <span style="font-weight:600;">¥${parseFloat(r.amount).toFixed(2)}</span>
+        </div>`
+      }).join('')
+      confirmMsg = `<div style="text-align:left;">
+        <p style="margin-bottom:8px;">本次为<strong>批量付款</strong>，回单金额包含多笔报销：</p>
+        <div style="margin-bottom:8px;">${items}</div>
+        <div style="display:flex;justify-content:space-between;padding:8px;background:#f0f9eb;border-radius:4px;font-weight:600;">
+          <span>回单付款总额</span>
+          <span style="color:#67c23a;">¥${batch.totalAmount.toFixed(2)}</span>
+        </div>
+        <p style="margin-top:12px;color:#909399;font-size:13px;">确认后该批次下所有报销单将一并完成。</p>
+      </div>`
+    } else {
+      confirmMsg = '确认已收到付款？确认后报销流程将完成。'
+    }
     await ElMessageBox.confirm(confirmMsg, '确认收款', {
       confirmButtonText: '确认收款',
       cancelButtonText: '取消',
       type: 'success',
+      dangerouslyUseHTMLString: !!batchInfoForDialog.value,
     })
 
     confirmingReceipt.value = true
@@ -1127,5 +1189,82 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+/* 批量付款金额对照 */
+.batch-amount-compare {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+  margin-bottom: 12px;
+}
+
+.batch-compare-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.batch-compare-no {
+  font-size: 12px;
+  color: #92400e;
+}
+
+.batch-compare-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.batch-compare-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #92400e;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 4px;
+}
+
+.batch-compare-item.is-current {
+  background: rgba(64, 158, 255, 0.08);
+  border: 1px solid rgba(64, 158, 255, 0.3);
+}
+
+.batch-compare-id {
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.batch-compare-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-compare-amount {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.batch-compare-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  background: #f0f9eb;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.batch-compare-total-amount {
+  color: #67c23a;
 }
 </style>

@@ -1,6 +1,6 @@
 /**
  * 付款回单 OCR 识别服务
- * 使用 tesseract.js 识别图片中的文字
+ * 使用 PaddleOCR 识别图片中的文字
  * 识别字段：付款人、收款人姓名、收款账号、金额
  * 支持JPG、PNG格式
  *
@@ -11,8 +11,16 @@
  *   金额(大写) 人民币壹仟伍佰元整
  */
 
-import Tesseract from 'tesseract.js'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
+const execFileAsync = promisify(execFile)
 
 export interface PaymentProofOcrResult {
   payer: string          // 付款人
@@ -20,6 +28,47 @@ export interface PaymentProofOcrResult {
   payeeAccount: string   // 收款账号
   amount: number         // 金额
   rawText?: string       // 原始识别文本
+}
+
+// ==================== PaddleOCR 调用 ====================
+
+/**
+ * 获取 PaddleOCR worker 脚本路径
+ * 兼容开发环境（tsx watch）和生产环境（编译后的 dist/）
+ */
+function getPaddleOcrWorkerPath(): string {
+  const candidates = [
+    path.resolve(__dirname, '../scripts/paddle_ocr_worker.py'),
+    path.resolve(process.cwd(), 'server/scripts/paddle_ocr_worker.py'),
+  ]
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p
+  }
+  throw new Error('PaddleOCR worker 脚本不存在')
+}
+
+/**
+ * 调用 PaddleOCR Python 脚本识别图片文本
+ */
+async function callPaddleOcr(filePath: string): Promise<string> {
+  const workerPath = getPaddleOcrWorkerPath()
+  console.log('🐍 调用 PaddleOCR worker:', workerPath)
+
+  // 优先使用 venv 中的 python3（含 RapidOCR），回退到系统 python3
+  const venvPython = '/tmp/ocr-venv/bin/python3'
+  const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3'
+
+  const { stdout } = await execFileAsync(pythonCmd, [workerPath, filePath], {
+    timeout: 120000,
+    maxBuffer: 10 * 1024 * 1024,
+  })
+
+  const result = JSON.parse(stdout.trim())
+  if (result.error) {
+    throw new Error(`PaddleOCR 识别失败: ${result.error}`)
+  }
+
+  return result.fullText || ''
 }
 
 // ==================== 中文大写金额解析 ====================
@@ -34,12 +83,19 @@ function parseChineseAmount(text: string): number {
     '伍': 5, '陆': 6, '柒': 7, '捌': 8, '玖': 9,
     // OCR 常见误识别
     '吉': 1, '弍': 2, '参': 3,
+    '挫': 8, // "捌"的误识别
+    '壶': 1, '壷': 1, // OCR 把 "壹" 识别成类似字形
+    '武': 1, // OCR 把 "壹" 识别成类似字形
+    '肄': 4, // OCR 把 "肆" 识别成类似字形
+    '标': 7, // OCR 把 "柒" 识别成类似字形
   }
   const unitMap: Record<string, number> = {
     '拾': 10, '佰': 100, '仟': 1000, '万': 10000, '亿': 100000000,
     '百': 100, '千': 1000, '十': 10,
     // OCR 常见误识别
     '什': 1000, // "仟"的误识别
+    '件': 100, // "佰"的误识别
+    '河': 10, // "拾"的误识别
   }
 
   let result = 0
@@ -52,7 +108,6 @@ function parseChineseAmount(text: string): number {
     } else if (unitMap[char] !== undefined) {
       const unit = unitMap[char]
       if (unit >= 10000) {
-        // 万、亿等大单位：将已累积的结果（含当前数字）乘以大单位
         result = (result + current) * unit
         current = 0
         lastUnit = unit
@@ -96,7 +151,6 @@ function extractPayer(text: string, textNoSpace: string): string {
   }
 
   // 2. 银行回单表格格式：第一个"户名"后面的内容为付款方
-  //    OCR 文本示例：| 户 "名 | 京 羽 隶 工 程 咨询 有 限 公司 | 户 名 ...
   const tableMatch = text.match(/户\s*"?\s*名\s*\|?\s*([^|户\n]+)/i)
   if (tableMatch?.[1]?.trim()) {
     const name = tableMatch[1].replace(/[|"]/g, '').trim()
@@ -186,15 +240,30 @@ function extractPayeeAccount(text: string): string {
 function extractAmount(text: string, textNoSpace: string): number {
   // 1. 数字金额格式
   const numericPatterns = [
-    /金额[（(]?小\s*写[）)]?\s*[：:]?\s*[¥￥]?\s*([\d,]+\.?\d*)/,
-    /转账金额[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)/,
-    /付款金额[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)/,
-    /实付金额[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)/,
-    /金额[：:]\s*[¥￥]?\s*([\d,]+\.?\d*)/,
-    /[¥￥]\s*([\d,]+\.?\d*)/,
+    /金[额颜][（(]?小写[）)]?[：:]?[¥￥YK]?([\d,]+\.?\d*)/,
+    /转账金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
+    /付款金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
+    /实付金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
+    /金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
+    /金[额颜][|｜]?[¥￥YK]([\d,]+\.?\d*)/,
+    /[¥￥YK]([\d,]+\.?\d*)/,
   ]
 
   for (const p of numericPatterns) {
+    const m = textNoSpace.match(p)
+    if (m?.[1]) {
+      const amount = parseFloat(m[1].replace(/,/g, ''))
+      if (!isNaN(amount) && amount > 0) return amount
+    }
+  }
+
+  // 宽松模式匹配
+  const loosePatterns = [
+    /金\s*[额颜]\s*[（(]?\s*小\s*写\s*[）)]?\s*[：:]?\s*[¥￥YK]?\s*([\d,]+\.?\d*)/,
+    /金\s*[额颜]\s*[|｜]?\s*[¥￥YK]\s*([\d,]+\.?\d*)/,
+    /[¥￥K]\s*([\d,]+\.?\d*)/,
+  ]
+  for (const p of loosePatterns) {
     const m = text.match(p)
     if (m?.[1]) {
       const amount = parseFloat(m[1].replace(/,/g, ''))
@@ -202,14 +271,21 @@ function extractAmount(text: string, textNoSpace: string): number {
     }
   }
 
-  // 2. 中文大写金额格式（人民币壹仟伍佰元整）
-  const chineseMatch = textNoSpace.match(/人民币([零壹贰叁肆伍陆柒捌玖吉什弍参拾佰仟百千万亿十元圆角分整]+)/)
+  // 2. 中文大写金额格式
+  const chineseMatch = textNoSpace.match(/人民币([\u4e00-\u9fff]+?)(?:元|圆)/)
   if (chineseMatch?.[1]) {
-    const amount = parseChineseAmount(chineseMatch[1])
+    const amount = parseChineseAmount(chineseMatch[1] + '元')
     if (amount > 0) return amount
   }
 
-  // 3. 独立的金额数字（带小数点）
+  // 3. 兜底：从"金额"字段后面提取数字
+  const labelAmount = textNoSpace.match(/金额[^0-9]{0,12}([0-9]{1,3}(?:[,\uFF0C][0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,8}(?:\.[0-9]{1,2})?)/)
+  if (labelAmount?.[1]) {
+    const amount = parseFloat(labelAmount[1].replace(/[,\uFF0C]/g, ''))
+    if (!isNaN(amount) && amount > 0) return amount
+  }
+
+  // 4. 独立的金额数字（带小数点）
   const amountMatch = text.match(/\b(\d{1,3}(?:,\d{3})*\.\d{2})\b/)
   if (amountMatch?.[1]) {
     const amount = parseFloat(amountMatch[1].replace(/,/g, ''))
@@ -276,10 +352,17 @@ function validatePaymentProof(rawText: string): {
  * @param filePath 文件路径（支持JPG、PNG）
  * @returns OCR识别结果
  */
-export async function recognizePaymentProof(filePath: string): Promise<PaymentProofOcrResult> {
-  console.log('🔍 开始识别付款回单...')
+export interface PaymentProofOcrOptions {
+  // 用于参考的期望金额（从业务侧获得）
+  expectedAmount?: number
+}
 
-  // 检查文件是否存在
+export async function recognizePaymentProof(
+  filePath: string,
+  options: PaymentProofOcrOptions = {},
+): Promise<PaymentProofOcrResult> {
+  console.log('🔍 开始识别付款回单（PaddleOCR）...')
+
   if (!fs.existsSync(filePath)) {
     throw new Error('付款回单文件不存在: ' + filePath)
   }
@@ -287,47 +370,35 @@ export async function recognizePaymentProof(filePath: string): Promise<PaymentPr
   try {
     console.log('📄 图片文件路径:', filePath)
 
-    // 使用Tesseract.js进行OCR识别（带超时）
-    console.log('🔍 开始OCR识别...')
-    const ocrPromise = Tesseract.recognize(
-      filePath,
-      'chi_sim+eng',
-      {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            console.log(`📊 识别进度: ${Math.round(m.progress * 100)}%`)
-          }
-        }
-      }
-    )
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('OCR 识别超时（60秒）')), 60000)
-    )
-
-    const { data } = await Promise.race([ocrPromise, timeoutPromise])
-
-    const text = data.text
+    // 调用 PaddleOCR 识别全图
+    const text = await callPaddleOcr(filePath)
 
     console.log('📄 识别文本成功，长度:', text.length, '字符')
     console.log('📄 完整识别文本:\n---START---\n' + text + '\n---END---')
 
-    // 先验证是否为银行回单（只检查"银行"和"回单"关键字）
+    // 验证是否为银行回单
     const validation = validatePaymentProof(text)
     if (!validation.isValid) {
       throw new Error(validation.reason || '此不是付款回单')
     }
 
-    // 解析文本，提取字段
     const result: PaymentProofOcrResult = {
       payer: '',
       payee: '',
       payeeAccount: '',
       amount: 0,
-      rawText: text
+      rawText: text,
     }
 
+    // 解析文本，提取各字段
     parsePaymentProofText(text, result)
+
+    console.log('📋 最终结果:', {
+      payer: result.payer || '未识别',
+      payee: result.payee || '未识别',
+      payeeAccount: result.payeeAccount || '未识别',
+      amount: result.amount || '未识别',
+    })
 
     console.log('✅ 付款回单识别成功')
     return result

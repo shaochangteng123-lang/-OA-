@@ -147,8 +147,15 @@
                 本次付款合计 <strong>¥{{ batchInfo.totalAmount.toFixed(2) }}</strong>，包含 {{ batchInfo.reimbursementCount }} 笔报销：
               </div>
               <div class="batch-reimbursement-list">
-                <div v-for="r in batchInfo.reimbursements" :key="r.id" class="batch-reimbursement-item">
+                <div
+                  v-for="r in batchInfo.reimbursements"
+                  :key="r.id"
+                  class="batch-reimbursement-item"
+                  :class="{ 'is-current': r.id === reimbursement.reimbursementId.value, 'is-clickable': r.id !== reimbursement.reimbursementId.value }"
+                  @click="handleBatchItemClick(r)"
+                >
                   <span class="batch-r-id">{{ r.id }}</span>
+                  <el-tag v-if="r.id === reimbursement.reimbursementId.value" type="primary" size="small">本笔</el-tag>
                   <span class="batch-r-title">{{ r.title }}</span>
                   <span class="batch-r-amount">¥{{ parseFloat(r.amount).toFixed(2) }}</span>
                 </div>
@@ -207,10 +214,31 @@ import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入 composables
+import { useRouter } from 'vue-router'
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { LARGE_AMOUNT_THRESHOLD } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
+
+const router = useRouter()
+
+// 报销类型到路由的映射
+const typeRouteMap: Record<string, string> = {
+  basic: '/basic-reimbursement',
+  business: '/business-reimbursement',
+  large: '/large-reimbursement',
+}
+
+// 点击批次中的报销单跳转
+function handleBatchItemClick(item: any) {
+  const currentId = reimbursement.reimbursementId.value
+  if (item.id === currentId) return
+  const basePath = typeRouteMap[item.type] || '/large-reimbursement'
+  router.push({
+    path: `${basePath}/${item.id}`,
+    query: { mode: 'view' }
+  })
+}
 
 // 使用 composables
 const invoice = useInvoice()
@@ -783,6 +811,26 @@ watch(
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.6);
   border-radius: 4px;
+}
+
+.batch-reimbursement-item.is-clickable {
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.batch-reimbursement-item.is-clickable:hover {
+  background: rgba(64, 158, 255, 0.12);
+}
+
+.batch-reimbursement-item.is-clickable .batch-r-id,
+.batch-reimbursement-item.is-clickable .batch-r-title {
+  color: #409eff;
+}
+
+.batch-reimbursement-item.is-current {
+  background: rgba(64, 158, 255, 0.08);
+  border: 1px solid rgba(64, 158, 255, 0.3);
+}
 }
 
 .batch-r-id {

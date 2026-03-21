@@ -1600,9 +1600,12 @@ router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('payment
         `).get(reimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
 
     // OCR 识别
+    const expectedAmount = Number.parseFloat(reimbursement.total_amount)
     let ocrResult
     try {
-      ocrResult = await recognizePaymentProof(req.file.path)
+      ocrResult = await recognizePaymentProof(req.file.path, {
+        expectedAmount: Number.isFinite(expectedAmount) && expectedAmount > 0 ? expectedAmount : undefined,
+      })
     } catch (ocrError: any) {
       try { fs.unlinkSync(req.file.path) } catch (_) {}
       return res.status(400).json({
@@ -1637,11 +1640,26 @@ router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('payment
       }
     }
 
-    // 检查收款人姓名是否在全文中出现
+    // 检查收款人姓名是否在全文中出现（支持模糊匹配，容忍 OCR 单字识别错误）
     let nameFound = false
     if (userBankInfo?.bank_account_name) {
       const expectedName = userBankInfo.bank_account_name.trim()
-      nameFound = ocrTextNoSpace.includes(expectedName)
+      // 1. 精确匹配
+      if (ocrTextNoSpace.includes(expectedName)) {
+        nameFound = true
+      }
+      // 2. 模糊匹配：姓名中至少 2/3 的字在全文中相邻出现（容忍 OCR 单字错误）
+      if (!nameFound && expectedName.length >= 2) {
+        const chars = expectedName.split('')
+        for (let i = 0; i < chars.length && !nameFound; i++) {
+          // 跳过第 i 个字，检查剩余字符是否按顺序出现在文本中
+          const partial = chars.filter((_, idx) => idx !== i).join('')
+          if (ocrTextNoSpace.includes(partial)) {
+            console.log(`✅ 姓名模糊匹配成功：跳过第${i + 1}个字"${chars[i]}"，匹配到"${partial}"`)
+            nameFound = true
+          }
+        }
+      }
     }
 
     console.log('🔍 verify-proof 匹配结果:', { accountMatched, nameFound })
@@ -2750,9 +2768,12 @@ router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentPr
         `).get(firstReimbursement.user_id) as { bank_account_name: string | null; bank_account_number: string | null } | undefined
 
     // OCR 识别
+    const expectedAmount = Number.parseFloat(batch.total_amount)
     let ocrResult
     try {
-      ocrResult = await recognizePaymentProof(req.file.path)
+      ocrResult = await recognizePaymentProof(req.file.path, {
+        expectedAmount: Number.isFinite(expectedAmount) && expectedAmount > 0 ? expectedAmount : undefined,
+      })
     } catch (ocrError: any) {
       try { fs.unlinkSync(req.file.path) } catch (_) {}
       return res.status(400).json({
@@ -2780,7 +2801,19 @@ router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentPr
     let nameFound = false
     if (userBankInfo?.bank_account_name) {
       const expectedName = userBankInfo.bank_account_name.trim()
-      nameFound = ocrTextNoSpace.includes(expectedName)
+      if (ocrTextNoSpace.includes(expectedName)) {
+        nameFound = true
+      }
+      if (!nameFound && expectedName.length >= 2) {
+        const chars = expectedName.split('')
+        for (let i = 0; i < chars.length && !nameFound; i++) {
+          const partial = chars.filter((_, idx) => idx !== i).join('')
+          if (ocrTextNoSpace.includes(partial)) {
+            console.log(`✅ 姓名模糊匹配成功：跳过第${i + 1}个字"${chars[i]}"，匹配到"${partial}"`)
+            nameFound = true
+          }
+        }
+      }
     }
 
     if (!accountMatched && !nameFound) {
