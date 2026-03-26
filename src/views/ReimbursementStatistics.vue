@@ -128,7 +128,7 @@
           </el-table-column>
           <el-table-column prop="type" label="报销类型" min-width="120" align="center" header-align="center">
             <template #default="{ row }">
-              {{ row.invoiceCategory || getTypeText(row.type) }}
+              {{ row.invoiceCategory || '-' }}
             </template>
           </el-table-column>
           <el-table-column label="报销范围/区域" min-width="120" align="center" header-align="center">
@@ -163,7 +163,7 @@
               {{ row.approver || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="100" align="center" header-align="center">
+          <el-table-column label="操作" min-width="100" align="center" header-align="center">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleViewApproval(row)">
                 查看详情

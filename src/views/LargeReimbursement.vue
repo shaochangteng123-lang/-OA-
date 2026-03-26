@@ -76,7 +76,7 @@
           </el-table-column>
           <el-table-column prop="category" label="报销类型" min-width="120" align="center">
             <template #default="{ row }">
-              {{ row.invoiceCategory || row.category || '-' }}
+              {{ row.invoiceCategory || '-' }}
             </template>
           </el-table-column>
           <el-table-column prop="reimbursementScope" label="报销范围/区域" min-width="130" align="center">
@@ -101,7 +101,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="submitTime" label="提交时间" min-width="130" align="center" />
-          <el-table-column label="操作" width="150" align="center">
+          <el-table-column label="操作" min-width="150" align="center">
             <template #default="{ row }">
               <el-button
                 v-if="row.status !== 'draft'"

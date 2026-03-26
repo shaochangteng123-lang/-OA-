@@ -64,27 +64,27 @@
           stripe
           style="width: 100%"
         >
-          <el-table-column label="序号" width="80" align="center">
+          <el-table-column label="序号" align="center" header-align="center">
             <template #default="{ $index }">
               {{ (pagination.page - 1) * pagination.pageSize + $index + 1 }}
             </template>
           </el-table-column>
-          <el-table-column prop="title" label="报销事由" min-width="200" align="center">
+          <el-table-column prop="title" label="报销事由" align="center" header-align="center">
             <template #default="{ row }">
               {{ normalizeReimbursementTitle(row.title) }}
             </template>
           </el-table-column>
-          <el-table-column prop="category" label="报销类型" width="180" align="center">
+          <el-table-column prop="category" label="报销类型" align="center" header-align="center">
             <template #default="{ row }">
-              {{ row.invoiceCategory || row.category || '-' }}
+              {{ row.invoiceCategory || '-' }}
             </template>
           </el-table-column>
-          <el-table-column prop="amount" label="报销金额" width="120" align="center">
+          <el-table-column prop="amount" label="报销金额" align="center" header-align="center">
             <template #default="{ row }">
               <span class="amount-text">¥{{ row.amount.toFixed(2) }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="status" label="状态" width="120" align="center">
+          <el-table-column prop="status" label="状态" align="center" header-align="center">
             <template #default="{ row }">
               <el-tag
                 :type="getStatusType(row.status)"
@@ -95,8 +95,12 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
-          <el-table-column label="操作" width="200" align="center">
+          <el-table-column prop="submitTime" label="提交时间" align="center" header-align="center">
+            <template #default="{ row }">
+              {{ row.submitTime || '-' }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" align="center" header-align="center">
             <template #default="{ row }">
               <el-button
                 v-if="row.status !== 'draft'"

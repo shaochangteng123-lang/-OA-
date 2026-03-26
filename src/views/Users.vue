@@ -10,6 +10,9 @@
       </div>
       <div class="yl-page-actions">
         <el-button :icon="Refresh" @click="refreshUsers">刷新</el-button>
+        <el-button v-if="authStore.hasPermission('manage_users')" :icon="Setting" @click="showDepartmentDialog">
+          部门职位管理
+        </el-button>
         <el-button v-if="authStore.hasPermission('manage_users')" type="primary" :icon="Plus" @click="showCreateDialog">
           创建用户
         </el-button>
@@ -56,7 +59,7 @@
             <span v-else class="yl-text-placeholder">未登录</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280">
+        <el-table-column label="操作" min-width="280">
           <template #default="{ row }">
             <div class="yl-action-buttons">
               <el-button size="small" :icon="Edit" @click="editUser(row)">编辑</el-button>
@@ -115,12 +118,12 @@
         </el-form-item>
         <el-form-item label="部门" prop="department">
           <el-select v-model="createForm.department" placeholder="请选择部门" style="width: 100%">
-            <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+            <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
           </el-select>
         </el-form-item>
         <el-form-item label="职位" prop="position">
           <el-select v-model="createForm.position" placeholder="请先选择部门" :disabled="!createForm.department" style="width: 100%">
-            <el-option v-for="pos in getPositionsByDepartment(createForm.department)" :key="pos" :label="pos" :value="pos" />
+            <el-option v-for="pos in getPositions(createForm.department)" :key="pos" :label="pos" :value="pos" />
           </el-select>
         </el-form-item>
         <el-form-item label="角色" prop="role">
@@ -161,12 +164,12 @@
         </el-form-item>
         <el-form-item label="部门" prop="department">
           <el-select v-model="editForm.department" placeholder="请选择部门" clearable style="width: 100%">
-            <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+            <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
           </el-select>
         </el-form-item>
         <el-form-item label="职位" prop="position">
           <el-select v-model="editForm.position" placeholder="请先选择部门" :disabled="!editForm.department" clearable style="width: 100%">
-            <el-option v-for="pos in getPositionsByDepartment(editForm.department)" :key="pos" :label="pos" :value="pos" />
+            <el-option v-for="pos in getPositions(editForm.department)" :key="pos" :label="pos" :value="pos" />
           </el-select>
         </el-form-item>
         <el-form-item label="角色" prop="role">
@@ -206,26 +209,123 @@
         <el-button type="primary" :loading="resetPasswordLoading" @click="handleResetPassword">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 部门职位管理对话框 -->
+    <el-dialog v-model="departmentDialogVisible" title="部门职位管理" width="700px" :close-on-click-modal="false">
+      <div class="dept-management">
+        <div class="dept-section">
+          <div class="dept-header">
+            <h3>部门列表</h3>
+            <el-button size="small" type="primary" :icon="Plus" @click="showAddDepartmentDialog">添加部门</el-button>
+          </div>
+          <el-table :data="localDepartments" border>
+            <el-table-column label="部门名称" prop="name" />
+            <el-table-column label="职位数量" width="100">
+              <template #default="{ row }">{{ localDeptPositionMap[row]?.length || 0 }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="180">
+              <template #default="{ row }">
+                <el-button size="small" :icon="Edit" @click="showEditPositionsDialog(row)">管理职位</el-button>
+                <el-popconfirm title="确定删除此部门？" @confirm="deleteDepartment(row)">
+                  <template #reference>
+                    <el-button size="small" type="danger" :icon="Delete">删除</el-button>
+                  </template>
+                </el-popconfirm>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="departmentDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveDepartmentChanges">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加部门对话框 -->
+    <el-dialog v-model="addDepartmentVisible" title="添加部门" width="400px" :close-on-click-modal="false">
+      <el-form :model="addDepartmentForm" label-width="80px">
+        <el-form-item label="部门名称">
+          <el-input v-model="addDepartmentForm.name" placeholder="请输入部门名称" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="addDepartmentVisible = false">取消</el-button>
+        <el-button type="primary" @click="addDepartment">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 管理职位对话框 -->
+    <el-dialog v-model="editPositionsVisible" title="管理职位" width="500px" :close-on-click-modal="false">
+      <div class="positions-management">
+        <div class="positions-header">
+          <h4>{{ currentDepartment }} - 职位列表</h4>
+          <el-button size="small" type="primary" :icon="Plus" @click="showAddPositionInput">添加职位</el-button>
+        </div>
+        <el-input v-if="addPositionInputVisible" v-model="newPositionName" placeholder="输入职位名称" size="small" style="margin-bottom: 12px">
+          <template #append>
+            <el-button :icon="Check" @click="addPosition" />
+            <el-button :icon="Close" @click="cancelAddPosition" />
+          </template>
+        </el-input>
+        <el-table :data="currentPositions" border>
+          <el-table-column label="职位名称" prop="name" />
+          <el-table-column label="操作" width="100">
+            <template #default="{ row }">
+              <el-popconfirm title="确定删除此职位？" @confirm="deletePosition(row)">
+                <template #reference>
+                  <el-button size="small" type="danger" :icon="Delete">删除</el-button>
+                </template>
+              </el-popconfirm>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="editPositionsVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import { User, Edit, Refresh, Clock, Plus, Delete, Key } from '@element-plus/icons-vue'
+import { User, Edit, Refresh, Clock, Plus, Delete, Key, Setting, Check, Close } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '@/utils/api'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 import type { User as UserType, ElementPlusTagType } from '@/types'
 import { useAuthStore } from '@/stores/auth'
-import { DEPARTMENTS, getPositionsByDepartment } from '@/constants/department'
 
 const authStore = useAuthStore()
 
 const users = ref<UserType[]>([])
 const currentPage = ref(1)
 const pageSize = ref(20)
+
+// 动态部门职位配置
+const deptPositionMap = ref<Record<string, string[]>>({})
+const departments = computed(() => Object.keys(deptPositionMap.value))
+const getPositions = (dept: string) => deptPositionMap.value[dept] || []
+
+// 加载部门职位配置
+async function loadDeptPositionConfig() {
+  try {
+    const res = await api.get('/api/departments/org-options')
+    if (res.data.success) {
+      deptPositionMap.value = res.data.data
+    }
+  } catch (error) {
+    console.error('加载部门职位配置失败:', error)
+    // 使用默认配置
+    deptPositionMap.value = {
+      '行政部': ['行政主管', '行政专员', '财务', '出纳'],
+      '项目部': ['项目经理', '员工'],
+    }
+  }
+}
 
 // 分页后的用户列表
 const paginatedUsers = computed(() => {
@@ -254,8 +354,6 @@ const createForm = reactive({
 const validateMobile = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   if (!value) {
     callback(new Error('请输入手机号'))
-  } else if (value.length !== 11) {
-    callback(new Error('手机号格式不正确'))
   } else if (!/^1[3-9]\d{9}$/.test(value)) {
     callback(new Error('手机号格式不正确'))
   } else {
@@ -370,6 +468,25 @@ const resetPasswordRules: FormRules = {
     { min: 6, message: '密码至少6个字符', trigger: 'blur' },
   ],
 }
+
+// 部门职位管理相关
+const departmentDialogVisible = ref(false)
+const localDeptPositionMap = ref<Record<string, string[]>>({})
+const localDepartments = computed(() => Object.keys(localDeptPositionMap.value))
+
+// 添加部门
+const addDepartmentVisible = ref(false)
+const addDepartmentForm = reactive({ name: '' })
+
+// 管理职位
+const editPositionsVisible = ref(false)
+const currentDepartment = ref('')
+const currentPositions = computed(() => {
+  const positions = localDeptPositionMap.value[currentDepartment.value] || []
+  return positions.map(p => ({ name: p }))
+})
+const addPositionInputVisible = ref(false)
+const newPositionName = ref('')
 
 // 角色标签颜色
 function getRoleTagType(role: string): ElementPlusTagType {
@@ -588,7 +705,104 @@ async function handleResetPassword() {
   }
 }
 
+// 显示部门管理对话框
+async function showDepartmentDialog() {
+  localDeptPositionMap.value = JSON.parse(JSON.stringify(deptPositionMap.value))
+  departmentDialogVisible.value = true
+}
+
+// 显示添加部门对话框
+function showAddDepartmentDialog() {
+  addDepartmentForm.name = ''
+  addDepartmentVisible.value = true
+}
+
+// 添加部门
+function addDepartment() {
+  if (!addDepartmentForm.name.trim()) {
+    ElMessage.warning('请输入部门名称')
+    return
+  }
+  if (localDeptPositionMap.value[addDepartmentForm.name]) {
+    ElMessage.warning('部门已存在')
+    return
+  }
+  localDeptPositionMap.value[addDepartmentForm.name] = []
+  addDepartmentVisible.value = false
+  ElMessage.success('部门添加成功')
+}
+
+// 删除部门
+function deleteDepartment(dept: string) {
+  delete localDeptPositionMap.value[dept]
+  ElMessage.success('部门删除成功')
+}
+
+// 显示管理职位对话框
+function showEditPositionsDialog(dept: string) {
+  currentDepartment.value = dept
+  editPositionsVisible.value = true
+  addPositionInputVisible.value = false
+}
+
+// 显示添加职位输入框
+function showAddPositionInput() {
+  newPositionName.value = ''
+  addPositionInputVisible.value = true
+}
+
+// 添加职位
+function addPosition() {
+  if (!newPositionName.value.trim()) {
+    ElMessage.warning('请输入职位名称')
+    return
+  }
+  const positions = localDeptPositionMap.value[currentDepartment.value] || []
+  if (positions.includes(newPositionName.value)) {
+    ElMessage.warning('职位已存在')
+    return
+  }
+  positions.push(newPositionName.value)
+  localDeptPositionMap.value[currentDepartment.value] = positions
+  addPositionInputVisible.value = false
+  ElMessage.success('职位添加成功')
+}
+
+// 取消添加职位
+function cancelAddPosition() {
+  addPositionInputVisible.value = false
+  newPositionName.value = ''
+}
+
+// 删除职位
+function deletePosition(position: { name: string }) {
+  const positions = localDeptPositionMap.value[currentDepartment.value] || []
+  const index = positions.indexOf(position.name)
+  if (index > -1) {
+    positions.splice(index, 1)
+    localDeptPositionMap.value[currentDepartment.value] = positions
+    ElMessage.success('职位删除成功')
+  }
+}
+
+// 保存部门职位变更
+async function saveDepartmentChanges() {
+  try {
+    const res = await api.post('/api/departments/org-options', {
+      departmentPositionMap: localDeptPositionMap.value
+    })
+    if (res.data.success) {
+      deptPositionMap.value = JSON.parse(JSON.stringify(localDeptPositionMap.value))
+      ElMessage.success('保存成功')
+      departmentDialogVisible.value = false
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '保存失败')
+  }
+}
+
 onMounted(() => {
+  loadDeptPositionConfig()
   loadUsers()
 })
 </script>
@@ -684,5 +898,44 @@ onMounted(() => {
   .yl-pagination {
     justify-content: center;
   }
+}
+
+/* 部门管理样式 */
+.dept-management {
+  padding: 12px 0;
+}
+
+.dept-section {
+  margin-bottom: 24px;
+}
+
+.dept-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.dept-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.positions-management {
+  padding: 12px 0;
+}
+
+.positions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.positions-header h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
 }
 </style>
