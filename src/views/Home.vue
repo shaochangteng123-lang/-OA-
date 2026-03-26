@@ -572,7 +572,7 @@ async function handleSave() {
   height: calc(100vh - 60px);
   background: #ffffff;
   overflow: hidden;
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
 }
 
 /* ========== 编辑器主区域 ========== */
@@ -591,7 +591,7 @@ async function handleSave() {
 }
 
 .editor-container {
-  max-width: 900px;
+  max-width: min(900px, 100%);
   margin: 0 auto;
   padding: 60px 96px;
   min-height: 100%;
@@ -652,9 +652,15 @@ async function handleSave() {
 
 /* ========== 响应式设计 ========== */
 
+@media (max-width: 1366px) {
+  .editor-container {
+    padding: 40px 48px;
+  }
+}
+
 @media (max-width: 1024px) {
   .editor-container {
-    padding: 40px 60px;
+    padding: 30px 24px;
   }
 }
 

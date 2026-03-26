@@ -772,9 +772,9 @@ router.get('/records', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 构建查询条件（报销统计显示所有历史数据，包括已删除的）
-    let whereClause = 'WHERE user_id = ?'
-    const params: any[] = [userId]
+    // 构建查询条件（报销统计显示所有历史数据，包括已删除的，但排除草稿状态）
+    let whereClause = 'WHERE user_id = ? AND status != ?'
+    const params: any[] = [userId, 'draft']
 
     if (type) {
       whereClause += ' AND type = ?'
@@ -917,8 +917,8 @@ router.post('/create', requireAuth, async (req, res) => {
     // 导入数据库
     const { db } = await import('../db/index.js')
 
-    // 如果是基础报销，需要重新计算核减金额
-    let processedInvoices = invoices
+    // 服务端统一重算核减金额，不信任客户端传入的 deductedAmount
+    let processedInvoices = invoices.map((inv: any) => ({ ...inv, deductedAmount: 0 }))
     if (type === 'basic') {
       // 获取当月已使用的运输/交通/汽油/柴油类发票额度
       const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
@@ -1081,6 +1081,25 @@ router.post('/create', requireAuth, async (req, res) => {
         }
       }
 
+      // 事务内校验文件哈希唯一性（防止同一文件被上传到不同报销单）
+      for (const invoice of processedInvoices) {
+        if (invoice.fileHash) {
+          const existingByHash = db.prepare(`
+            SELECT ri.file_hash, r.applicant_name FROM reimbursement_invoices ri
+            JOIN reimbursements r ON ri.reimbursement_id = r.id
+            WHERE ri.file_hash = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+            LIMIT 1
+          `).get(invoice.fileHash) as { file_hash: string; applicant_name: string } | undefined
+          if (existingByHash) {
+            db.exec('ROLLBACK')
+            return res.status(400).json({
+              success: false,
+              message: `${existingByHash.applicant_name} 已上传此发票文件，请勿重复提交`,
+            })
+          }
+        }
+      }
+
       // 插入报销单主记录
       db.prepare(`
         INSERT INTO reimbursements (
@@ -1204,11 +1223,8 @@ router.get('/list', requireAuth, async (req, res) => {
     const { db } = await import('../db/index.js')
 
     // 构建查询条件
-    // 默认视图排除已删除数据，指定日期范围查询时包含已删除数据
-    const hasDateRange = startDate && endDate
-    let whereClause = hasDateRange
-      ? 'WHERE user_id = ?'
-      : 'WHERE user_id = ? AND (is_deleted IS NULL OR is_deleted = 0)'
+    // 用户列表页始终排除已删除数据
+    let whereClause = 'WHERE user_id = ? AND COALESCE(is_deleted, 0) = 0'
     const params: any[] = [userId]
 
     if (type) {
@@ -1257,12 +1273,11 @@ router.get('/list', requireAuth, async (req, res) => {
       whereClause += ' AND created_at >= ? AND created_at <= ?'
       params.push(startDateTime, endDateTime)
     } else {
-      // 如果没有指定日期范围，默认显示最近一个月的数据
-      const oneMonthAgo = new Date()
-      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
-      const oneMonthAgoStr = oneMonthAgo.toISOString()
+      // 如果没有指定日期范围，默认只显示当月数据
+      const now = new Date()
+      const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
       whereClause += ' AND created_at >= ?'
-      params.push(oneMonthAgoStr)
+      params.push(firstDayOfMonth.toISOString())
     }
 
     // 查询总数（包含一个月限制）
@@ -1470,96 +1485,15 @@ router.get('/pending-list', requireAuth, async (req, res) => {
 })
 
 /**
- * 审批报销单（管理员）
+ * 审批报销单（旧接口，已废弃）
  * POST /api/reimbursement/:id/approve
+ * 此接口不再使用，所有审批操作请走 /api/approval/:id/approve 或 /api/approval/:id/reject
  */
-router.post('/:id/approve', requireAuth, async (req, res) => {
-  try {
-    const { id } = req.params
-    const { action, reason } = req.body // action: 'approve' | 'reject', reason: 驳回原因
-    const currentUserId = req.session.user?.id
-    const currentUserName = req.session.user?.name
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId || !currentUserName) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
-    }
-
-    // 检查是否为管理员
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限操作',
-      })
-    }
-
-    if (!action || !['approve', 'reject'].includes(action)) {
-      return res.status(400).json({
-        success: false,
-        message: '无效的审批操作',
-      })
-    }
-
-    const { db } = await import('../db/index.js')
-
-    // 检查报销单是否存在
-    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
-
-    if (!reimbursement) {
-      return res.status(404).json({
-        success: false,
-        message: '报销单不存在',
-      })
-    }
-
-    // 检查报销单状态是否为待审批
-    const pendingStatuses = ['pending', 'pending_first', 'pending_second', 'pending_final']
-    if (!pendingStatuses.includes(reimbursement.status)) {
-      return res.status(400).json({
-        success: false,
-        message: '该报销单不是待审批状态',
-      })
-    }
-
-    // 更新报销单状态
-    // 如果是审批通过且报销金额为0，直接设置为已完成状态
-    let newStatus = action === 'approve' ? 'approved' : 'rejected'
-    const now = new Date().toISOString()
-
-    // 检查报销金额是否为0（实际报销金额为0时，无需付款流程）
-    if (action === 'approve' && reimbursement.total_amount === 0) {
-      newStatus = 'completed'
-      db.prepare(`
-        UPDATE reimbursements
-        SET status = ?, approve_time = ?, approver = ?, reject_reason = ?, completed_time = ?, updated_at = ?
-        WHERE id = ?
-      `).run(newStatus, now, currentUserName, reason || null, now, now, id)
-
-      console.log(`✅ 报销单审批成功（金额为0，直接完成）: ${id}, 审批人: ${currentUserName}`)
-    } else {
-      db.prepare(`
-        UPDATE reimbursements
-        SET status = ?, approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
-        WHERE id = ?
-      `).run(newStatus, now, currentUserName, reason || null, now, id)
-
-      console.log(`✅ 报销单审批成功: ${id}, 操作: ${action}, 审批人: ${currentUserName}`)
-    }
-
-    res.json({
-      success: true,
-      message: action === 'approve' ? '审批通过' : '已驳回',
-    })
-  } catch (error) {
-    console.error('审批报销单失败:', error)
-    res.status(500).json({
-      success: false,
-      message: '审批失败',
-    })
-  }
+router.post('/:id/approve', requireAuth, async (_req, res) => {
+  return res.status(410).json({
+    success: false,
+    message: '此接口已废弃，请使用新审批接口 /api/approval/:id/approve',
+  })
 })
 
 
@@ -1791,6 +1725,13 @@ router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
       INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, payment_proof_path, pay_time, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
     `).run(batchId, batchNo, expectedAmount, currentUserId, paymentProofPath, now, now, now)
+
+    // 创建批次快照记录（单笔付款也需要快照，确保确认收款时能查询到）
+    const itemId = nanoid()
+    db.prepare(`
+      INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(itemId, batchId, id, expectedAmount, now)
 
     // 更新报销单状态
     db.prepare(`
@@ -2053,12 +1994,30 @@ router.get('/:id', requireAuth, async (req, res) => {
       updateTime: formatDateTime((reimbursement as any).updateTime),
     }
 
+    // 查询当前有效的审批实例ID（用于前端调用新审批接口）
+    const currentApprovalInstance = db.prepare(`
+      SELECT id FROM approval_instances
+      WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'pending'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(id) as { id: string } | undefined
+
+    // 查询管理员和总经理的名字（用于审批流程显示）
+    const adminUser = db.prepare(`
+      SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
+    `).get() as { name: string } | undefined
+    const gmUser = db.prepare(`
+      SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
+    `).get() as { name: string } | undefined
+
     res.json({
       success: true,
       data: {
         ...formattedReimbursement,
+        approvalInstanceId: currentApprovalInstance?.id || null,
         invoices,
         approvalHistory: formattedApprovalHistory,
+        adminApproverName: adminUser?.name || null,
+        gmApproverName: gmUser?.name || null,
       },
     })
   } catch (error) {
@@ -2125,8 +2084,8 @@ router.put('/:id', requireAuth, async (req, res) => {
       })
     }
 
-    // 如果是基础报销，需要重新计算核减金额（与创建逻辑一致，不信任客户端传入的核减值）
-    let processedInvoices = invoices
+    // 服务端统一重算核减金额，不信任客户端传入的 deductedAmount
+    let processedInvoices = invoices.map((inv: any) => ({ ...inv, deductedAmount: 0 }))
     // 计算报销月份（跨月编辑时需要同步更新）
     const reimbursementMonth = calculateReimbursementMonth(new Date(), existingReimbursement.type)
 
@@ -2281,6 +2240,25 @@ router.put('/:id', requireAuth, async (req, res) => {
         }
       }
 
+      // 事务内校验文件哈希唯一性（排除当前报销单自身）
+      for (const invoice of processedInvoices) {
+        if (invoice.fileHash) {
+          const existingByHash = db.prepare(`
+            SELECT ri.file_hash, r.applicant_name FROM reimbursement_invoices ri
+            JOIN reimbursements r ON ri.reimbursement_id = r.id
+            WHERE ri.file_hash = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, 0) = 0
+            LIMIT 1
+          `).get(invoice.fileHash, id) as { file_hash: string; applicant_name: string } | undefined
+          if (existingByHash) {
+            db.exec('ROLLBACK')
+            return res.status(400).json({
+              success: false,
+              message: `${existingByHash.applicant_name} 已上传此发票文件，请勿重复提交`,
+            })
+          }
+        }
+      }
+
       // 更新报销单主记录（包括 reimbursement_month，跨月编辑时同步更新）
       db.prepare(`
         UPDATE reimbursements
@@ -2369,17 +2347,8 @@ router.put('/:id', requireAuth, async (req, res) => {
 
           console.log('✅ 草稿提交审批，创建审批实例:', { approvalInstanceId, reimbursementId: id, type: approvalType })
 
-          // 判断是否为再次提交：直接从驳回状态提交，或从草稿状态但之前有驳回记录
-          let isResubmit = oldReimbursement.status === 'rejected'
-          if (!isResubmit && oldReimbursement.status === 'draft') {
-            const rejectedInstance = db.prepare(`
-              SELECT id FROM approval_instances
-              WHERE target_id = ? AND target_type = 'reimbursement' AND status = 'rejected'
-            `).get(id)
-            if (rejectedInstance) {
-              isResubmit = true
-            }
-          }
+          // 判断是否为再次提交：只有从驳回状态重新提交才算再次提交
+          const isResubmit = oldReimbursement.status === 'rejected'
 
           if (isResubmit) {
             const recordId = nanoid()
@@ -2504,7 +2473,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
     const { db } = await import('../db/index.js')
 
     // 检查报销单是否存在且属于当前用户
-    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId)
+    const reimbursement = db.prepare('SELECT * FROM reimbursements WHERE id = ? AND user_id = ?').get(id, userId) as any
 
     if (!reimbursement) {
       return res.status(404).json({
@@ -2513,9 +2482,24 @@ router.delete('/:id', requireAuth, async (req, res) => {
       })
     }
 
-    // 软删除：标记为已删除，而不是真正删除
     const now = new Date().toISOString()
-    db.prepare('UPDATE reimbursements SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?').run(now, now, id)
+
+    if (reimbursement.status === 'draft') {
+      // 草稿状态（包括撤回后变为草稿的）：硬删除，彻底移除数据
+      const hardDeleteTransaction = db.transaction(() => {
+        // 删除关联的审批实例（撤回后可能残留 withdrawn 状态的记录）
+        db.prepare(`
+          DELETE FROM approval_instances
+          WHERE target_id = ? AND target_type = 'reimbursement'
+        `).run(id)
+        // 删除报销单（reimbursement_invoices 有 ON DELETE CASCADE，会自动级联删除）
+        db.prepare('DELETE FROM reimbursements WHERE id = ?').run(id)
+      })
+      hardDeleteTransaction()
+    } else {
+      // 其他状态（如已完成）：软删除，保留历史数据
+      db.prepare('UPDATE reimbursements SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?').run(now, now, id)
+    }
 
     res.json({
       success: true,
@@ -2646,10 +2630,10 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '请选择报销单' })
     }
 
-    // 查询所有选中的报销单
+    // 查询所有选中的报销单（包含 payment_batch_id 用于校验重复挂载）
     const placeholders = reimbursementIds.map(() => '?').join(',')
     const reimbursements = db.prepare(`
-      SELECT id, user_id, total_amount, status, applicant_name, type, title
+      SELECT id, user_id, total_amount, status, applicant_name, type, title, payment_batch_id
       FROM reimbursements
       WHERE id IN (${placeholders}) AND (is_deleted = 0 OR is_deleted IS NULL)
     `).all(...reimbursementIds) as any[]
@@ -2665,6 +2649,33 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
         success: false,
         message: `以下报销单未审批通过：${notApproved.map(r => r.id).join(', ')}`,
       })
+    }
+
+    // 校验：报销单不能已挂载到其他正在付款的批次（已上传回单待确认）
+    const withBatchId = reimbursements.filter(r => r.payment_batch_id)
+    if (withBatchId.length > 0) {
+      const batchIds = [...new Set(withBatchId.map(r => r.payment_batch_id))]
+      const batchPlaceholders = batchIds.map(() => '?').join(',')
+      // 只有 payment_uploaded 状态（已上传回单待确认）才视为活跃批次
+      const activeBatches = db.prepare(`
+        SELECT id FROM payment_batches WHERE id IN (${batchPlaceholders}) AND status = 'payment_uploaded'
+      `).all(...batchIds) as any[]
+      const activeBatchIds = new Set(activeBatches.map(b => b.id))
+
+      const alreadyInBatch = withBatchId.filter(r => activeBatchIds.has(r.payment_batch_id))
+      if (alreadyInBatch.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `以下报销单已上传付款回单待确认，不能重复付款：${alreadyInBatch.map(r => r.id).join(', ')}`,
+        })
+      }
+
+      // 清除 pending（未付款）/ confirmed（已完成）/ 不存在的旧批次关联
+      const clearStmt = db.prepare('UPDATE reimbursements SET payment_batch_id = NULL, updated_at = ? WHERE id = ?')
+      const clearNow = new Date().toISOString()
+      for (const r of withBatchId.filter(r => !activeBatchIds.has(r.payment_batch_id))) {
+        clearStmt.run(clearNow, r.id)
+      }
     }
 
     // 校验：所有报销单必须属于同一收款人
@@ -2689,11 +2700,19 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
       VALUES (?, ?, ?, ?, 'pending', ?, ?)
     `).run(batchId, batchNo, totalAmount, currentUserId, now, now)
 
+    // 写入批次明细快照（记录创建时的成员和金额，防止后续漂移）
+    const insertItemStmt = db.prepare(`
+      INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+
     // 关联报销单到批次
     const updateStmt = db.prepare(`
       UPDATE reimbursements SET payment_batch_id = ?, updated_at = ? WHERE id = ?
     `)
     for (const r of reimbursements) {
+      const itemId = nanoid()
+      insertItemStmt.run(itemId, batchId, r.id, parseFloat(r.total_amount), now)
       updateStmt.run(batchId, now, r.id)
     }
 
@@ -2745,9 +2764,13 @@ router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentPr
       return res.status(404).json({ success: false, message: '付款批次不存在' })
     }
 
-    // 获取批次关联的报销单，取收款人信息
+    // 从快照表获取批次关联的报销单，取收款人信息
     const firstReimbursement = db.prepare(`
-      SELECT user_id FROM reimbursements WHERE payment_batch_id = ? LIMIT 1
+      SELECT r.user_id
+      FROM payment_batch_items pbi
+      INNER JOIN reimbursements r ON pbi.reimbursement_id = r.id
+      WHERE pbi.batch_id = ?
+      LIMIT 1
     `).get(batchId) as any
 
     if (!firstReimbursement) {
@@ -2894,10 +2917,12 @@ router.post('/payment-batch/:batchId/complete', requireAuth, async (req, res) =>
       return res.status(400).json({ success: false, message: '该批次已完成付款' })
     }
 
-    // 查询批次关联的报销单
+    // 从快照表查询批次关联的报销单
     const reimbursements = db.prepare(`
-      SELECT id, status, total_amount FROM reimbursements
-      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+      SELECT r.id, r.status, r.total_amount
+      FROM payment_batch_items pbi
+      INNER JOIN reimbursements r ON pbi.reimbursement_id = r.id
+      WHERE pbi.batch_id = ? AND (r.is_deleted = 0 OR r.is_deleted IS NULL)
     `).all(batchId) as any[]
 
     // 校验所有报销单状态
@@ -3006,21 +3031,40 @@ router.post('/payment-batch/:batchId/confirm-receipt', requireAuth, async (req, 
       return res.status(400).json({ success: false, message: '该批次尚未完成付款' })
     }
 
-    // 查询批次关联的报销单
-    const reimbursements = db.prepare(`
-      SELECT id, user_id, status FROM reimbursements
-      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+    // 从快照表查询批次关联的报销单
+    let reimbursements = db.prepare(`
+      SELECT r.id, r.user_id, r.status
+      FROM payment_batch_items pbi
+      INNER JOIN reimbursements r ON pbi.reimbursement_id = r.id
+      WHERE pbi.batch_id = ? AND (r.is_deleted = 0 OR r.is_deleted IS NULL)
     `).all(batchId) as any[]
+
+    // 如果快照表中没有记录，直接通过 payment_batch_id 查询报销单（兼容数据不一致的情况）
+    if (reimbursements.length === 0) {
+      reimbursements = db.prepare(`
+        SELECT id, user_id, status
+        FROM reimbursements
+        WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+      `).all(batchId) as any[]
+    }
+
+    if (reimbursements.length === 0) {
+      return res.status(400).json({ success: false, message: '该批次下没有关联的报销单' })
+    }
 
     // 校验：当前用户必须是报销单的申请人
     const notOwned = reimbursements.filter(r => r.user_id !== currentUserId)
     if (notOwned.length > 0) {
-      return res.status(403).json({ success: false, message: '无权操作此批次的报销单' })
+      return res.status(403).json({ success: false, message: '只有报销单申请人才能确认收款' })
     }
 
     // 只更新 payment_uploaded 状态的报销单
     const toConfirm = reimbursements.filter(r => r.status === 'payment_uploaded')
     if (toConfirm.length === 0) {
+      const statuses = reimbursements.map(r => r.status)
+      if (statuses.every(s => s === 'completed')) {
+        return res.status(400).json({ success: false, message: '该批次报销单已全部确认收款' })
+      }
       return res.status(400).json({ success: false, message: '没有需要确认的报销单' })
     }
 
@@ -3074,18 +3118,23 @@ router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '付款批次不存在' })
     }
 
-    // 查询关联的报销单
+    // 从快照表查询关联的报销单
     const reimbursements = db.prepare(`
-      SELECT id, type, title, total_amount as amount, status, applicant_name as applicant
-      FROM reimbursements
-      WHERE payment_batch_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+      SELECT r.id, r.type, r.title, r.total_amount as amount, r.status, r.applicant_name as applicant
+      FROM payment_batch_items pbi
+      INNER JOIN reimbursements r ON pbi.reimbursement_id = r.id
+      WHERE pbi.batch_id = ? AND (r.is_deleted = 0 OR r.is_deleted IS NULL)
     `).all(batchId) as any[]
 
-    // 权限：管理员可查看所有，普通用户只能查看自己的
-    const isAdmin = ['super_admin', 'admin'].includes(currentUserRole || '')
+    // 权限：管理员和总经理可查看所有，普通用户只能查看自己的
+    const isAdmin = ['super_admin', 'admin', 'general_manager'].includes(currentUserRole || '')
     if (!isAdmin) {
       const ownedReimbursement = db.prepare(`
-        SELECT id FROM reimbursements WHERE payment_batch_id = ? AND user_id = ? LIMIT 1
+        SELECT r.id
+        FROM payment_batch_items pbi
+        INNER JOIN reimbursements r ON pbi.reimbursement_id = r.id
+        WHERE pbi.batch_id = ? AND r.user_id = ?
+        LIMIT 1
       `).get(batchId, currentUserId) as any
       if (!ownedReimbursement) {
         return res.status(403).json({ success: false, message: '无权查看此批次' })

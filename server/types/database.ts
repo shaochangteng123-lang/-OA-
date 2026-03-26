@@ -197,7 +197,7 @@ export interface ApprovalRecord {
   instance_id: string
   step: number
   approver_id: string
-  action: 'approve' | 'reject' | 'comment'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'resubmit'
   comment: string | null
   action_time: string
 }

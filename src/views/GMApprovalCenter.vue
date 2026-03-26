@@ -73,7 +73,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120" align="center">
+            <el-table-column label="申请人" min-width="100" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -83,7 +83,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="180" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div v-if="row.reimbursementInfo">
                   <div>{{ normalizeReimbursementTitle(row.reimbursementInfo.title) }}</div>
@@ -94,22 +94,22 @@
                 <div v-else>-</div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="100" align="center">
+            <el-table-column label="报销类型" min-width="80" align="center">
               <template #default>
                 <el-tag type="primary" size="small">商务报销</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="客户/对象" width="150" align="center">
+            <el-table-column label="客户/对象" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.client || row.serviceTarget || '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="130" align="center">
+            <el-table-column label="状态" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag
                   :type="getStatusTagType(row.reimbursementStatus) as any"
@@ -121,12 +121,12 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="160" align="center">
+            <el-table-column label="提交时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ formatDate(row.submitTime) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="360" align="center" fixed="right">
+            <el-table-column label="操作" width="280" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -171,7 +171,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120" align="center">
+            <el-table-column label="申请人" min-width="100" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -181,7 +181,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="180" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
@@ -189,22 +189,22 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="100" align="center">
+            <el-table-column label="报销类型" min-width="80" align="center">
               <template #default>
                 <el-tag type="primary" size="small">商务报销</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="客户/对象" width="150" align="center">
+            <el-table-column label="客户/对象" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.client || row.serviceTarget || '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="130" align="center">
+            <el-table-column label="状态" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag
                   :type="getStatusTagType(row.status) as any"
@@ -216,12 +216,12 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="审批时间" width="160" align="center">
+            <el-table-column label="审批时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" align="center" fixed="right">
+            <el-table-column label="操作" width="150" align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -348,7 +348,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120" align="center" header-align="center">
+            <el-table-column label="申请人" min-width="100" align="center" header-align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="28">
@@ -358,7 +358,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="180" align="center" header-align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center" header-align="center">
               <template #default="{ row }">
                 <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
@@ -366,24 +366,24 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="120" align="center" header-align="center">
+            <el-table-column label="报销类型" min-width="100" align="center" header-align="center">
               <template #default="{ row }">
                 <el-tag :type="getTypeTagType(row.type)" size="small">
                   {{ row.typeName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center" header-align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center" header-align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="客户/对象" width="150" align="center" header-align="center">
+            <el-table-column label="客户/对象" min-width="120" align="center" header-align="center">
               <template #default="{ row }">
                 {{ row.client || row.serviceTarget || '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="130" align="center" header-align="center">
+            <el-table-column label="状态" min-width="80" align="center" header-align="center">
               <template #default="{ row }">
                 <el-tag
                   :type="getStatusTagType(row.status) as any"
@@ -395,12 +395,12 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="审批时间" width="160" align="center" header-align="center">
+            <el-table-column label="审批时间" min-width="130" align="center" header-align="center">
               <template #default="{ row }">
                 {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right" align="center" header-align="center">
+            <el-table-column label="操作" width="150" align="center" header-align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -509,8 +509,8 @@
 
               <el-timeline-item timestamp="待审批" placement="top" type="warning">
                 <div class="timeline-content">
-                  <div class="timeline-title">总经理审批</div>
-                  <div class="timeline-desc">等待总经理审批...</div>
+                  <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
+                  <div class="timeline-desc">等待总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批...</div>
                 </div>
               </el-timeline-item>
             </template>
@@ -544,7 +544,7 @@
                     </div>
                     <div class="timeline-desc">
                       <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
-                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
+                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action }}
                       </el-tag>
                     </div>
                     <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
@@ -562,7 +562,7 @@
                   type="success"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">总经理审批</div>
+                    <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
                     <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 审批通过</div>
                   </div>
                 </el-timeline-item>
@@ -573,7 +573,7 @@
                   type="danger"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">总经理审批</div>
+                    <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
                     <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 驳回了申请</div>
                     <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
                       <div class="reject-reason-label">驳回原因：</div>
@@ -591,8 +591,8 @@
                 type="warning"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title">管理员审批</div>
-                  <div class="timeline-desc">等待管理员审批...</div>
+                  <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
+                  <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
                 </div>
               </el-timeline-item>
 
@@ -899,7 +899,7 @@ interface ApprovalRecordItem {
   approverId: string
   approverName: string
   approverAvatar: string | null
-  action: 'approve' | 'reject'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'resubmit'
   comment: string | null
   actionTime: string
 }
@@ -1470,6 +1470,13 @@ async function loadApprovalRecords(reimbursementId: string) {
         if (res.data.data.reimbursementDescription) {
           currentApprovalRecord.value.description = res.data.data.reimbursementDescription
         }
+        // 更新审批人名字
+        if (res.data.data.adminApproverName) {
+          currentApprovalRecord.value.adminApproverName = res.data.data.adminApproverName
+        }
+        if (res.data.data.gmApproverName) {
+          currentApprovalRecord.value.gmApproverName = res.data.data.gmApproverName
+        }
       }
     }
   } catch (error) {
@@ -1915,11 +1922,14 @@ onMounted(async () => {
 /* 付款回单预览 */
 .payment-proof-preview {
   margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .proof-card {
   position: relative;
-  width: 200px;
+  width: min(200px, 45%);
   height: 140px;
   border: 2px solid #67c23a;
   border-radius: 8px;

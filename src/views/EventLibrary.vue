@@ -33,7 +33,7 @@
         <el-table-column prop="name" label="事件名称" min-width="200" />
         <el-table-column prop="eventType" label="事件类型" width="120" />
         <el-table-column prop="standardDuration" label="标准时长(天)" width="120" />
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button type="primary" size="small" link @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" size="small" link @click="handleDelete(row)">删除</el-button>
@@ -178,7 +178,7 @@ onMounted(() => loadEvents())
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .event-library-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
   display: flex;
   flex-direction: column;

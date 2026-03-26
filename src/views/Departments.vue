@@ -61,7 +61,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button size="small" :icon="Edit" @click="editDepartment(row)">编辑</el-button>
             <el-button size="small" type="danger" :icon="Delete" @click="deleteDepartment(row)">删除</el-button>

@@ -58,7 +58,12 @@ api.interceptors.response.use(
           }
       }
     } else if (error.request) {
-      ElMessage.error('网络错误，请检查网络连接')
+      // 后台轮询请求网络错误时静默处理，避免干扰用户操作
+      const silentUrls = ['/api/approval/pending-counts', '/api/auth/user']
+      const requestUrl = error.config?.url || ''
+      if (!silentUrls.some(url => requestUrl.includes(url))) {
+        ElMessage.error('网络错误，请检查网络连接')
+      }
     } else {
       ElMessage.error('请求配置错误')
     }

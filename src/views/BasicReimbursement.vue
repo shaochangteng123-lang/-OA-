@@ -19,7 +19,7 @@
           class="alert-info"
         >
           <template #default>
-            <p>可通过日期范围按年、月、日进行查询，查看不同时间段的报销数据。</p>
+            <p>默认显示当月报销数据，可通过日期范围查询历史记录。</p>
           </template>
         </el-alert>
 
@@ -96,7 +96,7 @@
             </template>
           </el-table-column>
           <el-table-column prop="submitTime" label="提交时间" width="180" align="center" />
-          <el-table-column label="操作" width="200" align="center" fixed="right">
+          <el-table-column label="操作" width="200" align="center">
             <template #default="{ row }">
               <el-button
                 v-if="row.status !== 'draft'"
@@ -233,7 +233,7 @@
                     type="success"
                   >
                     <div class="timeline-content">
-                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
                       <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
                     </div>
                   </el-timeline-item>
@@ -244,7 +244,7 @@
                     type="danger"
                   >
                     <div class="timeline-content">
-                      <div class="timeline-title">管理员审批</div>
+                      <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
                       <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 驳回了申请</div>
                       <div v-if="currentApprovalRecord.rejectReason" class="timeline-desc reject-reason">
                         驳回原因：{{ currentApprovalRecord.rejectReason }}
@@ -258,8 +258,8 @@
                     type="warning"
                   >
                     <div class="timeline-content">
-                      <div class="timeline-title">管理员审批</div>
-                      <div class="timeline-desc">等待管理员审批...</div>
+                      <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
+                      <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
                     </div>
                   </el-timeline-item>
                 </template>
@@ -272,8 +272,8 @@
                   type="warning"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">管理员审批</div>
-                    <div class="timeline-desc">等待管理员审批...</div>
+                    <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
+                    <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
                   </div>
                 </el-timeline-item>
 
@@ -516,7 +516,7 @@ const pagination = reactive({
 const loading = ref(false)
 
 // 报销单列表
-const reimbursementList = ref([])
+const reimbursementList = ref<any[]>([])
 
 // 审批过程弹窗
 const approvalDialogVisible = ref(false)
@@ -637,9 +637,9 @@ const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
 }
 
-// 判断是否可以删除（只有草稿和已完成状态可以删除）
+// 判断是否可以删除（只有草稿状态可以删除）
 const canDelete = (status: string) => {
-  return status === 'draft' || status === 'completed'
+  return status === 'draft'
 }
 
 // 新建报销单
@@ -802,6 +802,18 @@ const handleConfirmReceipt = async () => {
 
     if (result.success) {
       ElMessage.success('已确认收款，报销流程完成')
+      // 立即更新本地列表状态，避免等待网络请求的延迟
+      if (record.paymentBatchId && batchInfoForDialog.value) {
+        const batchIds = new Set(batchInfoForDialog.value.reimbursements.map((r: any) => r.id))
+        reimbursementList.value.forEach((item: any) => {
+          if (batchIds.has(item.id)) {
+            item.status = 'completed'
+          }
+        })
+      } else {
+        const target = reimbursementList.value.find((item: any) => item.id === record.id)
+        if (target) target.status = 'completed'
+      }
       approvalDialogVisible.value = false
       // 立即刷新待办计数
       await pendingStore.refreshPendingCounts()
@@ -909,7 +921,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .basic-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 0;
 }
 
@@ -1053,7 +1065,7 @@ onMounted(() => {
 
 .proof-card {
   position: relative;
-  width: 200px;
+  width: min(200px, 45%);
   height: 140px;
   border: 2px solid #67c23a;
   border-radius: 8px;

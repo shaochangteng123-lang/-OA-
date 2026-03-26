@@ -74,8 +74,8 @@ async function testPdfToImage() {
     await page.render({
       canvasContext: canvasAndContext.context,
       viewport: viewport,
-      canvasFactory: canvasFactory as any,
-    }).promise
+      canvasFactory: canvasFactory,
+    } as any).promise
     console.log('✅ PDF渲染成功')
 
     // 将canvas转换为PNG图片

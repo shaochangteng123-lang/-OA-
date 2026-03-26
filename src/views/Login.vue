@@ -178,7 +178,7 @@ onMounted(async () => {
 .login-box {
   position: relative;
   z-index: 10;
-  width: 420px;
+  width: min(420px, 90%);
   background: #fff;
   border-radius: 16px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);

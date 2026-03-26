@@ -655,7 +655,7 @@ watch(
 }
 
 .step-content {
-  max-width: 1200px;
+  max-width: 100%;
   margin: 0 auto;
   padding: 16px 24px;
 }
@@ -675,7 +675,7 @@ watch(
 
 /* 拒绝原因区域样式 */
 .reject-reason-section {
-  max-width: 1200px;
+  max-width: min(1200px, 100%);
   margin: 0 auto 24px;
 }
 
@@ -695,7 +695,7 @@ watch(
 }
 
 .reimbursement-form {
-  max-width: 1200px;
+  max-width: min(1200px, 100%);
   margin: 0 auto;
   padding: 24px 24px 24px 16px;
   background: #f5f7fa;
@@ -714,8 +714,19 @@ watch(
 }
 
 .upload-right {
-  width: 450px;
+  width: min(450px, 100%);
+  min-width: 300px;
   flex-shrink: 0;
+}
+
+@media (max-width: 1366px) {
+  .upload-layout {
+    flex-direction: column;
+  }
+  .upload-right {
+    width: 100%;
+    min-width: unset;
+  }
 }
 
 .upload-layout .el-form-item {
@@ -761,7 +772,7 @@ watch(
 
 /* 付款回单区域样式 */
 .payment-proof-section {
-  max-width: 1200px;
+  max-width: min(1200px, 100%);
   margin: 32px auto 0;
   padding: 24px;
   background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
@@ -831,7 +842,6 @@ watch(
   background: rgba(64, 158, 255, 0.08);
   border: 1px solid rgba(64, 158, 255, 0.3);
 }
-}
 
 .batch-r-id {
   font-family: monospace;
@@ -883,6 +893,8 @@ watch(
   flex-wrap: wrap;
   gap: 12px;
   min-height: 200px;
+  align-items: center;
+  justify-content: center;
   background: #f8fafc;
   padding: 12px;
 }

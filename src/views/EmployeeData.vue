@@ -84,51 +84,51 @@
                 style="width: 100%"
                 header-align="center"
               >
-                <el-table-column type="index" label="序号" width="80" align="center" />
-                <el-table-column prop="employee_no" label="员工编号" width="130" align="center">
+                <el-table-column type="index" label="序号" width="60" align="center" />
+                <el-table-column prop="employee_no" label="员工编号" min-width="100" align="center">
                   <template #default="{ row }">
                     {{ row.employee_no || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="name" label="姓名" width="100" align="center" />
-                <el-table-column prop="gender" label="性别" width="80" align="center">
+                <el-table-column prop="name" label="姓名" min-width="80" align="center" />
+                <el-table-column prop="gender" label="性别" min-width="60" align="center">
                   <template #default="{ row }">
                     {{ getGenderText(row.gender) }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="department" label="部门" width="120" align="center">
+                <el-table-column prop="department" label="部门" min-width="100" align="center">
                   <template #default="{ row }">
                     {{ row.department || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="position" label="职位" width="150" align="center">
+                <el-table-column prop="position" label="职位" min-width="120" align="center">
                   <template #default="{ row }">
                     {{ row.position || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="mobile" label="联系电话" width="130" align="center">
+                <el-table-column prop="mobile" label="联系电话" min-width="110" align="center">
                   <template #default="{ row }">
                     {{ row.mobile || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="email" label="邮箱" min-width="180" align="center">
+                <el-table-column prop="email" label="邮箱" min-width="150" align="center">
                   <template #default="{ row }">
                     {{ row.email || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="hire_date" label="入职日期" width="120" align="center">
+                <el-table-column prop="hire_date" label="入职日期" min-width="100" align="center">
                   <template #default="{ row }">
                     {{ row.hire_date || '-' }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="employment_status" label="状态" width="100" align="center">
+                <el-table-column prop="employment_status" label="状态" min-width="80" align="center">
                   <template #default="{ row }">
                     <el-tag :type="getEmploymentStatusType(row.employment_status)">
                       {{ getEmploymentStatusText(row.employment_status) }}
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="150" fixed="right" align="center">
+                <el-table-column label="操作" width="120" align="center">
                   <template #default="{ row }">
                     <el-button link type="primary" size="small" @click="handleView(row)">
                       查看
@@ -304,21 +304,21 @@
                   </div>
                 </div>
                 <el-table :data="probationStore.confirmationList" style="width: 100%" border v-loading="probationStore.confirmationListLoading">
-                  <el-table-column type="index" label="序号" width="70" align="center" />
-                  <el-table-column prop="employee_name" label="员工姓名" width="100" />
-                  <el-table-column prop="employee_department" label="部门" width="120">
+                  <el-table-column type="index" label="序号" width="60" align="center" />
+                  <el-table-column prop="employee_name" label="员工姓名" min-width="80" />
+                  <el-table-column prop="employee_department" label="部门" min-width="100">
                     <template #default="{ row }">
                       {{ row.employee_department || '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="employee_position" label="职位" width="120">
+                  <el-table-column prop="employee_position" label="职位" min-width="100">
                     <template #default="{ row }">
                       {{ row.employee_position || '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column prop="hire_date" label="入职日期" width="120" />
-                  <el-table-column prop="probation_end_date" label="试用期截止" width="120" />
-                  <el-table-column label="转正申请表" width="150">
+                  <el-table-column prop="hire_date" label="入职日期" min-width="100" />
+                  <el-table-column prop="probation_end_date" label="试用期截止" min-width="100" />
+                  <el-table-column label="转正申请表" min-width="120">
                     <template #default="{ row }">
                       <template v-if="row.documents && row.documents.length > 0">
                         <el-button link type="primary" size="small" @click="handleViewProbationDocs(row)">
@@ -328,19 +328,19 @@
                       <span v-else class="no-file">未上传</span>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="status" label="状态" width="100">
+                  <el-table-column prop="status" label="状态" min-width="80">
                     <template #default="{ row }">
                       <el-tag :type="getProbationStatusType(row.status)">
                         {{ getProbationStatusText(row.status) }}
                       </el-tag>
                     </template>
                   </el-table-column>
-                  <el-table-column prop="submit_time" label="提交时间" width="180">
+                  <el-table-column prop="submit_time" label="提交时间" min-width="130">
                     <template #default="{ row }">
                       {{ row.submit_time ? formatDateTime(row.submit_time) : '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="180" fixed="right">
+                  <el-table-column label="操作" width="150">
                     <template #default="{ row }">
                       <el-button link type="primary" size="small" @click="handleViewProbation(row)">
                         查看
@@ -1368,7 +1368,7 @@ watch(activeTab, (newTab) => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .employee-data-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 0;
 }
 

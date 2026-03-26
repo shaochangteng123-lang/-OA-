@@ -286,8 +286,7 @@ onMounted(async () => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .create-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
-  padding: 0;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
 }
 
 .page-card {
@@ -339,7 +338,7 @@ onMounted(async () => {
 
 .step-container {
   width: 100%;
-  max-width: 1400px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -347,7 +346,7 @@ onMounted(async () => {
 
 .reimbursement-form {
   width: 100%;
-  max-width: 1100px;
+  max-width: min(1100px, 100%);
 }
 
 /* 减少发票上传和发票明细之间的间距 */
@@ -368,8 +367,19 @@ onMounted(async () => {
 }
 
 .upload-right {
-  width: 450px;
+  width: min(450px, 100%);
+  min-width: 300px;
   flex-shrink: 0;
+}
+
+@media (max-width: 1366px) {
+  .upload-layout {
+    flex-direction: column;
+  }
+  .upload-right {
+    width: 100%;
+    min-width: unset;
+  }
 }
 
 /* 确保两侧的 form-item 样式一致 */

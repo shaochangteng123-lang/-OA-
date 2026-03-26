@@ -57,32 +57,32 @@
           stripe
           style="width: 100%"
         >
-          <el-table-column prop="id" label="申请编号" width="120" />
-          <el-table-column prop="applicant" label="申请人" width="100" />
-          <el-table-column prop="department" label="部门" width="120" />
-          <el-table-column prop="leaveType" label="请假类型" width="100">
+          <el-table-column prop="id" label="申请编号" min-width="100" />
+          <el-table-column prop="applicant" label="申请人" min-width="80" />
+          <el-table-column prop="department" label="部门" min-width="100" />
+          <el-table-column prop="leaveType" label="请假类型" min-width="80">
             <template #default="{ row }">
               <el-tag :type="getLeaveTypeColor(row.leaveType)" size="small">
                 {{ getLeaveTypeText(row.leaveType) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="startDate" label="开始日期" width="120" />
-          <el-table-column prop="endDate" label="结束日期" width="120" />
-          <el-table-column prop="days" label="请假天数" width="100">
+          <el-table-column prop="startDate" label="开始日期" min-width="100" />
+          <el-table-column prop="endDate" label="结束日期" min-width="100" />
+          <el-table-column prop="days" label="请假天数" min-width="80">
             <template #default="{ row }">
               <span class="days-text">{{ row.days }} 天</span>
             </template>
           </el-table-column>
-          <el-table-column prop="reason" label="请假事由" min-width="150" show-overflow-tooltip />
-          <el-table-column prop="status" label="状态" width="100">
+          <el-table-column prop="reason" label="请假事由" min-width="120" show-overflow-tooltip />
+          <el-table-column prop="status" label="状态" min-width="80">
             <template #default="{ row }">
               <el-tag :type="getStatusType(row.status)">
                 {{ getStatusText(row.status) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="200" fixed="right">
+          <el-table-column label="操作" width="150">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleView(row)">
                 查看
@@ -301,7 +301,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .leave-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 0;
 }
 

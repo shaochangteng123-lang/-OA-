@@ -8,15 +8,15 @@
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .yl-page {
   height: calc(100vh - 60px);
-  margin: -24px;
-  padding: 24px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
+  padding: var(--yl-main-padding-y, 24px) var(--yl-main-padding-x, 45px);
   display: flex;
   flex-direction: column;
   gap: var(--yl-gap-lg);
 }
 
 .yl-page-container {
-  max-width: 1920px;
+  max-width: 2400px;
   margin: 0 auto;
   padding: var(--yl-padding-lg);
   background: var(--yl-bg-page);
@@ -395,6 +395,12 @@
     flex-direction: column;
     align-items: flex-start;
     gap: var(--yl-gap-md);
+  }
+}
+
+@media (max-width: 1366px) {
+  .yl-grid-4 {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 

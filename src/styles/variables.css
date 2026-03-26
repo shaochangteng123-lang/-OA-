@@ -141,6 +141,7 @@
   --yl-breakpoint-xs: 480px;
   --yl-breakpoint-sm: 768px;
   --yl-breakpoint-md: 1024px;
+  --yl-breakpoint-notebook: 1366px;
   --yl-breakpoint-lg: 1440px;
   --yl-breakpoint-xl: 1920px;
 

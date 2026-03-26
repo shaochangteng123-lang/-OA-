@@ -60,6 +60,14 @@ router.get('/statistics', requireAdmin, (req, res) => {
         )`
       : ''
 
+    // admin 对 reimbursements 表的类型过滤（不经过 approval_instances）
+    const reimbursementTypeFilter = userRole === 'admin'
+      ? `AND (
+          r.type IN ('basic', 'large')
+          OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded'))
+        )`
+      : ''
+
     // 1. 待办数量（所有未完成的流程：待审批、待付款、付款中、待确认收款）
     const pendingApproval = db.prepare(`
       SELECT COUNT(*) as count FROM approval_instances ai
@@ -70,7 +78,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
       ${typeFilter}
     `).get() as { count: number }
 
-    // 2. 按报销类型统计当月数量和金额（基础报销、大额报销、商务报销）
+    // 2. 按报销类型统计当月数量和金额（排除草稿和驳回）
     const typeStats = db.prepare(`
       SELECT
         r.type,
@@ -78,6 +86,8 @@ router.get('/statistics', requireAdmin, (req, res) => {
         COALESCE(SUM(r.total_amount), 0) as amount
       FROM reimbursements r
       WHERE r.created_at >= ? AND r.created_at <= ?
+      AND r.status NOT IN ('draft', 'rejected')
+      ${reimbursementTypeFilter}
       GROUP BY r.type
     `).all(monthStart, monthEnd) as Array<{ type: string; count: number; amount: number }>
 
@@ -86,24 +96,27 @@ router.get('/statistics', requireAdmin, (req, res) => {
       typeStatsMap[stat.type] = { count: stat.count, amount: stat.amount }
     }
 
-    // 3. 已通过未付款数量（兼容旧逻辑）
+    // 3. 已通过未付款数量
     const approvedUnpaid = db.prepare(`
-      SELECT COUNT(*) as count FROM reimbursements
-      WHERE status = 'approved'
+      SELECT COUNT(*) as count FROM reimbursements r
+      WHERE r.status = 'approved'
+      ${reimbursementTypeFilter}
     `).get() as { count: number }
 
     // 4. 本月已付款数量（包括待确认收款和已完成）
     const paidThisMonth = db.prepare(`
-      SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
-      WHERE status IN ('payment_uploaded', 'completed')
-      AND pay_time >= ? AND pay_time <= ?
+      SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount FROM reimbursements r
+      WHERE r.status IN ('payment_uploaded', 'completed')
+      AND r.pay_time >= ? AND r.pay_time <= ?
+      ${reimbursementTypeFilter}
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
     // 5. 本月已完成数量（员工已确认收款）
     const completedThisMonth = db.prepare(`
-      SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount FROM reimbursements
-      WHERE status = 'completed'
-      AND completed_time >= ? AND completed_time <= ?
+      SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount FROM reimbursements r
+      WHERE r.status = 'completed'
+      AND r.completed_time >= ? AND r.completed_time <= ?
+      ${reimbursementTypeFilter}
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
     res.json({
@@ -138,8 +151,15 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
     const conditions: string[] = []
     const params: any[] = []
 
-    // 默认只查 approved，如果传了 status 则按传入的查
+    // 默认只查 approved，如果传了 status 则按传入的查（限制允许的状态值）
+    const allowedStatuses = ['approved', 'payment_uploaded', 'completed']
     if (status) {
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `无效的状态筛选值，允许的值: ${allowedStatuses.join(', ')}`,
+        })
+      }
       conditions.push('r.status = ?')
       params.push(status)
     } else {
@@ -471,6 +491,14 @@ router.get('/by-target', requireAuth, (req, res) => {
       FROM reimbursements WHERE id = ?
     `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null } | undefined
 
+    // 查询管理员和总经理的名字（用于审批流程显示）
+    const adminUser = db.prepare(`
+      SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
+    `).get() as { name: string } | undefined
+    const gmUser = db.prepare(`
+      SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
+    `).get() as { name: string } | undefined
+
     res.json({
       success: true,
       data: {
@@ -497,6 +525,8 @@ router.get('/by-target', requireAuth, (req, res) => {
         paymentUploadTime: reimbursement?.payment_upload_time ? formatDateTime(reimbursement.payment_upload_time) : null,
         completedTime: reimbursement?.completed_time ? formatDateTime(reimbursement.completed_time) : null,
         receiptConfirmedBy: reimbursement?.receipt_confirmed_by,
+        adminApproverName: adminUser?.name || null,
+        gmApproverName: gmUser?.name || null,
       },
     })
   } catch (error) {
@@ -1099,7 +1129,7 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
         type: r.type,
         typeName: typeMap[r.type] || r.type,
         title: normalizeReimbursementTitle(r.title || ''),
-        amount: r.total_amount - (r.deduction_amount || 0),
+        amount: r.total_amount,  // total_amount 已经是扣除核减后的实际金额
         status: r.status,
         statusName: statusMap[r.status] || r.status,
         payTime: formatDateTime(r.pay_time),
@@ -1306,7 +1336,7 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
 // 获取总经理审批统计数据
 router.get('/gm-statistics', requireAuth, (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.user?.id
 
     // 检查是否是总经理
     const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
@@ -1373,7 +1403,7 @@ router.get('/gm-statistics', requireAuth, (req, res) => {
 // 获取总经理待审批列表（只显示商务报销）
 router.get('/gm-pending', requireAuth, (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.user?.id
 
     // 检查是否是总经理
     const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
@@ -1469,7 +1499,7 @@ router.get('/gm-pending', requireAuth, (req, res) => {
 // 获取总经理本月已审批列表（只显示商务报销）
 router.get('/gm-completed', requireAuth, (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.user?.id
 
     // 检查是否是总经理
     const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
@@ -2097,6 +2127,14 @@ router.get('/:id', requireAuth, (req, res) => {
       ORDER BY ar.action_time ASC
     `).all(id) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
 
+    // 查询管理员和总经理的名字（用于审批流程显示）
+    const adminUser = db.prepare(`
+      SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
+    `).get() as { name: string } | undefined
+    const gmUser = db.prepare(`
+      SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
+    `).get() as { name: string } | undefined
+
     res.json({
       success: true,
       data: {
@@ -2122,6 +2160,8 @@ router.get('/:id', requireAuth, (req, res) => {
           comment: record.comment,
           actionTime: formatDateTime(record.action_time),
         })),
+        adminApproverName: adminUser?.name || null,
+        gmApproverName: gmUser?.name || null,
       },
     })
   } catch (error) {

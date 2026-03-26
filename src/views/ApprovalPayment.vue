@@ -559,9 +559,10 @@ onUnmounted(() => {
 <style scoped>
 .approval-payment {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
 }
+
 .no-border-card { border: none; }
 .section { margin-bottom: 32px; }
 .section-title {
@@ -594,10 +595,10 @@ onUnmounted(() => {
 }
 .proof-card {
   position: relative;
-  width: 160px;
+  width: min(160px, 45%);
 }
 .proof-preview {
-  width: 160px;
+  width: 100%;
   height: 120px;
   border-radius: 6px;
   overflow: hidden;
@@ -617,9 +618,10 @@ onUnmounted(() => {
 }
 .proof-delete { position: absolute; top: -8px; right: -8px; z-index: 10; }
 
+.add-more-upload { width: min(160px, 45%); }
 .add-more-upload :deep(.el-upload) { width: 100%; height: 100%; }
 .add-more-btn {
-  width: 160px;
+  width: 100%;
   height: 120px;
   border: 1px dashed #d9d9d9;
   border-radius: 6px;

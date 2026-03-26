@@ -56,7 +56,7 @@
             <span v-else class="yl-text-placeholder">未登录</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="280" fixed="right">
+        <el-table-column label="操作" width="280">
           <template #default="{ row }">
             <div class="yl-action-buttons">
               <el-button size="small" :icon="Edit" @click="editUser(row)">编辑</el-button>
@@ -601,7 +601,7 @@ onMounted(() => {
   height: calc(100vh - 60px);
   display: flex;
   flex-direction: column;
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
 }
 

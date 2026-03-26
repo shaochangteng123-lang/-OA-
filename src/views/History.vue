@@ -360,7 +360,7 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
 }
 

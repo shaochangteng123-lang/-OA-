@@ -23,6 +23,7 @@ html {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   scroll-behavior: smooth;
+  overflow-x: hidden;
 }
 
 body {
@@ -32,6 +33,12 @@ body {
   color: var(--yl-text-regular);
   background: var(--yl-bg-page);
   min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* 防止页面内容横向溢出 */
+.app-main {
+  overflow-x: hidden !important;
 }
 
 /* ========== 滚动条美化 ========== */

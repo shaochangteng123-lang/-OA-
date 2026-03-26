@@ -34,39 +34,39 @@
         <!-- 转正信息表格 -->
         <el-table :data="[myStatus.confirmation]" stripe style="width: 100%" :header-cell-style="{ textAlign: 'center' }" :cell-style="{ textAlign: 'center' }">
           <el-table-column type="index" label="序号" width="60" />
-          <el-table-column label="申请人" width="100">
+          <el-table-column label="申请人" min-width="80">
             <template #default>
               {{ myStatus.profile?.name || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="部门" width="120">
+          <el-table-column label="部门" min-width="100">
             <template #default>
               {{ myStatus.profile?.department || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="职位" width="120">
+          <el-table-column label="职位" min-width="100">
             <template #default>
               {{ myStatus.profile?.position || '-' }}
             </template>
           </el-table-column>
-          <el-table-column label="入职时间" width="110">
+          <el-table-column label="入职时间" min-width="90">
             <template #default>
               {{ formatDate(myStatus.profile?.hire_date) }}
             </template>
           </el-table-column>
-          <el-table-column label="试用期截止" width="110">
+          <el-table-column label="试用期截止" min-width="90">
             <template #default>
               {{ formatDate(myStatus.confirmation?.probation_end_date) }}
             </template>
           </el-table-column>
-          <el-table-column label="剩余天数" width="90">
+          <el-table-column label="剩余天数" min-width="70">
             <template #default>
               <span :class="getRemainingDaysClass(myStatus.confirmation?.probation_end_date)">
                 {{ getRemainingDays(myStatus.confirmation?.probation_end_date) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="转正申请模板" width="130">
+          <el-table-column label="转正申请模板" min-width="100">
             <template #default>
               <template v-if="templates.length > 0">
                 <el-button type="primary" link size="small" @click="handleDownloadTemplate(templates[0])">
@@ -78,7 +78,7 @@
               </template>
             </template>
           </el-table-column>
-          <el-table-column label="转正申请表" width="200">
+          <el-table-column label="转正申请表" min-width="150">
             <template #default>
               <template v-if="myStatus.documents && myStatus.documents.length > 0">
                 <el-button type="primary" link size="small" @click="handleViewDocs">
@@ -109,14 +109,14 @@
               </el-upload>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="100">
+          <el-table-column label="状态" min-width="80">
             <template #default>
               <el-tag :type="getStatusType(myStatus.confirmation?.status)" size="small">
                 {{ getStatusText(myStatus.confirmation?.status) }}
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="180" fixed="right">
+          <el-table-column label="操作" width="150">
             <template #default>
               <el-button type="primary" link @click="handleViewDetail">
                 查看详情
@@ -469,7 +469,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .probation-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 0;
 }
 

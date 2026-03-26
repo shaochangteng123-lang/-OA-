@@ -122,8 +122,12 @@ export function useInvoice() {
     }
 
     // 调用后端API进行发票OCR识别
+    const loadingMessage = ElMessage.info({
+      message: `正在识别发票 ${file.name}...`,
+      duration: 0, // 持续显示，直到识别完成
+    })
+
     try {
-      ElMessage.info(`正在识别发票 ${file.name}...`)
 
       const uploadFormData = new FormData()
       uploadFormData.append('invoice', file.raw)
@@ -149,6 +153,7 @@ export function useInvoice() {
         // 校验金额
         const amountResult = validateInvoiceAmount(amount)
         if (!amountResult.valid) {
+          loadingMessage.close()
           ElMessage.error(amountResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
@@ -157,6 +162,7 @@ export function useInvoice() {
         // 校验重复（本地）
         const duplicateResult = validateInvoiceDuplicate(invoiceNumber, invoiceNumbers.value)
         if (!duplicateResult.valid) {
+          loadingMessage.close()
           ElMessage.warning(duplicateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
@@ -173,6 +179,7 @@ export function useInvoice() {
             })
             const dupData = await dupRes.json()
             if (dupData.success && dupData.data?.duplicate) {
+              loadingMessage.close()
               ElMessage.warning(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
               removeFromFileList(file.uid, fileListParam)
               return
@@ -185,6 +192,7 @@ export function useInvoice() {
         // 校验日期
         const dateResult = validateInvoiceDate(date)
         if (!dateResult.valid) {
+          loadingMessage.close()
           ElMessage.error(dateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
@@ -201,15 +209,18 @@ export function useInvoice() {
           fileUid: file.uid,
         })
 
+        loadingMessage.close()
         ElMessage.success(`${file.name} 识别成功！`)
 
         // 保存文件路径供后续提交使用
         file.serverPath = result.data.filePath
       } else {
+        loadingMessage.close()
         ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error) {
+      loadingMessage.close()
       console.error('发票识别失败:', error)
       ElMessage.error(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
@@ -243,6 +254,15 @@ export function useInvoice() {
         body: uploadFormData,
         credentials: 'include',
       })
+
+      // 检查 HTTP 状态码
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: '上传失败' }))
+        loadingMessage.close()
+        ElMessage.error(errorData.message || `上传失败 (${response.status})`)
+        removeFromFileList(file.uid, fileListParam)
+        return
+      }
 
       const result: UploadResponse = await response.json()
 
@@ -580,8 +600,9 @@ export function useInvoice() {
       category: inv.category,
       filePath: inv.filePath,
       fileHash: inv.fileHash || '',
-      deductedAmount: inv.deductedAmount || 0,
-      actualAmount: inv.actualAmount || inv.amount,
+      // 核减金额由后端统一计算，前端仅供展示
+      deductedAmount: 0,
+      actualAmount: inv.amount,
     }))
   }
 

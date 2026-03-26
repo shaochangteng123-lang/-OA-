@@ -12,7 +12,7 @@
         <el-table-column label="包含事件" width="100">
           <template #default="{ row }">{{ row.events?.length || 0 }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150" fixed="right">
+        <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button type="primary" size="small" link @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" size="small" link @click="handleDelete(row)">删除</el-button>
@@ -138,7 +138,7 @@ onMounted(() => loadBlocks())
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .blocks-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
   display: flex;
   flex-direction: column;

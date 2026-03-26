@@ -219,6 +219,8 @@ const setupReimbursementCleanup = () => {
   console.log('✅ 月末报销数据自动清除任务已启动')
 }
 
+import { shutdownOcrDaemon } from './services/ocrDaemon.js'
+
 setupReimbursementCleanup()
 
 // Start server
@@ -232,10 +234,12 @@ app.listen(PORT, '0.0.0.0', () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server')
+  shutdownOcrDaemon()
   process.exit(0)
 })
 
 process.on('SIGINT', () => {
   console.log('SIGINT signal received: closing HTTP server')
+  shutdownOcrDaemon()
   process.exit(0)
 })

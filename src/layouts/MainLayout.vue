@@ -572,6 +572,7 @@ onUnmounted(() => {
   min-height: 100vh;
   background-color: #ffffff;
   position: relative;
+  overflow-x: hidden;
 }
 
 /* 侧边栏 - 优雅展开动画 */
@@ -618,12 +619,15 @@ onUnmounted(() => {
 
 /* 主内容区域 - 优化模块34：隐藏滚动条但保持滚动功能 */
 .app-main {
+  --yl-main-padding-y: 24px;
+  --yl-main-padding-x: 45px;
   margin-top: 60px;
   margin-left: 64px;
   min-height: calc(100vh - 60px);
   overflow: auto;
+  overflow-x: hidden;
   background-color: #ffffff;
-  padding: 24px 45px;
+  padding: var(--yl-main-padding-y) var(--yl-main-padding-x);
   max-width: none;
   transition: margin-left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   /* 优化模块34：隐藏滚动条但保持滚动功能 */
@@ -652,7 +656,14 @@ onUnmounted(() => {
   opacity: 0;
 }
 
-/* 响应式 */
+/* 响应式 - 笔记本屏幕 */
+@media (max-width: 1366px) {
+  .app-main {
+    --yl-main-padding-y: 16px;
+    --yl-main-padding-x: 20px;
+  }
+}
+
 @media (max-width: 768px) {
   .app-sidebar {
     transform: translateX(0);

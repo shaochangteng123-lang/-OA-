@@ -475,12 +475,13 @@ onMounted(async () => {
   height: calc(100vh - 60px);
   overflow: hidden;
   position: relative;
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
 }
 
 /* 左栏侧边栏（优化模块22：背景改为白色） */
 .calendar-sidebar {
   width: 280px;
+  min-width: 220px;
   border-right: 1px solid #e5e7eb;
   display: flex;
   flex-direction: column;
@@ -488,6 +489,13 @@ onMounted(async () => {
   position: relative;
   background: #ffffff;
   flex-shrink: 0;
+}
+
+@media (max-width: 1366px) {
+  .calendar-sidebar {
+    width: 240px;
+    min-width: 200px;
+  }
 }
 
 .calendar-sidebar.collapsed {
@@ -632,6 +640,12 @@ onMounted(async () => {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+}
+
+@media (max-width: 1366px) {
+  .calendar-right-panel {
+    width: 320px;
+  }
 }
 
 /* 右栏顶部标题区域（高度60px，与左栏、中栏一致） */

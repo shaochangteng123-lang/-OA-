@@ -11,16 +11,8 @@
  *   金额(大写) 人民币壹仟伍佰元整
  */
 
-import { execFile } from 'child_process'
-import { promisify } from 'util'
 import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
-
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
-
-const execFileAsync = promisify(execFile)
+import { callPaddleOcr } from './ocrDaemon.js'
 
 export interface PaymentProofOcrResult {
   payer: string          // 付款人
@@ -28,47 +20,6 @@ export interface PaymentProofOcrResult {
   payeeAccount: string   // 收款账号
   amount: number         // 金额
   rawText?: string       // 原始识别文本
-}
-
-// ==================== PaddleOCR 调用 ====================
-
-/**
- * 获取 PaddleOCR worker 脚本路径
- * 兼容开发环境（tsx watch）和生产环境（编译后的 dist/）
- */
-function getPaddleOcrWorkerPath(): string {
-  const candidates = [
-    path.resolve(__dirname, '../scripts/paddle_ocr_worker.py'),
-    path.resolve(process.cwd(), 'server/scripts/paddle_ocr_worker.py'),
-  ]
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p
-  }
-  throw new Error('PaddleOCR worker 脚本不存在')
-}
-
-/**
- * 调用 PaddleOCR Python 脚本识别图片文本
- */
-async function callPaddleOcr(filePath: string): Promise<string> {
-  const workerPath = getPaddleOcrWorkerPath()
-  console.log('🐍 调用 PaddleOCR worker:', workerPath)
-
-  // 优先使用 venv 中的 python3（含 RapidOCR），回退到系统 python3
-  const venvPython = '/tmp/ocr-venv/bin/python3'
-  const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3'
-
-  const { stdout } = await execFileAsync(pythonCmd, [workerPath, filePath], {
-    timeout: 120000,
-    maxBuffer: 10 * 1024 * 1024,
-  })
-
-  const result = JSON.parse(stdout.trim())
-  if (result.error) {
-    throw new Error(`PaddleOCR 识别失败: ${result.error}`)
-  }
-
-  return result.fullText || ''
 }
 
 // ==================== 中文大写金额解析 ====================

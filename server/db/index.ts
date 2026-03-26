@@ -402,6 +402,24 @@ export function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_payment_batches_status ON payment_batches(status);
   `)
 
+  // 13.6. payment_batch_items 表 - 批次明细快照表（记录批次创建时的成员快照，防止批次成员漂移）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_batch_items (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      reimbursement_id TEXT NOT NULL,
+      amount REAL NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (batch_id) REFERENCES payment_batches(id),
+      FOREIGN KEY (reimbursement_id) REFERENCES reimbursements(id)
+    )
+  `)
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_payment_batch_items_batch_id ON payment_batch_items(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_payment_batch_items_reimbursement_id ON payment_batch_items(reimbursement_id);
+  `)
+
   // 14. reimbursements 表 - 报销单主表
   db.exec(`
     CREATE TABLE IF NOT EXISTS reimbursements (

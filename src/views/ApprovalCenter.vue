@@ -159,7 +159,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="150" align="center">
+            <el-table-column label="申请人" min-width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -169,7 +169,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="200" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div v-if="row.reimbursementInfo">
                   <div>{{ normalizeReimbursementTitle(row.reimbursementInfo.title) }}</div>
@@ -180,18 +180,18 @@
                 <div v-else>-</div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="150" align="center">
+            <el-table-column label="报销类型" min-width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.invoiceCategories">{{ row.invoiceCategories }}</span>
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120" align="center">
+            <el-table-column label="状态" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag
                   :type="getPendingStatusTagType(row)"
@@ -203,12 +203,12 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="180" align="center">
+            <el-table-column label="提交时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ formatDate(row.submitTime) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="360" fixed="right" align="center">
+            <el-table-column label="操作" width="280" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -283,23 +283,11 @@
                   v-model="unpaidFilterForm.type"
                   placeholder="全部"
                   clearable
-                  multiple
-                  collapse-tags
-                  collapse-tags-tooltip
-                  style="width: 160px"
+                  style="width: 140px"
                 >
-                  <el-option value="basic" label="基础报销">
-                    <el-checkbox :model-value="unpaidFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
-                    基础报销
-                  </el-option>
-                  <el-option value="large" label="大额报销">
-                    <el-checkbox :model-value="unpaidFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
-                    大额报销
-                  </el-option>
-                  <el-option value="business" label="商务报销">
-                    <el-checkbox :model-value="unpaidFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
-                    商务报销
-                  </el-option>
+                  <el-option value="basic" label="基础报销" />
+                  <el-option value="large" label="大额报销" />
+                  <el-option value="business" label="商务报销" />
                 </el-select>
               </el-form-item>
               <el-form-item label="状态">
@@ -309,7 +297,6 @@
                   clearable
                   style="width: 130px"
                 >
-                  <el-option label="待审批" value="pending" />
                   <el-option label="待付款" value="approved" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
@@ -342,7 +329,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="150" align="center">
+            <el-table-column label="申请人" min-width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -352,7 +339,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="200" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
@@ -360,23 +347,23 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="150" align="center">
+            <el-table-column label="报销类型" min-width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.invoiceCategories">{{ row.invoiceCategories }}</span>
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="通过时间" width="180" align="center">
+            <el-table-column label="通过时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="280" fixed="right" align="center">
+            <el-table-column label="操作" width="220" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -396,6 +383,7 @@
                     审批流程
                   </el-button>
                   <el-button
+                    v-if="row.status === 'approved'"
                     type="success"
                     size="small"
                     :icon="Money"
@@ -518,7 +506,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="150" align="center">
+            <el-table-column label="申请人" min-width="120" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="32">
@@ -528,7 +516,7 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="200" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
@@ -536,30 +524,30 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="150" align="center">
+            <el-table-column label="报销类型" min-width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.invoiceCategories">{{ row.invoiceCategories }}</span>
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column label="报销范围/区域" width="150" align="center">
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="付款时间" width="180" align="center">
+            <el-table-column label="付款时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ row.payTime ? formatDate(row.payTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120" align="center">
+            <el-table-column label="状态" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag :type="row.status === 'completed' ? 'success' : 'warning'" size="small">
                   {{ row.status === 'completed' ? '已确认收款' : '待确认收款' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100" fixed="right" align="center">
+            <el-table-column label="操作" width="100"  align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -715,7 +703,7 @@
                 {{ $index + 1 }}
               </template>
             </el-table-column>
-            <el-table-column label="申请人" width="120" align="center">
+            <el-table-column label="申请人" min-width="100" align="center">
               <template #default="{ row }">
                 <div class="applicant-cell">
                   <el-avatar :src="row.applicantAvatar" :size="28">
@@ -725,14 +713,14 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="类型" width="100" align="center">
+            <el-table-column label="类型" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag :type="getTypeTagType(row.type)" size="small">
                   {{ row.typeName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="标题/金额" min-width="180" align="center">
+            <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
                 <div>{{ normalizeReimbursementTitle(row.title) }}</div>
                 <div v-if="row.amount !== undefined && row.amount !== null" style="color: #409eff; font-weight: 600; margin-top: 4px;">
@@ -741,30 +729,30 @@
                 <div v-else style="color: #909399; margin-top: 4px;">-</div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" width="150" align="center">
+            <el-table-column label="报销类型" min-width="120" align="center">
               <template #default="{ row }">
                 <span v-if="row.invoiceCategories">{{ row.invoiceCategories }}</span>
                 <span v-else>-</span>
               </template>
             </el-table-column>
-            <el-table-column label="所属区域" width="150" align="center">
+            <el-table-column label="所属区域" min-width="120" align="center">
               <template #default="{ row }">
                 {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" width="120" align="center">
+            <el-table-column label="状态" min-width="80" align="center">
               <template #default="{ row }">
                 <el-tag :type="getAllStatusType(row.status)" size="small">
                   {{ row.statusName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="提交时间" width="160" align="center">
+            <el-table-column label="提交时间" min-width="130" align="center">
               <template #default="{ row }">
                 {{ row.submitTime ? formatDate(row.submitTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="180" fixed="right" align="center">
+            <el-table-column label="操作" width="150"  align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -1068,7 +1056,7 @@
                   </div>
                   <div class="timeline-desc">
                     <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
-                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : '再次提交' }}
+                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action }}
                     </el-tag>
                   </div>
                   <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
@@ -1086,7 +1074,7 @@
                 type="success"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
                   <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 审批通过</div>
                 </div>
               </el-timeline-item>
@@ -1097,7 +1085,7 @@
                 type="danger"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title">管理员审批</div>
+                  <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
                   <div class="timeline-desc">{{ currentApprovalRecord.approver || '管理员' }} 驳回了申请</div>
                   <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
                     <div class="reject-reason-label">驳回原因：</div>
@@ -1112,8 +1100,8 @@
                 type="warning"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title">管理员审批</div>
-                  <div class="timeline-desc">等待管理员审批...</div>
+                  <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
+                  <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
                 </div>
               </el-timeline-item>
             </template>
@@ -1126,8 +1114,8 @@
               type="warning"
             >
               <div class="timeline-content">
-                <div class="timeline-title">管理员审批</div>
-                <div class="timeline-desc">等待管理员审批...</div>
+                <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
+                <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
               </div>
             </el-timeline-item>
 
@@ -1564,7 +1552,7 @@ const paidListLoading = ref(false)
 // 待付款筛选表单
 const unpaidFilterForm = reactive({
   userId: '',
-  type: [] as string[],
+  type: '',
   status: '',
   dateRange: null as [string, string] | null,
 })
@@ -1887,7 +1875,7 @@ interface ApprovalRecordItem {
   approverId: string
   approverName: string
   approverAvatar: string | null
-  action: 'approve' | 'reject'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'resubmit'
   comment: string | null
   actionTime: string
 }
@@ -2300,7 +2288,7 @@ async function loadUnpaidList() {
   try {
     const params: Record<string, string> = {}
     if (unpaidFilterForm.userId) params.userId = unpaidFilterForm.userId
-    if (unpaidFilterForm.type.length > 0) params.type = unpaidFilterForm.type.join(',')
+    if (unpaidFilterForm.type) params.type = unpaidFilterForm.type
     if (unpaidFilterForm.status) params.status = unpaidFilterForm.status
     if (unpaidFilterForm.dateRange) {
       params.startDate = unpaidFilterForm.dateRange[0]
@@ -2348,7 +2336,7 @@ function handleQueryUnpaidList() {
 // 待付款重置
 function handleResetUnpaidFilter() {
   unpaidFilterForm.userId = ''
-  unpaidFilterForm.type = []
+  unpaidFilterForm.type = ''
   unpaidFilterForm.status = ''
   unpaidFilterForm.dateRange = null
   loadUnpaidList()
@@ -2670,6 +2658,13 @@ async function loadApprovalRecords(reimbursementId: string) {
         // 更新详细说明
         if (res.data.data.reimbursementDescription) {
           currentApprovalRecord.value.description = res.data.data.reimbursementDescription
+        }
+        // 更新审批人名字
+        if (res.data.data.adminApproverName) {
+          currentApprovalRecord.value.adminApproverName = res.data.data.adminApproverName
+        }
+        if (res.data.data.gmApproverName) {
+          currentApprovalRecord.value.gmApproverName = res.data.data.gmApproverName
         }
       }
     }
@@ -3450,7 +3445,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .approval-center {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px;
 }
 
@@ -3860,11 +3855,14 @@ onMounted(() => {
 /* 时间线中的付款回单预览 */
 .payment-proof-preview {
   margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .proof-card {
   position: relative;
-  width: 200px;
+  width: min(200px, 45%);
   height: 140px;
   border: 2px solid #67c23a;
   border-radius: 8px;

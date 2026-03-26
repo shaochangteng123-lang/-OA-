@@ -320,7 +320,7 @@ onMounted(() => {
 /* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
 .create-reimbursement-container {
   height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 0;
 }
 
@@ -373,7 +373,7 @@ onMounted(() => {
 
 .step-container {
   width: 100%;
-  max-width: 1400px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -381,7 +381,7 @@ onMounted(() => {
 
 .reimbursement-form {
   width: 100%;
-  max-width: 1100px;
+  max-width: min(1100px, 100%);
 }
 
 .reimbursement-form :deep(.el-form-item__content) {
@@ -400,8 +400,19 @@ onMounted(() => {
 }
 
 .upload-right {
-  width: 450px;
+  width: min(450px, 100%);
+  min-width: 300px;
   flex-shrink: 0;
+}
+
+@media (max-width: 1366px) {
+  .upload-layout {
+    flex-direction: column;
+  }
+  .upload-right {
+    width: 100%;
+    min-width: unset;
+  }
 }
 
 .upload-layout .el-form-item {
