@@ -116,18 +116,18 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="150">
+          <el-table-column label="操作" min-width="200">
             <template #default>
               <el-button type="primary" link @click="handleViewDetail">
                 查看详情
               </el-button>
               <el-button
-                v-if="myStatus.confirmation?.status === 'pending' && myStatus.documents && myStatus.documents.length > 0"
-                type="success"
+                v-if="myStatus.confirmation?.status === 'submitted' || myStatus.confirmation?.status === 'approved' || myStatus.confirmation?.status === 'rejected'"
+                type="info"
                 link
-                @click="handleSubmitApply"
+                @click="handleViewApprovalFlow"
               >
-                提交申请
+                查看审批流程
               </el-button>
             </template>
           </el-table-column>
@@ -193,7 +193,7 @@
                 {{ formatDateTime(row.created_at) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100">
+            <el-table-column label="操作" min-width="100">
               <template #default="{ row }">
                 <el-button type="primary" link @click="handleDownload(row)">
                   下载
@@ -205,6 +205,42 @@
       </div>
       <template #footer>
         <el-button @click="detailDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 审批流程对话框 -->
+    <el-dialog
+      v-model="approvalFlowDialogVisible"
+      title="审批流程"
+      width="600px"
+    >
+      <div v-if="approvalFlowData">
+        <el-timeline>
+          <el-timeline-item
+            v-for="(record, index) in approvalFlowData.records"
+            :key="index"
+            :timestamp="formatDateTime(record.created_at)"
+            placement="top"
+            :type="record.action === 'approved' ? 'success' : record.action === 'rejected' ? 'danger' : 'info'"
+          >
+            <el-card>
+              <div style="margin-bottom: 8px;">
+                <el-tag :type="record.action === 'approved' ? 'success' : record.action === 'rejected' ? 'danger' : 'info'">
+                  {{ record.action === 'approved' ? '已通过' : record.action === 'rejected' ? '已驳回' : '待审批' }}
+                </el-tag>
+                <span style="margin-left: 8px; font-weight: 600;">
+                  {{ record.approver_name || '未知' }}
+                </span>
+              </div>
+              <div v-if="record.comment" style="color: #606266;">
+                {{ record.comment }}
+              </div>
+            </el-card>
+          </el-timeline-item>
+        </el-timeline>
+      </div>
+      <template #footer>
+        <el-button @click="approvalFlowDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -398,6 +434,27 @@ const handleSubmitApply = async () => {
     if (error !== 'cancel') {
       ElMessage.error(error.response?.data?.message || '提交失败')
     }
+  }
+}
+
+// 查看审批流程
+const approvalFlowDialogVisible = ref(false)
+const approvalFlowData = ref<any>(null)
+
+const handleViewApprovalFlow = async () => {
+  if (!myStatus.value?.confirmation?.id) {
+    ElMessage.warning('暂无审批流程信息')
+    return
+  }
+
+  try {
+    const response = await axios.get(`/api/probation/${myStatus.value.confirmation.id}/approval-flow`)
+    if (response.data.success) {
+      approvalFlowData.value = response.data.data
+      approvalFlowDialogVisible.value = true
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '获取审批流程失败')
   }
 }
 

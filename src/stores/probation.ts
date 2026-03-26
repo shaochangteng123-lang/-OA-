@@ -251,6 +251,12 @@ export const useProbationStore = defineStore('probation', () => {
     return res.data
   }
 
+  // 获取审批流程
+  async function getApprovalFlow(id: string) {
+    const res = await api.get(`/api/probation/${id}/approval-flow`)
+    return res.data
+  }
+
   return {
     // 状态
     templates,
@@ -278,6 +284,7 @@ export const useProbationStore = defineStore('probation', () => {
     deleteDocument,
     approveConfirmation,
     rejectConfirmation,
-    getConfirmationDetail
+    getConfirmationDetail,
+    getApprovalFlow
   }
 })

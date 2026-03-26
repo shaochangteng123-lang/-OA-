@@ -43,7 +43,7 @@ function formatInvoiceCategories(categories: string | null): string {
 }
 
 // 获取审批统计数据
-router.get('/statistics', requireAdmin, (req, res) => {
+router.get('/statistics', requireAdmin, async (req, res) => {
   try {
     const userRole = req.session?.user?.role
 
@@ -69,7 +69,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
       : ''
 
     // 1. 待办数量（所有未完成的流程：待审批、待付款、付款中、待确认收款）
-    const pendingApproval = db.prepare(`
+    const pendingApproval = await db.prepare(`
       SELECT COUNT(*) as count FROM approval_instances ai
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
       WHERE ai.status NOT IN ('rejected', 'withdrawn')
@@ -79,7 +79,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
     `).get() as { count: number }
 
     // 2. 按报销类型统计当月数量和金额（排除草稿和驳回）
-    const typeStats = db.prepare(`
+    const typeStats = await db.prepare(`
       SELECT
         r.type,
         COUNT(*) as count,
@@ -97,14 +97,14 @@ router.get('/statistics', requireAdmin, (req, res) => {
     }
 
     // 3. 已通过未付款数量
-    const approvedUnpaid = db.prepare(`
+    const approvedUnpaid = await db.prepare(`
       SELECT COUNT(*) as count FROM reimbursements r
       WHERE r.status = 'approved'
       ${reimbursementTypeFilter}
     `).get() as { count: number }
 
     // 4. 本月已付款数量（包括待确认收款和已完成）
-    const paidThisMonth = db.prepare(`
+    const paidThisMonth = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount FROM reimbursements r
       WHERE r.status IN ('payment_uploaded', 'completed')
       AND r.pay_time >= ? AND r.pay_time <= ?
@@ -112,7 +112,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
     // 5. 本月已完成数量（员工已确认收款）
-    const completedThisMonth = db.prepare(`
+    const completedThisMonth = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount FROM reimbursements r
       WHERE r.status = 'completed'
       AND r.completed_time >= ? AND r.completed_time <= ?
@@ -145,7 +145,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
 })
 
 // 获取已通过未付款的报销单列表
-router.get('/approved-unpaid', requireAdmin, (req, res) => {
+router.get('/approved-unpaid', requireAdmin, async (req, res) => {
   try {
     const { userId, type, status, startDate, endDate } = req.query as Record<string, string>
     const conditions: string[] = []
@@ -184,12 +184,12 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
       params.push(endDate + 'T23:59:59')
     }
 
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
-        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ${conditions.join(' AND ')}
@@ -224,7 +224,7 @@ router.get('/approved-unpaid', requireAdmin, (req, res) => {
 })
 
 // 获取本月已付款列表
-router.get('/paid-this-month', requireAdmin, (req, res) => {
+router.get('/paid-this-month', requireAdmin, async (req, res) => {
   try {
     const { userId, type, status, startDate, endDate } = req.query as Record<string, string>
 
@@ -263,12 +263,12 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
       params.push(status)
     }
 
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
-        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ${conditions.join(' AND ')}
@@ -309,14 +309,14 @@ router.get('/paid-this-month', requireAdmin, (req, res) => {
 })
 
 // 获取本月已完成列表（员工已确认收款）
-router.get('/completed-this-month', requireAdmin, (req, res) => {
+router.get('/completed-this-month', requireAdmin, async (req, res) => {
   try {
     // 获取当月的开始和结束时间
     const now = new Date()
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
@@ -360,12 +360,12 @@ router.get('/completed-this-month', requireAdmin, (req, res) => {
 })
 
 // 获取收款人信息（从入职信息 employee_profiles 表获取）
-router.get('/payee-info/:userId', requireAdmin, (req, res) => {
+router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params
 
     // 优先从 employee_profiles 表获取收款信息（入职时填写的信息）
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT bank_account_name, bank_account_phone, bank_name, bank_account_number
       FROM employee_profiles WHERE user_id = ?
     `).get(userId) as { bank_account_name: string | null; bank_account_phone: string | null; bank_name: string | null; bank_account_number: string | null } | undefined
@@ -384,7 +384,7 @@ router.get('/payee-info/:userId', requireAdmin, (req, res) => {
     }
 
     // 如果入职信息中没有收款信息，回退到 users 表（兼容旧数据）
-    const user = db.prepare(`
+    const user = await db.prepare(`
       SELECT bank_account_name, bank_account_phone, bank_name, bank_account_number
       FROM users WHERE id = ?
     `).get(userId) as { bank_account_name: string | null; bank_account_phone: string | null; bank_name: string | null; bank_account_number: string | null } | undefined
@@ -415,7 +415,7 @@ router.get('/payee-info/:userId', requireAdmin, (req, res) => {
 })
 
 // 根据目标ID和类型获取审批记录
-router.get('/by-target', requireAuth, (req, res) => {
+router.get('/by-target', requireAuth, async (req, res) => {
   try {
     const { targetId, targetType } = req.query
     const userId = req.session.user?.id
@@ -436,7 +436,7 @@ router.get('/by-target', requireAuth, (req, res) => {
     }
 
     // 查询最新的审批实例
-    const instance = db.prepare(`
+    const instance = await db.prepare(`
       SELECT * FROM approval_instances
       WHERE target_id = ? AND target_type = ?
       ORDER BY created_at DESC
@@ -459,7 +459,7 @@ router.get('/by-target', requireAuth, (req, res) => {
     const isGMForBusiness = userRole === 'general_manager' && instance.type === 'reimbursement_business'
 
     // 检查是否是审批人（查询该用户是否有该实例的审批记录）
-    const approvalRecord = db.prepare(`
+    const approvalRecord = await db.prepare(`
       SELECT COUNT(*) as count FROM approval_records
       WHERE instance_id = ? AND approver_id = ?
     `).get(instance.id, userId) as { count: number }
@@ -473,7 +473,7 @@ router.get('/by-target', requireAuth, (req, res) => {
     }
 
     // 获取所有历史审批记录（包括所有审批实例的记录，不仅限于当前实例）
-    const records = db.prepare(`
+    const records = await db.prepare(`
       SELECT
         ar.*,
         u.name as approver_name,
@@ -486,16 +486,16 @@ router.get('/by-target', requireAuth, (req, res) => {
     `).all(targetId, targetType) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
 
     // 获取报销单最新状态（用于前端实时展示）
-    const reimbursement = db.prepare(`
+    const reimbursement = await db.prepare(`
       SELECT status, description, payment_proof_path, pay_time, payment_upload_time, completed_time, receipt_confirmed_by
       FROM reimbursements WHERE id = ?
     `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null } | undefined
 
     // 查询管理员和总经理的名字（用于审批流程显示）
-    const adminUser = db.prepare(`
+    const adminUser = await db.prepare(`
       SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
     `).get() as { name: string } | undefined
-    const gmUser = db.prepare(`
+    const gmUser = await db.prepare(`
       SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
     `).get() as { name: string } | undefined
 
@@ -539,7 +539,7 @@ router.get('/by-target', requireAuth, (req, res) => {
 })
 
 // 获取待我审批的列表
-router.get('/pending', requireAdmin, (req, res) => {
+router.get('/pending', requireAdmin, async (req, res) => {
   try {
     const userRole = req.session?.user?.role
 
@@ -614,7 +614,7 @@ router.get('/pending', requireAdmin, (req, res) => {
 
     const whereClause = conditions.join(' AND ')
 
-    const instances = db.prepare(`
+    const instances = await db.prepare(`
       SELECT
         ai.*,
         u.name as applicant_name,
@@ -626,7 +626,7 @@ router.get('/pending', requireAdmin, (req, res) => {
         r.user_id as reimbursement_user_id,
         r.type as reimbursement_type,
         r.reimbursement_scope as reimbursement_scope,
-        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
@@ -677,11 +677,11 @@ router.get('/pending', requireAdmin, (req, res) => {
 })
 
 // 获取我提交的审批
-router.get('/my-submissions', requireAuth, (req, res) => {
+router.get('/my-submissions', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
 
-    const instances = db.prepare(`
+    const instances = await db.prepare(`
       SELECT * FROM approval_instances
       WHERE applicant_id = ?
       ORDER BY submit_time DESC
@@ -711,12 +711,12 @@ router.get('/my-submissions', requireAuth, (req, res) => {
 })
 
 // 获取已处理的审批（管理员）
-router.get('/processed', requireAdmin, (req, res) => {
+router.get('/processed', requireAdmin, async (req, res) => {
   try {
     const userId = req.session?.userId
 
     // 获取我处理过的审批实例ID
-    const processedRecords = db.prepare(`
+    const processedRecords = await db.prepare(`
       SELECT DISTINCT instance_id FROM approval_records
       WHERE approver_id = ?
     `).all(userId) as Array<{ instance_id: string }>
@@ -731,7 +731,7 @@ router.get('/processed', requireAdmin, (req, res) => {
     const instanceIds = processedRecords.map(r => r.instance_id)
     const placeholders = instanceIds.map(() => '?').join(',')
 
-    const instances = db.prepare(`
+    const instances = await db.prepare(`
       SELECT
         ai.*,
         u.name as applicant_name,
@@ -770,10 +770,10 @@ router.get('/processed', requireAdmin, (req, res) => {
 
 // 获取所有员工列表（用于汇总查询下拉选择）
 // 注意：此路由必须放在 /:id 路由之前，否则会被 /:id 路由拦截
-router.get('/employees', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
+router.get('/employees', requireRole(['super_admin', 'admin', 'general_manager']), async (req, res) => {
   try {
     // 排除系统管理员账号（super_admin 角色）
-    const employees = db.prepare(`
+    const employees = await db.prepare(`
       SELECT id, name, username, department, position
       FROM users
       WHERE status = 'active'
@@ -802,7 +802,7 @@ router.get('/employees', requireRole(['super_admin', 'admin', 'general_manager']
 
 // 员工报销汇总查询
 // 注意：此路由必须放在 /:id 路由之前，否则会被 /:id 路由拦截
-router.get('/employee-summary', requireAdmin, (req, res) => {
+router.get('/employee-summary', requireAdmin, async (req, res) => {
   try {
     const { userId, startDate, endDate } = req.query
 
@@ -814,7 +814,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
     }
 
     // 获取员工信息
-    const employee = db.prepare('SELECT id, name FROM users WHERE id = ?').get(userId) as { id: string; name: string } | undefined
+    const employee = await db.prepare('SELECT id, name FROM users WHERE id = ?').get(userId) as { id: string; name: string } | undefined
 
     if (!employee) {
       return res.status(404).json({
@@ -825,7 +825,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
 
     // 查询该员工在指定时间范围内的报销数据（管理员可以看到所有数据，包括已删除的）
     // 按类型分组统计
-    const summaryByType = db.prepare(`
+    const summaryByType = await db.prepare(`
       SELECT
         type,
         COUNT(*) as count,
@@ -839,7 +839,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
     `).all(userId, startDate, endDate + 'T23:59:59.999Z') as Array<{ type: string; count: number; amount: number }>
 
     // 查询明细列表
-    const details = db.prepare(`
+    const details = await db.prepare(`
       SELECT
         id, type, title, total_amount as amount, status,
         submit_time as submitTime, approve_time as approveTime,
@@ -905,7 +905,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
           submitTime: formatDateTime(item.submitTime),
           approveTime: formatDateTime(item.approveTime),
           createTime: formatDateTime(item.createTime),
-          isDeleted: item.isDeleted === 1,
+          isDeleted: item.isDeleted === true,
         })),
       },
     })
@@ -919,7 +919,7 @@ router.get('/employee-summary', requireAdmin, (req, res) => {
 })
 
 // 获取全部报销记录（支持筛选）
-router.get('/all-reimbursements', requireAdmin, (req, res) => {
+router.get('/all-reimbursements', requireAdmin, async (req, res) => {
   try {
     const { status, type, userId, reimbursementScope, startDate, endDate } = req.query
 
@@ -972,13 +972,13 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
       params.push(endMonth)
     }
 
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
         u.department as applicant_department,
-        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
@@ -1052,7 +1052,7 @@ router.get('/all-reimbursements', requireAdmin, (req, res) => {
 })
 
 // 导出本月报销数据（包含员工明细）
-router.get('/export-monthly', requireAdmin, (req, res) => {
+router.get('/export-monthly', requireAdmin, async (req, res) => {
   try {
     const { month } = req.query // 格式: YYYY-MM
 
@@ -1069,7 +1069,7 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
     const monthEnd = new Date(year, monthNum, 0, 23, 59, 59).toISOString()
 
     // 获取该月所有已完成的报销记录（按员工分组）
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
@@ -1166,7 +1166,7 @@ router.get('/export-monthly', requireAdmin, (req, res) => {
 })
 
 // 核减金额查询（必须在 /:id 之前定义，否则会被通配路由拦截）
-router.get('/deduction-query', requireAdmin, (req, res) => {
+router.get('/deduction-query', requireAdmin, async (req, res) => {
   try {
     const { dateType, startDate, endDate, userId, month, year } = req.query as {
       dateType?: string
@@ -1256,7 +1256,7 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
 
     whereSql += ' ORDER BY u.name ASC, r.created_at DESC'
 
-    const deductions = db.prepare(whereSql).all(...params) as Array<any>
+    const deductions = await db.prepare(whereSql).all(...params) as Array<any>
 
     // 类型映射
     const typeMap: Record<string, string> = {
@@ -1334,12 +1334,12 @@ router.get('/deduction-query', requireAdmin, (req, res) => {
 // ==================== 总经理审批中心 API ====================
 
 // 获取总经理审批统计数据
-router.get('/gm-statistics', requireAuth, (req, res) => {
+router.get('/gm-statistics', requireAuth, async (req, res) => {
   try {
     const userId = req.session.user?.id
 
     // 检查是否是总经理
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
@@ -1353,7 +1353,7 @@ router.get('/gm-statistics', requireAuth, (req, res) => {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
     // 1. 待审批数量和金额（只统计商务报销）
-    const pendingStats = db.prepare(`
+    const pendingStats = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
       FROM approval_instances ai
       INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
@@ -1362,7 +1362,7 @@ router.get('/gm-statistics', requireAuth, (req, res) => {
     `).get() as { count: number; amount: number }
 
     // 2. 本月已审批数量（包括通过和驳回的商务报销）
-    const completedThisMonth = db.prepare(`
+    const completedThisMonth = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
       FROM approval_instances ai
       INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
@@ -1372,7 +1372,7 @@ router.get('/gm-statistics', requireAuth, (req, res) => {
     `).get(monthStart, monthEnd) as { count: number; amount: number }
 
     // 3. 全部已完成商务报销数量和金额
-    const completedAll = db.prepare(`
+    const completedAll = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(total_amount), 0) as amount
       FROM reimbursements
       WHERE type = 'business'
@@ -1401,12 +1401,12 @@ router.get('/gm-statistics', requireAuth, (req, res) => {
 })
 
 // 获取总经理待审批列表（只显示商务报销）
-router.get('/gm-pending', requireAuth, (req, res) => {
+router.get('/gm-pending', requireAuth, async (req, res) => {
   try {
     const userId = req.session.user?.id
 
     // 检查是否是总经理
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
@@ -1415,7 +1415,7 @@ router.get('/gm-pending', requireAuth, (req, res) => {
     }
 
     // 查询待审批的商务报销
-    const instances = db.prepare(`
+    const instances = await db.prepare(`
       SELECT
         ai.id,
         ai.target_type,
@@ -1497,12 +1497,12 @@ router.get('/gm-pending', requireAuth, (req, res) => {
 })
 
 // 获取总经理本月已审批列表（只显示商务报销）
-router.get('/gm-completed', requireAuth, (req, res) => {
+router.get('/gm-completed', requireAuth, async (req, res) => {
   try {
     const userId = req.session.user?.id
 
     // 检查是否是总经理
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
@@ -1516,7 +1516,7 @@ router.get('/gm-completed', requireAuth, (req, res) => {
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
     // 查询本月已审批的商务报销
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.id,
         r.type,
@@ -1599,13 +1599,13 @@ router.get('/gm-completed', requireAuth, (req, res) => {
 })
 
 // 获取总经理全部查询列表（支持完整筛选条件，和管理员一致）
-router.get('/gm-all', requireAuth, (req, res) => {
+router.get('/gm-all', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const { status, type, userId: filterUserId, reimbursementScope, startDate, endDate } = req.query
 
     // 检查是否是总经理
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
@@ -1662,13 +1662,13 @@ router.get('/gm-all', requireAuth, (req, res) => {
       params.push(endMonth)
     }
 
-    const reimbursements = db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
         u.department as applicant_department,
-        (SELECT GROUP_CONCAT(DISTINCT ri.category) FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
@@ -1733,7 +1733,7 @@ router.get('/gm-all', requireAuth, (req, res) => {
 // ==================== 发票管理 API ====================
 
 // 发票管理 - 查询发票列表
-router.get('/invoice-management', requireAdmin, (req, res) => {
+router.get('/invoice-management', requireAdmin, async (req, res) => {
   try {
     const { userId, type, fileType, reimbursementScope, startDate, endDate } = req.query
 
@@ -1785,7 +1785,7 @@ router.get('/invoice-management', requireAdmin, (req, res) => {
     }
 
     // 查询发票列表
-    const invoices = db.prepare(`
+    const invoices = await db.prepare(`
       SELECT
         ri.id,
         ri.reimbursement_id,
@@ -1878,7 +1878,7 @@ router.post('/invoice-management/batch-download', requireAdmin, async (req, res)
 
     // 查询发票信息
     const placeholders = invoiceIds.map(() => '?').join(',')
-    const invoices = db.prepare(`
+    const invoices = await db.prepare(`
       SELECT
         ri.id,
         ri.file_path,
@@ -1964,10 +1964,10 @@ router.post('/invoice-management/batch-download', requireAdmin, async (req, res)
 
 // 获取审批详情
 // 获取待办计数（必须在 /:id 之前定义，避免被通配路由拦截）
-router.get('/pending-counts', requireAuth, (req, res) => {
+router.get('/pending-counts', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
-    const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+    const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
 
     if (!user) {
       return res.status(401).json({ success: false, message: '用户不存在' })
@@ -1984,7 +1984,7 @@ router.get('/pending-counts', requireAuth, (req, res) => {
             OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded'))
           )`
         : ''
-      const approvalPending = db.prepare(`
+      const approvalPending = await db.prepare(`
         SELECT COUNT(*) as count FROM approval_instances ai
         LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
         WHERE ai.status NOT IN ('rejected', 'withdrawn')
@@ -1995,26 +1995,36 @@ router.get('/pending-counts', requireAuth, (req, res) => {
       data.approvalPending = approvalPending.count
 
       // Admin: 转正待审批（status='submitted'）
-      const probationPending = db.prepare(`
+      const probationPending = await db.prepare(`
         SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'submitted'
       `).get() as { count: number }
       data.probationPending = probationPending.count
     }
 
-    // General Manager: 商务报销待审批
+    // General Manager: 商务报销待审批 + 转正待审批
     if (user.role === 'general_manager') {
-      const gmPending = db.prepare(`
+      const gmPending = await db.prepare(`
         SELECT COUNT(*) as count
         FROM approval_instances ai
         INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
         WHERE ai.status = 'pending'
         AND r.type = 'business'
       `).get() as { count: number }
-      data.gmApprovalPending = gmPending.count
+
+      // 转正待审批
+      const probationPending = await db.prepare(`
+        SELECT COUNT(*) as count
+        FROM probation_confirmations
+        WHERE status = 'pending'
+      `).get() as { count: number }
+
+      // 总经理待审批 = 商务报销待审批 + 转正待审批
+      data.gmApprovalPending = gmPending.count + probationPending.count
+      data.probationPending = probationPending.count
     }
 
     // 所有用户: 自己的报销待确认收款（按类型分）
-    const myReimbursementPending = db.prepare(`
+    const myReimbursementPending = await db.prepare(`
       SELECT type, COUNT(*) as count FROM reimbursements
       WHERE user_id = ? AND status = 'payment_uploaded'
       GROUP BY type
@@ -2029,7 +2039,7 @@ router.get('/pending-counts', requireAuth, (req, res) => {
     data.myReimbursementBusiness = reimbursementMap['business'] || 0
 
     // 所有用户: 自己的报销已驳回（按类型分）
-    const myReimbursementRejected = db.prepare(`
+    const myReimbursementRejected = await db.prepare(`
       SELECT type, COUNT(*) as count FROM reimbursements
       WHERE user_id = ? AND status = 'rejected'
       GROUP BY type
@@ -2044,13 +2054,13 @@ router.get('/pending-counts', requireAuth, (req, res) => {
     data.myReimbursementBusinessRejected = rejectedMap['business'] || 0
 
     // 所有用户: 转正待提交（试用期且未提交申请）
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT ep.id, ep.employment_status FROM employee_profiles ep
       WHERE ep.user_id = ?
     `).get(userId) as { id: string; employment_status: string } | undefined
 
     if (profile && profile.employment_status === 'probation') {
-      const confirmation = db.prepare(`
+      const confirmation = await db.prepare(`
         SELECT status FROM probation_confirmations WHERE employee_id = ?
       `).get(profile.id) as { status: string } | undefined
 
@@ -2066,7 +2076,7 @@ router.get('/pending-counts', requireAuth, (req, res) => {
   }
 })
 
-router.get('/:id', requireAuth, (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session.user?.id
@@ -2079,7 +2089,7 @@ router.get('/:id', requireAuth, (req, res) => {
       })
     }
 
-    const instance = db.prepare(`
+    const instance = await db.prepare(`
       SELECT
         ai.*,
         u.name as applicant_name,
@@ -2102,7 +2112,7 @@ router.get('/:id', requireAuth, (req, res) => {
     const isGMForBusiness = userRole === 'general_manager' && instance.type === 'reimbursement_business'
 
     // 检查是否是审批人
-    const approvalRecord = db.prepare(`
+    const approvalRecord = await db.prepare(`
       SELECT COUNT(*) as count FROM approval_records
       WHERE instance_id = ? AND approver_id = ?
     `).get(id, userId) as { count: number }
@@ -2116,7 +2126,7 @@ router.get('/:id', requireAuth, (req, res) => {
     }
 
     // 获取审批记录
-    const records = db.prepare(`
+    const records = await db.prepare(`
       SELECT
         ar.*,
         u.name as approver_name,
@@ -2128,10 +2138,10 @@ router.get('/:id', requireAuth, (req, res) => {
     `).all(id) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
 
     // 查询管理员和总经理的名字（用于审批流程显示）
-    const adminUser = db.prepare(`
+    const adminUser = await db.prepare(`
       SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
     `).get() as { name: string } | undefined
-    const gmUser = db.prepare(`
+    const gmUser = await db.prepare(`
       SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
     `).get() as { name: string } | undefined
 
@@ -2174,7 +2184,7 @@ router.get('/:id', requireAuth, (req, res) => {
 })
 
 // 通过审批（管理员和总经理均可操作）
-router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
+router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manager']), async (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
@@ -2183,7 +2193,7 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
     const userRole = req.session?.user?.role
 
     // 获取审批实例
-    const instance = db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
+    const instance = await db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
 
     if (!instance) {
       return res.status(404).json({
@@ -2221,13 +2231,13 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
     const recordId = nanoid()
 
     // 创建审批记录
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
       VALUES (?, ?, ?, ?, 'approve', ?, ?)
     `).run(recordId, id, instance.current_step, userId, comment || null, now)
 
     // 更新审批实例状态
-    db.prepare(`
+    await db.prepare(`
       UPDATE approval_instances
       SET status = 'approved', complete_time = ?, updated_at = ?
       WHERE id = ?
@@ -2236,7 +2246,7 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
     // 如果是报销单审批，同步更新报销单状态
     if (instance.target_type === 'reimbursement') {
       // 计算总核减金额
-      const invoices = db.prepare(`
+      const invoices = await db.prepare(`
         SELECT COALESCE(SUM(deducted_amount), 0) as total_deduction
         FROM reimbursement_invoices
         WHERE reimbursement_id = ?
@@ -2245,19 +2255,19 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
       const totalDeduction = invoices?.total_deduction || 0
 
       // 获取报销单实际金额（total_amount 已经是扣除核减后的金额）
-      const reimbursement = db.prepare('SELECT total_amount FROM reimbursements WHERE id = ?').get(instance.target_id) as { total_amount: number } | undefined
+      const reimbursement = await db.prepare('SELECT total_amount FROM reimbursements WHERE id = ?').get(instance.target_id) as { total_amount: number } | undefined
       const actualAmount = reimbursement?.total_amount || 0
 
       // 实际报销金额为0时（全额核减），直接完成，无需付款流程
       if (actualAmount <= 0) {
-        db.prepare(`
+        await db.prepare(`
           UPDATE reimbursements
           SET status = 'completed', approve_time = ?, approver = ?, deduction_amount = ?, completed_time = ?, updated_at = ?
           WHERE id = ?
         `).run(now, userName || '系统', totalDeduction, now, now, instance.target_id)
         console.log('✅ 报销单全额核减，直接完成:', instance.target_id, '核减金额:', totalDeduction)
       } else {
-        db.prepare(`
+        await db.prepare(`
           UPDATE reimbursements
           SET status = 'approved', approve_time = ?, approver = ?, deduction_amount = ?, updated_at = ?
           WHERE id = ?
@@ -2282,7 +2292,7 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
 })
 
 // 驳回审批（管理员和总经理均可操作）
-router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager']), (req, res) => {
+router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager']), async (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
@@ -2297,7 +2307,7 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
     }
 
     // 获取审批实例
-    const instance = db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
+    const instance = await db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
 
     if (!instance) {
       return res.status(404).json({
@@ -2335,13 +2345,13 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
     const recordId = nanoid()
 
     // 创建审批记录
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
       VALUES (?, ?, ?, ?, 'reject', ?, ?)
     `).run(recordId, id, instance.current_step, userId, comment, now)
 
     // 更新审批实例状态
-    db.prepare(`
+    await db.prepare(`
       UPDATE approval_instances
       SET status = 'rejected', complete_time = ?, updated_at = ?
       WHERE id = ?
@@ -2350,7 +2360,7 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
     // 如果是报销单审批，同步更新报销单状态
     if (instance.target_type === 'reimbursement') {
       const userName = req.session?.user?.name
-      db.prepare(`
+      await db.prepare(`
         UPDATE reimbursements
         SET status = 'rejected', approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
         WHERE id = ?
@@ -2374,7 +2384,7 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
 })
 
 // 提交审批（用于报销单、工作日志等提交审批）
-router.post('/submit', requireAuth, (req, res) => {
+router.post('/submit', requireAuth, async (req, res) => {
   try {
     const { type, targetId, targetType } = req.body
     const userId = req.session?.userId
@@ -2387,7 +2397,7 @@ router.post('/submit', requireAuth, (req, res) => {
     }
 
     // 检查是否已有pending状态的审批
-    const existing = db.prepare(`
+    const existing = await db.prepare(`
       SELECT id FROM approval_instances
       WHERE target_id = ? AND target_type = ? AND status = 'pending'
     `).get(targetId, targetType)
@@ -2403,7 +2413,7 @@ router.post('/submit', requireAuth, (req, res) => {
     const instanceId = nanoid()
 
     // 创建审批实例
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO approval_instances (id, flow_id, type, target_id, target_type, applicant_id, current_step, status, submit_time, created_at, updated_at)
       VALUES (?, NULL, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)
     `).run(instanceId, type, targetId, targetType, userId, now, now, now)
@@ -2425,13 +2435,13 @@ router.post('/submit', requireAuth, (req, res) => {
 })
 
 // 撤销审批
-router.post('/:id/cancel', requireAuth, (req, res) => {
+router.post('/:id/cancel', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
 
     // 获取审批实例
-    const instance = db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
+    const instance = await db.prepare('SELECT * FROM approval_instances WHERE id = ?').get(id) as ApprovalInstance | undefined
 
     if (!instance) {
       return res.status(404).json({
@@ -2458,7 +2468,7 @@ router.post('/:id/cancel', requireAuth, (req, res) => {
     const now = new Date().toISOString()
 
     // 更新审批实例状态
-    db.prepare(`
+    await db.prepare(`
       UPDATE approval_instances
       SET status = 'cancelled', complete_time = ?, updated_at = ?
       WHERE id = ?
