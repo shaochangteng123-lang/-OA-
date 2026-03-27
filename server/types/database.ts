@@ -74,7 +74,7 @@ export interface EventPreset {
   project_type: string
   events_json: string | null
   blocks_json: string | null
-  is_default: number
+  is_default: boolean
   created_at: string
   updated_at: string
 }
@@ -114,7 +114,7 @@ export interface BlockCategory {
   name: string
   description: string | null
   sort_order: number
-  is_active: number
+  is_active: boolean
   created_at: string
   updated_at: string
 }
@@ -135,7 +135,7 @@ export interface CalendarEvent {
   description: string | null
   start_time: string
   end_time: string
-  all_day: number
+  all_day: boolean
   location: string | null
   color: string
   reminder_minutes: number | null
@@ -151,7 +151,7 @@ export interface GovernmentDepartment {
   short_names: string
   website_url: string | null
   sort_order: number
-  is_active: number
+  is_active: boolean
   created_at: string
   updated_at: string
 }
@@ -162,7 +162,7 @@ export interface ApprovalFlow {
   name: string
   type: string // worklog, reimbursement_basic, reimbursement_large, reimbursement_business, leave
   steps_json: string // JSON数组
-  is_active: number
+  is_active: boolean
   created_at: string
   updated_at: string
 }
@@ -184,7 +184,7 @@ export interface ApprovalInstance {
   target_type: string // worklog, reimbursement
   applicant_id: string
   current_step: number
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'withdrawn'
   submit_time: string
   complete_time: string | null
   created_at: string

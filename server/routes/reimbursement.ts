@@ -972,7 +972,8 @@ router.post('/create', requireAuth, async (req, res) => {
     let processedInvoices = invoices.map((inv: any) => ({ ...inv, deductedAmount: 0 }))
     if (type === 'basic') {
       // 获取当月已使用的运输/交通/汽油/柴油类发票额度
-      const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
+      // 使用 calculateReimbursementMonth 确保与入库时的 reimbursement_month 口径一致（本地时区）
+      const currentMonth = calculateReimbursementMonth(new Date(), 'basic')
       const monthlyUsedResult = await db.prepare(`
         SELECT COALESCE(SUM(i.amount), 0) as used_amount
         FROM reimbursement_invoices i
@@ -1276,9 +1277,9 @@ router.get('/list', requireAuth, async (req, res) => {
       whereClause += ' AND type = ?'
       params.push(type)
 
-      // 大额报销只显示金额 >= 1000 的记录
+      // 大额报销只显示金额 >= 1000 的记录，但草稿和已驳回状态除外（允许用户继续编辑）
       if (type === 'large') {
-        whereClause += ' AND total_amount >= 1000'
+        whereClause += ' AND (total_amount >= 1000 OR status IN (\'draft\', \'rejected\'))'
       }
     }
 

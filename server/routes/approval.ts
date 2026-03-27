@@ -1998,10 +1998,12 @@ router.post('/invoice-management/batch-download', requireAdmin, async (req, res)
       }
 
       // 生成文件名：员工姓名_发票日期_发票号码.扩展名
+      // 清洗文件名，只保留中英文、数字、下划线、横线、点号，防止路径穿越
+      const sanitize = (str: string) => str.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_\-\.]/g, '_')
       const ext = path.extname(inv.file_path)
       const fileName = inv.invoice_number
-        ? `${inv.user_name}_${inv.invoice_date}_${inv.invoice_number}${ext}`
-        : `${inv.user_name}_${inv.invoice_date}_${inv.id}${ext}`
+        ? `${sanitize(inv.user_name)}_${sanitize(inv.invoice_date)}_${sanitize(inv.invoice_number)}${ext}`
+        : `${sanitize(inv.user_name)}_${sanitize(inv.invoice_date)}_${inv.id}${ext}`
 
       // 添加文件到 ZIP
       archive.file(filePath, { name: fileName })

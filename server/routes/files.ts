@@ -23,7 +23,7 @@ router.get('/invoices/:filename', requireAuth, async (req, res) => {
 
     // 查询该文件是否属于当前用户的报销单
     const invoice = await db.get(
-      `SELECT r.user_id, r.id as reimbursement_id
+      `SELECT r.user_id, r.id as reimbursement_id, r.type
        FROM reimbursement_invoices ri
        JOIN reimbursements r ON ri.reimbursement_id = r.id
        WHERE ri.file_path = ? OR ri.file_path = ?`,
@@ -35,11 +35,12 @@ router.get('/invoices/:filename', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '文件不存在' })
     }
 
-    // 检查权限：必须是文件所有者或管理员
+    // 检查权限：必须是文件所有者、管理员，或总经理（仅限商务报销）
     const user = await db.get('SELECT role FROM users WHERE id = ?', userId)
     const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+    const isGMForBusiness = user?.role === 'general_manager' && invoice.type === 'business'
 
-    if (invoice.user_id !== userId && !isAdmin) {
+    if (invoice.user_id !== userId && !isAdmin && !isGMForBusiness) {
       return res.status(403).json({ success: false, message: '无权访问此文件' })
     }
 
@@ -70,7 +71,7 @@ router.get('/payment-proofs/:filename', requireAuth, async (req, res) => {
 
     // 查询该回单是否属于当前用户的报销单
     const proof = await db.get(
-      `SELECT r.user_id
+      `SELECT r.user_id, r.type
        FROM reimbursements r
        WHERE r.payment_proof_path LIKE ?`,
       `%${filename}%`
@@ -80,11 +81,12 @@ router.get('/payment-proofs/:filename', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '文件不存在' })
     }
 
-    // 检查权限
+    // 检查权限：必须是文件所有者、管理员，或总经理（仅限商务报销）
     const user = await db.get('SELECT role FROM users WHERE id = ?', userId)
     const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+    const isGMForBusiness = user?.role === 'general_manager' && proof.type === 'business'
 
-    if (proof.user_id !== userId && !isAdmin) {
+    if (proof.user_id !== userId && !isAdmin && !isGMForBusiness) {
       return res.status(403).json({ success: false, message: '无权访问此文件' })
     }
 

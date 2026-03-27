@@ -345,7 +345,7 @@
                     <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                       <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
                         <template v-if="isImagePath(proofUrl)">
-                          <img :src="proofUrl" class="proof-image" alt="付款回单" />
+                          <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" />
                         </template>
                         <template v-else>
                           <div class="proof-pdf">
@@ -427,8 +427,8 @@
         <!-- 付款回单预览对话框 -->
         <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
           <div class="preview-dialog-content">
-            <img v-if="isImagePath(previewingProofUrl)" :src="previewingProofUrl" class="preview-dialog-image" alt="付款回单" />
-            <iframe v-else-if="previewingProofUrl" :src="previewingProofUrl" class="preview-dialog-pdf" />
+            <img v-if="isImagePath(previewingProofUrl)" :src="toFileUrl(previewingProofUrl)" class="preview-dialog-image" alt="付款回单" />
+            <iframe v-else-if="previewingProofUrl" :src="toFileUrl(previewingProofUrl)" class="preview-dialog-pdf" />
           </div>
         </el-dialog>
       </div>
@@ -443,6 +443,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
 import { usePendingStore } from '@/stores/pending'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
+import { toFileUrl } from '@/utils/file'
 
 const router = useRouter()
 const pendingStore = usePendingStore()
