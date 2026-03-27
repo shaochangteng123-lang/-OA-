@@ -4,9 +4,12 @@
  */
 
 import { Router } from 'express'
+import fs from 'fs'
+import path from 'path'
 import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth, requireAdmin, requireRole } from '../middleware/auth.js'
+import { validateFilePath } from '../utils/file-validation.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 
 const router = Router()
@@ -47,10 +50,20 @@ router.get('/statistics', requireAdmin, async (req, res) => {
   try {
     const userRole = req.session?.user?.role
 
-    // 获取当月的开始和结束时间
+    // 获取当月的开始和结束时间（使用北京时间 UTC+8）
     const now = new Date()
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
-    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
+    // 转换为北京时间
+    const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000)
+    const year = beijingTime.getUTCFullYear()
+    const month = beijingTime.getUTCMonth()
+
+    // 计算当月开始时间（北京时间 00:00:00）
+    const monthStartBeijing = new Date(Date.UTC(year, month, 1, 0, 0, 0))
+    const monthStart = new Date(monthStartBeijing.getTime() - 8 * 60 * 60 * 1000).toISOString()
+
+    // 计算当月结束时间（北京时间 23:59:59）
+    const monthEndBeijing = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59))
+    const monthEnd = new Date(monthEndBeijing.getTime() - 8 * 60 * 60 * 1000).toISOString()
 
     // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有
     const typeFilter = userRole === 'admin'
@@ -72,7 +85,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const pendingApproval = await db.prepare(`
       SELECT COUNT(*) as count FROM approval_instances ai
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-      WHERE ai.status NOT IN ('rejected', 'withdrawn')
+      WHERE ai.status NOT IN ('rejected', 'withdrawn', 'cancelled')
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
       AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
       ${typeFilter}
@@ -558,7 +571,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
     }
 
     const conditions: string[] = [
-      `ai.status NOT IN ('rejected', 'withdrawn')`,
+      `ai.status NOT IN ('rejected', 'withdrawn', 'cancelled')`,
       `(ai.target_type != 'reimbursement' OR r.id IS NOT NULL)`,
     ]
     const params: unknown[] = []
@@ -1864,6 +1877,47 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
   }
 })
 
+// 发票管理 - 合并 PDF 用于打印（浏览器原生 PDF 查看器打印，预览彩色）
+router.post('/invoice-management/merge-for-print', requireAdmin, async (req, res) => {
+  try {
+    const { filePaths } = req.body
+    if (!filePaths || !Array.isArray(filePaths) || filePaths.length === 0) {
+      return res.status(400).json({ success: false, message: '请选择要打印的发票' })
+    }
+
+    // 校验所有文件路径安全性
+    for (const filePath of filePaths) {
+      if (!validateFilePath(filePath)) {
+        return res.status(400).json({ success: false, message: '文件路径不合法' })
+      }
+    }
+
+    const { PDFDocument } = await import('pdf-lib')
+    const mergedPdf = await PDFDocument.create()
+
+    for (const filePath of filePaths) {
+      const fullPath = path.resolve(process.cwd(), filePath)
+      if (!fs.existsSync(fullPath)) continue
+      try {
+        const pdfBytes = fs.readFileSync(fullPath)
+        const pdf = await PDFDocument.load(pdfBytes, { ignoreEncryption: true })
+        const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices())
+        pages.forEach(page => mergedPdf.addPage(page))
+      } catch (err) {
+        console.warn(`合并 PDF 失败，跳过: ${filePath}`, err)
+      }
+    }
+
+    const mergedBytes = await mergedPdf.save()
+    res.setHeader('Content-Type', 'application/pdf')
+    res.setHeader('Content-Disposition', 'inline; filename="invoices-print.pdf"')
+    res.send(Buffer.from(mergedBytes))
+  } catch (error) {
+    console.error('合并 PDF 失败:', error)
+    res.status(500).json({ success: false, message: '合并 PDF 失败' })
+  }
+})
+
 // 发票管理 - 批量下载发票（ZIP打包）
 router.post('/invoice-management/batch-download', requireAdmin, async (req, res) => {
   try {
@@ -1929,7 +1983,13 @@ router.post('/invoice-management/batch-download', requireAdmin, async (req, res)
 
     // 添加文件到 ZIP
     for (const inv of invoices) {
-      const filePath = path.join(process.cwd(), inv.file_path)
+      // 校验文件路径安全性
+      if (!validateFilePath(inv.file_path)) {
+        console.warn(`文件路径不合法: ${inv.file_path}`)
+        continue
+      }
+
+      const filePath = path.resolve(process.cwd(), inv.file_path)
 
       // 检查文件是否存在
       if (!fs.existsSync(filePath)) {
@@ -1987,7 +2047,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       const approvalPending = await db.prepare(`
         SELECT COUNT(*) as count FROM approval_instances ai
         LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
-        WHERE ai.status NOT IN ('rejected', 'withdrawn')
+        WHERE ai.status NOT IN ('rejected', 'withdrawn', 'cancelled')
         AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
         AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
         ${typeFilter}
@@ -2394,6 +2454,36 @@ router.post('/submit', requireAuth, async (req, res) => {
         success: false,
         message: '缺少必要参数',
       })
+    }
+
+    // 针对报销单类型，校验目标存在性、归属和状态
+    if (targetType === 'reimbursement') {
+      const reimbursement = await db.get(
+        'SELECT id, user_id, status FROM reimbursements WHERE id = ?',
+        targetId
+      )
+
+      if (!reimbursement) {
+        return res.status(404).json({
+          success: false,
+          message: '报销单不存在',
+        })
+      }
+
+      if (reimbursement.user_id !== userId) {
+        return res.status(403).json({
+          success: false,
+          message: '无权提交此报销单的审批',
+        })
+      }
+
+      // 只有 pending 状态的报销单才能提交审批
+      if (reimbursement.status !== 'pending') {
+        return res.status(400).json({
+          success: false,
+          message: '只有待审批状态的报销单才能提交审批',
+        })
+      }
     }
 
     // 检查是否已有pending状态的审批

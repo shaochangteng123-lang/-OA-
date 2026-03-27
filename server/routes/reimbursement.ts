@@ -6,14 +6,29 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { nanoid } from 'nanoid'
-import { requireAuth } from '../middleware/auth.js'
+import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
 import { recognizeReceipt } from '../services/receiptOcr.js'
 import { recognizePaymentProof } from '../services/paymentProofOcr.js'
 import { calculateReimbursementMonth } from '../utils/reimbursement.js'
+import { validateFilePath } from '../utils/file-validation.js'
 import { db } from '../db/index.js'
 
 const router = Router()
+
+// OCR 验证结果缓存（临时文件名 -> OCR 结果）
+// 用于防止客户端篡改金额
+const ocrCache = new Map<string, { amount: number; timestamp: number }>()
+
+// 定期清理过期缓存（30分钟）
+setInterval(() => {
+  const now = Date.now()
+  for (const [key, value] of ocrCache.entries()) {
+    if (now - value.timestamp > 30 * 60 * 1000) {
+      ocrCache.delete(key)
+    }
+  }
+}, 5 * 60 * 1000)
 
 // 格式化时间为中国时间，格式：YYYY-MM-DD HH:mm
 // 不依赖 Intl，避免 Alpine 容器 small-icu 导致乱码
@@ -195,7 +210,7 @@ async function recognizeInvoice(filePath: string): Promise<{
     console.error('❌ 本地 OCR 识别失败:', error)
 
     // 如果是无效发票错误，直接抛出，不返回默认值
-    if (error instanceof Error && error.message.includes('此不是发票文件')) {
+    if (error instanceof Error && (error.message.includes('此不是发票文件') || error.message.includes('此不是有效发票'))) {
       throw error
     }
 
@@ -410,7 +425,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
 
       return res.status(400).json({
         success: false,
-        message: '此不是发票文件请重新上传',
+        message: '此不是有效发票，请重新上传',
         isValidInvoice: false,
       })
     }
@@ -438,7 +453,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       message: '发票上传成功',
       data: {
         fileName: finalFileName,
-        filePath: `/uploads/invoices/${finalFileName}`,
+        filePath: `uploads/invoices/${finalFileName}`,
         fileHash,
         compressed,
         ocrResult,
@@ -1082,6 +1097,16 @@ router.post('/create', requireAuth, async (req, res) => {
 
     // === 所有校验在写库前完成 ===
 
+    // 校验发票文件路径安全性
+    for (const invoice of processedInvoices) {
+      if (invoice.filePath && !validateFilePath(invoice.filePath)) {
+        return res.status(400).json({
+          success: false,
+          message: '发票文件路径不合法',
+        })
+      }
+    }
+
     // 校验本次请求内发票号码不重复
     const invoiceNumbers = processedInvoices
       .map((inv: any) => inv.invoiceNumber)
@@ -1401,26 +1426,10 @@ router.get('/list', requireAuth, async (req, res) => {
  * 获取待审批报销单列表（管理员）
  * GET /api/reimbursement/pending-list
  */
-router.get('/pending-list', requireAuth, async (req, res) => {
+router.get('/pending-list', requireAdmin, async (req, res) => {
   try {
     const { page = '1', pageSize = '20', type } = req.query
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({
-        success: false,
-        message: '未登录',
-      })
-    }
-
-    // 检查是否为管理员
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({
-        success: false,
-        message: '无权限访问',
-      })
-    }
+    const currentUserId = req.session.userId!
 
     const { db } = await import('../db/index.js')
 
@@ -1521,14 +1530,9 @@ router.post('/:id/approve', requireAuth, async (_req, res) => {
  * 上传单张付款回单并进行OCR识别验证（不提交，仅验证）
  * POST /api/reimbursement/:id/verify-proof
  */
-router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('paymentProof'), async (req, res) => {
+router.post('/:id/verify-proof', requireAdmin, uploadPaymentProof.single('paymentProof'), async (req, res) => {
   try {
     const { id } = req.params
-    const currentUserRole = req.session.user?.role
-
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({ success: false, message: '无权限操作' })
-    }
 
     if (!req.file) {
       return res.status(400).json({ success: false, message: '请上传付款回单' })
@@ -1643,6 +1647,12 @@ router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('payment
     // 验证通过，保留临时文件，返回识别结果
     const tempFileName = path.basename(req.file.path)
 
+    // 将 OCR 结果存入缓存
+    ocrCache.set(tempFileName, {
+      amount: ocrResult.amount,
+      timestamp: Date.now(),
+    })
+
     res.json({
       success: true,
       message: '付款回单验证通过',
@@ -1670,21 +1680,12 @@ router.post('/:id/verify-proof', requireAuth, uploadPaymentProof.single('payment
  * 提交已验证的付款回单（支持多张回单）
  * POST /api/reimbursement/:id/complete-with-proof
  */
-router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
+router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
   console.log('🔵 收到付款回单提交请求')
 
   try {
     const { id } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({ success: false, message: '未登录' })
-    }
-
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({ success: false, message: '无权限操作' })
-    }
+    const currentUserId = req.session.userId!
 
     // 接收已验证的文件列表：[{ tempFileName, originalFileName, amount }]
     const { verifiedFiles } = req.body
@@ -1703,8 +1704,19 @@ router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '只有已审批通过的报销单才能付款' })
     }
 
-    // 验证金额总和
-    const totalOcrAmount = verifiedFiles.reduce((sum: number, f: any) => sum + (f.amount || 0), 0)
+    // 使用服务端缓存的金额，防止客户端篡改
+    let totalOcrAmount = 0
+    for (const file of verifiedFiles) {
+      const cached = ocrCache.get(file.tempFileName)
+      if (!cached) {
+        return res.status(400).json({
+          success: false,
+          message: `文件 ${file.originalFileName} 验证已过期，请重新验证`,
+        })
+      }
+      totalOcrAmount += cached.amount
+    }
+
     const expectedAmount = parseFloat(reimbursement.total_amount)
     if (Math.abs(expectedAmount - totalOcrAmount) > 0.01) {
       return res.status(400).json({
@@ -1724,7 +1736,7 @@ router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
       const finalFileName = `payment-proof-${id}-${Date.now()}-${safeFileName}`
       const finalPath = path.join(invoicesDir, finalFileName)
       fs.renameSync(tempPath, finalPath)
-      paymentProofPaths.push(`/uploads/invoices/${finalFileName}`)
+      paymentProofPaths.push(`uploads/invoices/${finalFileName}`)
     }
 
     const paymentProofPath = paymentProofPaths.join(',')
@@ -1737,43 +1749,46 @@ router.post('/:id/complete-with-proof', requireAuth, async (req, res) => {
       ORDER BY created_at DESC LIMIT 1
     `).get(id) as { id: string } | undefined
 
-    // 自动创建单笔付款批次（统一批次机制）
-    const batchId = nanoid()
-    const batchNo = generateBatchNo()
+    // 使用事务确保原子性
+    await db.transaction(async (client) => {
+      // 自动创建单笔付款批次（统一批次机制）
+      const batchId = nanoid()
+      const batchNo = generateBatchNo()
 
-    await db.prepare(`
-      INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, payment_proof_path, pay_time, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
-    `).run(batchId, batchNo, expectedAmount, currentUserId, paymentProofPath, now, now, now)
+      await txRun(client, `
+        INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, payment_proof_path, pay_time, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
+      `, batchId, batchNo, expectedAmount, currentUserId, paymentProofPath, now, now, now)
 
-    // 创建批次快照记录（单笔付款也需要快照，确保确认收款时能查询到）
-    const itemId = nanoid()
-    await db.prepare(`
-      INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(itemId, batchId, id, expectedAmount, now)
+      // 创建批次快照记录（单笔付款也需要快照，确保确认收款时能查询到）
+      const itemId = nanoid()
+      await txRun(client, `
+        INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
+        VALUES (?, ?, ?, ?, ?)
+      `, itemId, batchId, id, expectedAmount, now)
 
-    // 更新报销单状态
-    await db.prepare(`
-      UPDATE reimbursements
-      SET status = 'payment_uploaded',
-          payment_proof_path = ?,
-          payment_batch_id = ?,
-          pay_time = ?,
-          payment_upload_time = ?,
-          updated_at = ?
-      WHERE id = ?
-    `).run(paymentProofPath, batchId, now, now, now, id)
+      // 更新报销单状态
+      await txRun(client, `
+        UPDATE reimbursements
+        SET status = 'payment_uploaded',
+            payment_proof_path = ?,
+            payment_batch_id = ?,
+            pay_time = ?,
+            payment_upload_time = ?,
+            updated_at = ?
+        WHERE id = ?
+      `, paymentProofPath, batchId, now, now, now, id)
 
-    // 创建审批记录
-    if (approvalInstance) {
-      const { nanoid } = await import('nanoid')
-      const recordId = nanoid()
-      await db.prepare(`
-        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', '管理员已上传付款回单', now)
-    }
+      // 创建审批记录
+      if (approvalInstance) {
+        const { nanoid } = await import('nanoid')
+        const recordId = nanoid()
+        await txRun(client, `
+          INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', '管理员已上传付款回单', now)
+      }
+    })
 
     console.log(`✅ 付款回单提交成功: ${id}, 共 ${paymentProofPaths.length} 张回单`)
 
@@ -2225,6 +2240,16 @@ router.put('/:id', requireAuth, async (req, res) => {
 
     // === 所有校验在写库前完成 ===
 
+    // 校验文件路径安全性
+    for (const invoice of processedInvoices) {
+      if (invoice.filePath && !validateFilePath(invoice.filePath)) {
+        return res.status(403).json({
+          success: false,
+          message: '非法文件路径',
+        })
+      }
+    }
+
     // 校验本次请求内发票号码不重复
     const invoiceNumbers = processedInvoices
       .map((inv: any) => inv.invoiceNumber)
@@ -2609,14 +2634,9 @@ function generateBatchNo(): string {
  * 创建批量付款批次
  * POST /api/reimbursement/payment-batch/create
  */
-router.post('/payment-batch/create', requireAuth, async (req, res) => {
+router.post('/payment-batch/create', requireAdmin, async (req, res) => {
   try {
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({ success: false, message: '无权限操作' })
-    }
+    const currentUserId = req.session.userId!
 
     const { reimbursementIds } = req.body
     if (!reimbursementIds || !Array.isArray(reimbursementIds) || reimbursementIds.length === 0) {
@@ -2649,9 +2669,9 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
     if (withBatchId.length > 0) {
       const batchIds = [...new Set(withBatchId.map(r => r.payment_batch_id))]
       const batchPlaceholders = batchIds.map(() => '?').join(',')
-      // 只有 payment_uploaded 状态（已上传回单待确认）才视为活跃批次
+      // 只有 uploaded 或 pending 状态才视为活跃批次（防止并发创建批次）
       const activeBatches = await db.prepare(`
-        SELECT id FROM payment_batches WHERE id IN (${batchPlaceholders}) AND status = 'payment_uploaded'
+        SELECT id FROM payment_batches WHERE id IN (${batchPlaceholders}) AND status IN ('uploaded', 'pending')
       `).all(...batchIds) as any[]
       const activeBatchIds = new Set(activeBatches.map(b => b.id))
 
@@ -2659,15 +2679,8 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
       if (alreadyInBatch.length > 0) {
         return res.status(400).json({
           success: false,
-          message: `以下报销单已上传付款回单待确认，不能重复付款：${alreadyInBatch.map(r => r.id).join(', ')}`,
+          message: `以下报销单已在付款批次中，不能重复付款：${alreadyInBatch.map(r => r.id).join(', ')}`,
         })
-      }
-
-      // 清除 pending（未付款）/ confirmed（已完成）/ 不存在的旧批次关联
-      const clearStmt = await db.prepare('UPDATE reimbursements SET payment_batch_id = NULL, updated_at = ? WHERE id = ?')
-      const clearNow = new Date().toISOString()
-      for (const r of withBatchId.filter(r => !activeBatchIds.has(r.payment_batch_id))) {
-        await clearStmt.run(clearNow, r.id)
       }
     }
 
@@ -2688,26 +2701,35 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
     const batchNo = generateBatchNo()
     const now = new Date().toISOString()
 
-    await db.prepare(`
-      INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?)
-    `).run(batchId, batchNo, totalAmount, currentUserId, now, now)
+    // 使用事务确保原子性
+    await db.transaction(async (client) => {
+      // 清除旧批次关联（confirmed 或不存在的批次）
+      const toClear = withBatchId.filter(r => r.payment_batch_id)
+      if (toClear.length > 0) {
+        for (const r of toClear) {
+          await txRun(client, 'UPDATE reimbursements SET payment_batch_id = NULL, updated_at = ? WHERE id = ?', now, r.id)
+        }
+      }
 
-    // 写入批次明细快照（记录创建时的成员和金额，防止后续漂移）
-    const insertItemStmt = await db.prepare(`
-      INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `)
+      // 创建新批次
+      await txRun(client, `
+        INSERT INTO payment_batches (id, batch_no, total_amount, payer_id, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `, batchId, batchNo, totalAmount, currentUserId, now, now)
 
-    // 关联报销单到批次
-    const updateStmt = await db.prepare(`
-      UPDATE reimbursements SET payment_batch_id = ?, updated_at = ? WHERE id = ?
-    `)
-    for (const r of reimbursements) {
-      const itemId = nanoid()
-      await insertItemStmt.run(itemId, batchId, r.id, parseFloat(r.total_amount), now)
-      await updateStmt.run(batchId, now, r.id)
-    }
+      // 写入批次明细快照和关联报销单
+      for (const r of reimbursements) {
+        const itemId = nanoid()
+        await txRun(client, `
+          INSERT INTO payment_batch_items (id, batch_id, reimbursement_id, amount, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `, itemId, batchId, r.id, parseFloat(r.total_amount), now)
+
+        await txRun(client, `
+          UPDATE reimbursements SET payment_batch_id = ?, updated_at = ? WHERE id = ?
+        `, batchId, now, r.id)
+      }
+    })
 
     console.log(`✅ 创建付款批次: ${batchNo}, 包含 ${reimbursements.length} 笔, 合计 ¥${totalAmount.toFixed(2)}`)
 
@@ -2740,14 +2762,9 @@ router.post('/payment-batch/create', requireAuth, async (req, res) => {
  * 验证批量付款回单（OCR + 收款人匹配）
  * POST /api/reimbursement/payment-batch/:batchId/verify-proof
  */
-router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentProof.single('paymentProof'), async (req, res) => {
+router.post('/payment-batch/:batchId/verify-proof', requireAdmin, uploadPaymentProof.single('paymentProof'), async (req, res) => {
   try {
     const { batchId } = req.params
-    const currentUserRole = req.session.user?.role
-
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({ success: false, message: '无权限操作' })
-    }
 
     if (!req.file) {
       return res.status(400).json({ success: false, message: '请上传付款回单' })
@@ -2857,6 +2874,12 @@ router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentPr
 
     const tempFileName = path.basename(req.file.path)
 
+    // 将 OCR 结果存入缓存
+    ocrCache.set(tempFileName, {
+      amount: ocrResult.amount,
+      timestamp: Date.now(),
+    })
+
     res.json({
       success: true,
       message: '付款回单验证通过',
@@ -2884,19 +2907,10 @@ router.post('/payment-batch/:batchId/verify-proof', requireAuth, uploadPaymentPr
  * 提交批量付款回单
  * POST /api/reimbursement/payment-batch/:batchId/complete
  */
-router.post('/payment-batch/:batchId/complete', requireAuth, async (req, res) => {
+router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) => {
   try {
     const { batchId } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
-
-    if (!currentUserId) {
-      return res.status(401).json({ success: false, message: '未登录' })
-    }
-
-    if (!['super_admin', 'admin'].includes(currentUserRole || '')) {
-      return res.status(403).json({ success: false, message: '无权限操作' })
-    }
+    const currentUserId = req.session.userId!
 
     const { verifiedFiles } = req.body
     if (!verifiedFiles || !Array.isArray(verifiedFiles) || verifiedFiles.length === 0) {
@@ -2927,8 +2941,19 @@ router.post('/payment-batch/:batchId/complete', requireAuth, async (req, res) =>
       return res.status(400).json({ success: false, message: '部分报销单状态异常' })
     }
 
-    // 验证回单金额总和与批次金额
-    const totalOcrAmount = verifiedFiles.reduce((sum: number, f: any) => sum + (f.amount || 0), 0)
+    // 使用服务端缓存的金额，防止客户端篡改
+    let totalOcrAmount = 0
+    for (const file of verifiedFiles) {
+      const cached = ocrCache.get(file.tempFileName)
+      if (!cached) {
+        return res.status(400).json({
+          success: false,
+          message: `文件 ${file.originalFileName} 验证已过期，请重新验证`,
+        })
+      }
+      totalOcrAmount += cached.amount
+    }
+
     const expectedAmount = parseFloat(batch.total_amount)
     if (Math.abs(expectedAmount - totalOcrAmount) > 0.01) {
       return res.status(400).json({
@@ -2948,47 +2973,48 @@ router.post('/payment-batch/:batchId/complete', requireAuth, async (req, res) =>
       const finalFileName = `payment-proof-batch-${batch.batch_no}-${Date.now()}-${safeFileName}`
       const finalPath = path.join(invoicesDir, finalFileName)
       fs.renameSync(tempPath, finalPath)
-      paymentProofPaths.push(`/uploads/invoices/${finalFileName}`)
+      paymentProofPaths.push(`uploads/invoices/${finalFileName}`)
     }
 
     const paymentProofPath = paymentProofPaths.join(',')
     const now = new Date().toISOString()
 
-    // 更新批次状态
-    await db.prepare(`
-      UPDATE payment_batches
-      SET status = 'uploaded', payment_proof_path = ?, pay_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(paymentProofPath, now, now, batchId)
+    // 使用事务确保原子性
+    await db.transaction(async (client) => {
+      // 更新批次状态
+      await txRun(client, `
+        UPDATE payment_batches
+        SET status = 'uploaded', payment_proof_path = ?, pay_time = ?, updated_at = ?
+        WHERE id = ?
+      `, paymentProofPath, now, now, batchId)
 
-    // 更新所有关联报销单状态
-    const updateReimbursement = await db.prepare(`
-      UPDATE reimbursements
-      SET status = 'payment_uploaded', payment_proof_path = ?, pay_time = ?, payment_upload_time = ?, updated_at = ?
-      WHERE id = ?
-    `)
+      // 更新所有关联报销单状态
+      for (const r of reimbursements) {
+        await txRun(client, `
+          UPDATE reimbursements
+          SET status = 'payment_uploaded', payment_proof_path = ?, pay_time = ?, payment_upload_time = ?, updated_at = ?
+          WHERE id = ?
+        `, paymentProofPath, now, now, now, r.id)
 
-    for (const r of reimbursements) {
-      await updateReimbursement.run(paymentProofPath, now, now, now, r.id)
+        // 为每个报销单创建审批记录
+        const approvalInstance = await txGet(client, `
+          SELECT id FROM approval_instances
+          WHERE target_id = ? AND target_type = 'reimbursement'
+          ORDER BY created_at DESC LIMIT 1
+        `, r.id) as { id: string } | undefined
 
-      // 为每个报销单创建审批记录
-      const approvalInstance = await db.prepare(`
-        SELECT id FROM approval_instances
-        WHERE target_id = ? AND target_type = 'reimbursement'
-        ORDER BY created_at DESC LIMIT 1
-      `).get(r.id) as { id: string } | undefined
-
-      if (approvalInstance) {
-        const recordId = nanoid()
-        const comment = reimbursements.length > 1
-          ? `管理员已批量付款（批次 ${batch.batch_no}，共 ${reimbursements.length} 笔，合计 ¥${expectedAmount.toFixed(2)}）`
-          : '管理员已上传付款回单'
-        await db.prepare(`
-          INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', comment, now)
+        if (approvalInstance) {
+          const recordId = nanoid()
+          const comment = reimbursements.length > 1
+            ? `管理员已批量付款（批次 ${batch.batch_no}，共 ${reimbursements.length} 笔，合计 ¥${expectedAmount.toFixed(2)}）`
+            : '管理员已上传付款回单'
+          await txRun(client, `
+            INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `, recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', comment, now)
+        }
       }
-    }
+    })
 
     console.log(`✅ 批量付款完成: ${batch.batch_no}, 共 ${reimbursements.length} 笔, 合计 ¥${expectedAmount.toFixed(2)}`)
 
@@ -3066,20 +3092,22 @@ router.post('/payment-batch/:batchId/confirm-receipt', requireAuth, async (req, 
 
     const now = new Date().toISOString()
 
-    const updateStmt = await db.prepare(`
-      UPDATE reimbursements
-      SET status = 'completed', completed_time = ?, receipt_confirmed_by = ?, updated_at = ?
-      WHERE id = ?
-    `)
+    // 使用事务确保原子性
+    await db.transaction(async (client) => {
+      // 更新所有关联报销单状态
+      for (const r of toConfirm) {
+        await txRun(client, `
+          UPDATE reimbursements
+          SET status = 'completed', completed_time = ?, receipt_confirmed_by = ?, updated_at = ?
+          WHERE id = ?
+        `, now, currentUserName || '用户', now, r.id)
+      }
 
-    for (const r of toConfirm) {
-      await updateStmt.run(now, currentUserName || '用户', now, r.id)
-    }
-
-    // 更新批次状态
-    await db.prepare(`
-      UPDATE payment_batches SET status = 'confirmed', updated_at = ? WHERE id = ?
-    `).run(now, batchId)
+      // 更新批次状态
+      await txRun(client, `
+        UPDATE payment_batches SET status = 'confirmed', updated_at = ? WHERE id = ?
+      `, now, batchId)
+    })
 
     console.log(`✅ 批量确认收款: ${batch.batch_no}, 共 ${toConfirm.length} 笔`)
 
@@ -3100,8 +3128,11 @@ router.post('/payment-batch/:batchId/confirm-receipt', requireAuth, async (req, 
 router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
   try {
     const { batchId } = req.params
-    const currentUserId = req.session.user?.id
-    const currentUserRole = req.session.user?.role
+    const currentUserId = req.session.userId!
+
+    // 查询当前用户角色
+    const user = await db.get('SELECT role FROM users WHERE id = ?', currentUserId)
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
 
     const batch = await db.prepare(`
       SELECT pb.*, u.name as payerName
@@ -3123,7 +3154,6 @@ router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
     `).all(batchId) as any[]
 
     // 权限：管理员和总经理可查看所有，普通用户只能查看自己的
-    const isAdmin = ['super_admin', 'admin', 'general_manager'].includes(currentUserRole || '')
     if (!isAdmin) {
       const ownedReimbursement = await db.prepare(`
         SELECT r.id
