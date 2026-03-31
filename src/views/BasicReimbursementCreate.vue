@@ -29,6 +29,7 @@
                   <InvoiceUploader
                     v-model="invoice.fileList.value"
                     theme-color="#667eea"
+                    :existing-deductions="deductionItems"
                     @file-change="handleFileChange"
                     @delete-file="handleDeleteFile"
                   />
@@ -40,8 +41,20 @@
                   <ReceiptUploader
                     v-model="receiptFileList"
                     theme-color="#67c23a"
+                    :existing-deductions="deductionItems"
                     @file-change="handleReceiptChange"
                     @delete-file="handleDeleteReceipt"
+                  />
+                </el-form-item>
+              </div>
+
+              <div class="upload-deduction">
+                <el-form-item label="核减上传">
+                  <DeductionUploader
+                    v-model="deductionItems"
+                    :total-invoice-amount="invoice.totalAmount.value"
+                    :yearly-deduction-used="0"
+                    :existing-invoices="invoice.invoiceList.value"
                   />
                 </el-form-item>
               </div>
@@ -54,6 +67,8 @@
                 :readonly="false"
                 :show-deduction="true"
                 :monthly-used-quota="invoice.monthlyUsedQuota.value"
+                :deduction-invoices="deductionItems"
+                :total-invoice-amount="invoice.totalAmount.value"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -97,6 +112,8 @@ import type { FormInstance } from 'element-plus'
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
 import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
+import DeductionUploader from '@/components/reimbursement/DeductionUploader.vue'
+import type { DeductionItem } from '@/components/reimbursement/DeductionUploader.vue'
 
 // 导入工具函数和常量
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
@@ -120,6 +137,9 @@ const invoice = useInvoice()
 
 // 收据文件列表
 const receiptFileList = ref<any[]>([])
+
+// 核减发票列表
+const deductionItems = ref<DeductionItem[]>([])
 
 // 获取当前月份（根据报销规则计算，基础报销使用特殊规则）
 const getCurrentMonth = () => {
@@ -146,9 +166,44 @@ const handleBack = () => {
 
 // 处理文件变化
 const handleFileChange = async (file: any, fileList: any[]) => {
+  // 先调用原有的上传逻辑
   await invoice.handleFileChange(file, fileList)
+
+  // 上传成功后，检查最新添加的发票是否与核减列表中的文件重复
+  const latestInvoice = invoice.invoiceList.value[invoice.invoiceList.value.length - 1]
+  if (latestInvoice && latestInvoice.fileHash) {
+    const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === latestInvoice.fileHash)
+
+    if (duplicateInDeduction) {
+      // 发现重复，删除刚上传的发票
+      ElMessage.error('此发票已在核减上传中上传，请勿重复上传')
+      invoice.deleteInvoiceById(latestInvoice.id)
+      return
+    }
+  }
+
   // 每次上传发票后,重新获取当月已使用额度
   await invoice.fetchMonthlyUsedQuota()
+}
+
+// 处理无票上传变化
+const handleReceiptChange = async (file: any, fileList: any[]) => {
+  await invoice.handleReceiptChange(file, fileList)
+
+  // 上传成功后，检查最新添加的发票是否与核减列表中的文件重复
+  const latestInvoice = invoice.invoiceList.value[invoice.invoiceList.value.length - 1]
+  if (latestInvoice && latestInvoice.fileHash) {
+    const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === latestInvoice.fileHash)
+
+    if (duplicateInDeduction) {
+      // 发现重复，删除刚上传的发票
+      ElMessage.error('此发票已在核减上传中上传，请勿重复上传')
+      invoice.deleteInvoiceById(latestInvoice.id)
+      return
+    }
+  }
+
+  receiptFileList.value = fileList
 }
 
 // 处理删除文件
@@ -158,21 +213,23 @@ const handleDeleteFile = (file: any) => {
 
 // 处理删除发票
 const handleDeleteInvoice = (invoiceItem: any) => {
-  // 先从 invoice 中删除
-  invoice.deleteInvoiceById(invoiceItem.id)
-
-  // 如果是收据（从 receiptFileList 中删除）
-  const receiptIndex = receiptFileList.value.findIndex(f => f.uid === invoiceItem.fileUid)
-  if (receiptIndex > -1) {
-    receiptFileList.value.splice(receiptIndex, 1)
+  if (invoiceItem.isDeduction) {
+    // 删除核减发票
+    const index = deductionItems.value.findIndex(item =>
+      item.filePath === invoiceItem.filePath ||
+      item.invoiceNumber === invoiceItem.invoiceNumber
+    )
+    if (index > -1) {
+      deductionItems.value.splice(index, 1)
+    }
+  } else {
+    // 删除普通发票
+    invoice.deleteInvoiceById(invoiceItem.id)
+    const receiptIndex = receiptFileList.value.findIndex(f => f.uid === invoiceItem.fileUid)
+    if (receiptIndex > -1) {
+      receiptFileList.value.splice(receiptIndex, 1)
+    }
   }
-}
-
-// 处理收据变化
-const handleReceiptChange = async (file: any, fileList: any[]) => {
-  await invoice.handleReceiptChange(file, fileList)
-  // 每次上传收据后,重新获取当月已使用额度
-  await invoice.fetchMonthlyUsedQuota()
 }
 
 // 处理删除收据
@@ -189,21 +246,34 @@ const handleDeleteReceipt = (file: any) => {
 
 // 保存草稿
 const handleSaveDraft = async () => {
-  // 验证
-  if (invoice.invoiceList.value.length === 0) {
-    ElMessage.warning('请至少上传一张发票')
+  // 验证：至少要有一张发票或核减发票
+  if (invoice.invoiceList.value.length === 0 && deductionItems.value.length === 0) {
+    ElMessage.warning('请至少上传一张发票或核减发票')
     return
   }
 
   try {
     submitting.value = true
 
-    // 构建提交数据
+    // 构建提交数据，合并普通发票和核减发票
+    const normalInvoices = invoice.getInvoicesForSubmit()
+    const deductionInvoicesData = deductionItems.value.map(item => ({
+      amount: item.amount,
+      invoiceDate: item.invoiceDate,
+      invoiceNumber: item.invoiceNumber,
+      category: '核减发票',
+      filePath: item.filePath,
+      fileHash: item.fileHash || '',
+      deductedAmount: 0,
+      actualAmount: item.amount,
+      isDeduction: true,
+    }))
+
     const submitData = {
       type: 'basic' as const,
       title: `${getCurrentMonth()}-基础报销`,
       description: formData.description,
-      invoices: invoice.getInvoicesForSubmit(),
+      invoices: [...normalInvoices, ...deductionInvoicesData],
       status: 'draft', // 草稿状态
     }
 
@@ -234,21 +304,34 @@ const handleSaveDraft = async () => {
 
 // 提交报销单
 const handleSubmit = async () => {
-  // 验证
-  if (invoice.invoiceList.value.length === 0) {
-    ElMessage.warning('请至少上传一张发票')
+  // 验证：至少要有一张发票或核减发票
+  if (invoice.invoiceList.value.length === 0 && deductionItems.value.length === 0) {
+    ElMessage.warning('请至少上传一张发票或核减发票')
     return
   }
 
   try {
     submitting.value = true
 
-    // 构建提交数据
+    // 构建提交数据，合并普通发票和核减发票
+    const normalInvoices = invoice.getInvoicesForSubmit()
+    const deductionInvoicesData = deductionItems.value.map(item => ({
+      amount: item.amount,
+      invoiceDate: item.invoiceDate,
+      invoiceNumber: item.invoiceNumber,
+      category: '核减发票',
+      filePath: item.filePath,
+      fileHash: item.fileHash || '',
+      deductedAmount: 0,
+      actualAmount: item.amount,
+      isDeduction: true,
+    }))
+
     const submitData = {
       type: 'basic' as const,
       title: `${getCurrentMonth()}-基础报销`,
       description: formData.description,
-      invoices: invoice.getInvoicesForSubmit(),
+      invoices: [...normalInvoices, ...deductionInvoicesData],
     }
 
     const response = await fetch('/api/reimbursement/create', {
@@ -354,31 +437,31 @@ onMounted(async () => {
   margin-top: 8px;
 }
 
-/* 两列布局 */
+/* 三列布局 - 使用 flex 避免重叠 */
 .upload-layout {
   display: flex;
-  gap: 24px;
+  gap: 20px;
   align-items: flex-start;
 }
 
-.upload-left {
+.upload-left,
+.upload-right,
+.upload-deduction {
   flex: 1;
   min-width: 0;
-}
-
-.upload-right {
-  width: min(450px, 100%);
-  min-width: 300px;
-  flex-shrink: 0;
 }
 
 @media (max-width: 1366px) {
   .upload-layout {
     flex-direction: column;
   }
-  .upload-right {
+
+  .upload-left,
+  .upload-right,
+  .upload-deduction {
+    flex: 1 1 auto;
     width: 100%;
-    min-width: unset;
+    min-width: 0;
   }
 }
 

@@ -317,10 +317,10 @@ router.post('/create', requireAdmin, async (req, res) => {
     const { username, password, email, mobile, role, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
 
     // 验证必填字段
-    if (!username || !password || !mobile || !department || !position) {
+    if (!username || !password || !email || !mobile || !department || !position) {
       return res.status(400).json({
         success: false,
-        message: '用户名、密码、手机号、部门、职位为必填项',
+        message: '用户名、密码、邮箱、手机号、部门、职位为必填项',
       })
     }
 

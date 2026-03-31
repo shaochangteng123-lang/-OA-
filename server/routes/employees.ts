@@ -56,12 +56,12 @@ const uploadEmployeeDoc = multer({
 })
 
 // 获取当前用户的档案文件列表（用于入职页面查看管理员上传的文件）
-router.get('/my-documents', requireAuth, (req, res) => {
+router.get('/my-documents', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
 
     // 先获取当前用户的员工信息
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT id FROM employee_profiles WHERE user_id = ?
     `).get(userId) as { id: string } | undefined
 
@@ -73,7 +73,7 @@ router.get('/my-documents', requireAuth, (req, res) => {
     }
 
     // 获取该员工的档案文件
-    const documents = db.prepare(`
+    const documents = await db.prepare(`
       SELECT * FROM employee_documents WHERE employee_id = ? ORDER BY created_at DESC
     `).all(profile.id) as EmployeeDocument[]
 
@@ -88,13 +88,13 @@ router.get('/my-documents', requireAuth, (req, res) => {
 })
 
 // 下载/预览当前用户的档案文件
-router.get('/my-documents/:docId/download', requireAuth, (req, res) => {
+router.get('/my-documents/:docId/download', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const { docId } = req.params
 
     // 先获取当前用户的员工信息
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT id FROM employee_profiles WHERE user_id = ?
     `).get(userId) as { id: string } | undefined
 
@@ -103,7 +103,7 @@ router.get('/my-documents/:docId/download', requireAuth, (req, res) => {
     }
 
     // 获取文档信息，确保是当前用户的文档
-    const document = db.prepare(`
+    const document = await db.prepare(`
       SELECT * FROM employee_documents WHERE id = ? AND employee_id = ?
     `).get(docId, profile.id) as EmployeeDocument | undefined
 
@@ -130,12 +130,12 @@ router.get('/my-documents/:docId/download', requireAuth, (req, res) => {
 })
 
 // 获取当前用户的员工信息（用于入职页面）
-router.get('/my-profile', requireAuth, (req, res) => {
+router.get('/my-profile', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
 
     // 联合查询 employee_profiles 和 users 表，获取员工编号
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT
         ep.*,
         COALESCE(u.employee_no, ep.employee_no) as employee_no,
@@ -158,7 +158,7 @@ router.get('/my-profile', requireAuth, (req, res) => {
 
     // 如果没有 employee_profiles 记录，从 users 表获取基本信息
     if (!profile) {
-      const user = db.prepare(`
+      const user = await db.prepare(`
         SELECT id, name, email, mobile, employee_no, department, position,
                bank_account_name, bank_account_phone, bank_name, bank_account_number
         FROM users WHERE id = ?
@@ -196,14 +196,14 @@ router.get('/my-profile', requireAuth, (req, res) => {
 })
 
 // 保存/更新当前用户的员工信息（草稿）
-router.post('/my-profile', requireAuth, (req, res) => {
+router.post('/my-profile', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const data = req.body
     const now = new Date().toISOString()
 
     // 检查是否已有记录
-    const existing = db.prepare(`
+    const existing = await db.prepare(`
       SELECT id, status FROM employee_profiles WHERE user_id = ?
     `).get(userId) as { id: string; status: string } | undefined
 
@@ -217,7 +217,7 @@ router.post('/my-profile', requireAuth, (req, res) => {
 
     if (existing) {
       // 更新现有记录
-      db.prepare(`
+      await db.prepare(`
         UPDATE employee_profiles SET
           employee_no = ?,
           name = ?,
@@ -272,7 +272,7 @@ router.post('/my-profile', requireAuth, (req, res) => {
         existing.id
       )
 
-      const updated = db.prepare(`
+      const updated = await db.prepare(`
         SELECT * FROM employee_profiles WHERE id = ?
       `).get(existing.id)
 
@@ -284,7 +284,7 @@ router.post('/my-profile', requireAuth, (req, res) => {
     } else {
       // 创建新记录
       const id = nanoid()
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO employee_profiles (
           id, user_id, employee_no, name, gender, birth_date,
           id_number, native_place, ethnicity, marital_status,
@@ -324,7 +324,7 @@ router.post('/my-profile', requireAuth, (req, res) => {
         now
       )
 
-      const created = db.prepare(`
+      const created = await db.prepare(`
         SELECT * FROM employee_profiles WHERE id = ?
       `).get(id)
 
@@ -341,13 +341,13 @@ router.post('/my-profile', requireAuth, (req, res) => {
 })
 
 // 提交当前用户的员工信息
-router.post('/my-profile/submit', requireAuth, (req, res) => {
+router.post('/my-profile/submit', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const now = new Date().toISOString()
 
     // 检查是否已有记录
-    const existing = db.prepare(`
+    const existing = await db.prepare(`
       SELECT id, status, name, hire_date FROM employee_profiles WHERE user_id = ?
     `).get(userId) as { id: string; status: string; name: string; hire_date: string | null } | undefined
 
@@ -374,7 +374,7 @@ router.post('/my-profile/submit', requireAuth, (req, res) => {
     }
 
     // 更新状态为已提交，并设置在职状态为实习期
-    db.prepare(`
+    await db.prepare(`
       UPDATE employee_profiles SET status = 'submitted', employment_status = 'probation', updated_at = ? WHERE id = ?
     `).run(now, existing.id)
 
@@ -388,7 +388,7 @@ router.post('/my-profile/submit', requireAuth, (req, res) => {
 
     // 创建转正申请记录
     const confirmationId = nanoid()
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO probation_confirmations (
         id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
       ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
@@ -401,7 +401,7 @@ router.post('/my-profile/submit', requireAuth, (req, res) => {
       now
     )
 
-    const updated = db.prepare(`
+    const updated = await db.prepare(`
       SELECT * FROM employee_profiles WHERE id = ?
     `).get(existing.id)
 
@@ -417,29 +417,29 @@ router.post('/my-profile/submit', requireAuth, (req, res) => {
 })
 
 // 获取员工统计数据（管理员）
-router.get('/statistics', requireAdmin, (req, res) => {
+router.get('/statistics', requireAdmin, async (req, res) => {
   try {
     // 只统计已提交的员工
-    const total = db.prepare(`
+    const total = await db.prepare(`
       SELECT COUNT(*) as count FROM employee_profiles WHERE status = 'submitted'
     `).get() as { count: number }
 
-    const active = db.prepare(`
+    const active = await db.prepare(`
       SELECT COUNT(*) as count FROM employee_profiles
       WHERE status = 'submitted' AND (employment_status = 'active' OR employment_status IS NULL)
     `).get() as { count: number }
 
-    const probation = db.prepare(`
+    const probation = await db.prepare(`
       SELECT COUNT(*) as count FROM employee_profiles
       WHERE status = 'submitted' AND employment_status = 'probation'
     `).get() as { count: number }
 
-    const resigned = db.prepare(`
+    const resigned = await db.prepare(`
       SELECT COUNT(*) as count FROM employee_profiles
       WHERE status = 'submitted' AND employment_status = 'resigned'
     `).get() as { count: number }
 
-    const onLeave = db.prepare(`
+    const onLeave = await db.prepare(`
       SELECT COUNT(*) as count FROM employee_profiles
       WHERE status = 'submitted' AND employment_status = 'on_leave'
     `).get() as { count: number }
@@ -447,11 +447,11 @@ router.get('/statistics', requireAdmin, (req, res) => {
     res.json({
       success: true,
       data: {
-        total: total.count,
-        active: active.count,
-        probation: probation.count,
-        resigned: resigned.count,
-        onLeave: onLeave.count
+        total: Number(total.count),
+        active: Number(active.count),
+        probation: Number(probation.count),
+        resigned: Number(resigned.count),
+        onLeave: Number(onLeave.count)
       }
     })
   } catch (error) {
@@ -461,7 +461,7 @@ router.get('/statistics', requireAdmin, (req, res) => {
 })
 
 // 获取所有员工信息列表（管理员）
-router.get('/list', requireAdmin, (req, res) => {
+router.get('/list', requireAdmin, async (req, res) => {
   try {
     const { status, employmentStatus, department, keyword, page = 1, pageSize = 20 } = req.query
 
@@ -494,27 +494,27 @@ router.get('/list', requireAdmin, (req, res) => {
     }
 
     if (keyword) {
-      sql += ` AND (ep.name LIKE ? OR u.employee_no LIKE ? OR ep.mobile LIKE ?)`
+      sql += ` AND (ep.name ILIKE ? OR u.employee_no ILIKE ? OR ep.mobile ILIKE ?)`
       const kw = `%${keyword}%`
       params.push(kw, kw, kw)
     }
 
     // 获取总数
     const countSql = sql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM')
-    const countResult = db.prepare(countSql).get(...params) as { total: number }
+    const countResult = await db.prepare(countSql).get(...params) as { total: number }
 
     // 分页
     const offset = (Number(page) - 1) * Number(pageSize)
     sql += ` ORDER BY ep.created_at DESC LIMIT ? OFFSET ?`
     params.push(Number(pageSize), offset)
 
-    const list = db.prepare(sql).all(...params) as EmployeeProfile[]
+    const list = await db.prepare(sql).all(...params) as EmployeeProfile[]
 
     res.json({
       success: true,
       data: {
         list,
-        total: countResult.total,
+        total: Number(countResult.total),
         page: Number(page),
         pageSize: Number(pageSize)
       }
@@ -526,11 +526,11 @@ router.get('/list', requireAdmin, (req, res) => {
 })
 
 // 获取单个员工信息（管理员）
-router.get('/:id', requireAdmin, (req, res) => {
+router.get('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
 
-    const profile = db.prepare(`
+    const profile = await db.prepare(`
       SELECT * FROM employee_profiles WHERE id = ?
     `).get(id) as EmployeeProfile | undefined
 
@@ -549,13 +549,13 @@ router.get('/:id', requireAdmin, (req, res) => {
 })
 
 // 更新员工信息（管理员）
-router.put('/:id', requireAdmin, (req, res) => {
+router.put('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
     const data = req.body
     const now = new Date().toISOString()
 
-    const existing = db.prepare(`
+    const existing = await db.prepare(`
       SELECT id FROM employee_profiles WHERE id = ?
     `).get(id)
 
@@ -563,7 +563,7 @@ router.put('/:id', requireAdmin, (req, res) => {
       return res.status(404).json({ success: false, message: '员工信息不存在' })
     }
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE employee_profiles SET
         employee_no = ?,
         name = ?,
@@ -622,7 +622,7 @@ router.put('/:id', requireAdmin, (req, res) => {
       id
     )
 
-    const updated = db.prepare(`
+    const updated = await db.prepare(`
       SELECT * FROM employee_profiles WHERE id = ?
     `).get(id)
 
@@ -638,11 +638,11 @@ router.put('/:id', requireAdmin, (req, res) => {
 })
 
 // 删除员工信息（管理员）
-router.delete('/:id', requireAdmin, (req, res) => {
+router.delete('/:id', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
 
-    const existing = db.prepare(`
+    const existing = await db.prepare(`
       SELECT id FROM employee_profiles WHERE id = ?
     `).get(id)
 
@@ -657,7 +657,7 @@ router.delete('/:id', requireAdmin, (req, res) => {
     }
 
     // 删除员工档案文件记录（数据库会级联删除）
-    db.prepare(`DELETE FROM employee_profiles WHERE id = ?`).run(id)
+    await db.prepare(`DELETE FROM employee_profiles WHERE id = ?`).run(id)
 
     res.json({
       success: true,
@@ -672,12 +672,12 @@ router.delete('/:id', requireAdmin, (req, res) => {
 // ==================== 员工档案文件管理 API ====================
 
 // 获取员工档案文件列表
-router.get('/:id/documents', requireAdmin, (req, res) => {
+router.get('/:id/documents', requireAdmin, async (req, res) => {
   try {
     const { id } = req.params
 
     // 检查员工是否存在
-    const employee = db.prepare(`
+    const employee = await db.prepare(`
       SELECT id FROM employee_profiles WHERE id = ?
     `).get(id)
 
@@ -685,7 +685,7 @@ router.get('/:id/documents', requireAdmin, (req, res) => {
       return res.status(404).json({ success: false, message: '员工信息不存在' })
     }
 
-    const documents = db.prepare(`
+    const documents = await db.prepare(`
       SELECT * FROM employee_documents WHERE employee_id = ? ORDER BY created_at DESC
     `).all(id) as EmployeeDocument[]
 
@@ -700,7 +700,7 @@ router.get('/:id/documents', requireAdmin, (req, res) => {
 })
 
 // 上传员工档案文件
-router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (req, res) => {
+router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), async (req, res) => {
   try {
     const { id } = req.params
     const { document_type, originalFileName } = req.body
@@ -717,7 +717,7 @@ router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (r
     }
 
     // 检查员工是否存在
-    const employee = db.prepare(`
+    const employee = await db.prepare(`
       SELECT id FROM employee_profiles WHERE id = ?
     `).get(id)
 
@@ -727,7 +727,7 @@ router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (r
     }
 
     // 获取上传者信息
-    const uploader = db.prepare(`
+    const uploader = await db.prepare(`
       SELECT name FROM users WHERE id = ?
     `).get(req.session.userId) as { name: string } | undefined
 
@@ -738,7 +738,7 @@ router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (r
     const now = new Date().toISOString()
     const relativePath = `/uploads/employee-documents/${id}/${file.filename}`
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO employee_documents (
         id, employee_id, document_type, file_name, file_path,
         file_size, mime_type, uploaded_by, uploaded_by_name, created_at
@@ -756,7 +756,7 @@ router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (r
       now
     )
 
-    const document = db.prepare(`
+    const document = await db.prepare(`
       SELECT * FROM employee_documents WHERE id = ?
     `).get(docId)
 
@@ -780,12 +780,12 @@ router.post('/:id/documents', requireAdmin, uploadEmployeeDoc.single('file'), (r
 })
 
 // 删除员工档案文件
-router.delete('/:id/documents/:docId', requireAdmin, (req, res) => {
+router.delete('/:id/documents/:docId', requireAdmin, async (req, res) => {
   try {
     const { id, docId } = req.params
 
     // 获取文档信息
-    const document = db.prepare(`
+    const document = await db.prepare(`
       SELECT * FROM employee_documents WHERE id = ? AND employee_id = ?
     `).get(docId, id) as EmployeeDocument | undefined
 
@@ -800,7 +800,7 @@ router.delete('/:id/documents/:docId', requireAdmin, (req, res) => {
     }
 
     // 删除数据库记录
-    db.prepare(`DELETE FROM employee_documents WHERE id = ?`).run(docId)
+    await db.prepare(`DELETE FROM employee_documents WHERE id = ?`).run(docId)
 
     res.json({
       success: true,
@@ -813,12 +813,12 @@ router.delete('/:id/documents/:docId', requireAdmin, (req, res) => {
 })
 
 // 下载/预览员工档案文件
-router.get('/:id/documents/:docId/download', requireAdmin, (req, res) => {
+router.get('/:id/documents/:docId/download', requireAdmin, async (req, res) => {
   try {
     const { id, docId } = req.params
 
     // 获取文档信息
-    const document = db.prepare(`
+    const document = await db.prepare(`
       SELECT * FROM employee_documents WHERE id = ? AND employee_id = ?
     `).get(docId, id) as EmployeeDocument | undefined
 
@@ -903,9 +903,9 @@ interface OnboardingTemplate {
 }
 
 // 获取所有入职文件模板列表
-router.get('/onboarding/templates', requireAuth, (req, res) => {
+router.get('/onboarding/templates', requireAuth, async (req, res) => {
   try {
-    const templates = db.prepare(`
+    const templates = await db.prepare(`
       SELECT * FROM onboarding_templates ORDER BY file_type, created_at DESC
     `).all() as OnboardingTemplate[]
 
@@ -920,7 +920,7 @@ router.get('/onboarding/templates', requireAuth, (req, res) => {
 })
 
 // 上传入职文件模板（管理员）
-router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.single('file'), (req, res) => {
+router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.single('file'), async (req, res) => {
   try {
     const { file_type, originalFileName: bodyOriginalFileName } = req.body
     const file = req.file
@@ -938,7 +938,7 @@ router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.sing
     const originalFileName = bodyOriginalFileName || Buffer.from(file.originalname, 'latin1').toString('utf8')
 
     // 获取上传者信息
-    const uploader = db.prepare(`
+    const uploader = await db.prepare(`
       SELECT name FROM users WHERE id = ?
     `).get(req.session.userId) as { name: string } | undefined
 
@@ -946,7 +946,7 @@ router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.sing
     const now = new Date().toISOString()
     const relativePath = `/uploads/onboarding-templates/${file.filename}`
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO onboarding_templates (
         id, file_type, file_name, file_path,
         file_size, mime_type, uploaded_by, uploaded_by_name, created_at
@@ -963,7 +963,7 @@ router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.sing
       now
     )
 
-    const template = db.prepare(`
+    const template = await db.prepare(`
       SELECT * FROM onboarding_templates WHERE id = ?
     `).get(templateId)
 
@@ -986,12 +986,12 @@ router.post('/onboarding/templates', requireAdmin, uploadOnboardingTemplate.sing
 })
 
 // 删除入职文件模板（管理员）
-router.delete('/onboarding/templates/:templateId', requireAdmin, (req, res) => {
+router.delete('/onboarding/templates/:templateId', requireAdmin, async (req, res) => {
   try {
     const { templateId } = req.params
 
     // 获取模板信息
-    const template = db.prepare(`
+    const template = await db.prepare(`
       SELECT * FROM onboarding_templates WHERE id = ?
     `).get(templateId) as OnboardingTemplate | undefined
 
@@ -1006,7 +1006,7 @@ router.delete('/onboarding/templates/:templateId', requireAdmin, (req, res) => {
     }
 
     // 删除数据库记录
-    db.prepare(`DELETE FROM onboarding_templates WHERE id = ?`).run(templateId)
+    await db.prepare(`DELETE FROM onboarding_templates WHERE id = ?`).run(templateId)
 
     res.json({
       success: true,
@@ -1019,12 +1019,12 @@ router.delete('/onboarding/templates/:templateId', requireAdmin, (req, res) => {
 })
 
 // 下载/预览入职文件模板
-router.get('/onboarding/templates/:templateId/download', requireAuth, (req, res) => {
+router.get('/onboarding/templates/:templateId/download', requireAuth, async (req, res) => {
   try {
     const { templateId } = req.params
 
     // 获取模板信息
-    const template = db.prepare(`
+    const template = await db.prepare(`
       SELECT * FROM onboarding_templates WHERE id = ?
     `).get(templateId) as OnboardingTemplate | undefined
 

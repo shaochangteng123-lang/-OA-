@@ -189,58 +189,73 @@ function extractPayeeAccount(text: string): string {
  * 支持：数字金额（¥1,500.00）和中文大写金额（人民币壹仟伍佰元整）
  */
 function extractAmount(text: string, textNoSpace: string): number {
-  // 1. 数字金额格式
+  // 1. 数字金额格式（支持中英文逗号）
   const numericPatterns = [
-    /金[额颜][（(]?小写[）)]?[：:]?[¥￥YK]?([\d,]+\.?\d*)/,
-    /转账金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
-    /付款金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
-    /实付金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
-    /金[额颜][：:][¥￥YK]?([\d,]+\.?\d*)/,
-    /金[额颜][|｜]?[¥￥YK]([\d,]+\.?\d*)/,
-    /[¥￥YK]([\d,]+\.?\d*)/,
+    /金[额颜][（(]?小写[）)]?[：:]?[¥￥YK]?([\d,，]+\.?\d*)/,
+    /转账金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
+    /付款金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
+    /实付金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
+    /金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
+    /金[额颜][|｜]?[¥￥YK]?([\d,，]+\.?\d*)/,
   ]
 
   for (const p of numericPatterns) {
     const m = textNoSpace.match(p)
     if (m?.[1]) {
-      const amount = parseFloat(m[1].replace(/,/g, ''))
-      if (!isNaN(amount) && amount > 0) return amount
+      // 同时处理英文逗号和中文逗号（，）
+      const amount = parseFloat(m[1].replace(/[,，]/g, ''))
+      if (!isNaN(amount) && amount > 0) {
+        console.log('✅ 使用数字金额（精确匹配）:', amount)
+        return amount
+      }
     }
   }
 
-  // 宽松模式匹配
+  // 宽松模式匹配（支持中英文逗号）
   const loosePatterns = [
-    /金\s*[额颜]\s*[（(]?\s*小\s*写\s*[）)]?\s*[：:]?\s*[¥￥YK]?\s*([\d,]+\.?\d*)/,
-    /金\s*[额颜]\s*[|｜]?\s*[¥￥YK]\s*([\d,]+\.?\d*)/,
-    /[¥￥K]\s*([\d,]+\.?\d*)/,
+    /金\s*[额颜]\s*[（(]?\s*小\s*写\s*[）)]?\s*[：:]?\s*[¥￥YK]?\s*([\d,，]+\.?\d*)/,
+    /金\s*[额颜]\s*[|｜]?\s*[¥￥YK]?\s*([\d,，]+\.?\d*)/,
   ]
   for (const p of loosePatterns) {
     const m = text.match(p)
     if (m?.[1]) {
-      const amount = parseFloat(m[1].replace(/,/g, ''))
-      if (!isNaN(amount) && amount > 0) return amount
+      // 同时处理英文逗号和中文逗号（，）
+      const amount = parseFloat(m[1].replace(/[,，]/g, ''))
+      if (!isNaN(amount) && amount > 0) {
+        console.log('✅ 使用数字金额（宽松匹配）:', amount)
+        return amount
+      }
     }
   }
 
-  // 2. 中文大写金额格式
+  // 2. 兜底：从"金额"字段后面提取数字（支持中英文逗号）
+  const labelAmount = textNoSpace.match(/金额[^0-9]{0,12}([0-9]{1,3}(?:[,，\uFF0C][0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,8}(?:\.[0-9]{1,2})?)/)
+  if (labelAmount?.[1]) {
+    const amount = parseFloat(labelAmount[1].replace(/[,，\uFF0C]/g, ''))
+    if (!isNaN(amount) && amount > 0) {
+      console.log('✅ 使用数字金额（兜底匹配）:', amount)
+      return amount
+    }
+  }
+
+  // 3. 独立的金额数字（带小数点，支持中英文逗号）
+  const amountMatch = text.match(/\b(\d{1,3}(?:[,，]\d{3})*\.\d{2})\b/)
+  if (amountMatch?.[1]) {
+    const amount = parseFloat(amountMatch[1].replace(/[,，]/g, ''))
+    if (!isNaN(amount) && amount > 0) {
+      console.log('✅ 使用独立金额数字:', amount)
+      return amount
+    }
+  }
+
+  // 4. 中文大写金额格式（最后才使用，因为 OCR 容易识别错误）
   const chineseMatch = textNoSpace.match(/人民币([\u4e00-\u9fff]+?)(?:元|圆)/)
   if (chineseMatch?.[1]) {
     const amount = parseChineseAmount(chineseMatch[1] + '元')
-    if (amount > 0) return amount
-  }
-
-  // 3. 兜底：从"金额"字段后面提取数字
-  const labelAmount = textNoSpace.match(/金额[^0-9]{0,12}([0-9]{1,3}(?:[,\uFF0C][0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,8}(?:\.[0-9]{1,2})?)/)
-  if (labelAmount?.[1]) {
-    const amount = parseFloat(labelAmount[1].replace(/[,\uFF0C]/g, ''))
-    if (!isNaN(amount) && amount > 0) return amount
-  }
-
-  // 4. 独立的金额数字（带小数点）
-  const amountMatch = text.match(/\b(\d{1,3}(?:,\d{3})*\.\d{2})\b/)
-  if (amountMatch?.[1]) {
-    const amount = parseFloat(amountMatch[1].replace(/,/g, ''))
-    if (!isNaN(amount) && amount > 0) return amount
+    if (amount > 0) {
+      console.log('⚠️ 使用中文大写金额（可能不准确）:', amount)
+      return amount
+    }
   }
 
   return 0

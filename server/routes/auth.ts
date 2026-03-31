@@ -26,7 +26,7 @@ router.post('/login', async (req, res) => {
     }
 
     // 查找用户
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as User | undefined
+    const user = await db.prepare('SELECT * FROM users WHERE username = ?').get(username) as User | undefined
 
     if (!user) {
       return res.status(401).json({
@@ -62,7 +62,7 @@ router.post('/login', async (req, res) => {
 
     // 更新最后登录时间
     const now = new Date().toISOString()
-    db.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(now, now, user.id)
+    await db.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(now, now, user.id)
 
     // 设置session
     if (req.session) {
@@ -143,7 +143,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
     }
 
     // 获取用户
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as User | undefined
+    const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as User | undefined
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -170,7 +170,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
     // 更新密码
     const newPasswordHash = await hashPassword(newPassword)
     const now = new Date().toISOString()
-    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(newPasswordHash, now, userId)
+    await db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(newPasswordHash, now, userId)
 
     console.log('✅ 密码修改成功:', { userId, userName: user.name })
 

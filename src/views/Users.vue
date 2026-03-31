@@ -22,35 +22,34 @@
     <!-- 用户表格 -->
     <el-card class="yl-table-card">
       <el-table :data="paginatedUsers" border stripe>
-        <el-table-column label="用户" min-width="200">
+        <el-table-column label="用户" min-width="200" align="center">
           <template #default="{ row }">
-            <div class="yl-user-cell">
-              <el-avatar :src="row.avatarUrl" :size="36">
-                <el-icon><User /></el-icon>
-              </el-avatar>
-              <div class="yl-user-info">
+            <div class="yl-user-cell-wrapper">
+              <div class="yl-user-cell">
+                <el-avatar :src="row.avatarUrl" :size="36">
+                  <el-icon><User /></el-icon>
+                </el-avatar>
                 <div class="yl-user-name">{{ row.name }}</div>
-                <div class="yl-user-email">{{ row.email || '-' }}</div>
               </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="角色" width="140">
+        <el-table-column label="角色" width="140" align="center">
           <template #default="{ row }">
             <el-tag :type="getRoleTagType(row.role)" size="small">
               {{ getRoleText(row.role) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="row.status === 'active' ? 'success' : 'danger'" size="small">
               {{ row.status === 'active' ? '激活' : '停用' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="department" label="部门" min-width="150" />
-        <el-table-column label="最后登录" width="180">
+        <el-table-column prop="department" label="部门" min-width="150" align="center" />
+        <el-table-column label="最后登录" width="180" align="center">
           <template #default="{ row }">
             <div v-if="row.lastLoginAt" class="yl-date-cell">
               <el-icon><Clock /></el-icon>
@@ -59,7 +58,7 @@
             <span v-else class="yl-text-placeholder">未登录</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="280">
+        <el-table-column label="操作" min-width="280" align="center">
           <template #default="{ row }">
             <div class="yl-action-buttons">
               <el-button size="small" :icon="Edit" @click="editUser(row)">编辑</el-button>
@@ -128,6 +127,7 @@
         </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="createForm.role" style="width: 100%">
+            <el-option label="超级管理员" value="super_admin" />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
@@ -150,9 +150,6 @@
         <el-form-item label="用户名" prop="username">
           <el-input v-model="editForm.username" placeholder="仅字母、数字、下划线" />
         </el-form-item>
-        <el-form-item label="显示名称" prop="name">
-          <el-input v-model="editForm.name" placeholder="用户的显示名称" />
-        </el-form-item>
         <el-form-item label="密码" prop="password">
           <el-input v-model="editForm.password" type="password" placeholder="不修改请留空" show-password />
         </el-form-item>
@@ -173,8 +170,8 @@
           </el-select>
         </el-form-item>
         <el-form-item label="角色" prop="role">
-          <el-select v-model="editForm.role" style="width: 100%" :disabled="editForm.role === 'super_admin'">
-            <el-option label="超级管理员" value="super_admin" :disabled="editForm.role !== 'super_admin'" />
+          <el-select v-model="editForm.role" style="width: 100%">
+            <el-option label="超级管理员" value="super_admin" />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
@@ -218,19 +215,19 @@
             <h3>部门列表</h3>
             <el-button size="small" type="primary" :icon="Plus" @click="showAddDepartmentDialog">添加部门</el-button>
           </div>
-          <el-table :data="localDepartments" border>
-            <el-table-column label="部门名称" prop="name" />
-            <el-table-column label="职位数量" width="100">
-              <template #default="{ row }">{{ localDeptPositionMap[row]?.length || 0 }}</template>
-            </el-table-column>
-            <el-table-column label="操作" width="180">
+          <el-table :data="localDepartmentList" border>
+            <el-table-column label="部门名称" prop="name" align="center" />
+            <el-table-column label="职位数量" prop="positionCount" width="100" align="center" />
+            <el-table-column label="操作" width="220" align="center">
               <template #default="{ row }">
-                <el-button size="small" :icon="Edit" @click="showEditPositionsDialog(row)">管理职位</el-button>
-                <el-popconfirm title="确定删除此部门？" @confirm="deleteDepartment(row)">
-                  <template #reference>
-                    <el-button size="small" type="danger" :icon="Delete">删除</el-button>
-                  </template>
-                </el-popconfirm>
+                <div style="display: flex; gap: 8px; justify-content: center; align-items: center;">
+                  <el-button size="small" :icon="Edit" @click="showEditPositionsDialog(row.name)">管理职位</el-button>
+                  <el-popconfirm title="确定删除此部门？" @confirm="deleteDepartment(row.name)">
+                    <template #reference>
+                      <el-button size="small" type="danger" :icon="Delete">删除</el-button>
+                    </template>
+                  </el-popconfirm>
+                </div>
               </template>
             </el-table-column>
           </el-table>
@@ -361,16 +358,29 @@ const validateMobile = (_rule: unknown, value: string, callback: (error?: Error)
   }
 }
 
+// 用户名验证：必须为汉字，至少2个字符
+const validateChineseName = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  if (!value) {
+    callback(new Error('请输入用户名'))
+  } else if (!/^[\u4e00-\u9fa5]+$/.test(value)) {
+    callback(new Error('用户名必须为汉字'))
+  } else if (value.length < 2) {
+    callback(new Error('用户名至少2个汉字'))
+  } else {
+    callback()
+  }
+}
+
 const createRules: FormRules = {
   username: [
-    { required: true, message: '请输入用户名', trigger: 'blur' },
-    { min: 2, message: '用户名至少2个字符', trigger: 'blur' },
+    { required: true, validator: validateChineseName, trigger: 'blur' },
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
     { min: 6, message: '密码至少6个字符', trigger: 'blur' },
   ],
   email: [
+    { required: true, message: '请输入邮箱', trigger: 'blur' },
     { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
   ],
   mobile: [
@@ -432,11 +442,20 @@ const validateEditBankAccount = (_rule: unknown, value: string, callback: (error
 
 const editRules: FormRules = {
   username: [
-    { required: true, message: '请输入用户名', trigger: 'blur' },
-    { min: 2, message: '用户名至少2个字符', trigger: 'blur' },
+    { required: true, validator: validateChineseName, trigger: 'blur' },
   ],
-  name: [
-    { required: true, message: '请输入显示名称', trigger: 'blur' },
+  email: [
+    { required: true, message: '请输入邮箱', trigger: 'blur' },
+    { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
+  ],
+  mobile: [
+    { required: true, validator: validateMobile, trigger: 'blur' },
+  ],
+  department: [
+    { required: true, message: '请选择部门', trigger: 'change' },
+  ],
+  position: [
+    { required: true, message: '请选择职位', trigger: 'change' },
   ],
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
@@ -473,6 +492,12 @@ const resetPasswordRules: FormRules = {
 const departmentDialogVisible = ref(false)
 const localDeptPositionMap = ref<Record<string, string[]>>({})
 const localDepartments = computed(() => Object.keys(localDeptPositionMap.value))
+const localDepartmentList = computed(() =>
+  localDepartments.value.map(name => ({
+    name,
+    positionCount: localDeptPositionMap.value[name]?.length || 0,
+  }))
+)
 
 // 添加部门
 const addDepartmentVisible = ref(false)
@@ -843,13 +868,26 @@ onMounted(() => {
   flex-wrap: nowrap;
   gap: 8px;
   align-items: center;
+  justify-content: center;
 }
 
-/* 用户单元格 */
+/* 用户单元格外层容器 - 居中对齐 */
+.yl-user-cell-wrapper {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+/* 用户单元格 - 固定宽度，内容左对齐 */
 .yl-user-cell {
   display: flex;
   align-items: center;
   gap: var(--yl-gap-sm);
+  width: 140px;
+}
+
+.yl-user-cell .el-avatar {
+  flex-shrink: 0;
 }
 
 .yl-user-info {
@@ -879,6 +917,7 @@ onMounted(() => {
 .yl-date-cell {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--yl-gap-xs);
   color: var(--yl-text-secondary);
   font-size: var(--yl-font-size-small);

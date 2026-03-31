@@ -184,7 +184,7 @@
                   <el-col :span="8">
                     <el-form-item label="所属部门" prop="department">
                       <el-select v-model="formData.department" placeholder="请选择部门" style="width: 100%" :disabled="profileData?.status === 'submitted'">
-                        <el-option v-for="dept in DEPARTMENTS" :key="dept" :label="dept" :value="dept" />
+                        <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
                       </el-select>
                     </el-form-item>
                   </el-col>
@@ -193,7 +193,7 @@
                   <el-col :span="8">
                     <el-form-item label="职位" prop="position">
                       <el-select v-model="formData.position" placeholder="请先选择部门" :disabled="!formData.department || profileData?.status === 'submitted'" style="width: 100%">
-                        <el-option v-for="pos in getPositionsByDepartment(formData.department)" :key="pos" :label="pos" :value="pos" />
+                        <el-option v-for="pos in getPositions(formData.department)" :key="pos" :label="pos" :value="pos" />
                       </el-select>
                     </el-form-item>
                   </el-col>
@@ -374,14 +374,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, watch, nextTick, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Document, Download, View, Clock } from '@element-plus/icons-vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/utils/api'
-import { DEPARTMENTS, getPositionsByDepartment } from '@/constants/department'
 
 // 员工档案文件类型
 interface MyDocument {
@@ -415,6 +414,27 @@ const submitting = ref(false)
 
 // 员工信息数据（从服务器获取）
 const profileData = ref<any>(null)
+
+// 动态部门职位配置
+const deptPositionMap = ref<Record<string, string[]>>({})
+const departments = computed(() => Object.keys(deptPositionMap.value))
+const getPositions = (dept: string) => deptPositionMap.value[dept] || []
+
+// 加载部门职位配置
+async function loadDeptPositionConfig() {
+  try {
+    const res = await api.get('/api/departments/org-options')
+    if (res.data.success) {
+      deptPositionMap.value = res.data.data
+    }
+  } catch (error) {
+    console.error('加载部门职位配置失败:', error)
+    deptPositionMap.value = {
+      '行政部': ['行政主管', '行政专员', '财务', '出纳'],
+      '项目部': ['项目经理', '员工'],
+    }
+  }
+}
 
 // 表单数据
 const formData = reactive({
@@ -819,9 +839,9 @@ const formatFileSize = (size: number | null) => {
 }
 
 onMounted(() => {
+  loadDeptPositionConfig()
   fetchProfile()
   fetchMyDocuments()
-  // 加载入职文件模板
   onboardingStore.fetchTemplates()
 })
 </script>

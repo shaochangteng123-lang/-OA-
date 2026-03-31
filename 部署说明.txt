@@ -68,8 +68,10 @@
 
 ## 数据备份
 
-- 数据库文件位于：./data/worklog.db
-- 建议定期备份此文件
+- PostgreSQL 建议使用 `pg_dump` 定期备份：
+  - `pg_dump -U postgres yulilog_worklog > backup_$(date +%Y%m%d).sql`
+- 恢复命令：
+  - `psql -U postgres yulilog_worklog < backup_20260326.sql`
 
 ## 常见问题
 
@@ -78,8 +80,8 @@
 - 或修改 docker-compose.yml 中的端口映射
 
 ### 数据库权限问题
-- 确保 data 目录有写入权限
-- Docker 方式会自动处理权限问题
+- 确保 PostgreSQL 用户对目标数据库有读写权限
+- Docker 方式请检查 `postgres` 容器健康状态与 `DATABASE_URL` 配置
 
 ### 构建失败
 - 确保 Node.js 版本 >= 20

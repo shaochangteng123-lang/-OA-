@@ -140,7 +140,7 @@ export function validateInvoiceAmount(amount: number | undefined): ValidationRes
   if (!amount || amount <= 0) {
     return {
       valid: false,
-      message: '未能识别发票信息，请确认文件是否为有效发票',
+      message: '此不是有效发票，请重新上传',
     }
   }
 

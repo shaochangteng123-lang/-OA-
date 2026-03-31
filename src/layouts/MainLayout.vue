@@ -161,6 +161,16 @@
               tooltip-content="请假"
             />
             <SidebarMenuItem
+              v-if="isGeneralManager"
+              path="/gm-probation-approval"
+              label="审批中心"
+              :icon="Stamp"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="审批中���"
+              :badge="gmProbationPendingCount > 0 ? gmProbationPendingCount : undefined"
+              badge-type="danger"
+            />
+            <SidebarMenuItem
               v-if="isAdmin"
               path="/employee-data"
               label="员工数据"
@@ -357,6 +367,7 @@ const groupStates = reactive<Record<string, GroupState>>({
 // 待审批数量（从 pendingStore 获取）
 const pendingApprovalCount = computed(() => pendingStore.counts.approvalPending)
 const gmPendingApprovalCount = computed(() => pendingStore.counts.gmApprovalPending)
+const gmProbationPendingCount = computed(() => pendingStore.counts.probationPending)
 
 // 是否是管理员
 const isAdmin = computed(() => {
@@ -388,7 +399,9 @@ const hrGroupHasBadge = computed(() => {
   const userProbation = counts.myProbationPending
   // 管理员的转正待审批
   const adminProbation = isAdmin.value ? counts.probationPending : 0
-  return userProbation || adminProbation > 0
+  // 总经理的转正待审批
+  const gmProbation = isGeneralManager.value ? counts.probationPending : 0
+  return userProbation || adminProbation > 0 || gmProbation > 0
 })
 
 // 计算各个报销类型的待办数量（包含待确认收款和已驳回）

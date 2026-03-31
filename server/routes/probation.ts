@@ -2,12 +2,22 @@ import { Router } from 'express'
 import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
+import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import type { ProbationConfirmation, ProbationConfirmationWithEmployee, ProbationDocument, ProbationTemplate } from '../types/database.js'
 import { nanoid } from 'nanoid'
 
 const router = Router()
+
+function convertPlaceholders(sql: string): string {
+  let index = 0
+  return sql.replace(/\?/g, () => `$${++index}`)
+}
+
+async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise<void> {
+  await client.query(convertPlaceholders(sql), params)
+}
 
 // 转正文件上传目录
 const probationDocsDir = path.join(process.cwd(), 'uploads', 'probation-documents')
@@ -886,39 +896,39 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
     `).get() as { id: string } | undefined
 
     // 使用事务处理多表更新
-    await db.transaction(async () => {
+    await db.transaction(async (client) => {
       // 1. 更新转正申请状态
-      await db.prepare(`
+      await txRun(client, `
         UPDATE probation_confirmations
         SET status = 'approved', approve_time = ?, approver_id = ?, approver_comment = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, approverId, comment || null, now, id)
+      `, now, approverId, comment || null, now, id)
 
       // 2. 更新审批实例状态
-      await db.prepare(`
+      await txRun(client, `
         UPDATE approval_instances
         SET status = 'approved', complete_time = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, now, instance.id)
+      `, now, now, instance.id)
 
       // 3. 创建总经理审批记录
-      await db.prepare(`
+      await txRun(client, `
         INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
         VALUES (?, ?, 1, ?, 'approve', ?, ?)
-      `).run(nanoid(), instance.id, approverId, comment || '审批通过', now)
+      `, nanoid(), instance.id, approverId, comment || '审批通过', now)
 
       // 4. 创建管理员抄送记录
       if (adminUser) {
-        await db.prepare(`
+        await txRun(client, `
           INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
           VALUES (?, ?, 2, ?, 'cc', '已抄送', ?)
-        `).run(nanoid(), instance.id, adminUser.id, now)
+        `, nanoid(), instance.id, adminUser.id, now)
       }
 
       // 5. 更新员工状态为在职
-      await db.prepare(`
+      await txRun(client, `
         UPDATE employee_profiles SET employment_status = 'active', updated_at = ? WHERE id = ?
-      `).run(now, confirmation.employee_id)
+      `, now, confirmation.employee_id)
     })
 
     const updated = await db.prepare(`
@@ -983,26 +993,26 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
     }
 
     // 使用事务处理多表更新
-    await db.transaction(async () => {
+    await db.transaction(async (client) => {
       // 1. 更新转正申请状态
-      await db.prepare(`
+      await txRun(client, `
         UPDATE probation_confirmations
         SET status = 'rejected', approve_time = ?, approver_id = ?, approver_comment = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, approverId, comment, now, id)
+      `, now, approverId, comment, now, id)
 
       // 2. 更新审批实例状态
-      await db.prepare(`
+      await txRun(client, `
         UPDATE approval_instances
         SET status = 'rejected', complete_time = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, now, instance.id)
+      `, now, now, instance.id)
 
       // 3. 创建总经理驳回记录
-      await db.prepare(`
+      await txRun(client, `
         INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
         VALUES (?, ?, 1, ?, 'reject', ?, ?)
-      `).run(nanoid(), instance.id, approverId, comment, now)
+      `, nanoid(), instance.id, approverId, comment, now)
     })
 
     const updated = await db.prepare(`

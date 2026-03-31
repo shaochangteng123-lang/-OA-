@@ -7,7 +7,7 @@ import type { CalendarEvent } from '../types/database.js'
 const router = Router()
 
 // 获取所有日历事件
-router.get('/events', requireAuth, (req, res) => {
+router.get('/events', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.session?.userId
     const { start, end, userId: requestedUserId } = req.query
@@ -18,7 +18,7 @@ router.get('/events', requireAuth, (req, res) => {
     // 如果请求查看其他用户的日历
     if (requestedUserId && requestedUserId !== currentUserId) {
       // 检查权限：只有 super_admin 和 admin 可以查看他人日历
-      const currentUser = db
+      const currentUser = await db
         .prepare('SELECT role FROM users WHERE id = ?')
         .get(currentUserId) as { role: string } | undefined
 
@@ -42,7 +42,7 @@ router.get('/events', requireAuth, (req, res) => {
 
     query += ' ORDER BY start_time ASC'
 
-    const events = db.prepare(query).all(...params) as CalendarEvent[]
+    const events = await db.prepare(query).all(...params) as CalendarEvent[]
 
     const result = events.map((event) => ({
       id: event.id,
@@ -50,7 +50,7 @@ router.get('/events', requireAuth, (req, res) => {
       description: event.description,
       startTime: event.start_time,
       endTime: event.end_time,
-      allDay: event.all_day === 1,
+      allDay: event.all_day === true,
       location: event.location,
       color: event.color,
       reminderMinutes: event.reminder_minutes,
@@ -68,12 +68,12 @@ router.get('/events', requireAuth, (req, res) => {
 })
 
 // 获取单个事件
-router.get('/events/:id', requireAuth, (req, res) => {
+router.get('/events/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
 
-    const event = db.prepare('SELECT * FROM calendar_events WHERE id = ? AND user_id = ?').get(id, userId) as CalendarEvent | undefined
+    const event = await db.prepare('SELECT * FROM calendar_events WHERE id = ? AND user_id = ?').get(id, userId) as CalendarEvent | undefined
 
     if (!event) {
       return res.status(404).json({ success: false, message: '事件不存在' })
@@ -87,7 +87,7 @@ router.get('/events/:id', requireAuth, (req, res) => {
         description: event.description,
         startTime: event.start_time,
         endTime: event.end_time,
-        allDay: event.all_day === 1,
+        allDay: event.all_day === true,
         location: event.location,
         color: event.color,
         reminderMinutes: event.reminder_minutes,
@@ -103,7 +103,7 @@ router.get('/events/:id', requireAuth, (req, res) => {
 })
 
 // 创建日历事件
-router.post('/events', requireAuth, (req, res) => {
+router.post('/events', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const {
@@ -121,7 +121,7 @@ router.post('/events', requireAuth, (req, res) => {
     const id = nanoid()
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO calendar_events (
         id, title, description, start_time, end_time, all_day,
         location, color, reminder_minutes, recurrence_rule,
@@ -151,7 +151,7 @@ router.post('/events', requireAuth, (req, res) => {
 })
 
 // 更新日历事件
-router.put('/events/:id', requireAuth, (req, res) => {
+router.put('/events/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
@@ -169,7 +169,7 @@ router.put('/events/:id', requireAuth, (req, res) => {
 
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE calendar_events
       SET title = ?, description = ?, start_time = ?, end_time = ?, all_day = ?,
           location = ?, color = ?, reminder_minutes = ?, recurrence_rule = ?,
@@ -198,12 +198,12 @@ router.put('/events/:id', requireAuth, (req, res) => {
 })
 
 // 删除日历事件
-router.delete('/events/:id', requireAuth, (req, res) => {
+router.delete('/events/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
 
-    db.prepare('DELETE FROM calendar_events WHERE id = ? AND user_id = ?').run(id, userId)
+    await db.prepare('DELETE FROM calendar_events WHERE id = ? AND user_id = ?').run(id, userId)
     res.json({ success: true })
   } catch (error) {
     console.error('删除日历事件失败:', error)

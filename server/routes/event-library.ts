@@ -7,7 +7,7 @@ import type { EventLibrary } from '../types/database.js'
 const router = Router()
 
 // 获取所有事件
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { search, eventType } = req.query
 
@@ -26,7 +26,7 @@ router.get('/', requireAuth, (req, res) => {
 
     query += ' ORDER BY created_at DESC'
 
-    const events = db.prepare(query).all(...params) as EventLibrary[]
+    const events = await db.prepare(query).all(...params) as EventLibrary[]
 
     const result = events.map((event) => ({
       id: event.id,
@@ -48,10 +48,10 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 获取单个事件
-router.get('/:id', requireAuth, (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const event = db.prepare('SELECT * FROM event_library WHERE id = ?').get(id) as EventLibrary | undefined
+    const event = await db.prepare('SELECT * FROM event_library WHERE id = ?').get(id) as EventLibrary | undefined
 
     if (!event) {
       return res.status(404).json({ success: false, message: '事件不存在' })
@@ -78,13 +78,13 @@ router.get('/:id', requireAuth, (req, res) => {
 })
 
 // 创建事件
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const { name, eventType, description, standardDuration } = req.body
     const id = nanoid()
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO event_library (id, name, event_type, description, level, standard_duration, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, name, eventType, description || null, 1, standardDuration || null, now, now)
@@ -97,13 +97,13 @@ router.post('/', requireAuth, (req, res) => {
 })
 
 // 更新事件
-router.put('/:id', requireAuth, (req, res) => {
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const { name, eventType, description, standardDuration } = req.body
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE event_library
       SET name = ?, event_type = ?, description = ?, standard_duration = ?, updated_at = ?
       WHERE id = ?
@@ -117,10 +117,10 @@ router.put('/:id', requireAuth, (req, res) => {
 })
 
 // 删除事件
-router.delete('/:id', requireAuth, (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    db.prepare('DELETE FROM event_library WHERE id = ?').run(id)
+    await db.prepare('DELETE FROM event_library WHERE id = ?').run(id)
     res.json({ success: true })
   } catch (error) {
     console.error('删除事件失败:', error)

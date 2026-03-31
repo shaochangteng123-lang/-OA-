@@ -1,13 +1,13 @@
 /**
  * 本地 OCR 服务
  * 使用 pdf-parse 提取 PDF 文本，然后使用正则表达式识别发票信息
- * 当 pdf-parse 提取文本不完整时，自动回退到 PDF 转图片 + Tesseract OCR
+ * 当 pdf-parse 提取文本不完整时，自动回退到 PDF 转图片 + PaddleOCR
  * 数据完全在本地处理，保证数据安全
  */
 
 import fs from 'fs'
 import path from 'path'
-import Tesseract from 'tesseract.js'
+import { callPaddleOcr } from './ocrDaemon.js'
 
 // 动态导入 pdf-parse
 let PDFParseClass: any = null
@@ -20,49 +20,8 @@ async function getPdfParse() {
   return PDFParseClass
 }
 
-// ==================== Tesseract Scheduler（发票 OCR 专用） ====================
-
-let invoiceScheduler: Tesseract.Scheduler | null = null
-let invoiceSchedulerReady: Promise<void> | null = null
-
-async function getInvoiceScheduler(): Promise<Tesseract.Scheduler> {
-  if (invoiceScheduler) return invoiceScheduler
-
-  if (invoiceSchedulerReady) {
-    await invoiceSchedulerReady
-    if (invoiceScheduler) return invoiceScheduler
-  }
-
-  invoiceSchedulerReady = (async () => {
-    console.log('🔧 初始化发票 OCR Tesseract Scheduler...')
-    invoiceScheduler = Tesseract.createScheduler()
-
-    const worker = await Tesseract.createWorker('chi_sim+eng', 1, {
-      langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-      logger: () => {},
-    })
-    invoiceScheduler!.addWorker(worker)
-
-    console.log('✅ 发票 OCR Scheduler 初始化完成')
-  })().catch((err) => {
-    // 初始化失败时重置状态，允许下次重试
-    invoiceScheduler = null
-    invoiceSchedulerReady = null
-    throw err
-  })
-
-  await invoiceSchedulerReady
-  return invoiceScheduler!
-}
-
-// 使用 SIGTERM/SIGINT 信号处理，确保异步清理能执行
-const cleanupScheduler = () => {
-  if (invoiceScheduler) {
-    invoiceScheduler.terminate().catch(console.error)
-  }
-}
-process.on('SIGTERM', cleanupScheduler)
-process.on('SIGINT', cleanupScheduler)
+// ==================== PaddleOCR（发票 OCR 专用） ====================
+// PaddleOCR 通过 ocrDaemon.ts 管理，无需额外初始化
 
 /**
  * 发票识别结果接口
@@ -101,7 +60,7 @@ async function extractTextFromPdf(pdfPath: string): Promise<string> {
 }
 
 /**
- * 使用正则表达式从文本中提取发票信息
+ * 从文本中提取发票信息
  */
 function parseInvoiceText(text: string): InvoiceOcrResult {
   console.log('🔍 开始解析发票文本...')
@@ -325,14 +284,14 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     console.log('📋 提取到报销类型:', result.type)
   }
 
-  // 判断是否为有效发票（更严格的验证条件）
-  result.isValidInvoice =
-    result.amount > 0 && // 条件1：金额必须大于0
-    !!result.invoiceNumber && // 条件2：必须有发票号码
-    result.invoiceNumber.length >= 8 && // 条件3：发票号码至少8位
-    /^\d+$/.test(result.invoiceNumber) && // 条件4：发票号码必须是纯数字（不含字母）
-    !!result.date && // 条件5：必须有日期
-    /^\d{4}-\d{2}-\d{2}$/.test(result.date) // 条件6：日期格式必须是 YYYY-MM-DD
+  // 判断是否为有效发票（严格验证：必须同时满足所有条件）
+  const textNoSpace = text.replace(/\s+/g, '')
+  const hasInvoiceKeyword = textNoSpace.includes('发票') || textNoSpace.includes('電子發票')
+  const hasAmount = result.amount > 0
+  const hasDate = !!result.date && /^\d{4}-\d{2}-\d{2}$/.test(result.date)
+  const hasInvoiceNumber = !!result.invoiceNumber && result.invoiceNumber.length >= 8
+
+  result.isValidInvoice = hasInvoiceKeyword && hasAmount && hasDate && hasInvoiceNumber
 
   console.log('✅ 发票解析完成:', {
     amount: result.amount,
@@ -346,7 +305,7 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
 }
 
 /**
- * 将 PDF 转为图片并用 Tesseract OCR 识别文本
+ * 将 PDF 转为图片并用 PaddleOCR 识别文本
  */
 async function extractTextFromPdfViaImage(pdfPath: string): Promise<string> {
   console.log('🖼️ 开始 PDF 转图片 OCR 识别...')
@@ -371,26 +330,25 @@ async function extractTextFromPdfViaImage(pdfPath: string): Promise<string> {
     throw new Error('PDF 转图片失败：未找到输出文件')
   }
 
-  const pngBuffer = fs.readFileSync(pngFilePath)
-  console.log('🖼️ PDF 转图片完成，大小:', pngBuffer.length, 'bytes')
+  console.log('🖼️ PDF 转图片完成，路径:', pngFilePath)
 
-  // 清理临时图片文件
-  try { fs.unlinkSync(pngFilePath) } catch { /* 忽略 */ }
+  try {
+    // 用 PaddleOCR 识别
+    const text = await callPaddleOcr(pngFilePath)
 
-  // 用 Tesseract 识别
-  const scheduler = await getInvoiceScheduler()
-  const ocrResult = await scheduler.addJob('recognize', pngBuffer)
-  const text = ocrResult.data.text
+    console.log('🖼️ PaddleOCR 识别完成，文本长度:', text.length)
+    console.log('🖼️ 文本预览:', text.substring(0, 200))
 
-  console.log('🖼️ Tesseract OCR 识别完成，文本长度:', text.length)
-  console.log('🖼️ 文本预览:', text.substring(0, 200))
-
-  return text
+    return text
+  } finally {
+    // 清理临时图片文件
+    try { fs.unlinkSync(pngFilePath) } catch { /* 忽略 */ }
+  }
 }
 
 /**
  * 本地 OCR 识别发票
- * 策略：先用 pdf-parse 提取文本，如果关键字段缺失则回退到 PDF 转图片 + Tesseract OCR
+ * 策略：先用 pdf-parse 提取文本，如果关键字段缺失则回退到 PDF 转图片 + PaddleOCR
  * @param filePath PDF 文件路径
  * @returns 发票识别结果
  */
@@ -403,6 +361,16 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
       throw new Error('文件不存在')
     }
 
+    // 验证文件格式：通过文件头魔术字节判断是否为 PDF（临时文件可能没有扩展名）
+    const headerBuf = Buffer.alloc(5)
+    const fd = fs.openSync(filePath, 'r')
+    fs.readSync(fd, headerBuf, 0, 5, 0)
+    fs.closeSync(fd)
+    const isPdf = headerBuf.toString('ascii') === '%PDF-'
+    if (!isPdf) {
+      throw new Error('此不是PDF文件，请重新上传')
+    }
+
     // 第一步：尝试 pdf-parse 提取文本
     console.log('📄 正在提取 PDF 文本...')
     const text = await extractTextFromPdf(filePath)
@@ -413,9 +381,10 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
       result = parseInvoiceText(text)
     }
 
-    // 第二步：如果 pdf-parse 结果无效，回退到图片 OCR
-    if (!result || !result.isValidInvoice) {
-      console.log('⚠️ pdf-parse 提取结果不完整，回退到 PDF 转图片 + Tesseract OCR...')
+    // 第二步：如果 pdf-parse 未提取到关键字段，回退到图片 OCR
+    const hasKeyFields = result && (result.amount > 0 || result.date || result.invoiceNumber)
+    if (!hasKeyFields) {
+      console.log('⚠️ pdf-parse 未提取到关键字段，回退到 PDF 转图片 + PaddleOCR...')
 
       try {
         const imageText = await extractTextFromPdfViaImage(filePath)
@@ -430,7 +399,7 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
 
     // 最终判断
     if (!result || !result.isValidInvoice) {
-      throw new Error('此不是发票文件，请重新上传')
+      throw new Error('此不是有效发票，请重新上传')
     }
 
     return result

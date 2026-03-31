@@ -249,11 +249,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { usePendingStore } from '@/stores/pending'
 import axios from 'axios'
 import dayjs from 'dayjs'
-
-const pendingStore = usePendingStore()
 
 // 类型定义
 interface ProbationDocument {
@@ -414,27 +411,6 @@ const handleUploadError = (error: any) => {
   console.error('上传失败:', error)
   const message = error?.response?.data?.message || error?.message || '文件上传失败'
   ElMessage.error(message)
-}
-
-// 提交申请
-const handleSubmitApply = async () => {
-  try {
-    await ElMessageBox.confirm('确定要提交转正申请吗？提交后将进入审批流程。', '确认提交', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'warning'
-    })
-
-    await axios.post('/api/probation/apply')
-    ElMessage.success('转正申请已提交')
-    // 立即刷新菜单栏角标
-    await pendingStore.refreshPendingCounts()
-    fetchMyStatus()
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      ElMessage.error(error.response?.data?.message || '提交失败')
-    }
-  }
 }
 
 // 查看审批流程

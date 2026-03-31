@@ -11,6 +11,7 @@ declare module 'vue' {
     ColorLabelPanel: typeof import('./components/calendar/ColorLabelPanel.vue')['default']
     CustomHeadingView: typeof import('./components/worklog/CustomHeadingView.vue')['default']
     DayView: typeof import('./components/calendar/DayView.vue')['default']
+    DeductionUploader: typeof import('./components/reimbursement/DeductionUploader.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElAvatar: typeof import('element-plus/es')['ElAvatar']
     ElBadge: typeof import('element-plus/es')['ElBadge']

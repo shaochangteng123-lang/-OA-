@@ -135,6 +135,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '请假' },
       },
       {
+        path: '/gm-probation-approval',
+        name: 'GMProbationApproval',
+        component: () => import('@/views/GMProbationApproval.vue'),
+        meta: { title: '审批中心', requiresRole: ['super_admin', 'admin', 'general_manager'] },
+      },
+      {
         path: '/projects',
         name: 'Projects',
         component: () => import('@/views/Projects.vue'),

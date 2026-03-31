@@ -360,15 +360,15 @@
                     <div class="timeline-title">上传付款凭证</div>
                     <div class="timeline-desc">财务已上传付款凭证</div>
                     <!-- 付款回单展示 -->
-                    <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
-                      <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
-                        <template v-if="isImagePath(proofUrl)">
-                          <img :src="proofUrl" class="proof-image" alt="付款回单" />
-                        </template>
-                        <template v-else>
-                          <div class="proof-pdf">
-                            <el-icon :size="32" color="#409EFF"><Document /></el-icon>
-                            <span>付款回单.pdf</span>
+	                    <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
+	                      <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
+	                        <template v-if="isImagePath(proofUrl)">
+	                          <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" />
+	                        </template>
+	                        <template v-else>
+	                          <div class="proof-pdf">
+	                            <el-icon :size="32" color="#409EFF"><Document /></el-icon>
+	                            <span>付款回单.pdf</span>
                           </div>
                         </template>
                         <div class="proof-overlay">
@@ -442,13 +442,13 @@
           </template>
         </el-dialog>
 
-        <!-- 付款回单预览对话框 -->
-        <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
-          <div class="preview-dialog-content">
-            <img v-if="isImagePath(previewingProofUrl)" :src="previewingProofUrl" class="preview-dialog-image" alt="付款回单" />
-            <iframe v-else-if="previewingProofUrl" :src="previewingProofUrl" class="preview-dialog-pdf" />
-          </div>
-        </el-dialog>
+	        <!-- 付款回单预览对话框 -->
+	        <el-dialog v-model="paymentProofDialogVisible" title="付款回单" width="80%" :close-on-click-modal="true">
+	          <div class="preview-dialog-content">
+	            <img v-if="isImagePath(previewingProofUrl)" :src="toFileUrl(previewingProofUrl)" class="preview-dialog-image" alt="付款回单" />
+	            <iframe v-else-if="previewingProofUrl" :src="toFileUrl(previewingProofUrl)" class="preview-dialog-pdf" />
+	          </div>
+	        </el-dialog>
 
         <!-- 分页 -->
         <div class="pagination-wrapper">
@@ -470,11 +470,12 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Clock, CircleCheck, Wallet, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
-import { usePendingStore } from '@/stores/pending'
-import { useAuthStore } from '@/stores/auth'
-import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
+	import { ElMessage, ElMessageBox } from 'element-plus'
+	import { Refresh, Search, Clock, CircleCheck, Wallet, Document, ZoomIn, RemoveFilled } from '@element-plus/icons-vue'
+	import { usePendingStore } from '@/stores/pending'
+	import { useAuthStore } from '@/stores/auth'
+	import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
+	import { toFileUrl } from '@/utils/file'
 
 const router = useRouter()
 const pendingStore = usePendingStore()

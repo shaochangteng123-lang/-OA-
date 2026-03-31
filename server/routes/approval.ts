@@ -478,6 +478,9 @@ router.get('/by-target', requireAuth, async (req, res) => {
     `).get(instance.id, userId) as { count: number }
     const isApprover = approvalRecord.count > 0
 
+    console.log('[by-target] 权限检查 - userId:', userId, 'userRole:', userRole, 'instance.type:', instance.type)
+    console.log('[by-target] isApplicant:', isApplicant, 'isAdmin:', isAdmin, 'isGMForBusiness:', isGMForBusiness, 'isApprover:', isApprover)
+
     if (!isApplicant && !isApprover && !isAdmin && !isGMForBusiness) {
       return res.status(403).json({
         success: false,
@@ -497,6 +500,9 @@ router.get('/by-target', requireAuth, async (req, res) => {
       WHERE ai.target_id = ? AND ai.target_type = ?
       ORDER BY ar.action_time ASC
     `).all(targetId, targetType) as Array<ApprovalRecord & { approver_name: string; approver_avatar: string | null }>
+
+    console.log('[by-target] 查询到的审批记录数量:', records.length)
+    console.log('[by-target] 审批记录详情:', records.map(r => ({ action: r.action, approver: r.approver_name, comment: r.comment })))
 
     // 获取报销单最新状态（用于前端实时展示）
     const reimbursement = await db.prepare(`
@@ -972,17 +978,17 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
     }
 
     if (startDate) {
-      // 将日期转换为报销月份格式 YYYY-MM
-      const startMonth = String(startDate).substring(0, 7) // 取 YYYY-MM 部分
-      whereClause += ' AND r.reimbursement_month >= ?'
-      params.push(startMonth)
+      const startDateObj = new Date(startDate + 'T00:00:00+08:00')
+      const startISO = startDateObj.toISOString()
+      whereClause += ' AND r.submit_time >= ?'
+      params.push(startISO)
     }
 
     if (endDate) {
-      // 将日期转换为报销月份格式 YYYY-MM
-      const endMonth = String(endDate).substring(0, 7) // 取 YYYY-MM 部分
-      whereClause += ' AND r.reimbursement_month <= ?'
-      params.push(endMonth)
+      const endDateObj = new Date(endDate + 'T23:59:59+08:00')
+      const endISO = endDateObj.toISOString()
+      whereClause += ' AND r.submit_time <= ?'
+      params.push(endISO)
     }
 
     const reimbursements = await db.prepare(`
@@ -1235,7 +1241,9 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
       period = `${startDateStr} 至 ${endDateStr}`
     }
 
-    // 查询核减记录（核减金额 > 0 的报销单）
+    // 查询核减记录：包含两种情况：
+    // 1. 发票明细中有 deducted_amount > 0（运输类自动核减）
+    // 2. 发票明细中有 is_deduction = 1（核减发票）
     let whereSql = `
       SELECT
         r.id,
@@ -1248,13 +1256,19 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
         r.submit_time,
         r.user_id,
         u.name as user_name,
-        u.department as user_department
+        u.department as user_department,
+        COALESCE((SELECT SUM(i.deducted_amount) FROM reimbursement_invoices i WHERE i.reimbursement_id = r.id), 0)
+          + COALESCE((SELECT SUM(i.amount) FROM reimbursement_invoices i WHERE i.reimbursement_id = r.id AND i.is_deduction = 1), 0)
+        AS total_deduction_amount
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
-      WHERE r.deduction_amount > 0
+      WHERE (
+        EXISTS (SELECT 1 FROM reimbursement_invoices i WHERE i.reimbursement_id = r.id AND i.deducted_amount > 0)
+        OR EXISTS (SELECT 1 FROM reimbursement_invoices i WHERE i.reimbursement_id = r.id AND i.is_deduction = 1)
+      )
         AND r.submit_time >= ?
         AND r.submit_time <= ?
-        AND r.status IN ('approved', 'payment_uploaded', 'completed')
+        AND r.status IN ('pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed')
     `
 
     const params: any[] = [
@@ -1304,7 +1318,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
         }
       }
 
-      const deductionAmount = d.deduction_amount || 0
+      const deductionAmount = d.total_deduction_amount || 0
       employeeMap[uid].deductionAmount += deductionAmount
       employeeMap[uid].deductionCount += 1
       totalDeduction += deductionAmount
@@ -1365,14 +1379,27 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    // 1. 待审批数量和金额（只统计商务报销）
-    const pendingStats = await db.prepare(`
+    // 1. 待审批数量和金额（统计商务报销和转正申请）
+    // 商务报销统计
+    const pendingReimbursement = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
       FROM approval_instances ai
       INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
       WHERE ai.status = 'pending'
       AND r.type = 'business'
     `).get() as { count: number; amount: number }
+
+    // 转正申请统计
+    const pendingProbation = await db.prepare(`
+      SELECT COUNT(*) as count
+      FROM probation_confirmations
+      WHERE status = 'submitted'
+    `).get() as { count: number }
+
+    const pendingStats = {
+      count: pendingReimbursement.count + pendingProbation.count,
+      amount: pendingReimbursement.amount,
+    }
 
     // 2. 本月已审批数量（包括通过和驳回的商务报销）
     const completedThisMonth = await db.prepare(`
@@ -1413,7 +1440,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
   }
 })
 
-// 获取总经理待审批列表（只显示商务报销）
+// 获取总经理待审批列表（商务报销 + 转正申请）
 router.get('/gm-pending', requireAuth, async (req, res) => {
   try {
     const userId = req.session.user?.id
@@ -1428,7 +1455,7 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
     }
 
     // 查询待审批的商务报销
-    const instances = await db.prepare(`
+    const reimbursements = await db.prepare(`
       SELECT
         ai.id,
         ai.target_type,
@@ -1473,28 +1500,75 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
       reimbursement_status: string
     }>
 
-    const result = instances.map((item) => ({
-      id: item.id,
-      type: 'business',
-      targetId: item.target_id,
-      targetType: item.target_type,
-      applicantId: item.applicant_id,
-      applicantName: item.applicant_name,
-      applicantAvatar: item.applicant_avatar,
-      currentStep: item.current_step,
-      status: item.status,
-      submitTime: formatDateTime(item.submit_time),
-      createdAt: formatDateTime(item.created_at),
-      reimbursementInfo: {
-        title: normalizeReimbursementTitle(item.reimbursement_title),
-        amount: item.reimbursement_amount,
-      },
-      reimbursementType: item.reimbursement_type,
-      reimbursementScope: item.reimbursement_scope,
-      client: item.client,
-      serviceTarget: item.service_target,
-      reimbursementStatus: item.reimbursement_status,
-    }))
+    // 查询待审批的转正申请
+    const probations = await db.prepare(`
+      SELECT
+        pc.id,
+        pc.employee_id,
+        pc.status,
+        pc.submit_time,
+        pc.created_at,
+        e.name as employee_name,
+        u.avatar_url as employee_avatar
+      FROM probation_confirmations pc
+      LEFT JOIN employees e ON pc.employee_id = e.id
+      LEFT JOIN users u ON e.user_id = u.id
+      WHERE pc.status = 'submitted'
+      ORDER BY pc.submit_time ASC
+    `).all() as Array<{
+      id: string
+      employee_id: string
+      status: string
+      submit_time: string
+      created_at: string
+      employee_name: string
+      employee_avatar: string | null
+    }>
+
+    // 合并商务报销和转正申请
+    const result = [
+      ...reimbursements.map((item) => ({
+        id: item.id,
+        type: 'business',
+        targetId: item.target_id,
+        targetType: item.target_type,
+        applicantId: item.applicant_id,
+        applicantName: item.applicant_name,
+        applicantAvatar: item.applicant_avatar,
+        currentStep: item.current_step,
+        status: item.status,
+        submitTime: formatDateTime(item.submit_time),
+        createdAt: formatDateTime(item.created_at),
+        reimbursementInfo: {
+          title: normalizeReimbursementTitle(item.reimbursement_title),
+          amount: item.reimbursement_amount,
+        },
+        reimbursementType: item.reimbursement_type,
+        reimbursementScope: item.reimbursement_scope,
+        client: item.client,
+        serviceTarget: item.service_target,
+        reimbursementStatus: item.reimbursement_status,
+      })),
+      ...probations.map((item) => ({
+        id: item.id,
+        type: 'probation',
+        targetId: item.id,
+        targetType: 'probation',
+        applicantId: item.employee_id,
+        applicantName: item.employee_name,
+        applicantAvatar: item.employee_avatar,
+        currentStep: 1,
+        status: item.status,
+        submitTime: formatDateTime(item.submit_time),
+        createdAt: formatDateTime(item.created_at),
+        reimbursementInfo: null,
+        reimbursementType: null,
+        reimbursementScope: null,
+        client: null,
+        serviceTarget: null,
+        reimbursementStatus: null,
+      })),
+    ]
 
     res.json({
       success: true,
@@ -1528,7 +1602,7 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    // 查询本月已审批的商务报销
+    // 查询本月已审批的商务报销（用子查询取每张报销单最新的审批实例，避免重复）
     const reimbursements = await db.prepare(`
       SELECT
         r.id,
@@ -1551,7 +1625,12 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
         u.avatar_url as applicant_avatar
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
-      INNER JOIN approval_instances ai ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
+      INNER JOIN (
+        SELECT DISTINCT ON (target_id) id, target_id, status, updated_at
+        FROM approval_instances
+        WHERE target_type = 'reimbursement'
+        ORDER BY target_id, updated_at DESC
+      ) ai ON ai.target_id = r.id
       WHERE r.type = 'business'
       AND ai.status IN ('approved', 'rejected')
       AND ai.updated_at >= ? AND ai.updated_at <= ?
@@ -1626,8 +1705,11 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       })
     }
 
-    let whereClause = "WHERE r.type = 'business'"
+    let whereClause = "WHERE 1=1"
     const params: any[] = []
+
+    // 总经理只能查询商务报销
+    whereClause += " AND r.type = 'business'"
 
     // 状态筛选
     if (status) {
@@ -1636,15 +1718,6 @@ router.get('/gm-all', requireAuth, async (req, res) => {
     } else {
       // 未指定状态时，默认只返回已付款的记录
       whereClause += " AND r.status IN ('payment_uploaded', 'completed')"
-    }
-
-    // 类型支持多选（逗号分隔）
-    if (type) {
-      const types = String(type).split(',').filter(t => t.trim())
-      if (types.length > 0) {
-        whereClause += ` AND r.type IN (${types.map(() => '?').join(',')})`
-        params.push(...types)
-      }
     }
 
     // 员工筛选
@@ -1662,17 +1735,23 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       }
     }
 
-    // 日期范围筛选（使用报销月份）
+    // 日期范围筛选（使用提交时间，转换为北京时间进行比较）
     if (startDate) {
-      const startMonth = String(startDate).substring(0, 7) // 取 YYYY-MM 部分
-      whereClause += ' AND r.reimbursement_month >= ?'
-      params.push(startMonth)
+      // 将北京时间的日期转换为UTC时间范围的开始（2026-03-26 00:00 +08:00 = 2026-03-25 16:00 UTC）
+      const startDateObj = new Date(startDate + 'T00:00:00+08:00')
+      const startISO = startDateObj.toISOString()
+      whereClause += ' AND r.submit_time >= ?'
+      params.push(startISO)
+      console.log('[GM-ALL] Date filter - startDate:', startDate, '-> UTC:', startISO)
     }
 
     if (endDate) {
-      const endMonth = String(endDate).substring(0, 7) // 取 YYYY-MM 部分
-      whereClause += ' AND r.reimbursement_month <= ?'
-      params.push(endMonth)
+      // 将北京时间的日期转换为UTC时间范围的结束（2026-03-26 23:59:59 +08:00 = 2026-03-26 15:59:59 UTC）
+      const endDateObj = new Date(endDate + 'T23:59:59+08:00')
+      const endISO = endDateObj.toISOString()
+      whereClause += ' AND r.submit_time <= ?'
+      params.push(endISO)
+      console.log('[GM-ALL] Date filter - endDate:', endDate, '-> UTC:', endISO)
     }
 
     const reimbursements = await db.prepare(`
@@ -1826,6 +1905,20 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       ORDER BY ri.invoice_date DESC, ri.created_at DESC
     `).all(...params) as Array<any>
 
+    // 查询核减发票总金额（避免重复统计）
+    // 只统计已付款状态的报销单的核减发票（is_deduction = 1）
+    // 需要构建一个适用于子查询的WHERE子句（将 r. 替换为 r2.）
+    const subWhereClause = whereClause.replace(/\br\./g, 'r2.')
+
+    const deductionInvoicesTotal = await db.prepare(`
+      SELECT COALESCE(SUM(ri.amount), 0) as total
+      FROM reimbursement_invoices ri
+      INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
+      LEFT JOIN users u ON r.user_id = u.id
+      WHERE ri.is_deduction = 1
+        AND ${whereClause}
+    `).get(...params) as { total: number }
+
     // 类型映射
     const typeMap: Record<string, string> = {
       basic: '基础报销',
@@ -1867,6 +1960,8 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         userDepartment: inv.user_department,
         createdAt: formatDateTime(inv.created_at),
       })),
+      // 核减发票总金额（单独返回，避免重复统计）
+      deductionInvoicesTotal: deductionInvoicesTotal.total || 0,
     })
   } catch (error) {
     console.error('查询发票列表失败:', error)
@@ -2073,11 +2168,12 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         AND r.type = 'business'
       `).get() as { count: number }
 
-      // 转正待审批
+      // 转正待审批（只统计有审批实例的转正申请）
       const probationPending = await db.prepare(`
         SELECT COUNT(*) as count
-        FROM probation_confirmations
-        WHERE status = 'pending'
+        FROM probation_confirmations pc
+        INNER JOIN approval_instances ai ON ai.target_type = 'probation' AND ai.target_id = pc.id
+        WHERE pc.status = 'pending' AND ai.status = 'pending'
       `).get() as { count: number }
 
       // 总经理待审批 = 商务报销待审批 + 转正待审批

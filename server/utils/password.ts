@@ -72,15 +72,15 @@ export function validateUsername(username: string): { valid: boolean; message?: 
   if (!username) {
     return { valid: false, message: '用户名不能为空' }
   }
-  if (username.length < 3) {
-    return { valid: false, message: '用户名至少需要3个字符' }
+  if (username.length < 2) {
+    return { valid: false, message: '用户名至少需要2个字符' }
   }
   if (username.length > 50) {
     return { valid: false, message: '用户名不能超过50个字符' }
   }
-  // 只允许字母、数字、下划线
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    return { valid: false, message: '用户名只能包含字母、数字和下划线' }
+  // 允许汉字、字母、数字、下划线
+  if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(username)) {
+    return { valid: false, message: '用户名只能包含汉字、字母、数字和下划线' }
   }
   return { valid: true }
 }

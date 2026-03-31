@@ -7,7 +7,7 @@ import type { EventPreset } from '../types/database.js'
 const router = Router()
 
 // 获取所有预设方案
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const { implementationType, projectType } = req.query
 
@@ -26,7 +26,7 @@ router.get('/', requireAuth, (req, res) => {
 
     query += ' ORDER BY is_default DESC, created_at DESC'
 
-    const presets = db.prepare(query).all(...params) as EventPreset[]
+    const presets = await db.prepare(query).all(...params) as EventPreset[]
 
     const result = presets.map((preset) => ({
       id: preset.id,
@@ -34,7 +34,7 @@ router.get('/', requireAuth, (req, res) => {
       implementationType: preset.implementation_type,
       projectType: preset.project_type,
       events: preset.events_json ? JSON.parse(preset.events_json) : [],
-      isDefault: preset.is_default === 1,
+      isDefault: preset.is_default === true,
       createdAt: preset.created_at,
       updatedAt: preset.updated_at,
     }))
@@ -47,10 +47,10 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 获取单个预设方案
-router.get('/:id', requireAuth, (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const preset = db.prepare('SELECT * FROM event_presets WHERE id = ?').get(id) as EventPreset | undefined
+    const preset = await db.prepare('SELECT * FROM event_presets WHERE id = ?').get(id) as EventPreset | undefined
 
     if (!preset) {
       return res.status(404).json({ success: false, message: '预设方案不存在' })
@@ -64,7 +64,7 @@ router.get('/:id', requireAuth, (req, res) => {
         implementationType: preset.implementation_type,
         projectType: preset.project_type,
         events: preset.events_json ? JSON.parse(preset.events_json) : [],
-        isDefault: preset.is_default === 1,
+        isDefault: preset.is_default === true,
         createdAt: preset.created_at,
         updatedAt: preset.updated_at,
       },
@@ -76,7 +76,7 @@ router.get('/:id', requireAuth, (req, res) => {
 })
 
 // 创建预设方案
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const { name, implementationType, projectType, blocks, isDefault } = req.body
     const id = nanoid()
@@ -84,14 +84,14 @@ router.post('/', requireAuth, (req, res) => {
 
     // 如果设置为默认，先取消其他默认方案
     if (isDefault) {
-      db.prepare(`
+      await db.prepare(`
         UPDATE event_presets
         SET is_default = 0
         WHERE implementation_type = ? AND project_type = ?
       `).run(implementationType, projectType)
     }
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO event_presets (
         id, name, implementation_type, project_type, blocks_json, is_default, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -114,7 +114,7 @@ router.post('/', requireAuth, (req, res) => {
 })
 
 // 更新预设方案
-router.put('/:id', requireAuth, (req, res) => {
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const { name, implementationType, projectType, blocks, isDefault } = req.body
@@ -122,14 +122,14 @@ router.put('/:id', requireAuth, (req, res) => {
 
     // 如果设置为默认，先取消其他默认方案
     if (isDefault) {
-      db.prepare(`
+      await db.prepare(`
         UPDATE event_presets
         SET is_default = 0
         WHERE implementation_type = ? AND project_type = ? AND id != ?
       `).run(implementationType, projectType, id)
     }
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE event_presets
       SET name = ?, implementation_type = ?, project_type = ?, blocks_json = ?, is_default = ?, updated_at = ?
       WHERE id = ?
@@ -143,10 +143,10 @@ router.put('/:id', requireAuth, (req, res) => {
 })
 
 // 删除预设方案
-router.delete('/:id', requireAuth, (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    db.prepare('DELETE FROM event_presets WHERE id = ?').run(id)
+    await db.prepare('DELETE FROM event_presets WHERE id = ?').run(id)
     res.json({ success: true })
   } catch (error) {
     console.error('删除预设方案失败:', error)

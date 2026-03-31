@@ -58,9 +58,12 @@ if (nodeEnv === 'production') {
   }
 }
 
-// 4. 检查数据库路径
-const dbPath = process.env.DATABASE_PATH || './data/worklog.db'
-console.log(`📊 数据库路径: ${dbPath}`)
+// 4. 检查数据库连接
+const dbUrl = process.env.DATABASE_URL
+if (!dbUrl) {
+  warnings.push('⚠️  DATABASE_URL 未设置，将使用默认 PostgreSQL 连接')
+}
+console.log(`📊 数据库: ${dbUrl || 'postgresql://localhost:5432/yulilog_worklog (默认)'}`)
 
 // 输出结果
 console.log('\n' + '='.repeat(60))

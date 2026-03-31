@@ -8,7 +8,7 @@ import type { WorkLog } from '../types/database.js'
 const router = Router()
 
 // 获取所有工作日志
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const { startDate, endDate } = req.query
@@ -23,7 +23,7 @@ router.get('/', requireAuth, (req, res) => {
 
     query += ' ORDER BY date DESC'
 
-    const worklogs = db.prepare(query).all(...params) as WorkLog[]
+    const worklogs = (await db.prepare(query).all(...params)) as WorkLog[]
 
     const result = worklogs.map((log) => ({
       id: log.id,
@@ -44,12 +44,12 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 获取指定日期的工作日志
-router.get('/:date', requireAuth, (req, res) => {
+router.get('/:date', requireAuth, async (req, res) => {
   try {
     const { date } = req.params
     const userId = req.session?.userId
 
-    const worklog = db.prepare('SELECT * FROM worklogs WHERE date = ? AND user_id = ?').get(date, userId) as WorkLog | undefined
+    const worklog = (await db.prepare('SELECT * FROM worklogs WHERE date = ? AND user_id = ?').get(date, userId)) as WorkLog | undefined
 
     if (!worklog) {
       return res.json({
@@ -86,7 +86,7 @@ router.post('/', requireAuth, async (req, res) => {
     const finalContent = content || overallContent || ''
 
     // 检查是否已存在
-    const existing = db.prepare('SELECT id, notion_page_id FROM worklogs WHERE date = ? AND user_id = ?').get(date, userId) as
+    const existing = (await db.prepare('SELECT id, notion_page_id FROM worklogs WHERE date = ? AND user_id = ?').get(date, userId)) as
       | { id: string; notion_page_id: string | null }
       | undefined
 
@@ -113,7 +113,7 @@ router.post('/', requireAuth, async (req, res) => {
 
     if (existing) {
       // 更新
-      db.prepare(`
+      await db.prepare(`
         UPDATE worklogs
         SET title = ?, overall_content = ?, projects_json = ?, updated_at = ?, notion_page_id = ?
         WHERE id = ?
@@ -124,7 +124,7 @@ router.post('/', requireAuth, async (req, res) => {
       // 创建
       const id = nanoid()
 
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO worklogs (id, date, title, overall_content, projects_json, user_id, notion_page_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, date, title, finalContent, JSON.stringify(projects || []), userId, notionPageId, now, now)
@@ -138,7 +138,7 @@ router.post('/', requireAuth, async (req, res) => {
 })
 
 // 更新工作日志
-router.put('/:date', requireAuth, (req, res) => {
+router.put('/:date', requireAuth, async (req, res) => {
   try {
     const { date } = req.params
     const userId = req.session?.userId
@@ -146,7 +146,7 @@ router.put('/:date', requireAuth, (req, res) => {
 
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE worklogs
       SET title = ?, overall_content = ?, projects_json = ?, updated_at = ?
       WHERE date = ? AND user_id = ?
@@ -160,12 +160,12 @@ router.put('/:date', requireAuth, (req, res) => {
 })
 
 // 删除工作日志
-router.delete('/:date', requireAuth, (req, res) => {
+router.delete('/:date', requireAuth, async (req, res) => {
   try {
     const { date } = req.params
     const userId = req.session?.userId
 
-    db.prepare('DELETE FROM worklogs WHERE date = ? AND user_id = ?').run(date, userId)
+    await db.prepare('DELETE FROM worklogs WHERE date = ? AND user_id = ?').run(date, userId)
     res.json({ success: true })
   } catch (error) {
     console.error('删除工作日志失败:', error)

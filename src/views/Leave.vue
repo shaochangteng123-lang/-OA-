@@ -82,7 +82,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="150">
+          <el-table-column label="操作" min-width="150">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleView(row)">
                 查看

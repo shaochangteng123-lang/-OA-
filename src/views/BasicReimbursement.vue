@@ -644,7 +644,7 @@ const canEdit = (status: string) => {
 
 // 判断是否可以删除（只有草稿状态可以删除）
 const canDelete = (status: string) => {
-  return status === 'draft'
+  return status === 'draft' || status === 'rejected'
 }
 
 // 新建报销单

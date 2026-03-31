@@ -15,11 +15,11 @@ const DEFAULT_COLOR_LABELS = [
 ]
 
 // 获取颜色偏好
-router.get('/colors', requireAuth, (req, res) => {
+router.get('/colors', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
 
-    const preferences = db
+    const preferences = await db
       .prepare('SELECT event_colors, color_labels FROM user_preferences WHERE user_id = ?')
       .get(userId) as UserPreferencesRow | undefined
 
@@ -54,19 +54,19 @@ router.get('/colors', requireAuth, (req, res) => {
 })
 
 // 保存颜色偏好
-router.put('/colors', requireAuth, (req, res) => {
+router.put('/colors', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const { eventColors, colorLabels } = req.body
 
     // 检查是否存在偏好记录
-    const existing = db
+    const existing = await db
       .prepare('SELECT user_id FROM user_preferences WHERE user_id = ?')
       .get(userId)
 
     if (existing) {
       // 更新现有记录
-      db.prepare(
+      await db.prepare(
         `
         UPDATE user_preferences
         SET event_colors = ?, color_labels = ?
@@ -75,7 +75,7 @@ router.put('/colors', requireAuth, (req, res) => {
       ).run(JSON.stringify(eventColors), JSON.stringify(colorLabels), userId)
     } else {
       // 创建新记录
-      db.prepare(
+      await db.prepare(
         `
         INSERT INTO user_preferences (user_id, event_colors, color_labels)
         VALUES (?, ?, ?)
@@ -103,11 +103,11 @@ router.put('/colors', requireAuth, (req, res) => {
 })
 
 // 获取所有用户偏好设置（日历模块使用）
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
 
-    const preferences = db
+    const preferences = await db
       .prepare('SELECT * FROM user_preferences WHERE user_id = ?')
       .get(userId) as UserPreferencesRow | undefined
 
@@ -155,13 +155,13 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 更新用户偏好设置（日历模块使用）
-router.put('/', requireAuth, (req, res) => {
+router.put('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const { colorLabels, calendarViewMode, weekDisplayDays } = req.body
 
     // 检查是否存在偏好记录
-    const existing = db
+    const existing = await db
       .prepare('SELECT user_id FROM user_preferences WHERE user_id = ?')
       .get(userId)
 
@@ -185,13 +185,13 @@ router.put('/', requireAuth, (req, res) => {
 
       if (updates.length > 0) {
         values.push(userId)
-        db.prepare(
+        await db.prepare(
           `UPDATE user_preferences SET ${updates.join(', ')} WHERE user_id = ?`
         ).run(...values)
       }
     } else {
       // 创建新记录
-      db.prepare(
+      await db.prepare(
         `
         INSERT INTO user_preferences (
           user_id, color_labels, calendar_view_mode, week_display_days
@@ -226,23 +226,23 @@ router.put('/', requireAuth, (req, res) => {
 })
 
 // 重置颜色标签为默认值
-router.post('/reset-labels', requireAuth, (req, res) => {
+router.post('/reset-labels', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
 
     // 检查是否存在偏好记录
-    const existing = db
+    const existing = await db
       .prepare('SELECT user_id FROM user_preferences WHERE user_id = ?')
       .get(userId)
 
     if (existing) {
       // 更新现有记录
-      db.prepare(
+      await db.prepare(
         `UPDATE user_preferences SET color_labels = ? WHERE user_id = ?`
       ).run(JSON.stringify(DEFAULT_COLOR_LABELS), userId)
     } else {
       // 创建新记录
-      db.prepare(
+      await db.prepare(
         `
         INSERT INTO user_preferences (user_id, color_labels)
         VALUES (?, ?)

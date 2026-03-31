@@ -7,7 +7,7 @@ import type { Project } from '../types/database.js'
 const router = Router()
 
 // 获取所有项目
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const { district, status } = req.query
@@ -27,7 +27,7 @@ router.get('/', requireAuth, (req, res) => {
 
     query += ' ORDER BY created_at DESC'
 
-    const projects = db.prepare(query).all(...params) as Project[]
+    const projects = await db.prepare(query).all(...params) as Project[]
 
     const result = projects.map((p) => ({
       id: p.id,
@@ -54,12 +54,12 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 获取单个项目
-router.get('/:id', requireAuth, (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
 
-    const project = db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, userId) as Project | undefined
+    const project = await db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?').get(id, userId) as Project | undefined
 
     if (!project) {
       return res.status(404).json({ success: false, message: '项目不存在' })
@@ -91,7 +91,7 @@ router.get('/:id', requireAuth, (req, res) => {
 })
 
 // 创建项目
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const {
@@ -111,7 +111,7 @@ router.post('/', requireAuth, (req, res) => {
     const id = nanoid()
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO projects (
         id, name, district, project_type, implementation_type, status,
         start_date, report_specialist, report_specialist_phone,
@@ -144,7 +144,7 @@ router.post('/', requireAuth, (req, res) => {
 })
 
 // 更新项目
-router.put('/:id', requireAuth, (req, res) => {
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
@@ -165,7 +165,7 @@ router.put('/:id', requireAuth, (req, res) => {
 
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE projects
       SET name = ?, district = ?, project_type = ?, implementation_type = ?,
           status = ?, start_date = ?, report_specialist = ?, report_specialist_phone = ?,
@@ -198,12 +198,12 @@ router.put('/:id', requireAuth, (req, res) => {
 })
 
 // 删除项目
-router.delete('/:id', requireAuth, (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const userId = req.session?.userId
 
-    db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(id, userId)
+    await db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?').run(id, userId)
     res.json({ success: true })
   } catch (error) {
     console.error('删除项目失败:', error)

@@ -61,6 +61,7 @@
               <InvoiceTable
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="false"
+                :total-invoice-amount="invoice.totalAmount.value"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -176,8 +177,14 @@ const handleBack = () => {
 }
 
 // 处理文件变化
-const handleFileChange = (file: any, fileList: any[]) => {
-  invoice.handleFileChange(file, fileList)
+const handleFileChange = async (file: any, fileList: any[]) => {
+  await invoice.handleFileChange(file, fileList)
+}
+
+// 处理无票上传变化
+const handleReceiptChange = async (file: any, fileList: any[]) => {
+  await invoice.handleReceiptChange(file, fileList)
+  receiptFileList.value = fileList
 }
 
 // 处理删除文件
@@ -192,12 +199,6 @@ const handleDeleteInvoice = (invoiceItem: any) => {
     receiptFileList.value.splice(receiptIndex, 1)
   }
   invoice.deleteInvoiceById(invoiceItem.id)
-}
-
-// 处理无票上传变化
-const handleReceiptChange = async (file: any, fileList: any[]) => {
-  await invoice.handleReceiptChange(file, fileList)
-  receiptFileList.value = fileList
 }
 
 // 处理删除无票文件
@@ -390,28 +391,31 @@ onMounted(() => {
 
 .upload-layout {
   display: flex;
-  gap: 24px;
+  width: 100%;
+  gap: 20px;
   align-items: flex-start;
 }
 
 .upload-left {
-  flex: 1;
+  flex: 11;
   min-width: 0;
 }
 
 .upload-right {
-  width: min(450px, 100%);
-  min-width: 300px;
-  flex-shrink: 0;
+  flex: 9;
+  min-width: 0;
 }
 
 @media (max-width: 1366px) {
   .upload-layout {
     flex-direction: column;
   }
+
+  .upload-left,
   .upload-right {
+    flex: 1 1 auto;
     width: 100%;
-    min-width: unset;
+    min-width: 0;
   }
 }
 

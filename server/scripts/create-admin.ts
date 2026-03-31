@@ -78,10 +78,10 @@ async function main() {
   console.log('========================================\n')
 
   // 初始化数据库
-  initDatabase()
+  await initDatabase()
 
   // 检查是否已有超级管理员
-  const existingAdmin = db.prepare(
+  const existingAdmin = await db.prepare(
     "SELECT id, name, username FROM users WHERE role = 'super_admin' AND username IS NOT NULL"
   ).get() as { id: string; name: string; username: string } | undefined
 
@@ -106,7 +106,7 @@ async function main() {
     const validation = validateUsername(username)
     if (validation.valid) {
       // 检查是否已存在
-      const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(username)
+      const existing = await db.prepare('SELECT id FROM users WHERE username = ?').get(username)
       if (existing) {
         console.log('❌ 该用户名已被使用，请选择其他用户名\n')
         continue
@@ -159,7 +159,7 @@ async function main() {
     const passwordHash = hashPasswordSync(password)
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO users (id, username, password_hash, name, role, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'super_admin', 'active', ?, ?)
     `).run(id, username, passwordHash, name, now, now)

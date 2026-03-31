@@ -361,6 +361,22 @@ app.use(helmet())
 
 ## 更新日志
 
+- 2026-03-27: 修复 departments.ts 路由注册顺序问题
+  - `/org-options` GET/POST 路由移至 `/:id` 路由之前，避免被通配参数路由拦截返回 404
+- 2026-03-26: 转正审批路由修复 PostgreSQL 事务一致性问题
+  - `server/routes/probation.ts` 中审批通过/驳回流程改为在同一 `db.transaction(async (client) => ...)` 连接内执行全部 SQL
+  - 新增事务内参数占位符转换与 `txRun` 封装，避免跨连接执行导致的“伪事务”
+- 2026-03-26: 审批流程详情接口字段与前端类型同步
+  - `GET /api/approval/by-target` 返回的 `adminApproverName`、`gmApproverName` 已在前端审批流程类型中声明
+  - 修复审批流程弹窗读取审批人名称时的 TypeScript 报错
+- 2026-03-26: 报销路由适配 PostgreSQL 异步 db 接口
+  - `server/routes/reimbursement.ts` 中所有 `db.prepare(...).get/all/run` 已改为 `await` 调用，并统一保持异步路由处理
+  - 创建、更新、撤回、删除、恢复等写操作已改为 PostgreSQL `db.transaction(async (client) => ...)` 事务写法
+  - 发票分类聚合改为 PostgreSQL `STRING_AGG(DISTINCT ..., ',')`，软删除布尔字段判断统一改为 boolean 语义
+- 2026-03-26: 审批中心路由适配 PostgreSQL 异步 db 接口
+  - `server/routes/approval.ts` 中所有 `db.prepare(...).get/all/run` 调整为 `await` 调用，对应路由处理函数改为 `async`
+  - 发票分类聚合函数由 `GROUP_CONCAT` 改为 PostgreSQL 兼容的 `STRING_AGG(DISTINCT ..., ',')`
+  - 已删除报销单布尔字段判断改为 PostgreSQL boolean 判断
 - 2026-03-13: 审批中心API新增报销类型和报销范围字段
   - GET /api/approval/pending 返回新增 invoiceCategories（发票分类聚合）、reimbursementScope 字段
   - GET /api/approval/approved-unpaid 返回新增 invoiceCategories、reimbursementScope 字段

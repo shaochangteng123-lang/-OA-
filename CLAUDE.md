@@ -147,7 +147,7 @@ npm run mode:check       # Check current mode
 
 ### Tech Stack
 - **Frontend**: Vue 3 + Pinia + Vue Router + Element Plus + TanStack Query + TipTap editor
-- **Backend**: Express + better-sqlite3 + express-session
+- **Backend**: Express + PostgreSQL (pg) + express-session
 - **Auth**: 账号密码登录（bcrypt 密码哈希）
 - **Build**: Vite (frontend) + tsx (server dev) + tsc (server build)
 
@@ -180,11 +180,11 @@ server/                 # Backend source
 
 **API Proxy**: Frontend dev server proxies `/api` requests to `http://localhost:3000`
 
-**Database**: SQLite stored at `data/worklog.db` (configurable via `DATABASE_PATH` env var). Schema defined in [server/db/index.ts](server/db/index.ts).
+**Database**: PostgreSQL (configurable via `DATABASE_URL` env var). Schema defined in [server/db/index.ts](server/db/index.ts).
 
 **Role-Based Access**: Four roles (super_admin, admin, user, guest) with permissions defined in [src/types/index.ts](src/types/index.ts). Roles are stored in the users database table.
 
-**Session Management**: express-session with better-sqlite3 session store. Sessions stored in the same database.
+**Session Management**: express-session with connect-pg-simple session store. Sessions stored in PostgreSQL.
 
 **Admin Creation**: Use `npm run create:admin` to create the initial admin account via command line.
 
@@ -219,7 +219,7 @@ server/                 # Backend source
 
 1. 首次部署：使用 `npm run create:admin` 创建管理员账号
 2. 用户登录：输入用户名和密码 → [server/routes/auth.ts](server/routes/auth.ts) 验证密码
-3. 密码验证通过 → 会话存储到 SQLite，Cookie 发送给客户端
+3. 密码验证通过 → 会话存储到 PostgreSQL，Cookie 发送给客户端
 4. 前端 [src/stores/auth.ts](src/stores/auth.ts) 调用 `/api/auth/user` 获取当前用户
 5. 管理员可在"用户管理"页面创建新用户
 
@@ -234,7 +234,7 @@ Role hierarchy: `super_admin` > `admin` > `user` > `guest`
 ## Environment Variables
 
 Optional:
-- `DATABASE_PATH` (default: `./data/worklog.db`)
+- `DATABASE_URL` (default: `postgresql://localhost:5432/yulilog_worklog`)
 - `SESSION_SECRET`
 - `FRONTEND_URL` (default: `http://localhost:8899`)
 - `PORT` (default: `3000`)

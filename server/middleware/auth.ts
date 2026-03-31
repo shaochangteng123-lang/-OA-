@@ -18,7 +18,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
 }
 
 export function requireRole(roles: string[]) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     // 确保用户已登录
     if (!req.session.userId) {
       return res.status(401).json({
@@ -29,7 +29,7 @@ export function requireRole(roles: string[]) {
 
     try {
       // 从数据库查询用户角色
-      const user = db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId) as
+      const user = await db.prepare('SELECT role FROM users WHERE id = ?').get(req.session.userId) as
         | { role: string }
         | undefined
 

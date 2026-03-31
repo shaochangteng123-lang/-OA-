@@ -12,7 +12,7 @@
         <el-table-column label="包含事件" width="100">
           <template #default="{ row }">{{ row.events?.length || 0 }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="150">
+        <el-table-column label="操作" min-width="150">
           <template #default="{ row }">
             <el-button type="primary" size="small" link @click="handleEdit(row)">编辑</el-button>
             <el-button type="danger" size="small" link @click="handleDelete(row)">删除</el-button>

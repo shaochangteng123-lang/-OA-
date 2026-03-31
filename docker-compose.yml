@@ -8,6 +8,25 @@
 # ============================================
 
 services:
+  postgres:
+    container_name: yulilog-worklog-postgres
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=yulilog_worklog
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - TZ=Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d yulilog_worklog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+
   yulilog-dev:
     container_name: yulilog-worklog-dev
     image: node:20-alpine
@@ -19,12 +38,14 @@ services:
     environment:
       - NODE_ENV=development
       - PORT=3000
-      - DATABASE_PATH=/app/data/worklog.db
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
       - TZ=Asia/Shanghai
     working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       # 数据持久化
-      - ./data:/app/data
       - ./uploads:/app/uploads
       - ./debug:/app/debug
       # 源代码挂载（热重载）
@@ -45,8 +66,8 @@ services:
       - ocr_venv:/tmp/ocr-venv
     command: >
       sh -c "
-      sed -i 's|https://dl-cdn.alpinelinux.org|https://mirrors.aliyun.com|g' /etc/apk/repositories &&
-      apk add --no-cache python3 py3-pip py3-onnxruntime py3-opencv py3-pillow py3-numpy py3-shapely py3-yaml py3-pyclipper make g++ sqlite sqlite-libs pkgconfig pixman-dev cairo-dev pango-dev libjpeg-turbo-dev giflib-dev poppler-utils poppler-data tesseract-ocr tesseract-ocr-data-chi_sim &&
+      apk update &&
+      apk add --no-cache python3 py3-pip py3-opencv py3-onnxruntime py3-yaml py3-pillow py3-numpy py3-shapely py3-pyclipper make g++ pkgconfig pixman-dev cairo-dev pango-dev libjpeg-turbo-dev giflib-dev poppler-utils poppler-data font-noto-cjk &&
       if [ ! -f /tmp/ocr-venv/bin/python3 ]; then python3 -m venv --system-site-packages /tmp/ocr-venv && /tmp/ocr-venv/bin/pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --no-deps rapidocr_onnxruntime; fi &&
       npm config set registry https://registry.npmmirror.com &&
       export npm_config_nodedir=/usr/local &&
@@ -56,5 +77,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   dev_node_modules:
   ocr_venv:

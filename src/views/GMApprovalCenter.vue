@@ -85,7 +85,10 @@
             </el-table-column>
             <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
-                <div v-if="row.reimbursementInfo">
+                <div v-if="row.type === 'probation'">
+                  <div>转正申请</div>
+                </div>
+                <div v-else-if="row.reimbursementInfo">
                   <div>{{ normalizeReimbursementTitle(row.reimbursementInfo.title) }}</div>
                   <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
                     ¥{{ row.reimbursementInfo.amount.toFixed(2) }}
@@ -94,9 +97,10 @@
                 <div v-else>-</div>
               </template>
             </el-table-column>
-            <el-table-column label="报销类型" min-width="80" align="center">
-              <template #default>
-                <el-tag type="primary" size="small">商务报销</el-tag>
+            <el-table-column label="类型" min-width="80" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.type === 'probation'" type="success" size="small">转正申请</el-tag>
+                <el-tag v-else type="primary" size="small">商务报销</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
@@ -129,28 +133,46 @@
             <el-table-column label="操作" min-width="280" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
-                  <el-button
-                    type="primary"
-                    size="small"
-                    :icon="View"
-                    @click="handleViewReimbursement(row)"
-                  >
-                    详情
-                  </el-button>
-                  <el-button
-                    type="info"
-                    size="small"
-                    :icon="List"
-                    @click="handleViewApprovalProcess(row)"
-                  >
-                    审批流程
-                  </el-button>
-                  <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
-                    通过
-                  </el-button>
-                  <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
-                    驳回
-                  </el-button>
+                  <template v-if="row.type === 'probation'">
+                    <el-button
+                      type="primary"
+                      size="small"
+                      :icon="View"
+                      @click="handleViewProbation(row)"
+                    >
+                      详情
+                    </el-button>
+                    <el-button type="success" size="small" :icon="Check" @click="handleApproveProbation(row)">
+                      通过
+                    </el-button>
+                    <el-button type="danger" size="small" :icon="Close" @click="handleRejectProbation(row)">
+                      驳回
+                    </el-button>
+                  </template>
+                  <template v-else>
+                    <el-button
+                      type="primary"
+                      size="small"
+                      :icon="View"
+                      @click="handleViewReimbursement(row)"
+                    >
+                      详情
+                    </el-button>
+                    <el-button
+                      type="info"
+                      size="small"
+                      :icon="List"
+                      @click="handleViewApprovalProcess(row)"
+                    >
+                      审批流程
+                    </el-button>
+                    <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
+                      通过
+                    </el-button>
+                    <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
+                      驳回
+                    </el-button>
+                  </template>
                 </div>
               </template>
             </el-table-column>
@@ -428,90 +450,6 @@
         </el-card>
       </el-tab-pane>
 
-      <!-- 转正审批 -->
-      <el-tab-pane label="转正审批" name="probation">
-        <el-card>
-          <el-table :data="probationList" border stripe empty-text="暂无转正申请">
-            <el-table-column label="序号" width="60" align="center">
-              <template #default="{ $index }">
-                {{ $index + 1 }}
-              </template>
-            </el-table-column>
-            <el-table-column label="申请人" min-width="100" align="center">
-              <template #default="{ row }">
-                <div class="applicant-cell">
-                  <el-avatar :size="32">
-                    <el-icon><User /></el-icon>
-                  </el-avatar>
-                  <span>{{ row.employee_name }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="部门" min-width="100" align="center">
-              <template #default="{ row }">
-                {{ row.department || '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="职位" min-width="100" align="center">
-              <template #default="{ row }">
-                {{ row.position || '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="入职日期" min-width="110" align="center">
-              <template #default="{ row }">
-                {{ formatDate(row.hire_date) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="试用期截止" min-width="110" align="center">
-              <template #default="{ row }">
-                {{ formatDate(row.probation_end_date) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" min-width="80" align="center">
-              <template #default="{ row }">
-                <el-tag :type="getProbationStatusType(row.status)" size="small">
-                  {{ getProbationStatusText(row.status) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="提交时间" min-width="130" align="center">
-              <template #default="{ row }">
-                {{ formatDate(row.submit_time) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="280" align="center">
-              <template #default="{ row }">
-                <div class="action-buttons">
-                  <el-button
-                    type="primary"
-                    size="small"
-                    :icon="View"
-                    @click="handleViewProbation(row)"
-                  >
-                    详情
-                  </el-button>
-                  <el-button
-                    type="success"
-                    size="small"
-                    :icon="Check"
-                    @click="handleApproveProbation(row)"
-                  >
-                    通过
-                  </el-button>
-                  <el-button
-                    type="danger"
-                    size="small"
-                    :icon="Close"
-                    @click="handleRejectProbation(row)"
-                  >
-                    驳回
-                  </el-button>
-                </div>
-              </template>
-            </el-table-column>
-          </el-table>
-        </el-card>
-      </el-tab-pane>
     </el-tabs>
 
     <!-- 驳回对话框 -->
@@ -582,121 +520,98 @@
         <div class="timeline-section">
           <h4 class="section-title">审批流程</h4>
           <el-timeline>
-            <!-- 待审批时仅显示当前下一步 -->
-            <template v-if="currentApprovalRecord.status === 'pending'">
+            <!-- 1. 员工提交（始终显示） -->
+            <el-timeline-item
+              :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
+              placement="top"
+              type="primary"
+            >
+              <div class="timeline-content">
+                <div class="timeline-title">员工提交</div>
+                <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
+                <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
+              </div>
+            </el-timeline-item>
+
+            <!-- 2. 审批记录（如果有，显示详细的历史操作记录） -->
+            <template v-if="approvalRecords.length > 0">
               <el-timeline-item
-                :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
+                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
+                :key="record.id"
+                :timestamp="formatDate(record.actionTime)"
                 placement="top"
-                type="primary"
+                :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title">员工提交</div>
-                  <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
-                  <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
+                  <div class="timeline-title">
+                    {{ record.approverName || '总经理' }}
+                  </div>
+                  <div class="timeline-desc">
+                    <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
+                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action }}
+                    </el-tag>
+                  </div>
+                  <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
+                    驳回原因：{{ record.comment }}
+                  </div>
                 </div>
               </el-timeline-item>
-
-              <el-timeline-item timestamp="待审批" placement="top" type="warning">
+            </template>
+            <!-- 如果没有审批记录，根据状态显示简化版本 -->
+            <template v-else>
+              <el-timeline-item
+                v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                placement="top"
+                type="success"
+              >
                 <div class="timeline-content">
                   <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
-                  <div class="timeline-desc">等待总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批...</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 审批通过</div>
+                </div>
+              </el-timeline-item>
+              <el-timeline-item
+                v-else-if="currentApprovalRecord.status === 'rejected'"
+                :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+                placement="top"
+                type="danger"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
+                  <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 驳回了申请</div>
+                  <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
+                    <div class="reject-reason-label">驳回原因：</div>
+                    <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
+                  </div>
                 </div>
               </el-timeline-item>
             </template>
 
-            <template v-else>
-              <!-- 1. 员工提交 -->
-              <el-timeline-item
-                :timestamp="currentApprovalRecord.submitTime ? formatDate(currentApprovalRecord.submitTime) : ''"
-                placement="top"
-                type="primary"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">员工提交</div>
-                  <div class="timeline-desc">{{ currentApprovalRecord.applicantName }} 提交了报销申请</div>
-                  <div v-if="currentApprovalRecord.description" class="timeline-description">{{ currentApprovalRecord.description }}</div>
-                </div>
-              </el-timeline-item>
+            <!-- 驳回重新提交后，等待审批的下一步；或首次待审批 -->
+            <el-timeline-item
+              v-if="currentApprovalRecord.status === 'pending'"
+              timestamp="待审批"
+              placement="top"
+              type="warning"
+            >
+              <div class="timeline-content">
+                <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
+                <div class="timeline-desc">等待总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批...</div>
+              </div>
+            </el-timeline-item>
 
-              <!-- 2. 审批记录 -->
-              <template v-if="approvalRecords.length > 0">
-                <el-timeline-item
-                  v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
-                  :key="record.id"
-                  :timestamp="formatDate(record.actionTime)"
-                  placement="top"
-                  :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">
-                      {{ record.approverName || '管理员' }}
-                    </div>
-                    <div class="timeline-desc">
-                      <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
-                        {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action }}
-                      </el-tag>
-                    </div>
-                    <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
-                      驳回原因：{{ record.comment }}
-                    </div>
-                  </div>
-                </el-timeline-item>
-              </template>
-              <!-- 如果没有审批记录，显示简化版本 -->
-              <template v-else>
-                <el-timeline-item
-                  v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                  :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-                  placement="top"
-                  type="success"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 审批通过</div>
-                  </div>
-                </el-timeline-item>
-                <el-timeline-item
-                  v-else-if="currentApprovalRecord.status === 'rejected'"
-                  :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
-                  placement="top"
-                  type="danger"
-                >
-                  <div class="timeline-content">
-                    <div class="timeline-title">总经理{{ currentApprovalRecord.gmApproverName ? '（' + currentApprovalRecord.gmApproverName + '）' : '' }}审批</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.approver || '总经理' }} 驳回了申请</div>
-                    <div v-if="currentApprovalRecord.rejectReason" class="reject-reason-box">
-                      <div class="reject-reason-label">驳回原因：</div>
-                      <div class="reject-reason-text">{{ currentApprovalRecord.rejectReason }}</div>
-                    </div>
-                  </div>
-                </el-timeline-item>
-              </template>
-
-              <!-- 驳回重新提交后，等待审批的下一步 -->
-              <el-timeline-item
-                v-if="currentApprovalRecord.status === 'pending' && approvalRecords.length > 0"
-                timestamp="待审批"
-                placement="top"
-                type="warning"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批</div>
-                  <div class="timeline-desc">等待管理员{{ currentApprovalRecord.adminApproverName ? '（' + currentApprovalRecord.adminApproverName + '）' : '' }}审批...</div>
-                </div>
-              </el-timeline-item>
-
-              <!-- 驳回后的下一步 -->
-              <el-timeline-item
-                v-if="currentApprovalRecord.status === 'rejected'"
-                timestamp="待重新提交"
-                placement="top"
-                type="warning"
-              >
-                <div class="timeline-content">
-                  <div class="timeline-title">重新提交</div>
-                  <div class="timeline-desc">等待员工修改后重新提交...</div>
-                </div>
-              </el-timeline-item>
+            <!-- 驳回后的下一步 -->
+            <el-timeline-item
+              v-if="currentApprovalRecord.status === 'rejected'"
+              timestamp="待重新提交"
+              placement="top"
+              type="warning"
+            >
+              <div class="timeline-content">
+                <div class="timeline-title">重新提交</div>
+                <div class="timeline-desc">等待员工修改后重新提交...</div>
+              </div>
+            </el-timeline-item>
 
               <!-- 3. 财务付款：approved及之后的状态才显示 -->
               <el-timeline-item
@@ -730,7 +645,7 @@
                       <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                         <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
                           <template v-if="isImagePath(proofUrl)">
-                            <img :src="proofUrl" class="proof-image" alt="付款回单" />
+                            <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" />
                           </template>
                           <template v-else>
                             <div class="proof-pdf">
@@ -776,7 +691,6 @@
                   <div class="timeline-desc">等待员工确认收款...</div>
                 </div>
               </el-timeline-item>
-            </template>
           </el-timeline>
         </div>
       </div>
@@ -817,13 +731,13 @@
         <div v-if="allExportData.byScope && allExportData.byScope.length > 0" class="export-scope-summary">
           <h4>报销范围汇总</h4>
           <el-table :data="allExportData.byScope" border size="small" style="margin-top: 10px;">
-            <el-table-column prop="scopeName" label="报销范围" min-width="150" align="center" />
-            <el-table-column label="报销笔数" width="100" align="center">
+            <el-table-column prop="scopeName" label="报销范围" min-width="150" align="center" header-align="center" />
+            <el-table-column label="报销笔数" width="100" align="center" header-align="center">
               <template #default="{ row }">
                 {{ row.count }} 笔
               </template>
             </el-table-column>
-            <el-table-column label="报销金额" width="120" align="center">
+            <el-table-column label="报销金额" width="120" align="center" header-align="center">
               <template #default="{ row }">
                 ¥{{ row.amount.toFixed(2) }}
               </template>
@@ -849,19 +763,19 @@
                 </div>
               </template>
               <el-table :data="emp.details" border size="small">
-                <el-table-column prop="typeName" label="类型" width="100" align="center" />
-                <el-table-column prop="title" label="报销事由" min-width="150" align="center">
+                <el-table-column prop="typeName" label="类型" width="100" align="center" header-align="center" />
+                <el-table-column prop="title" label="报销事由" min-width="150" align="center" header-align="center">
                   <template #default="{ row }">
                     {{ normalizeReimbursementTitle(row.title) }}
                   </template>
                 </el-table-column>
-                <el-table-column label="金额" width="100" align="center">
+                <el-table-column label="金额" width="100" align="center" header-align="center">
                   <template #default="{ row }">
                     ¥{{ row.amount.toFixed(2) }}
                   </template>
                 </el-table-column>
-                <el-table-column prop="statusName" label="状态" width="100" align="center" />
-                <el-table-column label="提交时间" width="180" align="center">
+                <el-table-column prop="statusName" label="状态" width="100" align="center" header-align="center" />
+                <el-table-column label="提交时间" width="180" align="center" header-align="center">
                   <template #default="{ row }">
                     {{ formatDate(row.submitTime) }}
                   </template>
@@ -891,6 +805,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { User, Check, Close, View, Clock, SuccessFilled, List, Document, ZoomIn, Search, Download } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { toFileUrl, isImageFile } from '@/utils/file'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 import { usePendingStore } from '@/stores/pending'
 import { format } from 'date-fns'
@@ -979,6 +894,8 @@ interface ApprovalProcessRecord {
   completedTime?: string
   paymentProofPath?: string
   receiptConfirmedBy?: string
+  adminApproverName?: string
+  gmApproverName?: string
   description?: string
 }
 
@@ -1010,7 +927,6 @@ const pendingList = ref<ApprovalItem[]>([])
 const completedList = ref<ReimbursementItem[]>([])
 const allList = ref<ReimbursementItem[]>([])
 const allListLoading = ref(false)
-const probationList = ref<any[]>([])
 const statistics = ref<Statistics>({
   pendingCount: 0,
   pendingAmount: 0,
@@ -1030,7 +946,7 @@ const allFilterForm = reactive({
   type: [] as string[],
   status: '',
   reimbursementScope: [] as string[],
-  dateQueryType: 'month' as 'year' | 'month' | 'day',
+  dateQueryType: 'day' as 'year' | 'month' | 'day',
   dateRange: null as [string, string] | null,
   yearRange: null as [string, string] | null,
   monthRange: null as [string, string] | null,
@@ -1205,13 +1121,13 @@ const previewingProofUrl = ref('')
 
 // 判断路径是否为图片
 function isImagePath(p: string): boolean {
-  const lower = p.toLowerCase()
-  return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+  return isImageFile(p)
 }
 
 // 预览付款回单
 function handlePreviewPaymentProof(url?: string) {
-  previewingProofUrl.value = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
+  const raw = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
+  previewingProofUrl.value = toFileUrl(raw)
   paymentProofDialogVisible.value = true
 }
 
@@ -1243,8 +1159,6 @@ function handleTabChange(tab: any) {
     fetchPendingList()
   } else if (tab === 'completed') {
     fetchCompletedList()
-  } else if (tab === 'probation') {
-    fetchProbationList()
   }
   // 全部查询标签不自动加载，等用户点击查询按钮
 }
@@ -1293,6 +1207,11 @@ async function fetchAllList() {
     allListLoading.value = true
     const params: any = {}
 
+    console.log('[前端] fetchAllList - dateQueryType:', allFilterForm.dateQueryType)
+    console.log('[前端] fetchAllList - dateRange:', allFilterForm.dateRange)
+    console.log('[前端] fetchAllList - monthRange:', allFilterForm.monthRange)
+    console.log('[前端] fetchAllList - yearRange:', allFilterForm.yearRange)
+
     if (allFilterForm.userId) {
       params.userId = allFilterForm.userId
     }
@@ -1313,18 +1232,23 @@ async function fetchAllList() {
     if (allFilterForm.dateQueryType === 'day' && allFilterForm.dateRange && allFilterForm.dateRange[0] && allFilterForm.dateRange[1]) {
       params.startDate = allFilterForm.dateRange[0]
       params.endDate = allFilterForm.dateRange[1]
+      console.log('[前端] 日期筛选 - 类型: day, startDate:', params.startDate, 'endDate:', params.endDate)
     } else if (allFilterForm.dateQueryType === 'month' && allFilterForm.monthRange && allFilterForm.monthRange[0] && allFilterForm.monthRange[1]) {
       const [startYear, startMonth] = allFilterForm.monthRange[0].split('-')
       const [endYear, endMonth] = allFilterForm.monthRange[1].split('-')
       params.startDate = `${startYear}-${startMonth}-01`
       const lastDay = new Date(parseInt(endYear), parseInt(endMonth), 0).getDate()
       params.endDate = `${endYear}-${endMonth}-${String(lastDay).padStart(2, '0')}`
+      console.log('[前端] 日期筛选 - 类型: month, startDate:', params.startDate, 'endDate:', params.endDate)
     } else if (allFilterForm.dateQueryType === 'year' && allFilterForm.yearRange && allFilterForm.yearRange[0] && allFilterForm.yearRange[1]) {
       params.startDate = `${allFilterForm.yearRange[0]}-01-01`
       params.endDate = `${allFilterForm.yearRange[1]}-12-31`
+      console.log('[前端] 日期筛选 - 类型: year, startDate:', params.startDate, 'endDate:', params.endDate)
     }
 
+    console.log('[前端] API请求参数:', params)
     const response = await api.get('/api/approval/gm-all', { params })
+    console.log('[前端] API响应数据数量:', response.data.data?.length || 0)
     if (response.data.success) {
       allList.value = response.data.data
     }
@@ -1511,24 +1435,77 @@ async function fetchEmployeeList() {
   }
 }
 
-// 获取转正审批列表
-async function fetchProbationList() {
-  try {
-    const response = await api.get('/api/probation/list', {
-      params: { status: 'pending' }
-    })
-    if (response.data.success) {
-      probationList.value = response.data.data.list || []
-    }
-  } catch (error) {
-    console.error('获取转正审批列表失败:', error)
-    ElMessage.error('获取转正审批列表失败')
-  }
-}
-
 // 查看报销单详情
 function handleViewReimbursement(row: ApprovalItem) {
   router.push(`/business-reimbursement/${row.targetId}?mode=view`)
+}
+
+// 查看转正申请详情
+function handleViewProbation(row: ApprovalItem) {
+  router.push(`/gm-probation-approval?id=${row.targetId}`)
+}
+
+// 通过转正申请
+async function handleApproveProbation(row: ApprovalItem) {
+  try {
+    await ElMessageBox.confirm('确认通过该转正申请？', '确认通过', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'success',
+    })
+
+    const response = await api.post(`/api/probation/${row.targetId}/approve`)
+
+    if (response.data.success) {
+      ElMessage.success('审批通过')
+      await pendingStore.refreshPendingCounts()
+      await fetchPendingList()
+      await fetchStatistics()
+    } else {
+      ElMessage.error(response.data.message || '审批失败')
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('审批失败:', error)
+      ElMessage.error('审批失败')
+    }
+  }
+}
+
+// 驳回转正申请
+async function handleRejectProbation(row: ApprovalItem) {
+  try {
+    const { value: comment } = await ElMessageBox.prompt('请填写驳回原因', '驳回转正申请', {
+      confirmButtonText: '确认驳回',
+      cancelButtonText: '取消',
+      inputType: 'textarea',
+      inputPlaceholder: '请填写驳回原因',
+      inputValidator: (value) => {
+        if (!value || value.trim().length < 2) {
+          return '驳回原因至少2个字符'
+        }
+        return true
+      },
+    })
+
+    const response = await api.post(`/api/probation/${row.targetId}/reject`, {
+      comment: comment?.trim(),
+    })
+
+    if (response.data.success) {
+      ElMessage.success('已驳回')
+      await pendingStore.refreshPendingCounts()
+      await fetchPendingList()
+      await fetchStatistics()
+    } else {
+      ElMessage.error(response.data.message || '驳回失败')
+    }
+  } catch (error: any) {
+    if (error !== 'cancel') {
+      console.error('驳回失败:', error)
+      ElMessage.error('驳回失败')
+    }
+  }
 }
 
 // 查看已审批报销单详情
@@ -1545,6 +1522,7 @@ function handleViewReimbursementDetail(row: ReimbursementItem) {
 // 加载审批记录
 async function loadApprovalRecords(reimbursementId: string) {
   try {
+    console.log('[前端] 开始加载审批记录, reimbursementId:', reimbursementId)
     const res = await api.get('/api/approval/by-target', {
       params: {
         targetId: reimbursementId,
@@ -1552,8 +1530,10 @@ async function loadApprovalRecords(reimbursementId: string) {
       },
     })
 
+    console.log('[前端] 审批记录API响应:', res.data)
     if (res.data.success && res.data.data) {
       approvalRecords.value = res.data.data.records || []
+      console.log('[前端] 加载到的审批记录数量:', approvalRecords.value.length)
 
       // 用最新的报销单状态覆盖弹窗数据
       if (currentApprovalRecord.value && res.data.data.reimbursementStatus) {
@@ -1594,8 +1574,10 @@ async function loadApprovalRecords(reimbursementId: string) {
 
 // 查看待审批的审批流程
 async function handleViewApprovalProcess(row: ApprovalItem | ReimbursementItem) {
+  console.log('[前端] handleViewApprovalProcess 被调用, row:', row)
   const isApprovalItem = 'targetId' in row
   const reimbursementId = isApprovalItem ? row.targetId : row.id
+  console.log('[前端] isApprovalItem:', isApprovalItem, 'reimbursementId:', reimbursementId)
 
   if (isApprovalItem) {
     // 待审批项
@@ -1768,96 +1750,6 @@ function getTypeTagType(type: string): 'success' | 'warning' | 'danger' | 'info'
     business: 'primary',
   }
   return typeMap[type] || 'info'
-}
-
-// 获取转正状态类型
-function getProbationStatusType(status: string): 'success' | 'warning' | 'danger' | 'info' {
-  const typeMap: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-    pending: 'warning',
-    submitted: 'info',
-    approved: 'success',
-    rejected: 'danger'
-  }
-  return typeMap[status] || 'info'
-}
-
-// 获取转正状态文本
-function getProbationStatusText(status: string): string {
-  const textMap: Record<string, string> = {
-    pending: '待审批',
-    submitted: '已提交',
-    approved: '已通过',
-    rejected: '已驳回'
-  }
-  return textMap[status] || status
-}
-
-// 查看转正详情
-function handleViewProbation(row: any) {
-  router.push(`/employee-data?id=${row.employee_id}&tab=probation`)
-}
-
-// 通过转正申请
-async function handleApproveProbation(row: any) {
-  try {
-    await ElMessageBox.confirm('确定要通过该转正申请吗？', '确认通过', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      type: 'success'
-    })
-
-    const response = await api.post(`/api/probation/${row.id}/approve`, {
-      comment: '同意转正'
-    })
-
-    if (response.data.success) {
-      ElMessage.success('转正申请已通过')
-      fetchProbationList()
-      fetchStatistics()
-    } else {
-      ElMessage.error(response.data.message || '操作失败')
-    }
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      console.error('通过转正申请失败:', error)
-      ElMessage.error(error.response?.data?.message || '操作失败')
-    }
-  }
-}
-
-// 驳回转正申请
-async function handleRejectProbation(row: any) {
-  try {
-    const { value: comment } = await ElMessageBox.prompt('请填写驳回原因', '驳回转正申请', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputType: 'textarea',
-      inputPlaceholder: '请填写驳回原因',
-      inputValidator: (value) => {
-        if (!value || value.trim() === '') {
-          return '请填写驳回原因'
-        }
-        return true
-      }
-    })
-
-    const response = await api.post(`/api/probation/${row.id}/reject`, {
-      comment: comment
-    })
-
-    if (response.data.success) {
-      ElMessage.success('转正申请已驳回')
-      fetchProbationList()
-      fetchStatistics()
-    } else {
-      ElMessage.error(response.data.message || '操作失败')
-    }
-  } catch (error: any) {
-    if (error !== 'cancel') {
-      console.error('驳回转正申请失败:', error)
-      ElMessage.error(error.response?.data?.message || '操作失败')
-    }
-  }
 }
 
 // 初始化
@@ -2234,6 +2126,31 @@ onMounted(async () => {
   font-size: 16px;
   font-weight: 600;
   color: #303133;
+}
+
+// 强制表格内容居中对齐
+.export-scope-summary :deep(.el-table) {
+  th.el-table__cell,
+  td.el-table__cell {
+    text-align: center !important;
+  }
+  .el-table__cell .cell {
+    text-align: center !important;
+    justify-content: center !important;
+    display: flex !important;
+  }
+}
+
+.export-employees :deep(.el-table) {
+  th.el-table__cell,
+  td.el-table__cell {
+    text-align: center !important;
+  }
+  .el-table__cell .cell {
+    text-align: center !important;
+    justify-content: center !important;
+    display: flex !important;
+  }
 }
 
 .employee-collapse-title {

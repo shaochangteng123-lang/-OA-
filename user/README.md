@@ -114,7 +114,7 @@
 | 模块 | 文档 | 说明 |
 |------|------|------|
 | 🔐 认证模块 | [01-认证模块.md](./01-认证模块.md) | 飞书 OAuth、会话管理、权限系统 |
-| 🗄️ 数据库模块 | [08-数据库模块.md](./08-数据库模块.md) | SQLite 数据表结构、数据迁移 |
+| 🗄️ 数据库模块 | [08-数据库模块.md](./08-数据库模块.md) | PostgreSQL 数据表结构、数据迁移 |
 | 🔌 服务集成模块 | [09-服务集成模块.md](./09-服务集成模块.md) | 飞书集成、Notion 集成 |
 | 🛣️ 路由与布局模块 | [06-路由与布局模块.md](./06-路由与布局模块.md) | 路由配置、导航守卫、侧边栏 |
 | 🌐 API 路由模块 | [07-API路由模块.md](./07-API路由模块.md) | RESTful API、中间件 |
@@ -146,7 +146,7 @@ FEISHU_APP_SECRET=your_app_secret
 FEISHU_REDIRECT_URI=http://localhost:8899/api/auth/callback
 
 # 数据库配置
-DATABASE_PATH=./data/worklog.db
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/yulilog_worklog
 
 # 会话配置
 SESSION_SECRET=your_session_secret
@@ -266,7 +266,7 @@ yulilog-worklog/
 │   ├── db/                 # 数据库
 │   └── config/             # 配置文件
 ├── user/                   # 用户文档（本目录）
-└── data/                   # 数据文件（SQLite）
+└── docker-compose.yml      # Docker（含 PostgreSQL）
 ```
 
 ### 技术栈
@@ -281,7 +281,7 @@ yulilog-worklog/
 
 **后端：**
 - Express + TypeScript
-- better-sqlite3（数据库）
+- pg（PostgreSQL 数据库）
 - express-session（会话管理）
 - 飞书 OAuth（认证）
 
@@ -339,9 +339,9 @@ npm run docker:logs      # 查看容器日志
 **问题：** 提示数据库连接失败或表不存在
 
 **解决方案：**
-- 检查 `DATABASE_PATH` 配置
-- 确保 `data/` 目录存在且有写权限
-- 删除 `data/worklog.db` 重新初始化
+- 检查 `DATABASE_URL` 配置
+- 检查 PostgreSQL 服务是否可用（`pg_isready` / `docker compose ps`）
+- 首次部署或结构升级后，重启服务触发 `server/db/index.ts` 自动建表
 
 ### 3. 会话过期
 
@@ -378,6 +378,10 @@ npm run docker:logs      # 查看容器日志
 ---
 
 ## 📝 更新日志
+
+### 2026-03-26
+- 同步 PostgreSQL 迁移收尾说明：移除 SQLite `worklog.db` 相关排障指引
+- 补充数据库连接排查建议（`DATABASE_URL`、PostgreSQL 服务可用性、自动建表）
 
 ### 2026-01-23
 - 📚 重新组织文档结构，按菜单栏分区

@@ -81,7 +81,7 @@
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180">
+        <el-table-column label="操作" min-width="180">
           <template #default="{ row }">
             <template v-if="!row.isArchived">
               <el-button type="warning" size="small" link @click="handleArchive(row)">

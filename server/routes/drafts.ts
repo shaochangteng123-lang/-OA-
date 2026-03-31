@@ -7,7 +7,7 @@ import type { Draft } from '../types/database.js'
 const router = Router()
 
 // 获取指定日期的草稿
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const { date } = req.query
@@ -16,7 +16,7 @@ router.get('/', requireAuth, (req, res) => {
       return res.status(400).json({ success: false, message: '缺少日期参数' })
     }
 
-    const draft = db
+    const draft = await db
       .prepare('SELECT * FROM drafts WHERE user_id = ? AND date = ?')
       .get(userId, date) as Draft | undefined
 
@@ -41,7 +41,7 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 保存或更新草稿
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const { date, pages } = req.body
@@ -54,13 +54,13 @@ router.post('/', requireAuth, (req, res) => {
     const pagesJson = JSON.stringify(pages)
 
     // 检查草稿是否已存在
-    const existingDraft = db
+    const existingDraft = await db
       .prepare('SELECT * FROM drafts WHERE user_id = ? AND date = ?')
       .get(userId, date) as Draft | undefined
 
     if (existingDraft) {
       // 更新现有草稿
-      db.prepare(
+      await db.prepare(
         `UPDATE drafts
          SET pages_json = ?, updated_at = ?
          WHERE user_id = ? AND date = ?`
@@ -80,7 +80,7 @@ router.post('/', requireAuth, (req, res) => {
     } else {
       // 创建新草稿
       const draftId = nanoid()
-      db.prepare(
+      await db.prepare(
         `INSERT INTO drafts (id, user_id, date, pages_json, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)`
       ).run(draftId, userId, date, pagesJson, now, now)
@@ -105,7 +105,7 @@ router.post('/', requireAuth, (req, res) => {
 })
 
 // 删除草稿
-router.delete('/', requireAuth, (req, res) => {
+router.delete('/', requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId
     const { date } = req.query
@@ -114,7 +114,7 @@ router.delete('/', requireAuth, (req, res) => {
       return res.status(400).json({ success: false, message: '缺少日期参数' })
     }
 
-    db.prepare('DELETE FROM drafts WHERE user_id = ? AND date = ?').run(userId, date)
+    await db.prepare('DELETE FROM drafts WHERE user_id = ? AND date = ?').run(userId, date)
 
     res.json({ success: true, message: '草稿已删除' })
   } catch (error) {

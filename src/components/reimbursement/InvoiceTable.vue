@@ -1,6 +1,6 @@
 <template>
   <div class="invoice-table-wrapper">
-    <el-table :data="invoiceList" border class="invoice-table">
+    <el-table :data="allInvoices" border class="invoice-table">
       <el-table-column prop="id" label="序号" width="50" align="center">
         <template #default="{ $index }">
           {{ $index + 1 }}
@@ -28,12 +28,10 @@
       </el-table-column>
       <el-table-column label="缩略图" width="110" align="center">
         <template #default="{ row }">
-          <div v-if="row.filePath" class="thumbnail-wrapper" @click="handlePreview(row.filePath)">
-            <!-- 判断是否为图片文件 -->
+          <div v-if="row.filePath" class="thumbnail-wrapper" @click.stop="handlePreview(row.filePath)">
             <div v-if="isImageFile(row.filePath)" class="image-thumbnail">
-              <img :src="getImageUrl(row.filePath)" alt="收据" class="thumbnail-image" />
+              <img :src="getImageUrl(row.filePath)" alt="发票" class="thumbnail-image" @click.stop />
             </div>
-            <!-- PDF文件显示图标 -->
             <div v-else class="pdf-icon">
               <el-icon :size="30"><Document /></el-icon>
               <div style="font-size: 10px; margin-top: 2px;">PDF</div>
@@ -56,11 +54,11 @@
     <div class="invoice-total" :class="{ 'amount-warning': showAmountWarning }">
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
-      <span v-if="showDeduction && hasTransportFuelInvoices && !approvalDeductionAmount" class="deducted-info">
-        （核减：-¥{{ totalDeductedAmount }}）
+      <span v-if="showDeduction && (hasTransportFuelInvoices || deductionSubtotal > 0) && !approvalDeductionAmount" class="deducted-info">
+        （实报金额：¥{{ transportFuelActual.toFixed(2) }} 核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
       </span>
       <span v-if="approvalDeductionAmount > 0" class="deducted-info">
-        （核减：-¥{{ approvalDeductionAmount.toFixed(2) }}）
+        （实报金额：¥{{ actualReimbursementAmount.toFixed(2) }} 核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
       </span>
       <span v-if="warningText" class="amount-tip">
         {{ warningText }}
@@ -100,6 +98,26 @@
       </div>
     </div>
 
+    <!-- 核减汇总信息 -->
+    <div v-if="deductionSubtotal > 0" class="deduction-summary">
+      <div class="summary-row">
+        <span class="summary-label">本次发票核减小计：</span>
+        <span class="summary-value">¥{{ deductionSubtotal.toFixed(2) }}</span>
+      </div>
+      <div class="summary-row">
+        <span class="summary-label">本次累计核减金额：</span>
+        <span class="summary-value">¥{{ currentTotalDeduction.toFixed(2) }}</span>
+      </div>
+      <div class="summary-row deduction-row">
+        <span class="summary-label">本年累计核减金额：</span>
+        <span class="summary-value deduction-amount">-¥{{ yearlyTotalDeduction.toFixed(2) }}</span>
+      </div>
+      <div class="summary-row actual-row">
+        <span class="summary-label">实际报销金额：</span>
+        <span class="summary-value actual-amount">¥{{ actualReimbursementAmount.toFixed(2) }}</span>
+      </div>
+    </div>
+
     <!-- 图片/PDF预览对话框 -->
     <el-dialog
       v-model="previewVisible"
@@ -135,6 +153,7 @@
 import { computed, ref } from 'vue'
 import { Delete, Document } from '@element-plus/icons-vue'
 import type { InvoiceItem } from '@/composables/reimbursement/useInvoice'
+import { toFileUrl, isImageFile as checkImageFile } from '@/utils/file'
 
 // 预览相关
 const previewVisible = ref(false)
@@ -148,9 +167,11 @@ const props = withDefaults(defineProps<{
   themeColor?: string
   amountThreshold?: number
   showThresholdWarning?: boolean
-  showDeduction?: boolean  // 是否显示核减金额列（仅基础报销显示）
-  monthlyUsedQuota?: number  // 当月已使用的运输/交通/汽油/柴油类发票额度
-  approvalDeductionAmount?: number  // 审批核减金额（已审批状态下使用）
+  showDeduction?: boolean
+  monthlyUsedQuota?: number
+  approvalDeductionAmount?: number
+  deductionInvoices?: any[]  // 核减发票列表
+  totalInvoiceAmount?: number  // 发票总金额
 }>(), {
   readonly: false,
   themeColor: '#409eff',
@@ -159,6 +180,8 @@ const props = withDefaults(defineProps<{
   showDeduction: false,
   monthlyUsedQuota: 0,
   approvalDeductionAmount: 0,
+  deductionInvoices: () => [],
+  totalInvoiceAmount: 0,
 })
 
 // Emits
@@ -166,16 +189,31 @@ const emit = defineEmits<{
   (e: 'delete', invoice: InvoiceItem): void
 }>()
 
+// 合并普通发票和核减发票
+const allInvoices = computed(() => {
+  const regular = props.invoiceList.map(item => ({ ...item, isDeduction: false }))
+  const deduction = (props.deductionInvoices || []).map(item => ({
+    ...item,
+    category: '核减发票',
+    amount: Number(item.amount).toFixed(2),
+    isDeduction: true
+  }))
+  return [...regular, ...deduction]
+})
+
 // 计算总金额数值（用于比较）- 使用精确的金额计算方法
+// 总金额 = 普通发票金额 + 核减发票金额
 const totalAmountNumber = computed(() => {
-  // 将所有金额转换为分（整数），避免浮点数精度问题
-  const totalCents = props.invoiceList.reduce((acc, item) => {
-    const amount = item.amount || 0  // 使用原始金额，不使用actualAmount
+  // 普通发票金额
+  const invoiceCents = props.invoiceList.reduce((acc, item) => {
+    const amount = item.amount || 0
     const amountInCents = Math.round(amount * 100)
     return acc + amountInCents
   }, 0)
+  // 核减发票金额
+  const deductionCents = Math.round(deductionSubtotal.value * 100)
   // 转换回元
-  return totalCents / 100
+  return (invoiceCents + deductionCents) / 100
 })
 
 // 计算总金额 - 保留原始精度，不进行四舍五入
@@ -254,6 +292,39 @@ const warningText = computed(() => {
   return `(金额不足${props.amountThreshold}元，不属于大额报销)`
 })
 
+// 核减发票小计
+const deductionSubtotal = computed(() => {
+  if (!props.deductionInvoices || props.deductionInvoices.length === 0) return 0
+  const total = props.deductionInvoices.reduce((sum, item) => sum + Number(item.amount || 0), 0)
+  console.log('[InvoiceTable] 核减发票小计:', total, '核减发票列表:', props.deductionInvoices)
+  return total
+})
+
+// 本次累计核减金额 = 发票上传的核减 + 核减发票上传的核减金额
+const currentTotalDeduction = computed(() => {
+  return totalDeductedAmountNumber.value + deductionSubtotal.value
+})
+
+// 本年累计核减金额 = 发票上传的核减 + 核减发票上传的核减金额（每一次的数值）
+const yearlyTotalDeduction = computed(() => {
+  return totalDeductedAmountNumber.value + deductionSubtotal.value
+})
+
+// 总核减金额（用于显示）= 运输/交通/汽油/柴油类核减 + 核减发票金额
+const totalDeductionAmount = computed(() => {
+  return totalDeductedAmountNumber.value + deductionSubtotal.value
+})
+
+// 有效核减金额（用于计算实际报销金额）= 运输/交通/汽油/柴油类核减 + 核减发票金额
+const effectiveDeduction = computed(() => {
+  return totalDeductedAmountNumber.value + deductionSubtotal.value
+})
+
+// 实际报销金额（发票总金额 - 有效核减金额）
+const actualReimbursementAmount = computed(() => {
+  return Math.max(0, totalAmountNumber.value - effectiveDeduction.value)
+})
+
 // 格式化日期为中文格式
 function formatDateToChinese(dateStr: string): string {
   if (!dateStr) return ''
@@ -266,32 +337,12 @@ function formatDateToChinese(dateStr: string): string {
 
 // 获取图片URL
 function getImageUrl(filePath: string): string {
-  if (!filePath) return ''
-  // 如果已经是完整URL，直接返回
-  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
-    return filePath
-  }
-  // 如果是相对路径，添加API前缀
-  if (filePath.startsWith('/')) {
-    return filePath
-  }
-  // 否则添加 /api/ 前缀
-  return `/api/${filePath}`
+  return toFileUrl(filePath)
 }
 
 // 判断是否为图片文件
 function isImageFile(filePath: string): boolean {
-  if (!filePath) return false
-  const lowerPath = filePath.toLowerCase()
-  return (
-    lowerPath.endsWith('.jpg') ||
-    lowerPath.endsWith('.jpeg') ||
-    lowerPath.endsWith('.png') ||
-    lowerPath.endsWith('.gif') ||
-    lowerPath.endsWith('.bmp') ||
-    lowerPath.endsWith('.webp') ||
-    lowerPath.includes('receipt-') // 收据文件名包含 receipt-
-  )
+  return checkImageFile(filePath)
 }
 
 // 处理预览
@@ -316,9 +367,23 @@ function handlePreview(filePath: string): void {
   previewVisible.value = true
 }
 
-// 删除发票
-function onDelete(invoice: InvoiceItem): void {
-  emit('delete', invoice)
+// 删除发票（普通发票或核减发票）
+function onDelete(invoice: any): void {
+  if (invoice.isDeduction) {
+    // 删除核减发票
+    const deductionList = props.deductionInvoices || []
+    const index = deductionList.findIndex(item =>
+      item.filePath === invoice.filePath ||
+      item.invoiceNumber === invoice.invoiceNumber
+    )
+    if (index > -1) {
+      const updated = deductionList.filter((_, i) => i !== index)
+      emit('delete', { ...invoice, isDeduction: true, index })
+    }
+  } else {
+    // 删除普通发票
+    emit('delete', invoice)
+  }
 }
 </script>
 
@@ -421,6 +486,25 @@ function onDelete(invoice: InvoiceItem): void {
   height: 100%;
   object-fit: cover;
   border-radius: 4px;
+}
+
+.pdf-thumbnail {
+  width: 50px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fff;
+  position: relative;
+}
+
+.pdf-preview-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  pointer-events: none;
 }
 
 .preview-container {
@@ -581,5 +665,68 @@ function onDelete(invoice: InvoiceItem): void {
   color: #67c23a;
   font-weight: 600;
   font-size: 14px;
+}
+
+/* 核减发票区域 */
+.deduction-section {
+  margin-top: 16px;
+}
+
+.deduction-table {
+  width: 100%;
+}
+
+.deduction-table :deep(.el-table__header-wrapper th) {
+  background: #fff9f0;
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+/* 核减汇总信息 */
+.deduction-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: #fff9f0;
+  border: 1px solid #f0b85c;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+}
+
+.deduction-summary .summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: #606266;
+}
+
+.deduction-summary .summary-label {
+  flex-shrink: 0;
+}
+
+.deduction-summary .summary-value {
+  font-weight: 500;
+  color: #303133;
+}
+
+.deduction-summary .deduction-row {
+  padding-top: 6px;
+  border-top: 1px solid #f0b85c;
+}
+
+.deduction-summary .deduction-row .summary-value {
+  color: #e6a23c;
+}
+
+.deduction-summary .actual-row {
+  font-weight: 600;
+}
+
+.deduction-summary .actual-row .summary-value {
+  color: #67c23a;
+  font-size: 15px;
+  font-weight: 600;
 }
 </style>

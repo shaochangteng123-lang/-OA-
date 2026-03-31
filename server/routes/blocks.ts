@@ -7,9 +7,9 @@ import type { EventBlock, BlockCategory } from '../types/database.js'
 const router = Router()
 
 // 获取板块分类（必须在 /:id 路由之前）
-router.get('/categories', requireAuth, (req, res) => {
+router.get('/categories', requireAuth, async (req, res) => {
   try {
-    const categories = db.prepare('SELECT * FROM block_categories WHERE is_active = 1 ORDER BY sort_order').all() as BlockCategory[]
+    const categories = await db.prepare('SELECT * FROM block_categories WHERE is_active = TRUE ORDER BY sort_order').all() as BlockCategory[]
 
     res.json({
       success: true,
@@ -27,12 +27,12 @@ router.get('/categories', requireAuth, (req, res) => {
 })
 
 // 获取所有板块
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     interface BlockWithCategory extends EventBlock {
       category_name?: string
     }
-    const blocks = db.prepare(`
+    const blocks = await db.prepare(`
       SELECT eb.*, bc.name as category_name
       FROM event_blocks eb
       LEFT JOIN block_categories bc ON eb.category_id = bc.id
@@ -58,10 +58,10 @@ router.get('/', requireAuth, (req, res) => {
 })
 
 // 获取单个板块
-router.get('/:id', requireAuth, (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const block = db.prepare('SELECT * FROM event_blocks WHERE id = ?').get(id) as EventBlock | undefined
+    const block = await db.prepare('SELECT * FROM event_blocks WHERE id = ?').get(id) as EventBlock | undefined
 
     if (!block) {
       return res.status(404).json({ success: false, message: '板块不存在' })
@@ -86,13 +86,13 @@ router.get('/:id', requireAuth, (req, res) => {
 })
 
 // 创建板块
-router.post('/', requireAuth, (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   try {
     const { name, categoryId, description, events } = req.body
     const id = nanoid()
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO event_blocks (id, name, category_id, description, events_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(id, name, categoryId, description || null, JSON.stringify(events || []), now, now)
@@ -105,13 +105,13 @@ router.post('/', requireAuth, (req, res) => {
 })
 
 // 更新板块
-router.put('/:id', requireAuth, (req, res) => {
+router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const { name, categoryId, description, events } = req.body
     const now = new Date().toISOString()
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE event_blocks
       SET name = ?, category_id = ?, description = ?, events_json = ?, updated_at = ?
       WHERE id = ?
@@ -125,10 +125,10 @@ router.put('/:id', requireAuth, (req, res) => {
 })
 
 // 删除板块
-router.delete('/:id', requireAuth, (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    db.prepare('DELETE FROM event_blocks WHERE id = ?').run(id)
+    await db.prepare('DELETE FROM event_blocks WHERE id = ?').run(id)
     res.json({ success: true })
   } catch (error) {
     console.error('删除板块失败:', error)

@@ -95,6 +95,18 @@
                   />
                 </el-form-item>
               </div>
+
+              <div class="upload-deduction">
+                <el-form-item label="核减上传">
+                  <DeductionUploader
+                    v-model="deductionItems"
+                    :total-invoice-amount="invoice.totalAmount.value"
+                    :yearly-deduction-used="0"
+                    :existing-invoices="invoice.invoiceList.value"
+                    :disabled="isReadonly"
+                  />
+                </el-form-item>
+              </div>
             </div>
 
             <!-- 发票明细表格 -->
@@ -104,6 +116,8 @@
                 :readonly="isReadonly"
                 :show-deduction="true"
                 :monthly-used-quota="invoice.monthlyUsedQuota.value"
+                :deduction-invoices="deductionItems"
+                :total-invoice-amount="invoice.totalAmount.value"
                 :approval-deduction-amount="approvalDeductionAmount"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
@@ -217,6 +231,8 @@ import TypeSelector from '@/components/reimbursement/TypeSelector.vue'
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
 import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
+import DeductionUploader from '@/components/reimbursement/DeductionUploader.vue'
+import type { DeductionItem } from '@/components/reimbursement/DeductionUploader.vue'
 
 // 导入 composables
 import { useRouter } from 'vue-router'
@@ -224,6 +240,7 @@ import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { getTypeLabel } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
+import { toFileUrl } from '@/utils/file'
 
 const router = useRouter()
 
@@ -263,6 +280,9 @@ const formData = reactive({
 // 无票上传文件列表
 const receiptFileList = ref<any[]>([])
 
+// 核减发票列表
+const deductionItems = ref<DeductionItem[]>([])
+
 // 表单引用
 const formRef = ref<FormInstance>()
 
@@ -271,10 +291,10 @@ const formRules: FormRules = {}
 
 // 付款回单相关
 const paymentProofPath = ref('')
-// 支持多张回单（逗号分隔）
+// 支持多张回单（逗号分隔），并转换为可访问的 URL
 const paymentProofPaths = computed(() => {
   if (!paymentProofPath.value) return []
-  return paymentProofPath.value.split(',').filter(Boolean)
+  return paymentProofPath.value.split(',').filter(Boolean).map(path => toFileUrl(path))
 })
 const previewingProofUrl = ref('')
 const payTime = ref('')
@@ -383,11 +403,23 @@ function handleDeleteReceipt(file: any): void {
 
 // 处理删除发票
 function handleDeleteInvoice(invoiceItem: any): void {
-  const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
-  if (receiptIndex > -1) {
-    receiptFileList.value.splice(receiptIndex, 1)
+  if (invoiceItem.isDeduction) {
+    // 删除核减发票
+    const index = deductionItems.value.findIndex(item =>
+      item.filePath === invoiceItem.filePath ||
+      item.invoiceNumber === invoiceItem.invoiceNumber
+    )
+    if (index > -1) {
+      deductionItems.value.splice(index, 1)
+    }
+  } else {
+    // 删除普通发票
+    const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
+    if (receiptIndex > -1) {
+      receiptFileList.value.splice(receiptIndex, 1)
+    }
+    invoice.deleteInvoiceById(invoiceItem.id)
   }
-  invoice.deleteInvoiceById(invoiceItem.id)
 }
 
 // 清除表单数据
@@ -399,6 +431,7 @@ function clearFormData(): void {
   // 清除发票列表
   invoice.clearInvoices()
   receiptFileList.value = []
+  deductionItems.value = []
   // 重置表单验证
   formRef.value?.resetFields()
 }
@@ -511,8 +544,24 @@ async function loadDetail(): Promise<void> {
 
     // 加载发票数据
     if (data.invoices && Array.isArray(data.invoices)) {
-      // 加载所有发票到 invoiceList
-      invoice.loadInvoices(data.invoices)
+      // 分离普通发票和核减发票（isDeduction 可能是 0/1 或 false/true）
+      const normalInvoices = data.invoices.filter((inv: any) => !inv.isDeduction)
+      const deductionInvoices = data.invoices.filter((inv: any) => inv.isDeduction)
+
+      // 加载普通发票到 invoiceList
+      invoice.loadInvoices(normalInvoices)
+
+      // 加载核减发票
+      deductionItems.value = deductionInvoices.map((inv: any) => ({
+        id: inv.id,
+        filePath: inv.filePath,
+        fileHash: inv.fileHash,
+        invoiceNumber: inv.invoiceNumber,
+        amount: inv.amount,
+        invoiceDate: inv.invoiceDate,
+        category: inv.category,
+        isDeduction: true,
+      }))
 
       // 分离 PDF 发票和收据（图片）的 fileList
       const allFiles = invoice.fileList.value
@@ -520,7 +569,7 @@ async function loadDetail(): Promise<void> {
       const receiptFiles: any[] = []
 
       allFiles.forEach((file, index) => {
-        const invoiceItem = data.invoices[index]
+        const invoiceItem = normalInvoices[index]
         if (invoiceItem && isImageFilePath(invoiceItem.filePath)) {
           receiptFiles.push(file)
         } else {
@@ -620,6 +669,7 @@ watch(
       paymentProofPath.value = ''
       payTime.value = ''
       receiptFileList.value = []
+      deductionItems.value = []
       await loadDetail()
       await invoice.fetchMonthlyUsedQuota(newId)
     }
@@ -716,28 +766,27 @@ watch(
 
 .upload-layout {
   display: flex;
-  gap: 24px;
+  gap: 20px;
   align-items: flex-start;
 }
 
-.upload-left {
+.upload-left,
+.upload-right,
+.upload-deduction {
   flex: 1;
   min-width: 0;
-}
-
-.upload-right {
-  width: min(450px, 100%);
-  min-width: 300px;
-  flex-shrink: 0;
 }
 
 @media (max-width: 1366px) {
   .upload-layout {
     flex-direction: column;
   }
-  .upload-right {
+  .upload-left,
+  .upload-right,
+  .upload-deduction {
+    flex: 1 1 auto;
     width: 100%;
-    min-width: unset;
+    min-width: 0;
   }
 }
 

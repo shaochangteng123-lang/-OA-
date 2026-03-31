@@ -366,7 +366,8 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
     console.log('🔑 文件哈希:', fileHash)
 
-    const existingByHash = await db.prepare(`
+    // 检查普通发票表
+    const existingInvoice = await db.prepare(`
       SELECT ri.file_hash, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
@@ -374,12 +375,30 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       LIMIT 1
     `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
 
-    if (existingByHash) {
+    if (existingInvoice) {
       // 清理临时文件
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingByHash.applicant_name} 已上传此发票，请勿重复上传`,
+        message: `${existingInvoice.applicant_name} 已上传此发票，请勿重复上传`,
+      })
+    }
+
+    // 检查核减发票表（交叉查重）
+    const existingDeduction = await db.prepare(`
+      SELECT rdi.file_hash, r.applicant_name
+      FROM reimbursement_deduction_invoices rdi
+      JOIN reimbursements r ON rdi.reimbursement_id = r.id
+      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingDeduction) {
+      // 清理临时文件
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingDeduction.applicant_name} 已在核减上传中上传此发票，请勿重复上传`,
       })
     }
 
@@ -433,9 +452,12 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     // 移动文件到正式目录
     // 优先使用前端传递的原始文件名，否则尝试解码
     const rawFileName = req.body.originalFileName || Buffer.from(req.file.originalname, 'latin1').toString('utf8')
+    console.log('📝 原始文件名:', rawFileName)
     // 路径清洗：只取文件名部分，防止路径穿越攻击
     const safeFileName = path.basename(rawFileName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+    console.log('📝 清洗后文件名:', safeFileName)
     const finalFileName = `invoice-${Date.now()}-${safeFileName}`
+    console.log('📝 最终文件名:', finalFileName)
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(finalFilePath, finalPath)
 
@@ -499,7 +521,8 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
     console.log('🔑 文件哈希:', fileHash)
 
-    const existingByHash = await db.prepare(`
+    // 检查普通发票表
+    const existingInvoice = await db.prepare(`
       SELECT ri.file_hash, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
@@ -507,12 +530,30 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
       LIMIT 1
     `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
 
-    if (existingByHash) {
+    if (existingInvoice) {
       // 清理临时文件
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingByHash.applicant_name} 已上传此支付截图，请勿重复上传`,
+        message: `${existingInvoice.applicant_name} 已上传此支付截图，请勿重复上传`,
+      })
+    }
+
+    // 检查核减发票表（交叉查重）
+    const existingDeduction = await db.prepare(`
+      SELECT rdi.file_hash, r.applicant_name
+      FROM reimbursement_deduction_invoices rdi
+      JOIN reimbursements r ON rdi.reimbursement_id = r.id
+      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingDeduction) {
+      // 清理临时文件
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingDeduction.applicant_name} 已在核减上传中上传此发票，请勿重复上传`,
       })
     }
 
@@ -596,6 +637,331 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
       success: false,
       message: error instanceof Error ? error.message : '上传失败',
     })
+  }
+})
+
+/**
+ * 上传核减发票并进行OCR识别
+ * POST /api/reimbursement/upload-deduction-invoice
+ * 仅支持PDF，单文件不超过5MB
+ */
+const uploadDeduction = multer({
+  dest: tempDir,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true)
+    } else {
+      cb(new Error('核减发票仅支持PDF格式'))
+    }
+  },
+})
+
+router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('invoice'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: '请上传PDF文件' })
+    }
+
+    const tempFilePath = req.file.path
+    console.log('📄 收到核减发票上传:', req.file.originalname)
+
+    // 计算文件哈希查重
+    const fileBuffer = fs.readFileSync(tempFilePath)
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
+
+    // 检查核减发票表
+    const existingDeduction = await db.prepare(`
+      SELECT rdi.file_hash, r.applicant_name
+      FROM reimbursement_deduction_invoices rdi
+      JOIN reimbursements r ON rdi.reimbursement_id = r.id
+      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingDeduction) {
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingDeduction.applicant_name} 已上传此核减发票，请勿重复上传`,
+      })
+    }
+
+    // 检查普通发票表（交叉查重）
+    // 包括草稿状态，防止重复使用发票
+    const existingInvoice = await db.prepare(`
+      SELECT ri.file_hash, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.file_hash = ?
+        AND r.status != 'rejected'
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingInvoice) {
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingInvoice.applicant_name} 已在发票上传中上传此发票，请勿重复上传`,
+      })
+    }
+
+    // 使用本地OCR识别
+    let ocrResult: { amount: number; date: string; invoiceNumber?: string; seller?: string; isValidInvoice: boolean }
+    try {
+      ocrResult = await recognizeInvoice(tempFilePath)
+    } catch (ocrErr) {
+      // OCR识别失败，清理临时文件并返回错误
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+
+      // 如果是"此不是有效发票"的错误，直接返回
+      if (ocrErr instanceof Error && ocrErr.message.includes('此不是有效发票')) {
+        return res.status(400).json({
+          success: false,
+          message: ocrErr.message,
+        })
+      }
+
+      // 其他OCR错误
+      return res.status(400).json({
+        success: false,
+        message: '核减发票识别失败，请重新上传',
+      })
+    }
+
+    // 验证发票有效性
+    if (!ocrResult.isValidInvoice) {
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: '此不是有效发票，请重新上传',
+      })
+    }
+
+    // 验证发票日期：核减发票只能是当年的
+    if (ocrResult.date) {
+      const invoiceDate = new Date(ocrResult.date)
+      const currentYear = new Date().getFullYear()
+      const invoiceYear = invoiceDate.getFullYear()
+
+      if (invoiceYear !== currentYear) {
+        try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+        return res.status(400).json({
+          success: false,
+          message: `核减发票只能是${currentYear}年的，当前发票日期为${invoiceYear}年`,
+        })
+      }
+    }
+
+    // 保存文件
+    const finalFileName = `deduction-${nanoid(8)}-${Date.now()}.pdf`
+    const finalPath = path.join(invoicesDir, finalFileName)
+    fs.copyFileSync(tempFilePath, finalPath)
+
+    // 清理临时文件
+    try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+
+    // 缓存OCR结果
+    ocrCache.set(finalFileName, { amount: ocrResult.amount, timestamp: Date.now() })
+
+    res.json({
+      success: true,
+      message: '核减发票上传成功',
+      data: {
+        fileName: finalFileName,
+        filePath: `uploads/invoices/${finalFileName}`,
+        fileHash,
+        ocrResult: {
+          amount: ocrResult.amount,
+          date: ocrResult.date,
+          invoiceNumber: ocrResult.invoiceNumber,
+        },
+      },
+    })
+  } catch (error) {
+    console.error('上传核减发票失败:', error)
+    if (req.file?.path) {
+      try { fs.unlinkSync(req.file.path) } catch (e) { /* 忽略 */ }
+    }
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : '上传失败',
+    })
+  }
+})
+
+/**
+ * 获取报销单核减发票列表
+ * GET /api/reimbursement/:id/deduction-invoices
+ */
+router.get('/:id/deduction-invoices', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const userId = req.session.user?.id
+    if (!userId) return res.status(401).json({ success: false, message: '未登录' })
+
+    // 确认该报销单属于当前用户（或管理员可查看）
+    const user = req.session.user!
+    const isAdmin = user.role === 'admin' || user.role === 'super_admin'
+
+    const reimbursement = await db.prepare(
+      `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`
+    ).get(id) as { id: string; user_id: string } | undefined
+
+    if (!reimbursement) {
+      return res.status(404).json({ success: false, message: '报销单不存在' })
+    }
+    if (!isAdmin && reimbursement.user_id !== userId) {
+      return res.status(403).json({ success: false, message: '无权查看' })
+    }
+
+    const invoices = await db.all(
+      `SELECT * FROM reimbursement_deduction_invoices WHERE reimbursement_id = ? ORDER BY created_at ASC`,
+      id
+    )
+
+    res.json({ success: true, data: invoices })
+  } catch (error) {
+    console.error('获取核减发票失败:', error)
+    res.status(500).json({ success: false, message: '获取核减发票失败' })
+  }
+})
+
+/**
+ * 保存核减发票到报销单
+ * POST /api/reimbursement/:id/deduction-invoices
+ */
+router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params
+    const userId = req.session.user?.id
+    if (!userId) return res.status(401).json({ success: false, message: '未登录' })
+
+    const { filePath, fileHash, amount, invoiceDate, invoiceNumber } = req.body
+    if (!filePath || amount === undefined) {
+      return res.status(400).json({ success: false, message: '缺少必要参数' })
+    }
+
+    // 确认报销单归属
+    const reimbursement = await db.prepare(
+      `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`
+    ).get(id) as { id: string; user_id: string } | undefined
+
+    if (!reimbursement) {
+      return res.status(404).json({ success: false, message: '报销单不存在' })
+    }
+    if (reimbursement.user_id !== userId) {
+      return res.status(403).json({ success: false, message: '无权操作' })
+    }
+
+    const invoiceId = nanoid()
+    const now = new Date().toISOString()
+    await db.run(
+      `INSERT INTO reimbursement_deduction_invoices (id, reimbursement_id, amount, invoice_date, invoice_number, file_path, created_at, file_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      invoiceId, id, amount, invoiceDate || now.slice(0, 10), invoiceNumber || '', filePath, now, fileHash || ''
+    )
+
+    res.json({ success: true, message: '核减发票保存成功', data: { id: invoiceId } })
+  } catch (error) {
+    console.error('保存核减发票失败:', error)
+    res.status(500).json({ success: false, message: '保存核减发票失败' })
+  }
+})
+
+/**
+ * 删除核减发票
+ * DELETE /api/reimbursement/deduction-invoices/:invoiceId
+ */
+router.delete('/deduction-invoices/:invoiceId', requireAuth, async (req, res) => {
+  try {
+    const { invoiceId } = req.params
+    const userId = req.session.user?.id
+    if (!userId) return res.status(401).json({ success: false, message: '未登录' })
+
+    const invoice = await db.prepare(
+      `SELECT rdi.*, r.user_id FROM reimbursement_deduction_invoices rdi
+       JOIN reimbursements r ON rdi.reimbursement_id = r.id
+       WHERE rdi.id = ?`
+    ).get(invoiceId) as any
+
+    if (!invoice) return res.status(404).json({ success: false, message: '核减发票不存在' })
+    if (invoice.user_id !== userId) return res.status(403).json({ success: false, message: '无权操作' })
+
+    await db.run(`DELETE FROM reimbursement_deduction_invoices WHERE id = ?`, invoiceId)
+
+    // 删除文件
+    if (invoice.file_path) {
+      const fullPath = path.join(process.cwd(), invoice.file_path)
+      try { fs.unlinkSync(fullPath) } catch (e) { /* 忽略 */ }
+    }
+
+    res.json({ success: true, message: '删除成功' })
+  } catch (error) {
+    console.error('删除核减发票失败:', error)
+    res.status(500).json({ success: false, message: '删除失败' })
+  }
+})
+
+/**
+ * 查询当年累计核减金额（每年1月1日清零）
+ * GET /api/reimbursement/deduction-quota?excludeId=xxx
+ */
+router.get('/deduction-quota', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.user?.id
+    if (!userId) return res.status(401).json({ success: false, message: '未登录' })
+
+    const { excludeId } = req.query
+    const now = new Date()
+    const year = now.getFullYear()
+    const yearStr = `${year}`
+
+    // 查询核减发票的累计金额
+    let deductionInvoiceSql = `
+      SELECT COALESCE(SUM(rdi.amount), 0) as total_amount
+      FROM reimbursement_deduction_invoices rdi
+      JOIN reimbursements r ON rdi.reimbursement_id = r.id
+      WHERE r.user_id = ?
+        AND r.status IN ('approved', 'payment_uploaded', 'completed')
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
+        AND r.reimbursement_month LIKE ?
+    `
+    const params: any[] = [userId, `${yearStr}%`]
+
+    if (excludeId) {
+      deductionInvoiceSql += ' AND r.id != ?'
+      params.push(excludeId)
+    }
+
+    // 查询发票上传的核减金额累计
+    let invoiceDeductionSql = `
+      SELECT COALESCE(SUM(ri.deducted_amount), 0) as total_amount
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE r.user_id = ?
+        AND r.status IN ('approved', 'payment_uploaded', 'completed')
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
+        AND r.reimbursement_month LIKE ?
+    `
+    const params2: any[] = [userId, `${yearStr}%`]
+
+    if (excludeId) {
+      invoiceDeductionSql += ' AND r.id != ?'
+      params2.push(excludeId)
+    }
+
+    const deductionInvoiceResult = await db.prepare(deductionInvoiceSql).get(...params) as { total_amount: number }
+    const invoiceDeductionResult = await db.prepare(invoiceDeductionSql).get(...params2) as { total_amount: number }
+
+    const yearlyDeductionTotal = (deductionInvoiceResult?.total_amount || 0) + (invoiceDeductionResult?.total_amount || 0)
+    res.json({ success: true, data: { yearlyDeductionTotal } })
+  } catch (error) {
+    console.error('获取核减额度失败:', error)
+    res.status(500).json({ success: false, message: '获取核减额度失败' })
   }
 })
 
@@ -729,9 +1095,10 @@ router.get('/statistics', requireAuth, async (req, res) => {
       WHERE ${baseCondition}
     `).get(...baseParams) as { count: number; amount: number }
 
-    // 查询核减金额统计（仅基础报销，每年1月1日清零，且只统计已审批通过的报销单）
-    let deductedCondition = 'r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?)'
-    const deductedParams: any[] = [userId, 'basic', 'approved', 'payment_uploaded', 'completed']
+    // 查询核减金额统计（仅基础报销，每年1月1日清零，统计所有非草稿/非驳回的报销单）
+    // 包括两部分：1. 系统自动核减金额（deducted_amount）2. 核减发票金额（is_deduction = 1）
+    let deductedCondition = `r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?, ?, ?, ?, ?)`
+    const deductedParams: any[] = [userId, 'basic', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed']
 
     // 添加日期范围筛选
     if (startDate) {
@@ -749,20 +1116,32 @@ router.get('/statistics', requireAuth, async (req, res) => {
       deductedParams.push(endDate)
     }
 
-    const deductedStats = await db.prepare(`
+    // 统计系统自动核减金额（deducted_amount）
+    const autoDeductedStats = await db.prepare(`
       SELECT COALESCE(SUM(i.deducted_amount), 0) as amount
       FROM reimbursement_invoices i
       INNER JOIN reimbursements r ON i.reimbursement_id = r.id
       WHERE ${deductedCondition}
     `).get(...deductedParams) as { amount: number }
 
-    // 查询有核减的报销单数量
+    // 统计核减发票金额（is_deduction = 1）
+    const deductionInvoiceStats = await db.prepare(`
+      SELECT COALESCE(SUM(i.amount), 0) as amount
+      FROM reimbursement_invoices i
+      INNER JOIN reimbursements r ON i.reimbursement_id = r.id
+      WHERE ${deductedCondition} AND i.is_deduction = 1
+    `).get(...deductedParams) as { amount: number }
+
+    // 总核减金额 = 系统自动核减 + 核减发票
+    const totalDeductedAmount = autoDeductedStats.amount + deductionInvoiceStats.amount
+
+    // 查询有核减的报销单数量（包括自动核减和核减发票）
     const deductedCountStats = await db.prepare(`
       SELECT COUNT(DISTINCT r.id) as count
       FROM reimbursements r
       INNER JOIN reimbursement_invoices i ON r.id = i.reimbursement_id
       WHERE ${deductedCondition}
-      AND i.deducted_amount > 0
+      AND (i.deducted_amount > 0 OR i.is_deduction = 1)
     `).get(...deductedParams) as { count: number }
 
     const statistics = {
@@ -788,7 +1167,7 @@ router.get('/statistics', requireAuth, async (req, res) => {
       },
       deducted: {
         count: deductedCountStats.count,
-        amount: deductedStats.amount,
+        amount: totalDeductedAmount,
       },
     }
 
@@ -942,6 +1321,14 @@ router.post('/create', requireAuth, async (req, res) => {
     const userId = req.session.user?.id
     const userName = req.session.user?.name
 
+    // 调试日志：查看提交的发票数据
+    console.log('📋 创建报销单 - 发票数量:', invoices?.length)
+    console.log('📋 发票数据:', JSON.stringify(invoices?.map((inv: any) => ({
+      category: inv.category,
+      amount: inv.amount,
+      isDeduction: inv.isDeduction
+    })), null, 2))
+
     if (!userId || !userName) {
       return res.status(401).json({
         success: false,
@@ -1065,8 +1452,13 @@ router.post('/create', requireAuth, async (req, res) => {
     }
 
     // 计算总金额（使用实际报销金额，即扣除核减后的金额）
+    // 核减发票不计入报销金额
     // 使用分（cents）来避免浮点数精度问题
     const totalAmountCents = processedInvoices.reduce((sum: number, inv: any) => {
+      // 核减发票不计入报销金额
+      if (inv.isDeduction) {
+        return sum
+      }
       const amountCents = Math.round((inv.amount || 0) * 100)
       const deductedCents = Math.round((inv.deductedAmount || 0) * 100)
       const actualCents = amountCents - deductedCents
@@ -1183,8 +1575,8 @@ router.post('/create', requireAuth, async (req, res) => {
         await txRun(client, `
           INSERT INTO reimbursement_invoices (
             id, reimbursement_id, amount, invoice_date, invoice_number,
-            file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, is_deduction, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
           invoiceId,
           reimbursementId,
@@ -1199,6 +1591,7 @@ router.post('/create', requireAuth, async (req, res) => {
           invoice.category || null,
           invoice.deductedAmount || 0,
           invoice.fileHash || null,
+          invoice.isDeduction ? 1 : 0,
           timestamp
         )
       }
@@ -1981,14 +2374,19 @@ router.get('/:id', requireAuth, async (req, res) => {
     const invoices = await db.prepare(`
       SELECT
         id, amount, invoice_date as invoiceDate, invoice_number as invoiceNumber,
-        file_path as filePath, seller, buyer, tax_amount as taxAmount,
-        invoice_code as invoiceCode, category, deducted_amount as deductedAmount
+        file_path as filePath, file_hash as fileHash, seller, buyer, tax_amount as taxAmount,
+        invoice_code as invoiceCode, category, deducted_amount as deductedAmount,
+        COALESCE(is_deduction, 0) as isDeduction
       FROM reimbursement_invoices
       WHERE reimbursement_id = ?
       ORDER BY created_at ASC
     `).all(id)
 
     console.log('📋 查询报销单详情 - ID:', id, '发票数量:', invoices.length)
+    if (invoices.length > 0) {
+      console.log('📋 第一个发票的文件路径:', invoices[0].filePath)
+      console.log('📋 文件路径长度:', invoices[0].filePath?.length)
+    }
 
     // 查询审批历史记录（包括所有历史审批实例的记录，不仅限于当前实例）
     const approvalHistory = await db.prepare(`
@@ -2217,8 +2615,13 @@ router.put('/:id', requireAuth, async (req, res) => {
     }
 
     // 计算总金额（使用实际报销金额，即扣除核减后的金额）
+    // 核减发票不计入报销金额
     // 使用分（cents）来避免浮点数精度问题
     const totalAmountCents = processedInvoices.reduce((sum: number, inv: any) => {
+      // 核减发票不计入报销金额
+      if (inv.isDeduction) {
+        return sum
+      }
       const amountCents = Math.round((inv.amount || 0) * 100)
       const deductedCents = Math.round((inv.deductedAmount || 0) * 100)
       const actualCents = amountCents - deductedCents
@@ -2513,10 +2916,18 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
     const now = new Date().toISOString()
 
-    if (reimbursement.status === 'draft') {
-      // 草稿状态（包括撤回后变为草稿的）：硬删除，彻底移除数据
+    if (reimbursement.status === 'draft' || reimbursement.status === 'rejected') {
+      // 草稿状态或已驳回状态：硬删除，彻底移除数据
       await db.transaction(async (client) => {
-        // 删除关联的审批实例（撤回后可能残留 withdrawn 状态的记录）
+        // 删除关联的审批记录
+        await txRun(client, `
+          DELETE FROM approval_records
+          WHERE instance_id IN (
+            SELECT id FROM approval_instances
+            WHERE target_id = ? AND target_type = 'reimbursement'
+          )
+        `, id)
+        // 删除关联的审批实例
         await txRun(client, `
           DELETE FROM approval_instances
           WHERE target_id = ? AND target_type = 'reimbursement'
@@ -2642,6 +3053,24 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
     const { reimbursementIds } = req.body
     if (!reimbursementIds || !Array.isArray(reimbursementIds) || reimbursementIds.length === 0) {
       return res.status(400).json({ success: false, message: '请选择报销单' })
+    }
+
+    // 自动清理：删除当前管理员之前创建的 pending 状态批次
+    const pendingBatches = await db.prepare(`
+      SELECT id FROM payment_batches WHERE payer_id = ? AND status = 'pending'
+    `).all(currentUserId) as any[]
+
+    if (pendingBatches.length > 0) {
+      console.log(`🧹 自动清理 ${pendingBatches.length} 个未完成的批次...`)
+      for (const batch of pendingBatches) {
+        // 清除报销单的批次关联
+        await db.prepare('UPDATE reimbursements SET payment_batch_id = NULL WHERE payment_batch_id = ?').run(batch.id)
+        // 删除批次明细
+        await db.prepare('DELETE FROM payment_batch_items WHERE batch_id = ?').run(batch.id)
+        // 删除批次
+        await db.prepare('DELETE FROM payment_batches WHERE id = ?').run(batch.id)
+        console.log(`✅ 已清理批次: ${batch.id}`)
+      }
     }
 
     // 查询所有选中的报销单（包含 payment_batch_id 用于校验重复挂载）
@@ -3155,7 +3584,8 @@ router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
     `).all(batchId) as any[]
 
     // 权限：管理员和总经理可查看所有，普通用户只能查看自己的
-    if (!isAdmin) {
+    const isGM = user?.role === 'general_manager'
+    if (!isAdmin && !isGM) {
       const ownedReimbursement = await db.prepare(`
         SELECT r.id
         FROM payment_batch_items pbi

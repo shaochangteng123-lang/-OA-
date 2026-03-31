@@ -3,6 +3,7 @@
  */
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { toFileUrl } from '@/utils/file'
 import {
   validateFile,
   validateInvoiceDate,
@@ -23,6 +24,7 @@ export interface InvoiceItem {
   fileHash?: string // 文件哈希，用于查重
   deductedAmount?: number // 核减金额
   actualAmount?: number // 实际报销金额
+  isDeduction?: boolean // 是否为核减发票
 }
 
 // OCR 识别结果
@@ -535,10 +537,9 @@ export function useInvoice() {
    * 处理文件预览
    */
   function handlePreview(file: any): void {
-    if (file.serverPath) {
-      window.open(file.serverPath, '_blank')
-    } else if (file.url) {
-      window.open(file.url, '_blank')
+    const path = file.serverPath || file.url
+    if (path) {
+      window.open(toFileUrl(path), '_blank')
     }
   }
 

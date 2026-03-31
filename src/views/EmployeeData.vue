@@ -128,7 +128,7 @@
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="120" align="center">
+                <el-table-column label="操作" min-width="120" align="center">
                   <template #default="{ row }">
                     <el-button link type="primary" size="small" @click="handleView(row)">
                       查看
@@ -218,7 +218,7 @@
                     <span v-else class="no-file">暂无文件</span>
                   </template>
                 </el-table-column>
-                <el-table-column label="操作" width="120" align="center">
+                <el-table-column label="操作" min-width="120" align="center">
                   <template #default="{ row }">
                     <!-- 邀请函和个人入职材料无需上传 -->
                     <template v-if="row.id !== 'invitation' && row.id !== 'personal'">
@@ -277,7 +277,7 @@
                       {{ formatDateTime(row.created_at) }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="150" align="center">
+                  <el-table-column label="操作" min-width="150" align="center">
                     <template #default="{ row }">
                       <el-button link type="primary" size="small" @click="handlePreviewProbationTemplate(row)">
                         预览
@@ -340,7 +340,7 @@
                       {{ row.submit_time ? formatDateTime(row.submit_time) : '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="操作" width="150">
+                  <el-table-column label="操作" min-width="150">
                     <template #default="{ row }">
                       <el-button link type="primary" size="small" @click="handleViewProbation(row)">
                         查看
@@ -655,7 +655,7 @@
                   <span v-else class="no-doc">暂无文件</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="isEditing" label="操作" width="120" align="center">
+              <el-table-column v-if="isEditing" label="操作" min-width="120" align="center">
                 <template #default="{ row }">
                   <el-upload
                     :show-file-list="false"

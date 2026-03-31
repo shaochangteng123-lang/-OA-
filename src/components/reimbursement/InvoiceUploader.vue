@@ -62,6 +62,7 @@
 import { computed, ref } from 'vue'
 import { Plus, Upload, Document, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { toFileUrl } from '@/utils/file'
 
 // Props
 const props = withDefaults(defineProps<{
@@ -69,10 +70,12 @@ const props = withDefaults(defineProps<{
   disabled?: boolean
   themeColor?: string
   maxFiles?: number
+  existingDeductions?: any[]  // 已上传的核减发票列表，用于交叉查重
 }>(), {
   disabled: false,
   themeColor: '#667eea',
   maxFiles: 50,
+  existingDeductions: () => [],
 })
 
 // Emits
@@ -133,7 +136,7 @@ function handleDrop(e: DragEvent): void {
 
     // 检查文件类型
     if (file.type !== 'application/pdf') {
-      ElMessage.error(`${file.name} 不是PDF文件，已跳过`)
+      ElMessage.error(`${file.name} 不是PDF文件，请重新上传`)
       continue
     }
 
@@ -201,10 +204,9 @@ function handleFileRemove(file: any): void {
 
 // 预览文件
 function handlePreview(file: any): void {
-  if (file.serverPath) {
-    window.open(file.serverPath, '_blank')
-  } else if (file.url) {
-    window.open(file.url, '_blank')
+  const path = file.serverPath || file.url
+  if (path) {
+    window.open(toFileUrl(path), '_blank')
   }
 }
 </script>
@@ -390,6 +392,16 @@ function handlePreview(file: any): void {
   position: relative;
   cursor: pointer;
   user-select: none;
+}
+
+.invoice-preview .pdf-preview-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
 }
 
 .invoice-preview .pdf-icon {

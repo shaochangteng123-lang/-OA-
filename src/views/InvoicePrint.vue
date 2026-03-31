@@ -19,7 +19,7 @@
           @click="scrollTo(index)"
         >
           <div class="preview-thumb">
-            <img v-if="isImage(inv.filePath)" :src="inv.filePath" />
+            <img v-if="isImage(inv.filePath)" :src="toFileUrl(inv.filePath)" />
             <canvas v-else :ref="el => setPdfThumbRef(index, el)" class="thumb-canvas"></canvas>
           </div>
           <div class="preview-label">
@@ -36,7 +36,7 @@
             <span>{{ inv.invoiceNumber ? '发票号: ' + inv.invoiceNumber : '' }}</span>
           </div>
           <div class="invoice-content">
-            <img v-if="isImage(inv.filePath)" :src="inv.filePath" />
+            <img v-if="isImage(inv.filePath)" :src="toFileUrl(inv.filePath)" />
             <!-- PDF 渲染为 canvas -->
             <canvas v-else :ref="el => setPdfMainRef(index, el)" class="pdf-canvas"></canvas>
           </div>
@@ -50,6 +50,7 @@
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import * as pdfjsLib from 'pdfjs-dist'
+import { toFileUrl, isImageFile } from '@/utils/file'
 
 // 设置 PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -83,8 +84,7 @@ function setPdfThumbRef(index: number, el: any) {
 }
 
 function isImage(filePath: string) {
-  const path = filePath.toLowerCase()
-  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.gif') || path.endsWith('.webp')
+  return isImageFile(filePath)
 }
 
 function scrollTo(index: number) {
@@ -94,7 +94,7 @@ function scrollTo(index: number) {
 function handlePrint() {
   if (rendering.value) return
 
-  // 创建新窗口，将所有内容转为图片打印，避免 canvas 分页问题
+  // 创建新窗口，将发票转为 JPEG 图片打印
   const printWindow = window.open('', '_blank')
   if (!printWindow) return
 
@@ -102,12 +102,11 @@ function handlePrint() {
   invoices.value.forEach((inv, index) => {
     let imgSrc = ''
     if (isImage(inv.filePath)) {
-      imgSrc = inv.filePath
+      imgSrc = toFileUrl(inv.filePath)
     } else {
-      // 将 canvas 转为图片
       const canvas = pdfMainCanvases[index]
       if (canvas) {
-        imgSrc = canvas.toDataURL('image/png')
+        imgSrc = canvas.toDataURL('image/jpeg', 1.0)
       }
     }
     if (imgSrc) {
@@ -118,32 +117,30 @@ function handlePrint() {
   printWindow.document.write(`<!DOCTYPE html>
 <html><head><title>发票打印</title>
 <style>
-  @page { margin: 0; }
+  @page { margin: 5mm; }
   * { margin: 0; padding: 0; }
   body { background: #fff; }
   .page {
-    width: 100vw;
-    height: 100vh;
+    width: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
     page-break-after: always;
-    padding: 10mm;
+    padding: 5mm;
     box-sizing: border-box;
   }
   .page:last-child { page-break-after: auto; }
   .page img {
     max-width: 100%;
-    max-height: 100%;
+    max-height: 95vh;
     object-fit: contain;
   }
 </style></head><body>${imagesHtml}</body></html>`)
   printWindow.document.close()
 
-  // 等待图片加载完成后打印
   printWindow.onload = () => {
+    printWindow.focus()
     printWindow.print()
-    printWindow.close()
   }
 }
 
@@ -160,12 +157,18 @@ async function renderPdf(filePath: string, mainCanvas: HTMLCanvasElement | null,
 
     // 渲染主内容区 canvas（高分辨率）
     if (mainCanvas) {
-      const scale = 2.0 // 高分辨率用于打印
+      const scale = 3.0 // 提升到 3 倍分辨率，提高打印清晰度
       const viewport = page.getViewport({ scale })
       mainCanvas.width = viewport.width
       mainCanvas.height = viewport.height
       const context = mainCanvas.getContext('2d')
       if (context) {
+        // 启用图像平滑以提高质量
+        context.imageSmoothingEnabled = true
+        context.imageSmoothingQuality = 'high'
+        // 先画白色背景，防止透明背景导致打印发灰
+        context.fillStyle = '#ffffff'
+        context.fillRect(0, 0, mainCanvas.width, mainCanvas.height)
         await page.render({
           canvasContext: context,
           viewport: viewport,
@@ -181,6 +184,8 @@ async function renderPdf(filePath: string, mainCanvas: HTMLCanvasElement | null,
       thumbCanvas.height = thumbViewport.height
       const thumbContext = thumbCanvas.getContext('2d')
       if (thumbContext) {
+        thumbContext.fillStyle = '#ffffff'
+        thumbContext.fillRect(0, 0, thumbCanvas.width, thumbCanvas.height)
         await page.render({
           canvasContext: thumbContext,
           viewport: thumbViewport,
@@ -204,7 +209,7 @@ async function renderAllPdfs() {
   // 逐个渲染，避免同时加载过多
   for (const { inv, index } of pdfInvoices) {
     await renderPdf(
-      inv.filePath,
+      toFileUrl(inv.filePath),
       pdfMainCanvases[index] || null,
       pdfThumbCanvases[index] || null
     )

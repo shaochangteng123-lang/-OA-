@@ -24,7 +24,7 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="300" align="center" header-align="center">
+          <el-table-column label="操作" min-width="300" align="center" header-align="center">
             <template #default="{ row }">
               <el-button link type="primary" size="small" @click="handleAddChild(row)">
                 添加子项

@@ -208,7 +208,7 @@
                 {{ formatDate(row.submitTime) }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="280" align="center">
+            <el-table-column label="操作" min-width="280" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -363,7 +363,7 @@
                 {{ row.approveTime ? formatDate(row.approveTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="220" align="center">
+            <el-table-column label="操作" min-width="220" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
                   <el-button
@@ -547,7 +547,7 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="100"  align="center">
+            <el-table-column label="操作" min-width="100"  align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -752,7 +752,7 @@
                 {{ row.submitTime ? formatDate(row.submitTime) : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="150"  align="center">
+            <el-table-column label="操作" min-width="150"  align="center">
               <template #default="{ row }">
                 <el-button
                   type="primary"
@@ -1159,7 +1159,7 @@
                 <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                   <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
                     <template v-if="isImagePath(proofUrl)">
-                      <img :src="proofUrl" class="proof-image" alt="付款回单" />
+                      <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" />
                     </template>
                     <template v-else>
                       <div class="proof-pdf">
@@ -1461,6 +1461,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { toFileUrl, isImageFile } from '@/utils/file'
 import { usePendingStore } from '@/stores/pending'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 import { format } from 'date-fns'
@@ -1867,6 +1868,8 @@ interface ApprovalProcessRecord {
   paymentProofPath?: string
   receiptConfirmedBy?: string
   description?: string
+  adminApproverName?: string
+  gmApproverName?: string
 }
 
 interface ApprovalRecordItem {
@@ -1890,8 +1893,7 @@ const previewingProofUrl = ref('')
 
 // 判断路径是否为图片
 function isImagePath(p: string): boolean {
-  const lower = p.toLowerCase()
-  return lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png')
+  return isImageFile(p)
 }
 
 // 判断是否为核减金额（报销金额为0，无需付款流程）
@@ -2088,6 +2090,8 @@ const selectedInvoiceIds = ref<string[]>([])
 const batchDownloading = ref(false)
 const invoicePreviewDialogVisible = ref(false)
 const previewInvoicePath = ref('')
+// 核减发票总金额（从后端API返回）
+const deductionInvoicesTotal = ref(0)
 
 // 发票日期选择器类型
 const invoiceDatePickerType = computed(() => {
@@ -2148,16 +2152,22 @@ const paidStatuses = ['payment_uploaded', 'completed']
 
 // 发票总金额（仅统计已付款的）
 const invoiceTotalAmount = computed(() => {
-  return invoiceList.value
+  const regularInvoices = invoiceList.value
     .filter(item => paidStatuses.includes(item.reimbursementStatus))
     .reduce((sum, item) => sum + (item.amount || 0), 0)
+  // 加上核减发票总金额
+  return regularInvoices + deductionInvoicesTotal.value
 })
 
 // 发票核减总金额（仅统计已付款的）
+// 包括：基础报销发票的核减金额 + 核减发票的金额
 const invoiceTotalDeductedAmount = computed(() => {
-  return invoiceList.value
+  const invoiceDeductions = invoiceList.value
     .filter(item => paidStatuses.includes(item.reimbursementStatus))
     .reduce((sum, item) => sum + (item.deductedAmount || 0), 0)
+  console.log('[发票管理] 发票核减:', invoiceDeductions, '核减发票总额:', deductionInvoicesTotal.value, '合计:', invoiceDeductions + deductionInvoicesTotal.value)
+  // 加上核减发票总金额
+  return invoiceDeductions + deductionInvoicesTotal.value
 })
 
 // 实报总金额
@@ -2185,8 +2195,7 @@ const invoiceSelectIndeterminate = computed(() => {
 
 // 预览发票是否为图片
 const previewInvoiceIsImage = computed(() => {
-  const path = previewInvoicePath.value.toLowerCase()
-  return path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.gif') || path.endsWith('.webp')
+  return isImageFile(previewInvoicePath.value)
 })
 
 // 获取类型标签
@@ -2676,7 +2685,8 @@ async function loadApprovalRecords(reimbursementId: string) {
 
 // 预览付款回单
 function handlePreviewPaymentProof(url?: string) {
-  previewingProofUrl.value = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
+  const raw = url || currentApprovalRecord.value?.paymentProofPath?.split(',')[0] || ''
+  previewingProofUrl.value = toFileUrl(raw)
   paymentProofDialogVisible.value = true
 }
 
@@ -3275,6 +3285,8 @@ async function loadInvoiceList() {
     const res = await api.get('/api/approval/invoice-management', { params })
     if (res.data.success) {
       invoiceList.value = res.data.data
+      // 获取核减发票总金额
+      deductionInvoicesTotal.value = res.data.deductionInvoicesTotal || 0
     } else {
       ElMessage.error(res.data.message || '查询失败')
     }
@@ -3322,7 +3334,7 @@ function handleInvoiceSelectAllChange(val: boolean | string | number) {
 
 // 预览发票
 function handlePreviewInvoice(inv: InvoiceManagementItem) {
-  previewInvoicePath.value = inv.filePath
+  previewInvoicePath.value = toFileUrl(inv.filePath)
   invoicePreviewDialogVisible.value = true
 }
 
@@ -3570,7 +3582,7 @@ onMounted(() => {
 
 .filter-form {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 12px;
   align-items: flex-end;
 }
@@ -3703,6 +3715,7 @@ onMounted(() => {
   padding: 16px;
   background: #f5f7fa;
   border-radius: 8px;
+  overflow: hidden;
 }
 
 /* 审批流程弹窗样式 */

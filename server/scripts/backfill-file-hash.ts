@@ -17,7 +17,7 @@ async function backfillFileHash() {
   console.log('🔄 开始为现有发票文件回填 file_hash...\n')
 
   // 获取所有没有 file_hash 的发票记录
-  const invoices = db.prepare(`
+  const invoices = await db.prepare(`
     SELECT id, file_path, file_hash
     FROM reimbursement_invoices
     WHERE file_hash IS NULL OR file_hash = ''
@@ -54,7 +54,7 @@ async function backfillFileHash() {
       const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
 
       // 更新数据库
-      db.prepare(`
+      await db.prepare(`
         UPDATE reimbursement_invoices
         SET file_hash = ?
         WHERE id = ?

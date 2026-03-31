@@ -219,6 +219,7 @@ import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { LARGE_AMOUNT_THRESHOLD } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
+import { toFileUrl } from '@/utils/file'
 
 const router = useRouter()
 
@@ -265,10 +266,10 @@ const formRules: FormRules = {
 
 // 付款回单相关
 const paymentProofPath = ref('')
-// 支持多张回单（逗号分隔）
+// 支持多张回单（逗号分隔），并转换为可访问的 URL
 const paymentProofPaths = computed(() => {
   if (!paymentProofPath.value) return []
-  return paymentProofPath.value.split(',').filter(Boolean)
+  return paymentProofPath.value.split(',').filter(Boolean).map(path => toFileUrl(path))
 })
 const previewingProofUrl = ref('')
 const payTime = ref('')

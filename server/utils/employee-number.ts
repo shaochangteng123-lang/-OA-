@@ -5,9 +5,9 @@ import { db } from '../db/index.js'
  * 格式：YULI-CS001, YULI-CS002, ...
  * 根据用户注册的先后顺序递增
  */
-export function generateEmployeeNumber(): string {
+export async function generateEmployeeNumber(): Promise<string> {
   // 查询当前最大的员工编号
-  const result = db.prepare(`
+  const result = await db.prepare(`
     SELECT employee_no FROM users
     WHERE employee_no IS NOT NULL AND employee_no LIKE 'YULI-CS%'
     ORDER BY employee_no DESC
