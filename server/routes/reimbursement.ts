@@ -920,15 +920,16 @@ router.get('/deduction-quota', requireAuth, async (req, res) => {
     const year = now.getFullYear()
     const yearStr = `${year}`
 
-    // 查询核减发票的累计金额
+    // 查询核减发票的累计金额（is_deduction = 1）
     let deductionInvoiceSql = `
-      SELECT COALESCE(SUM(rdi.amount), 0) as total_amount
-      FROM reimbursement_deduction_invoices rdi
-      JOIN reimbursements r ON rdi.reimbursement_id = r.id
+      SELECT COALESCE(SUM(ri.amount), 0) as total_amount
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE r.user_id = ?
         AND r.status IN ('approved', 'payment_uploaded', 'completed')
         AND COALESCE(r.is_deleted, FALSE) = FALSE
         AND r.reimbursement_month LIKE ?
+        AND ri.is_deduction = 1
     `
     const params: any[] = [userId, `${yearStr}%`]
 
@@ -937,7 +938,7 @@ router.get('/deduction-quota', requireAuth, async (req, res) => {
       params.push(excludeId)
     }
 
-    // 查询发票上传的核减金额累计
+    // 查询普通发票的核减金额累计（deducted_amount）
     let invoiceDeductionSql = `
       SELECT COALESCE(SUM(ri.deducted_amount), 0) as total_amount
       FROM reimbursement_invoices ri
@@ -946,6 +947,7 @@ router.get('/deduction-quota', requireAuth, async (req, res) => {
         AND r.status IN ('approved', 'payment_uploaded', 'completed')
         AND COALESCE(r.is_deleted, FALSE) = FALSE
         AND r.reimbursement_month LIKE ?
+        AND COALESCE(ri.is_deduction, 0) = 0
     `
     const params2: any[] = [userId, `${yearStr}%`]
 
@@ -1095,10 +1097,10 @@ router.get('/statistics', requireAuth, async (req, res) => {
       WHERE ${baseCondition}
     `).get(...baseParams) as { count: number; amount: number }
 
-    // 查询核减金额统计（仅基础报销，每年1月1日清零，统计所有非草稿/非驳回的报销单）
+    // 查询核减金额统计（仅基础报销，每年1月1日清零，仅统计已完成状态的报销单）
     // 包括两部分：1. 系统自动核减金额（deducted_amount）2. 核减发票金额（is_deduction = 1）
-    let deductedCondition = `r.user_id = ? AND r.type = ? AND r.status IN (?, ?, ?, ?, ?, ?, ?)`
-    const deductedParams: any[] = [userId, 'basic', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed']
+    let deductedCondition = `r.user_id = ? AND r.type = ? AND r.status = ?`
+    const deductedParams: any[] = [userId, 'basic', 'completed']
 
     // 添加日期范围筛选
     if (startDate) {
@@ -1992,23 +1994,49 @@ router.post('/:id/verify-proof', requireAdmin, uploadPaymentProof.single('paymen
       }
     }
 
-    // 检查收款人姓名是否在全文中出现（支持模糊匹配，容忍 OCR 单字识别错误）
+    // 检查收款人姓名是否匹配
     let nameFound = false
     if (userBankInfo?.bank_account_name) {
       const expectedName = userBankInfo.bank_account_name.trim()
-      // 1. 精确匹配
-      if (ocrTextNoSpace.includes(expectedName)) {
-        nameFound = true
+      const ocrPayee = (ocrResult.payee || '').trim()
+
+      // 1. 在 OCR 提取的收款人字段中精确/包含/模糊匹配
+      if (ocrPayee && ocrPayee !== '付款' && ocrPayee !== '收款') {
+        if (ocrPayee === expectedName || ocrPayee.includes(expectedName)) {
+          nameFound = true
+        }
+        if (!nameFound && expectedName.length >= 2) {
+          const chars = expectedName.split('')
+          for (let i = 0; i < chars.length && !nameFound; i++) {
+            const partial = chars.filter((_, idx) => idx !== i).join('')
+            if (ocrPayee.includes(partial)) {
+              console.log(`✅ 姓名模糊匹配成功（payee字段）：跳过第${i + 1}个字"${chars[i]}"，在"${ocrPayee}"中匹配到"${partial}"`)
+              nameFound = true
+            }
+          }
+        }
       }
-      // 2. 模糊匹配：姓名中至少 2/3 的字在全文中相邻出现（容忍 OCR 单字错误）
-      if (!nameFound && expectedName.length >= 2) {
-        const chars = expectedName.split('')
-        for (let i = 0; i < chars.length && !nameFound; i++) {
-          // 跳过第 i 个字，检查剩余字符是否按顺序出现在文本中
-          const partial = chars.filter((_, idx) => idx !== i).join('')
-          if (ocrTextNoSpace.includes(partial)) {
-            console.log(`✅ 姓名模糊匹配成功：跳过第${i + 1}个字"${chars[i]}"，匹配到"${partial}"`)
-            nameFound = true
+
+      // 2. OCR 字段提取失败或无效时，在原始文本的"户名"附近行中查找（排除备注区域）
+      if (!nameFound && ocrResult.rawText) {
+        // 截取备注之前的文本，避免在备注中误匹配
+        const rawBeforeMemo = ocrResult.rawText.split(/备注|附言|客户附言/)[0]
+        const rawNoSpace = rawBeforeMemo.replace(/\s+/g, '')
+
+        // 在去空格文本中查找姓名（精确）
+        if (rawNoSpace.includes(expectedName)) {
+          console.log(`✅ 姓名在回单主体中找到（精确）："${expectedName}"`)
+          nameFound = true
+        }
+        // 模糊匹配
+        if (!nameFound && expectedName.length >= 2) {
+          const chars = expectedName.split('')
+          for (let i = 0; i < chars.length && !nameFound; i++) {
+            const partial = chars.filter((_, idx) => idx !== i).join('')
+            if (rawNoSpace.includes(partial)) {
+              console.log(`✅ 姓名在回单主体中找到（模糊）：跳过"${chars[i]}"，匹配到"${partial}"`)
+              nameFound = true
+            }
           }
         }
       }
@@ -2016,24 +2044,64 @@ router.post('/:id/verify-proof', requireAdmin, uploadPaymentProof.single('paymen
 
     console.log('🔍 verify-proof 匹配结果:', { accountMatched, nameFound })
 
-    // 账号匹配 OR 姓名匹配，任一通过即可
-    if (!accountMatched && !nameFound) {
+    // 账号和姓名必须同时匹配
+    if (!accountMatched || !nameFound) {
       const reasons: string[] = []
-      if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
-        reasons.push(`收款账号不一致：报销单为"${userBankInfo.bank_account_number}"，付款回单为"${ocrResult.payeeAccount}"`)
-      } else if (!ocrResult.payeeAccount) {
-        reasons.push('无法识别付款回单中的收款账号')
+
+      // 检查账号匹配情况
+      if (!accountMatched) {
+        if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+          reasons.push(`收款账号不一致：报销单为"${userBankInfo.bank_account_number}"，付款回单为"${ocrResult.payeeAccount}"`)
+        } else if (!ocrResult.payeeAccount) {
+          reasons.push('无法识别付款回单中的收款账号')
+        } else if (!userBankInfo?.bank_account_number) {
+          reasons.push('报销单未设置收款账号')
+        }
       }
-      if (userBankInfo?.bank_account_name) {
-        reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
-      } else {
-        reasons.push('用户未设置收款人姓名')
+
+      // 检查姓名匹配情况
+      if (!nameFound) {
+        if (!userBankInfo?.bank_account_name) {
+          reasons.push('报销单未设置收款人姓名')
+        } else {
+          // 尝试从回单原始文本中提取实际收款人姓名用于提示
+          const ocrPayee = (ocrResult.payee || '').trim()
+          let actualPayee: string | null = null
+
+          // 1. 如果 OCR 提取的 payee 有效，使用它
+          if (ocrPayee && ocrPayee !== '付款' && ocrPayee !== '收款') {
+            actualPayee = ocrPayee
+          }
+
+          // 2. 否则从原始文本中提取（备注区域之前，2-4个汉字的人名）
+          if (!actualPayee && ocrResult.rawText) {
+            const rawBeforeMemo = ocrResult.rawText.split(/备注|附言|客户附言/)[0]
+            const lines = rawBeforeMemo.split('\n').map(l => l.trim()).filter(Boolean)
+            const namePattern = /^[\u4e00-\u9fff]{2,4}$/
+            const excludeWords = ['公司', '集团', '银行', '回单', '付款', '收款', '户名', '账号', '金额', '开户', '支行', '摘要', '用途', '业务', '产品', '种类']
+            for (const line of lines) {
+              if (namePattern.test(line) && !excludeWords.some(w => line.includes(w))) {
+                if (line !== userBankInfo.bank_account_name) {
+                  actualPayee = line
+                  break
+                }
+              }
+            }
+          }
+
+          if (actualPayee) {
+            reasons.push(`回单收款人（${actualPayee}）姓名与报销单收款人（${userBankInfo.bank_account_name}）不匹配`)
+          } else {
+            reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
+          }
+        }
       }
+
       console.warn('⚠️ verify-proof 验证失败:', reasons)
       try { fs.unlinkSync(req.file.path) } catch (_) {}
       return res.status(400).json({
         success: false,
-        message: '付款回单验证失败',
+        message: '付款回单验证失败：收款人姓名和收款账号必须与报销单一致',
         warnings: reasons,
       })
     }
@@ -3264,40 +3332,105 @@ router.post('/payment-batch/:batchId/verify-proof', requireAdmin, uploadPaymentP
       }
     }
 
+    // 检查收款人姓名是否匹配
     let nameFound = false
     if (userBankInfo?.bank_account_name) {
       const expectedName = userBankInfo.bank_account_name.trim()
-      if (ocrTextNoSpace.includes(expectedName)) {
-        nameFound = true
+      const ocrPayee = (ocrResult.payee || '').trim()
+
+      // 1. 在 OCR 提取的收款人字段中精确/包含/模糊匹配
+      if (ocrPayee && ocrPayee !== '付款' && ocrPayee !== '收款') {
+        if (ocrPayee === expectedName || ocrPayee.includes(expectedName)) {
+          nameFound = true
+        }
+        if (!nameFound && expectedName.length >= 2) {
+          const chars = expectedName.split('')
+          for (let i = 0; i < chars.length && !nameFound; i++) {
+            const partial = chars.filter((_, idx) => idx !== i).join('')
+            if (ocrPayee.includes(partial)) {
+              console.log(`✅ 姓名模糊匹配成功（payee字段）：跳过第${i + 1}个字"${chars[i]}"，在"${ocrPayee}"中匹配到"${partial}"`)
+              nameFound = true
+            }
+          }
+        }
       }
-      if (!nameFound && expectedName.length >= 2) {
-        const chars = expectedName.split('')
-        for (let i = 0; i < chars.length && !nameFound; i++) {
-          const partial = chars.filter((_, idx) => idx !== i).join('')
-          if (ocrTextNoSpace.includes(partial)) {
-            console.log(`✅ 姓名模糊匹配成功：跳过第${i + 1}个字"${chars[i]}"，匹配到"${partial}"`)
-            nameFound = true
+
+      // 2. OCR 字段提取失败或无效时，在原始文本的"户名"附近行中查找（排除备注区域）
+      if (!nameFound && ocrResult.rawText) {
+        const rawBeforeMemo = ocrResult.rawText.split(/备注|附言|客户附言/)[0]
+        const rawNoSpace = rawBeforeMemo.replace(/\s+/g, '')
+
+        if (rawNoSpace.includes(expectedName)) {
+          console.log(`✅ 姓名在回单主体中找到（精确）："${expectedName}"`)
+          nameFound = true
+        }
+        if (!nameFound && expectedName.length >= 2) {
+          const chars = expectedName.split('')
+          for (let i = 0; i < chars.length && !nameFound; i++) {
+            const partial = chars.filter((_, idx) => idx !== i).join('')
+            if (rawNoSpace.includes(partial)) {
+              console.log(`✅ 姓名在回单主体中找到（模糊）：跳过"${chars[i]}"，匹配到"${partial}"`)
+              nameFound = true
+            }
           }
         }
       }
     }
 
-    if (!accountMatched && !nameFound) {
+    // 账号和姓名必须同时匹配
+    if (!accountMatched || !nameFound) {
       const reasons: string[] = []
-      if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
-        reasons.push(`收款账号不一致：期望"${userBankInfo.bank_account_number}"，回单为"${ocrResult.payeeAccount}"`)
-      } else if (!ocrResult.payeeAccount) {
-        reasons.push('无法识别付款回单中的收款账号')
+
+      // 检查账号匹配情况
+      if (!accountMatched) {
+        if (userBankInfo?.bank_account_number && ocrResult.payeeAccount) {
+          reasons.push(`收款账号不一致：期望"${userBankInfo.bank_account_number}"，回单为"${ocrResult.payeeAccount}"`)
+        } else if (!ocrResult.payeeAccount) {
+          reasons.push('无法识别付款回单中的收款账号')
+        } else if (!userBankInfo?.bank_account_number) {
+          reasons.push('报销单未设置收款账号')
+        }
       }
-      if (userBankInfo?.bank_account_name) {
-        reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
-      } else {
-        reasons.push('用户未设置收款人姓名')
+
+      // 检查姓名匹配情况
+      if (!nameFound) {
+        if (!userBankInfo?.bank_account_name) {
+          reasons.push('报销单未设置收款人姓名')
+        } else {
+          const ocrPayee = (ocrResult.payee || '').trim()
+          let actualPayee: string | null = null
+
+          if (ocrPayee && ocrPayee !== '付款' && ocrPayee !== '收款') {
+            actualPayee = ocrPayee
+          }
+
+          if (!actualPayee && ocrResult.rawText) {
+            const rawBeforeMemo = ocrResult.rawText.split(/备注|附言|客户附言/)[0]
+            const lines = rawBeforeMemo.split('\n').map(l => l.trim()).filter(Boolean)
+            const namePattern = /^[\u4e00-\u9fff]{2,4}$/
+            const excludeWords = ['公司', '集团', '银行', '回单', '付款', '收款', '户名', '账号', '金额', '开户', '支行', '摘要', '用途', '业务', '产品', '种类']
+            for (const line of lines) {
+              if (namePattern.test(line) && !excludeWords.some(w => line.includes(w))) {
+                if (line !== userBankInfo.bank_account_name) {
+                  actualPayee = line
+                  break
+                }
+              }
+            }
+          }
+
+          if (actualPayee) {
+            reasons.push(`回单收款人（${actualPayee}）姓名与报销单收款人（${userBankInfo.bank_account_name}）不匹配`)
+          } else {
+            reasons.push(`未在付款回单中找到收款人"${userBankInfo.bank_account_name}"`)
+          }
+        }
       }
+
       try { fs.unlinkSync(req.file.path) } catch (_) {}
       return res.status(400).json({
         success: false,
-        message: '付款回单验证失败',
+        message: '付款回单验证失败：收款人姓名和收款账号必须与报销单一致',
         warnings: reasons,
       })
     }

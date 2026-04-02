@@ -119,6 +119,7 @@
                 :deduction-invoices="deductionItems"
                 :total-invoice-amount="invoice.totalAmount.value"
                 :approval-deduction-amount="approvalDeductionAmount"
+                :yearly-deduction-used="yearlyDeductionUsed"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -310,6 +311,9 @@ const rejectReason = ref('')
 // 审批核减金额
 const approvalDeductionAmount = ref(0)
 
+// 年度累计核减金额
+const yearlyDeductionUsed = ref(0)
+
 // 数据是否已加载
 const dataLoaded = ref(false)
 
@@ -434,6 +438,22 @@ function clearFormData(): void {
   deductionItems.value = []
   // 重置表单验证
   formRef.value?.resetFields()
+}
+
+// 获取年度累计核减金额
+async function fetchYearlyDeduction(excludeId?: string) {
+  try {
+    const url = excludeId
+      ? `/api/reimbursement/deduction-quota?excludeId=${excludeId}`
+      : '/api/reimbursement/deduction-quota'
+    const response = await fetch(url, { credentials: 'include' })
+    const result = await response.json()
+    if (result.success) {
+      yearlyDeductionUsed.value = result.data.yearlyDeductionTotal || 0
+    }
+  } catch (error) {
+    console.error('获取年度核减金额失败:', error)
+  }
 }
 
 // 返回
@@ -646,9 +666,13 @@ onMounted(async () => {
       await loadDetail()
       // 获取当月已使用额度（排除当前报销单）
       await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
+      // 获取年度累计核减金额（排除当前报销单）
+      await fetchYearlyDeduction(reimbursement.reimbursementId.value)
     } else {
       // 新建模式，直接获取当月已使用额度
       await invoice.fetchMonthlyUsedQuota()
+      // 获取年度累计核减金额
+      await fetchYearlyDeduction()
     }
   } catch (error) {
     console.error('❌ [基础] onMounted 异常:', error)
@@ -672,6 +696,7 @@ watch(
       deductionItems.value = []
       await loadDetail()
       await invoice.fetchMonthlyUsedQuota(newId)
+      await fetchYearlyDeduction(newId)
     }
   }
 )

@@ -218,6 +218,7 @@ async function onFileChange(file: any): Promise<void> {
 
     const res = await api.post('/api/reimbursement/upload-deduction-invoice', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000, // 3分钟，OCR识别可能耗时较长
     })
 
     // 关闭识别提示
@@ -259,17 +260,23 @@ async function onFileChange(file: any): Promise<void> {
       ElMessage.success(`核减发票识别成功，金额：¥${newItem.amount.toFixed(2)}`)
     } else {
       ElMessage.error(res.data.message || '上传失败')
-      if (uploadRef.value) {
-        uploadRef.value.handleRemove(file)
-      }
+      // 上传失败，从 fileList 中移除该文件
+      fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
     }
   } catch (err: any) {
     // 关闭识别提示
     loadingMessage.close()
-    ElMessage.error(err.response?.data?.message || '上传核减发票失败')
-    if (uploadRef.value) {
-      uploadRef.value.handleRemove(file)
-    }
+
+    console.log('[DeductionUploader] 上传错误:', err)
+    console.log('[DeductionUploader] err.response:', err.response)
+    console.log('[DeductionUploader] err.response?.data:', err.response?.data)
+    console.log('[DeductionUploader] err.message:', err.message)
+
+    // 优先显示后端返回的错误消息
+    const errorMessage = err.response?.data?.message || '上传核减发票失败'
+    ElMessage.error(errorMessage)
+    // 上传失败，从 fileList 中移除该文件
+    fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
   } finally {
     uploading.value = false
   }
@@ -358,7 +365,10 @@ function removeItem(idx: number): void {
 .deduction-upload :deep(.el-upload--picture-card) {
   width: 100px;
   height: 100px;
-  border-color: #dcdfe6;
+  background-color: #fbfdff;
+  border: 1px dashed #c0ccda;
+  border-radius: 6px;
+  transition: all 0.3s;
 }
 
 .deduction-upload :deep(.el-upload-list__item) {
@@ -366,7 +376,7 @@ function removeItem(idx: number): void {
   height: 100px;
 }
 
-@media (max-width: 1366px) {
+@media (max-width: 768px) {
   .deduction-upload :deep(.el-upload--picture-card) {
     width: 80px;
     height: 80px;

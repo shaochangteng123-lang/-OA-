@@ -28,7 +28,7 @@
       </div>
       <template #file="{ file }">
         <div class="receipt-preview" @dblclick="handlePreview(file)">
-          <img v-if="file.url" :src="file.url" class="preview-image" />
+          <img v-if="file.url || file.serverPath" :src="file.url || file.serverPath" class="preview-image" />
           <el-icon v-else class="image-icon"><Picture /></el-icon>
           <span class="file-name">{{ file.name }}</span>
           <el-icon v-if="!disabled" class="delete-icon" @click.stop="onDeleteFile(file)">
@@ -63,6 +63,7 @@
 import { computed, ref } from 'vue'
 import { Plus, Upload, Picture, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { toFileUrl } from '@/utils/file'
 
 // Props
 const props = withDefaults(defineProps<{
@@ -197,10 +198,10 @@ function handleFileRemove(file: any): void {
 
 // 预览文件
 function handlePreview(file: any): void {
-  if (file.serverPath) {
-    window.open(file.serverPath, '_blank')
-  } else if (file.url) {
-    window.open(file.url, '_blank')
+  // 优先使用 url（已转换的可访问 URL），其次使用 serverPath（需要转换）
+  const fileUrl = file.url || (file.serverPath ? toFileUrl(file.serverPath) : '')
+  if (fileUrl) {
+    window.open(fileUrl, '_blank')
   }
 }
 </script>

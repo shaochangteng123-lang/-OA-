@@ -33,7 +33,8 @@ export async function seedDatabase() {
   for (const [index, dept] of departments.entries()) {
     await db.run(
       `INSERT INTO government_departments (id, full_name, short_names, website_url, sort_order, is_active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (full_name) DO NOTHING`,
       nanoid(),
       dept.fullName,
       dept.shortNames,

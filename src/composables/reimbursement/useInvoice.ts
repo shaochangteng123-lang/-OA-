@@ -573,7 +573,7 @@ export function useInvoice() {
     fileList.value = invoices.map((inv, index) => ({
       uid: baseUid + index,
       name: (inv.filePath || '').split('/').pop() || '发票文件',
-      url: inv.filePath || '',
+      url: toFileUrl(inv.filePath || ''),
       serverPath: inv.filePath || '',
       status: 'success',
     }))

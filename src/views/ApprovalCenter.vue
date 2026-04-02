@@ -928,7 +928,10 @@
             </el-table-column>
             <el-table-column label="报销类型" width="100" align="center">
               <template #default="{ row }">
-                <el-tag :type="getTypeTagType(row.reimbursementType)" size="small">
+                <el-tag v-if="row.isDeduction" type="danger" size="small">
+                  核减发票
+                </el-tag>
+                <el-tag v-else :type="getTypeTagType(row.reimbursementType)" size="small">
                   {{ row.reimbursementTypeName }}
                 </el-tag>
               </template>
@@ -2152,22 +2155,25 @@ const paidStatuses = ['payment_uploaded', 'completed']
 
 // 发票总金额（仅统计已付款的）
 const invoiceTotalAmount = computed(() => {
-  const regularInvoices = invoiceList.value
+  // 所有发票金额总和（包括核减发票）
+  return invoiceList.value
     .filter(item => paidStatuses.includes(item.reimbursementStatus))
     .reduce((sum, item) => sum + (item.amount || 0), 0)
-  // 加上核减发票总金额
-  return regularInvoices + deductionInvoicesTotal.value
 })
 
 // 发票核减总金额（仅统计已付款的）
-// 包括：基础报销发票的核减金额 + 核减发票的金额
+// 包括：普通发票的核减金额 + 核减发票的金额
 const invoiceTotalDeductedAmount = computed(() => {
-  const invoiceDeductions = invoiceList.value
+  return invoiceList.value
     .filter(item => paidStatuses.includes(item.reimbursementStatus))
-    .reduce((sum, item) => sum + (item.deductedAmount || 0), 0)
-  console.log('[发票管理] 发票核减:', invoiceDeductions, '核减发票总额:', deductionInvoicesTotal.value, '合计:', invoiceDeductions + deductionInvoicesTotal.value)
-  // 加上核减发票总金额
-  return invoiceDeductions + deductionInvoicesTotal.value
+    .reduce((sum, item) => {
+      // 如果是核减发票，整个金额都算作核减
+      if (item.isDeduction) {
+        return sum + (item.amount || 0)
+      }
+      // 如果是普通发票，只算核减金额
+      return sum + (item.deductedAmount || 0)
+    }, 0)
 })
 
 // 实报总金额

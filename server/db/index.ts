@@ -676,6 +676,17 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_sort_order ON reimbursement_scopes(sort_order);
   `)
 
+    // 数据库迁移：添加 is_deduction 字段
+    try {
+      await ddlClient.query(`
+        ALTER TABLE reimbursement_invoices
+        ADD COLUMN IF NOT EXISTS is_deduction INTEGER NOT NULL DEFAULT 0
+      `)
+      console.log('✅ 数据库迁移：is_deduction 字段检查完成')
+    } catch (error: any) {
+      console.log('ℹ️  is_deduction 字段已存在或迁移失败:', error.message)
+    }
+
   // DDL 完成，销毁初始化连接，确保后续查询用干净的连接
   } finally {
     await ddlClient.end()
@@ -742,18 +753,6 @@ export async function initDatabase() {
       now
     )
     console.log('✅ 初始化默认部门职位配置')
-  }
-
-  // 数据库迁移：添加 is_deduction 字段
-  try {
-    await ddlClient.query(`
-      ALTER TABLE reimbursement_invoices
-      ADD COLUMN IF NOT EXISTS is_deduction INTEGER NOT NULL DEFAULT 0
-    `)
-    console.log('✅ 数据库迁移：添加 is_deduction 字段')
-  } catch (error) {
-    // 字段可能已存在，忽略错误
-    console.log('ℹ️ is_deduction 字段已存在或迁移失败:', error)
   }
 
   console.log('✅ PostgreSQL 数据库表初始化完成')

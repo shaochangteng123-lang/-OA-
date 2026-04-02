@@ -30,7 +30,7 @@
         <template #default="{ row }">
           <div v-if="row.filePath" class="thumbnail-wrapper" @click.stop="handlePreview(row.filePath)">
             <div v-if="isImageFile(row.filePath)" class="image-thumbnail">
-              <img :src="getImageUrl(row.filePath)" alt="发票" class="thumbnail-image" @click.stop />
+              <img :src="getImageUrl(row.filePath)" alt="发票" class="thumbnail-image" />
             </div>
             <div v-else class="pdf-icon">
               <el-icon :size="30"><Document /></el-icon>
@@ -55,10 +55,10 @@
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
       <span v-if="showDeduction && (hasTransportFuelInvoices || deductionSubtotal > 0) && !approvalDeductionAmount" class="deducted-info">
-        （实报金额：¥{{ transportFuelActual.toFixed(2) }} 核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
+        （核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
       </span>
       <span v-if="approvalDeductionAmount > 0" class="deducted-info">
-        （实报金额：¥{{ actualReimbursementAmount.toFixed(2) }} 核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
+        （核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
       </span>
       <span v-if="warningText" class="amount-tip">
         {{ warningText }}
@@ -172,6 +172,7 @@ const props = withDefaults(defineProps<{
   approvalDeductionAmount?: number
   deductionInvoices?: any[]  // 核减发票列表
   totalInvoiceAmount?: number  // 发票总金额
+  yearlyDeductionUsed?: number  // 本年度已累计核减金额（不包含本次）
 }>(), {
   readonly: false,
   themeColor: '#409eff',
@@ -182,6 +183,7 @@ const props = withDefaults(defineProps<{
   approvalDeductionAmount: 0,
   deductionInvoices: () => [],
   totalInvoiceAmount: 0,
+  yearlyDeductionUsed: 0,
 })
 
 // Emits
@@ -202,7 +204,7 @@ const allInvoices = computed(() => {
 })
 
 // 计算总金额数值（用于比较）- 使用精确的金额计算方法
-// 总金额 = 普通发票金额 + 核减发票金额
+// 总金额 = 仅普通发票金额（核减发票不计入总额）
 const totalAmountNumber = computed(() => {
   // 普通发票金额
   const invoiceCents = props.invoiceList.reduce((acc, item) => {
@@ -210,10 +212,8 @@ const totalAmountNumber = computed(() => {
     const amountInCents = Math.round(amount * 100)
     return acc + amountInCents
   }, 0)
-  // 核减发票金额
-  const deductionCents = Math.round(deductionSubtotal.value * 100)
   // 转换回元
-  return (invoiceCents + deductionCents) / 100
+  return invoiceCents / 100
 })
 
 // 计算总金额 - 保留原始精度，不进行四舍五入
@@ -305,9 +305,9 @@ const currentTotalDeduction = computed(() => {
   return totalDeductedAmountNumber.value + deductionSubtotal.value
 })
 
-// 本年累计核减金额 = 发票上传的核减 + 核减发票上传的核减金额（每一次的数值）
+// 本年累计核减金额 = 年度已累计核减 + 本次累计核减
 const yearlyTotalDeduction = computed(() => {
-  return totalDeductedAmountNumber.value + deductionSubtotal.value
+  return props.yearlyDeductionUsed + currentTotalDeduction.value
 })
 
 // 总核减金额（用于显示）= 运输/交通/汽油/柴油类核减 + 核减发票金额
@@ -315,12 +315,14 @@ const totalDeductionAmount = computed(() => {
   return totalDeductedAmountNumber.value + deductionSubtotal.value
 })
 
-// 有效核减金额（用于计算实际报销金额）= 运输/交通/汽油/柴油类核减 + 核减发票金额
+// 有效核减金额（用于计算实际报销金额）= 仅运输/交通/汽油/柴油类超额核减
+// 核减发票不参与实际报销金额计算，只用于统计展示
 const effectiveDeduction = computed(() => {
-  return totalDeductedAmountNumber.value + deductionSubtotal.value
+  return totalDeductedAmountNumber.value
 })
 
-// 实际报销金额（发票总金额 - 有效核减金额）
+// 实际报销金额（普通发票总金额 - 运输超额核减）
+// 核减发票不影响实际报销金额
 const actualReimbursementAmount = computed(() => {
   return Math.max(0, totalAmountNumber.value - effectiveDeduction.value)
 })

@@ -10,7 +10,6 @@ OCR Worker - 多引擎图片文字识别
 引擎优先级：
   1. PaddleOCR（本地开发环境，识别效果最佳）
   2. RapidOCR（基于相同模型，轻量部署）
-  3. Tesseract（Docker 容器环境后备方案）
 
 常驻模式协议：
   输入：每行一个 JSON {"image_path": "/path/to/image.png"}
@@ -39,13 +38,15 @@ def get_ocr_engine():
     # 优先使用 PaddleOCR
     try:
         from paddleocr import PaddleOCR
+        # 使用 PP-OCRv4 mobile 轻量模型，内存占用小，适合容器环境
         _ocr_engine = PaddleOCR(
-            use_angle_cls=True,
+            use_textline_orientation=False,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
             lang="ch",
-            use_gpu=False,
-            show_log=False,
-            det_db_box_thresh=0.3,
-            det_db_unclip_ratio=1.6,
+            ocr_version="PP-OCRv4",
+            text_det_box_thresh=0.3,
+            text_det_unclip_ratio=1.6,
         )
         _ocr_type = "paddleocr"
         return _ocr_engine, _ocr_type
@@ -59,12 +60,7 @@ def get_ocr_engine():
         _ocr_type = "rapidocr"
         return _ocr_engine, _ocr_type
     except ImportError:
-        pass
-
-    # 最后用 Tesseract（无需初始化引擎对象）
-    _ocr_engine = "tesseract"
-    _ocr_type = "tesseract"
-    return _ocr_engine, _ocr_type
+        raise RuntimeError("未找到可用的 OCR 引擎，请安装 PaddleOCR 或 RapidOCR")
 
 
 def do_ocr(image_path):
@@ -76,28 +72,34 @@ def do_ocr(image_path):
     elif engine_type == "rapidocr":
         return ocr_with_rapidocr(engine, image_path)
     else:
-        return ocr_with_tesseract(image_path)
+        raise RuntimeError("未找到可用的 OCR 引擎")
 
 
 def ocr_with_paddleocr(engine, image_path):
-    """使用 PaddleOCR 识别"""
-    result = engine.ocr(image_path, cls=True)
+    """使用 PaddleOCR 识别（兼容 3.x 新 API）"""
+    result = engine.predict(image_path)
 
     lines = []
     full_text_parts = []
 
-    if result and result[0]:
-        for line in result[0]:
-            box = line[0]
-            text = line[1][0]
-            confidence = float(line[1][1])
-            lines.append(
-                {
-                    "text": text,
-                    "confidence": confidence,
-                    "box": [[float(p[0]), float(p[1])] for p in box],
-                }
-            )
+    # PaddleOCR 3.x: predict() 返回列表，每个元素是 OCRResult（支持 [] 访问）
+    # 字段：rec_texts, rec_scores, rec_polys
+    for item in result:
+        try:
+            texts = item["rec_texts"]
+            scores = item["rec_scores"]
+            polys = item["rec_polys"]
+        except (KeyError, TypeError):
+            continue
+
+        for i, text in enumerate(texts):
+            confidence = float(scores[i]) if i < len(scores) else 1.0
+            poly = polys[i] if i < len(polys) else []
+            try:
+                box = poly.tolist()
+            except AttributeError:
+                box = poly
+            lines.append({"text": text, "confidence": confidence, "box": box})
             full_text_parts.append(text)
 
     return lines, "\n".join(full_text_parts)
@@ -127,28 +129,39 @@ def ocr_with_rapidocr(engine, image_path):
     return lines, "\n".join(full_text_parts)
 
 
-def ocr_with_tesseract(image_path):
-    """使用 Tesseract 识别（Docker 容器后备方案）"""
-    import subprocess
+def ensure_extension(image_path):
+    """
+    PaddleOCR 3.x 要求文件有扩展名。
+    如果文件没有扩展名，通过魔术字节判断类型，创建带扩展名的符号链接返回。
+    返回 (实际路径, 是否为临时文件)
+    """
+    _, ext = os.path.splitext(image_path)
+    if ext:
+        return image_path, False
 
-    result = subprocess.run(
-        ["tesseract", image_path, "stdout", "-l", "chi_sim+eng", "--psm", "6"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    # 读取文件头判断类型
+    with open(image_path, "rb") as f:
+        header = f.read(8)
 
-    if result.returncode != 0:
-        raise RuntimeError(f"Tesseract 执行失败: {result.stderr}")
+    if header[:4] == b'\x89PNG':
+        ext = '.png'
+    elif header[:2] == b'\xff\xd8':
+        ext = '.jpg'
+    elif header[:4] in (b'GIF8', b'GIF9'):
+        ext = '.gif'
+    elif header[:4] == b'BM':
+        ext = '.bmp'
+    elif header[:4] == b'RIFF' and header[8:12] == b'WEBP':
+        ext = '.webp'
+    elif header[:4] == b'%PDF':
+        ext = '.pdf'
+    else:
+        ext = '.jpg'  # 默认按 jpg 处理
 
-    full_text = result.stdout.strip()
-    lines = []
-    for text in full_text.split("\n"):
-        text = text.strip()
-        if text:
-            lines.append({"text": text, "confidence": 0.8, "box": []})
-
-    return lines, full_text
+    tmp_path = image_path + ext
+    if not os.path.exists(tmp_path):
+        os.symlink(image_path, tmp_path)
+    return tmp_path, True
 
 
 def process_request(image_path):
@@ -156,11 +169,18 @@ def process_request(image_path):
     if not os.path.exists(image_path):
         return {"error": f"文件不存在: {image_path}"}
 
+    actual_path, is_tmp = ensure_extension(image_path)
     try:
-        lines, full_text = do_ocr(image_path)
+        lines, full_text = do_ocr(actual_path)
         return {"lines": lines, "fullText": full_text}
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        if is_tmp and os.path.islink(actual_path):
+            try:
+                os.unlink(actual_path)
+            except Exception:
+                pass
 
 
 def run_daemon():

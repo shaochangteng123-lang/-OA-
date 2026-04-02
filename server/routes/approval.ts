@@ -1268,7 +1268,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
       )
         AND r.submit_time >= ?
         AND r.submit_time <= ?
-        AND r.status IN ('pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed')
+        AND r.status = 'completed'
     `
 
     const params: any[] = [
@@ -1511,7 +1511,7 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
         e.name as employee_name,
         u.avatar_url as employee_avatar
       FROM probation_confirmations pc
-      LEFT JOIN employees e ON pc.employee_id = e.id
+      LEFT JOIN employee_profiles e ON pc.employee_id = e.id
       LEFT JOIN users u ON e.user_id = u.id
       WHERE pc.status = 'submitted'
       ORDER BY pc.submit_time ASC
@@ -1876,7 +1876,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       params.push(endDate + 'T23:59:59.999Z')
     }
 
-    // 查询发票列表
+    // 查询发票列表（包含核减发票）
     const invoices = await db.prepare(`
       SELECT
         ri.id,
@@ -1889,6 +1889,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         ri.deducted_amount,
         ri.seller,
         ri.buyer,
+        ri.is_deduction,
         ri.created_at,
         r.type as reimbursement_type,
         r.title as reimbursement_title,
@@ -1915,8 +1916,8 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       FROM reimbursement_invoices ri
       INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
       LEFT JOIN users u ON r.user_id = u.id
-      WHERE ri.is_deduction = 1
-        AND ${whereClause}
+      ${whereClause}
+        AND ri.is_deduction = 1
     `).get(...params) as { total: number }
 
     // 类型映射
@@ -1947,6 +1948,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         fileType: getFileType(inv.file_path),
         category: inv.category,
         deductedAmount: inv.deducted_amount || 0,
+        isDeduction: inv.is_deduction || 0,
         seller: inv.seller,
         buyer: inv.buyer,
         reimbursementType: inv.reimbursement_type,
@@ -1960,7 +1962,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         userDepartment: inv.user_department,
         createdAt: formatDateTime(inv.created_at),
       })),
-      // 核减发票总金额（单独返回，避免重复统计）
+      // 核减发票总金额（单独返回，前端不再使用，保留兼容性）
       deductionInvoicesTotal: deductionInvoicesTotal.total || 0,
     })
   } catch (error) {

@@ -69,6 +69,7 @@
                 :monthly-used-quota="invoice.monthlyUsedQuota.value"
                 :deduction-invoices="deductionItems"
                 :total-invoice-amount="invoice.totalAmount.value"
+                :yearly-deduction-used="yearlyDeductionUsed"
                 theme-color="#409eff"
                 @delete="handleDeleteInvoice"
               />
@@ -141,10 +142,28 @@ const receiptFileList = ref<any[]>([])
 // 核减发票列表
 const deductionItems = ref<DeductionItem[]>([])
 
+// 年度累计核减金额
+const yearlyDeductionUsed = ref(0)
+
 // 获取当前月份（根据报销规则计算，基础报销使用特殊规则）
 const getCurrentMonth = () => {
   const monthStr = calculateReimbursementMonth(undefined, 'basic')
   return formatReimbursementMonth(monthStr)
+}
+
+// 获取年度累计核减金额
+const fetchYearlyDeduction = async () => {
+  try {
+    const response = await fetch('/api/reimbursement/deduction-quota', {
+      credentials: 'include'
+    })
+    const result = await response.json()
+    if (result.success) {
+      yearlyDeductionUsed.value = result.data.yearlyDeductionTotal || 0
+    }
+  } catch (error) {
+    console.error('获取年度核减金额失败:', error)
+  }
 }
 
 // 返回列表页
@@ -359,9 +378,10 @@ const handleSubmit = async () => {
   }
 }
 
-// 页面加载时获取当月已使用额度
+// 页面加载时获取当月已使用额度和年度核减金额
 onMounted(async () => {
   await invoice.fetchMonthlyUsedQuota()
+  await fetchYearlyDeduction()
 })
 </script>
 

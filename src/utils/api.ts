@@ -52,14 +52,17 @@ api.interceptors.response.use(
           ElMessage.error('服务器错误，请稍后重试')
           break
         default:
-          // 400 错误由业务代码自行处理，不在拦截器中重复提示
-          if (error.response.status !== 400) {
-            ElMessage.error(error.response.data?.message || '请求失败')
-          }
+          // 400 错误由业务代码自行处理，不在拦截器中提示
+          break
       }
     } else if (error.request) {
       // 后台轮询请求网络错误时静默处理，避免干扰用户操作
-      const silentUrls = ['/api/approval/pending-counts', '/api/auth/user']
+      // 核减发票上传由业务代码处理错误提示
+      const silentUrls = [
+        '/api/approval/pending-counts',
+        '/api/auth/user',
+        '/api/reimbursement/upload-deduction-invoice'
+      ]
       const requestUrl = error.config?.url || ''
       if (!silentUrls.some(url => requestUrl.includes(url))) {
         ElMessage.error('网络错误，请检查网络连接')

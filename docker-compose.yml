@@ -2,7 +2,7 @@
 # YuliLog 工作日志系统 - 开发模式 Docker Compose
 # ============================================
 # 使用方法：
-#   启动：docker compose up -d
+#   启动：docker compose up -d --build
 #   日志：docker compose logs -f
 #   停止：docker compose down
 # ============================================
@@ -29,7 +29,9 @@ services:
 
   yulilog-dev:
     container_name: yulilog-worklog-dev
-    image: node:20-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     ports:
       - "8899:8899"   # Vite 前端
       - "3000:3000"   # Express 后端
@@ -40,7 +42,6 @@ services:
       - PORT=3000
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
       - TZ=Asia/Shanghai
-    working_dir: /app
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,30 +54,12 @@ services:
       - ./server:/app/server
       - ./public:/app/public
       # 配置文件
-      - ./package.json:/app/package.json
-      - ./package-lock.json:/app/package-lock.json
       - ./tsconfig.json:/app/tsconfig.json
       - ./tsconfig.node.json:/app/tsconfig.node.json
       - ./tsconfig.server.json:/app/tsconfig.server.json
       - ./vite.config.ts:/app/vite.config.ts
       - ./index.html:/app/index.html
-      # node_modules 命名卷
-      - dev_node_modules:/app/node_modules
-      # OCR venv 持久化（避免每次重启重装）
-      - ocr_venv:/tmp/ocr-venv
-    command: >
-      sh -c "
-      apk update &&
-      apk add --no-cache python3 py3-pip py3-opencv py3-onnxruntime py3-yaml py3-pillow py3-numpy py3-shapely py3-pyclipper make g++ pkgconfig pixman-dev cairo-dev pango-dev libjpeg-turbo-dev giflib-dev poppler-utils poppler-data font-noto-cjk &&
-      if [ ! -f /tmp/ocr-venv/bin/python3 ]; then python3 -m venv --system-site-packages /tmp/ocr-venv && /tmp/ocr-venv/bin/pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com --no-deps rapidocr_onnxruntime; fi &&
-      npm config set registry https://registry.npmmirror.com &&
-      export npm_config_nodedir=/usr/local &&
-      npm ci --prefer-offline --legacy-peer-deps &&
-      npm run dev
-      "
     restart: unless-stopped
 
 volumes:
   postgres_data:
-  dev_node_modules:
-  ocr_venv:

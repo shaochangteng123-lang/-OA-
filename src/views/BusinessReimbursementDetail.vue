@@ -123,6 +123,7 @@
                 :approval-deduction-amount="approvalDeductionAmount"
                 :deduction-invoices="deductionItems"
                 :total-invoice-amount="invoice.totalAmount.value"
+                :yearly-deduction-used="yearlyDeductionUsed"
                 @delete="handleDeleteInvoice"
               />
             </el-form-item>
@@ -313,6 +314,9 @@ const rejectReason = ref('')
 // 审批核减金额
 const approvalDeductionAmount = ref(0)
 
+// 年度累计核减金额
+const yearlyDeductionUsed = ref(0)
+
 // 数据是否已加载
 const dataLoaded = ref(false)
 
@@ -442,6 +446,22 @@ function handleDeleteInvoice(invoiceItem: any): void {
       receiptFileList.value.splice(receiptIndex, 1)
     }
     invoice.deleteInvoiceById(invoiceItem.id)
+  }
+}
+
+// 获取年度累计核减金额
+async function fetchYearlyDeduction(excludeId?: string) {
+  try {
+    const url = excludeId
+      ? `/api/reimbursement/deduction-quota?excludeId=${excludeId}`
+      : '/api/reimbursement/deduction-quota'
+    const response = await fetch(url, { credentials: 'include' })
+    const result = await response.json()
+    if (result.success) {
+      yearlyDeductionUsed.value = result.data.yearlyDeductionTotal || 0
+    }
+  } catch (error) {
+    console.error('获取年度核减金额失败:', error)
   }
 }
 
@@ -623,8 +643,12 @@ onMounted(async () => {
       if (reimbursementScope.value && scopeMap.value[reimbursementScope.value]) {
         reimbursementScope.value = scopeMap.value[reimbursementScope.value]
       }
+      // 获取年度累计核减金额（排除当前报销单）
+      await fetchYearlyDeduction(reimbursement.reimbursementId.value)
     } else {
       await fetchScopeOptions()
+      // 获取年度累计核减金额
+      await fetchYearlyDeduction()
     }
   } catch (error) {
     console.error('❌ [商务] onMounted 异常:', error)
@@ -651,6 +675,7 @@ watch(
       batchInfo.value = null
       receiptFileList.value = []
       await loadDetail()
+      await fetchYearlyDeduction(newId)
     }
   }
 )

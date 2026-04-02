@@ -136,17 +136,33 @@ function extractPayee(text: string, textNoSpace: string): string {
   const allNameMatches = [...text.matchAll(/户\s*"?\s*名\s*\|?\s*([^|户\n]*)/gi)]
   if (allNameMatches.length >= 2) {
     const name = allNameMatches[1][1].replace(/[|"]/g, '').trim()
-    if (name.length >= 2) return name
+    if (name.length >= 2 && name !== '付款' && name !== '收款') return name
   }
 
-  // 3. 从备注中提取人名（格式：基础报销 - 邵长腾 - 2026年1月）
-  const memoMatch = textNoSpace.match(/(?:备注|附言)[：:]?.*?报销[-—]([^\d-—]{2,4})[-—]/)
-  if (memoMatch?.[1]) return memoMatch[1]
+  // 3. 工商银行双栏格式：公司名和个人名在"户名"标签之前出现
+  // 格式：[公司名]\n[个人名]\n户\n名\n户\n名\n付款\n收款
+  // 找到第一个"户"字之前的行，提取2-4个汉字的人名（排除公司名）
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const firstHuIdx = lines.findIndex(l => l === '户' || l === '户名' || /^户\s*名$/.test(l))
+  if (firstHuIdx >= 2) {
+    // 在"户名"之前的行中，找最后一个2-4个汉字的人名（排除带"公司""集团""银行"等机构词的行）
+    const candidateLines = lines.slice(0, firstHuIdx)
+    for (let i = candidateLines.length - 1; i >= 0; i--) {
+      const line = candidateLines[i]
+      if (/^[\u4e00-\u9fff]{2,4}$/.test(line) &&
+          !line.includes('公司') && !line.includes('集团') &&
+          !line.includes('银行') && !line.includes('回单') &&
+          !line.includes('付款') && !line.includes('收款')) {
+        return line
+      }
+    }
+  }
 
   // 4. 从去空格文本中匹配第二个户名
   const noSpaceMatches = [...textNoSpace.matchAll(/户名[|]?([^|户账]{2,20})/g)]
   if (noSpaceMatches.length >= 2 && noSpaceMatches[1][1]) {
-    return noSpaceMatches[1][1]
+    const name = noSpaceMatches[1][1]
+    if (name !== '付款' && name !== '收款') return name
   }
 
   return ''

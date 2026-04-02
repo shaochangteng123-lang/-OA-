@@ -1,0 +1,23 @@
+# 简化版 Docker Compose - 仅启动 PostgreSQL
+services:
+  postgres:
+    container_name: yulilog-worklog-postgres
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=yulilog_worklog
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - TZ=Asia/Shanghai
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d yulilog_worklog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:

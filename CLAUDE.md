@@ -115,25 +115,43 @@ To update holiday data:
 
 ### Docker
 ```bash
-# Quick start (recommended)
-./docker-start.sh        # One-command startup (stop old, build, start)
-npm run docker           # Same as above
+# 开发模式（推荐）
+npm run docker           # 启动完整 Docker 开发环境
+docker compose logs -f   # 查看日志
+docker compose down      # 停止服务
+docker compose restart   # 重启服务
 
-# Individual commands
-npm run docker:build     # Build Docker image
-npm run docker:stop      # Stop container
-npm run docker:logs      # View container logs (follow mode)
-npm run docker:restart   # Restart container
-npm run docker:up        # Start with docker compose
-npm run docker:down      # Stop with docker compose
-npm run docker:dev       # Start dev environment with docker compose
-npm run docker:dev:down  # Stop dev docker compose
-npm run docker:dev:logs  # View dev container logs
+# 生产模式
+npm run docker:prod      # 启动生产环境
+npm run docker:stop:prod # 停止生产环境
+npm run docker:logs:prod # 查看生产环境日志
+
+# 仅数据库（可选）
+npm run docker:db        # 仅启动 PostgreSQL 容器
+npm run docker:stop      # 停止数据库容器
 ```
 
-Standard deployment workflow after code changes:
+开发模式特性：
+- 完整容器化环境
+- 源代码挂载，支持热重载
+- 前端端口 8899，后端端口 3000
+- 包含完整的依赖环境
+- PostgreSQL 数据库自动初始化
+
+标准开发流程：
 ```bash
-docker compose down && docker compose up -d --build
+# 首次启动（会自动构建镜像）
+docker compose up -d --build
+
+# 日常开发
+docker compose up -d      # 启动服务
+# 代码修改后自动热重载
+
+# 查看日志
+docker compose logs -f
+
+# 停止服务
+docker compose down
 ```
 
 ### Mode Switching
