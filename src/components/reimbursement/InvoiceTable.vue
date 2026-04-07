@@ -310,11 +310,6 @@ const yearlyTotalDeduction = computed(() => {
   return props.yearlyDeductionUsed + currentTotalDeduction.value
 })
 
-// 总核减金额（用于显示）= 运输/交通/汽油/柴油类核减 + 核减发票金额
-const totalDeductionAmount = computed(() => {
-  return totalDeductedAmountNumber.value + deductionSubtotal.value
-})
-
 // 有效核减金额（用于计算实际报销金额）= 仅运输/交通/汽油/柴油类超额核减
 // 核减发票不参与实际报销金额计算，只用于统计展示
 const effectiveDeduction = computed(() => {
@@ -379,7 +374,6 @@ function onDelete(invoice: any): void {
       item.invoiceNumber === invoice.invoiceNumber
     )
     if (index > -1) {
-      const updated = deductionList.filter((_, i) => i !== index)
       emit('delete', { ...invoice, isDeduction: true, index })
     }
   } else {

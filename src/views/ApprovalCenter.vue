@@ -2168,7 +2168,7 @@ const invoiceTotalDeductedAmount = computed(() => {
     .filter(item => paidStatuses.includes(item.reimbursementStatus))
     .reduce((sum, item) => {
       // 如果是核减发票，整个金额都算作核减
-      if (item.isDeduction) {
+      if ((item as any).isDeduction) {
         return sum + (item.amount || 0)
       }
       // 如果是普通发票，只算核减金额

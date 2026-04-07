@@ -162,6 +162,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { showUploadError } from '@/utils/uploadError'
 import { ArrowLeft, UploadFilled, Delete, Loading, Plus } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { api } from '@/utils/api'
@@ -437,7 +438,7 @@ async function handleBatchSubmit() {
           amount: res.data.data.ocrResult.amount,
         })
       } else {
-        ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        showUploadError(res.data.message || `第 ${i + 1} 张回单验证失败`)
         fileItems.value = []
         return
       }
@@ -452,16 +453,16 @@ async function handleBatchSubmit() {
       await pendingStore.refreshPendingCounts().catch(() => {})
       navigateBack()
     } else {
-      ElMessage.error(completeRes.data.message || '提交失败')
+      showUploadError(completeRes.data.message || '提交失败')
     }
   } catch (err: any) {
     // 400 错误由业务代码处理（拦截器已跳过），其他错误拦截器已提示
     if (err.response?.status === 400) {
       const warnings = err.response?.data?.warnings
       if (warnings && Array.isArray(warnings) && warnings.length > 0) {
-        ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+        showUploadError(warnings.join('；'))
       } else {
-        ElMessage.error(err.response?.data?.message || '操作失败')
+        showUploadError(err.response?.data?.message || '操作失败')
       }
     }
     fileItems.value = []
@@ -499,7 +500,7 @@ async function handleSingleSubmit() {
           amount: res.data.data.ocrResult.amount,
         })
       } else {
-        ElMessage.error(res.data.message || `第 ${i + 1} 张回单验证失败`)
+        showUploadError(res.data.message || `第 ${i + 1} 张回单验证失败`)
         fileItems.value = []
         return
       }
@@ -514,16 +515,16 @@ async function handleSingleSubmit() {
       await pendingStore.refreshPendingCounts().catch(() => {})
       navigateBack()
     } else {
-      ElMessage.error(completeRes.data.message || '提交失败')
+      showUploadError(completeRes.data.message || '提交失败')
     }
   } catch (err: any) {
     // 400 错误由业务代码处理（拦截器已跳过），其他错误拦截器已提示
     if (err.response?.status === 400) {
       const warnings = err.response?.data?.warnings
       if (warnings && Array.isArray(warnings) && warnings.length > 0) {
-        ElMessage.error({ message: warnings.join('；'), duration: 5000, showClose: true })
+        showUploadError(warnings.join('；'))
       } else {
-        ElMessage.error(err.response?.data?.message || '操作失败')
+        showUploadError(err.response?.data?.message || '操作失败')
       }
     }
     fileItems.value = []

@@ -361,6 +361,13 @@ app.use(helmet())
 
 ## 更新日志
 
+- 2026-04-03: 修复报销模块安全和逻辑缺陷
+  - 核减发票上传：新增服务端金额校验，防止客户端篡改金额（`deductionOcrCache` 缓存校验）
+  - 银行回单提交：修复 fileHash 与 proofNo 错位绑定问题（单笔和批量付款）
+  - 发票识别：修复回退逻辑缺陷，确保最终结果包含完整关键字段（金额、日期、发票号）
+  - 发票识别：修复异常被误判为有效发票问题，识别失败时标记 `isValidInvoice: false`
+  - 发票上传：修正识别失败的 HTTP 状态码（业务错误返回 400，服务器错误返回 500）
+  - 回单识别：修复中文大写金额解析错误（处理省略"壹"的写法，如"拾贰元"）
 - 2026-03-27: 修复 departments.ts 路由注册顺序问题
   - `/org-options` GET/POST 路由移至 `/:id` 路由之前，避免被通配参数路由拦截返回 404
 - 2026-03-26: 转正审批路由修复 PostgreSQL 事务一致性问题
@@ -408,3 +415,4 @@ app.use(helmet())
 - 2026-01-31: 优化转正管理 API，确保管理员端与用户端数据一致（入职日期、试用期截止日期动态计算）
 - 2026-01-23: 添加报销管理路由，支持发票上传和OCR识别功能
 - 2026-01-22: 创建文档，描述 API 路由模块核心功能
+- 2026-04-02: 财务区安全与一致性修复 - PUT /api/reimbursement/:id 补齐 is_deduction 字段写入；/:id/deduction-invoices POST 接口增加 filePath session 归属校验；核减发票删除前强制 validateFilePath；付款回单 OCR cache 绑定 targetType/targetId/verifierId/fileHash，提交时严格匹配并一次性消费；审批通过/驳回改为事务写入；商务报销 client/service_target 更新时同步双写；大额报销后端阈值已统一为 >=1000（<1000 拒绝）

@@ -16,9 +16,20 @@ import { db } from '../db/index.js'
 
 const router = Router()
 
-// OCR 验证结果缓存（临时文件名 -> OCR 结果）
-// 用于防止客户端篡改金额
-const ocrCache = new Map<string, { amount: number; timestamp: number }>()
+// 付款回单 OCR 验证缓存（临时文件名 -> OCR 结果）
+// 绑定目标单据/批次、验证人、文件哈希、交易流水号，一次性消费，防止重放
+const ocrCache = new Map<string, {
+  amount: number
+  timestamp: number
+  targetType: 'reimbursement' | 'payment_batch'
+  targetId: string
+  verifierId: string
+  fileHash: string
+  proofNo: string
+}>()
+
+// 核减发票 OCR 缓存（临时文件名 -> 识别金额），用途：防客户端篡改金额
+const deductionOcrCache = new Map<string, { amount: number; timestamp: number }>()
 
 // 定期清理过期缓存（30分钟）
 setInterval(() => {
@@ -26,6 +37,11 @@ setInterval(() => {
   for (const [key, value] of ocrCache.entries()) {
     if (now - value.timestamp > 30 * 60 * 1000) {
       ocrCache.delete(key)
+    }
+  }
+  for (const [key, value] of deductionOcrCache.entries()) {
+    if (now - value.timestamp > 30 * 60 * 1000) {
+      deductionOcrCache.delete(key)
     }
   }
 }, 5 * 60 * 1000)
@@ -214,7 +230,7 @@ async function recognizeInvoice(filePath: string): Promise<{
       throw error
     }
 
-    // OCR 识别失败，返回零值供用户手动填写
+    // OCR 识别失败，返回零值供用户手动填写，但标记为无效发票
     console.warn('⚠️  OCR 识别失败，返回空值，请手动核对发票信息')
 
     return {
@@ -222,7 +238,7 @@ async function recognizeInvoice(filePath: string): Promise<{
       date: '',
       invoiceNumber: '',
       seller: '',
-      isValidInvoice: true,
+      isValidInvoice: false, // 识别失败时标记为无效，避免污染核减上传
     }
   }
 }
@@ -470,12 +486,24 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       }
     }
 
+    const uploadedFilePath = `uploads/invoices/${finalFileName}`
+    const uploadUserId = req.session.userId || req.session.user?.id
+
+    // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
+    if (uploadUserId) {
+      await db.run(
+        `INSERT INTO user_uploaded_files (id, user_id, file_path, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (user_id, file_path) DO NOTHING`,
+        nanoid(), uploadUserId, uploadedFilePath, new Date().toISOString()
+      )
+    }
+
     res.json({
       success: true,
       message: '发票上传成功',
       data: {
         fileName: finalFileName,
-        filePath: `uploads/invoices/${finalFileName}`,
+        filePath: uploadedFilePath,
         fileHash,
         compressed,
         ocrResult,
@@ -493,7 +521,14 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       }
     }
 
-    res.status(500).json({
+    // 区分业务错误（识别失败）和服务器错误
+    const isBusinessError = error instanceof Error && (
+      error.message.includes('此不是发票文件') ||
+      error.message.includes('此不是有效发票') ||
+      error.message.includes('识别失败')
+    )
+
+    res.status(isBusinessError ? 400 : 500).json({
       success: false,
       message: error instanceof Error ? error.message : '上传失败',
     })
@@ -606,12 +641,24 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(tempFilePath, finalPath)
 
+    const receiptFilePath = `uploads/invoices/${finalFileName}`
+    const receiptUserId = req.session.userId || req.session.user?.id
+
+    // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
+    if (receiptUserId) {
+      await db.run(
+        `INSERT INTO user_uploaded_files (id, user_id, file_path, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (user_id, file_path) DO NOTHING`,
+        nanoid(), receiptUserId, receiptFilePath, new Date().toISOString()
+      )
+    }
+
     res.json({
       success: true,
       message: '收据上传成功',
       data: {
         fileName: finalFileName,
-        filePath: `/uploads/invoices/${finalFileName}`,
+        filePath: receiptFilePath,
         fileHash,
         ocrResult: {
           amount: ocrResult.amount,
@@ -633,7 +680,13 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
       }
     }
 
-    res.status(500).json({
+    // 区分业务错误（识别失败）和服务器错误
+    const isBusinessError = error instanceof Error && (
+      error.message.includes('识别失败') ||
+      error.message.includes('无效')
+    )
+
+    res.status(isBusinessError ? 400 : 500).json({
       success: false,
       message: error instanceof Error ? error.message : '上传失败',
     })
@@ -732,12 +785,12 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
       })
     }
 
-    // 验证发票有效性
-    if (!ocrResult.isValidInvoice) {
+    // 验证发票有效性：必须是有效发票且金额大于0
+    if (!ocrResult.isValidInvoice || !ocrResult.amount || ocrResult.amount <= 0) {
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: '此不是有效发票，请重新上传',
+        message: '此不是有效发票或金额识别失败，请重新上传',
       })
     }
 
@@ -764,15 +817,27 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
     // 清理临时文件
     try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
 
-    // 缓存OCR结果
-    ocrCache.set(finalFileName, { amount: ocrResult.amount, timestamp: Date.now() })
+    // 缓存核减发票OCR结果（防客户端篡改金额）
+    deductionOcrCache.set(finalFileName, { amount: ocrResult.amount, timestamp: Date.now() })
+
+    const deductionFilePath = `uploads/invoices/${finalFileName}`
+    const deductionUserId = req.session.userId || req.session.user?.id
+
+    // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
+    if (deductionUserId) {
+      await db.run(
+        `INSERT INTO user_uploaded_files (id, user_id, file_path, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (user_id, file_path) DO NOTHING`,
+        nanoid(), deductionUserId, deductionFilePath, new Date().toISOString()
+      )
+    }
 
     res.json({
       success: true,
       message: '核减发票上传成功',
       data: {
         fileName: finalFileName,
-        filePath: `uploads/invoices/${finalFileName}`,
+        filePath: deductionFilePath,
         fileHash,
         ocrResult: {
           amount: ocrResult.amount,
@@ -845,6 +910,17 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '缺少必要参数' })
     }
 
+    // 校验文件路径：必须是合法的服务端路径且属于当前用户上传的文件
+    if (!validateFilePath(filePath)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+    const uploadedRecord = await db.prepare(
+      `SELECT id FROM user_uploaded_files WHERE user_id = ? AND file_path = ?`
+    ).get(userId, filePath) as { id: string } | undefined
+    if (!uploadedRecord) {
+      return res.status(403).json({ success: false, message: '文件路径无效，请重新上传' })
+    }
+
     // 确认报销单归属
     const reimbursement = await db.prepare(
       `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`
@@ -855,6 +931,29 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
     }
     if (reimbursement.user_id !== userId) {
       return res.status(403).json({ success: false, message: '无权操作' })
+    }
+
+    // 防篡改校验：从缓存中读取服务端识别的金额，与客户端提交的金额对比
+    const fileName = filePath.split('/').pop()
+    if (fileName) {
+      const cachedOcr = deductionOcrCache.get(fileName)
+      if (cachedOcr) {
+        // 允许 0.01 元的浮点误差
+        if (Math.abs(cachedOcr.amount - amount) > 0.01) {
+          return res.status(400).json({
+            success: false,
+            message: `金额校验失败：客户端提交 ${amount} 元，服务端识别 ${cachedOcr.amount} 元，请勿篡改金额`
+          })
+        }
+        // 校验通过后清除缓存，防止重复使用
+        deductionOcrCache.delete(fileName)
+      } else {
+        // 缓存已过期或不存在，拒绝保存
+        return res.status(400).json({
+          success: false,
+          message: '金额校验失败：识别结果已过期，请重新上传文件'
+        })
+      }
     }
 
     const invoiceId = nanoid()
@@ -893,10 +992,14 @@ router.delete('/deduction-invoices/:invoiceId', requireAuth, async (req, res) =>
 
     await db.run(`DELETE FROM reimbursement_deduction_invoices WHERE id = ?`, invoiceId)
 
-    // 删除文件
+    // 删除文件：先校验路径合法性，防止路径穿越攻击
     if (invoice.file_path) {
-      const fullPath = path.join(process.cwd(), invoice.file_path)
-      try { fs.unlinkSync(fullPath) } catch (e) { /* 忽略 */ }
+      if (!validateFilePath(invoice.file_path)) {
+        console.error('❌ 发现非法 file_path，跳过文件删除:', invoice.file_path)
+      } else {
+        const fullPath = path.join(process.cwd(), invoice.file_path)
+        try { fs.unlinkSync(fullPath) } catch (e) { /* 忽略 */ }
+      }
     }
 
     res.json({ success: true, message: '删除成功' })
@@ -1625,6 +1728,9 @@ router.post('/create', requireAuth, async (req, res) => {
       }
     })
 
+    // 报销单提交成功后，清理该用户的临时上传记录（发票已关联到正式报销单）
+    await db.run(`DELETE FROM user_uploaded_files WHERE user_id = ?`, userId)
+
     res.json({
       success: true,
       data: {
@@ -2108,11 +2214,19 @@ router.post('/:id/verify-proof', requireAdmin, uploadPaymentProof.single('paymen
 
     // 验证通过，保留临时文件，返回识别结果
     const tempFileName = path.basename(req.file.path)
+    const fileBuffer = fs.readFileSync(req.file.path)
+    const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
+    const verifierId = req.session.userId!
 
-    // 将 OCR 结果存入缓存
+    // 将 OCR 结果存入缓存，绑定目标单据、验证人、文件哈希、交易流水号，防止重放
     ocrCache.set(tempFileName, {
       amount: ocrResult.amount,
       timestamp: Date.now(),
+      targetType: 'reimbursement',
+      targetId: id,
+      verifierId,
+      fileHash,
+      proofNo: ocrResult.proofNo,
     })
 
     res.json({
@@ -2166,7 +2280,7 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: '只有已审批通过的报销单才能付款' })
     }
 
-    // 使用服务端缓存的金额，防止客户端篡改
+    // 使用服务端缓存的金额，防止客户端篡改，严格校验目标和验证人
     let totalOcrAmount = 0
     for (const file of verifiedFiles) {
       const cached = ocrCache.get(file.tempFileName)
@@ -2174,6 +2288,13 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         return res.status(400).json({
           success: false,
           message: `文件 ${file.originalFileName} 验证已过期，请重新验证`,
+        })
+      }
+      // 严格校验：必须是当前报销单、当前管理员验证的回单
+      if (cached.targetType !== 'reimbursement' || cached.targetId !== id || cached.verifierId !== currentUserId) {
+        return res.status(403).json({
+          success: false,
+          message: `文件 ${file.originalFileName} 验证记录与当前单据不匹配，请重新验证`,
         })
       }
       totalOcrAmount += cached.amount
@@ -2187,7 +2308,47 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       })
     }
 
-    // 移动所有临时文件到正式目录
+    // 收集哈希和交易流水号，先做去重校验，再落盘；校验失败则文件留在 temp 目录由定时清理处理
+    // 注意：必须同时获取 fileHash 和 proofNo，保持索引对应关系
+    const proofData = verifiedFiles
+      .map((f: any) => {
+        const cached = ocrCache.get(f.tempFileName)
+        return {
+          fileHash: cached?.fileHash || '',
+          proofNo: cached?.proofNo || ''
+        }
+      })
+      .filter(item => item.fileHash) // 只过滤有 fileHash 的项
+    const proofFileHashes = proofData.map(item => item.fileHash)
+    const proofNos = proofData.map(item => item.proofNo)
+
+    // 先检查哈希是否已被使用（防重放），校验失败则不落盘
+    for (const fileHash of proofFileHashes) {
+      const existing = await db.prepare(
+        `SELECT id FROM payment_proof_hashes WHERE file_hash = ?`
+      ).get(fileHash) as { id: string } | undefined
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: '付款回单已被其他付款记录使用，请重新上传',
+        })
+      }
+    }
+
+    // 检查交易流水号是否已被使用（防止同一笔交易的不同文件重复使用）
+    for (const proofNo of proofNos) {
+      if (!proofNo) continue // 允许未识别到电子回单号码的情况（兼容旧数据）
+      const existing = await db.prepare(
+        `SELECT id FROM payment_proof_hashes WHERE proof_no = ?`
+      ).get(proofNo) as { id: string } | undefined
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: `电子回单号码 ${proofNo} 已被使用，请勿重复提交同一张付款回单`,
+        })
+      }
+    }
+
     const paymentProofPaths: string[] = []
     for (const file of verifiedFiles) {
       const tempPath = path.join(tempDir, path.basename(file.tempFileName))
@@ -2222,6 +2383,16 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)
       `, batchId, batchNo, expectedAmount, currentUserId, paymentProofPath, now, now, now)
 
+      // 写入每张回单哈希和电子回单号码，防止后续重放
+      for (let i = 0; i < proofFileHashes.length; i++) {
+        const fileHash = proofFileHashes[i]
+        const proofNo = proofNos[i] || null
+        await txRun(client, `
+          INSERT INTO payment_proof_hashes (id, file_hash, proof_no, batch_id, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `, nanoid(), fileHash, proofNo, batchId, now)
+      }
+
       // 创建批次快照记录（单笔付款也需要快照，确保确认收款时能查询到）
       const itemId = nanoid()
       await txRun(client, `
@@ -2251,6 +2422,11 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         `, recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', '管理员已上传付款回单', now)
       }
     })
+
+    // 一次性消费：事务完成后从缓存中删除已使用的回单验证记录
+    for (const file of verifiedFiles) {
+      ocrCache.delete(file.tempFileName)
+    }
 
     console.log(`✅ 付款回单提交成功: ${id}, 共 ${paymentProofPaths.length} 张回单`)
 
@@ -2538,7 +2714,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 router.put('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const { category, title, description, invoices, businessType, client: clientName, status = 'pending' } = req.body
+    const { category, title, description, invoices, businessType, client: clientName, serviceTarget, status = 'pending' } = req.body
     const userId = req.session.user?.id
     const userName = req.session.user?.name
 
@@ -2768,7 +2944,7 @@ router.put('/:id', requireAuth, async (req, res) => {
       await txRun(client, `
         UPDATE reimbursements
         SET category = ?, title = ?, total_amount = ?, status = ?,
-            description = ?, business_type = ?, client = ?, reimbursement_month = ?, updated_at = ?
+            description = ?, business_type = ?, client = ?, service_target = ?, reimbursement_month = ?, updated_at = ?
         WHERE id = ? AND user_id = ?
       `,
         category || null,
@@ -2778,6 +2954,7 @@ router.put('/:id', requireAuth, async (req, res) => {
         description || null,
         businessType || null,
         clientName || null,
+        serviceTarget || clientName || null,
         reimbursementMonth,
         timestamp,
         id,
@@ -2793,8 +2970,8 @@ router.put('/:id', requireAuth, async (req, res) => {
         await txRun(client, `
           INSERT INTO reimbursement_invoices (
             id, reimbursement_id, amount, invoice_date, invoice_number,
-            file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            file_path, seller, buyer, tax_amount, invoice_code, category, deducted_amount, file_hash, is_deduction, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
           invoiceId,
           id,
@@ -2809,6 +2986,7 @@ router.put('/:id', requireAuth, async (req, res) => {
           invoice.category || null,
           invoice.deductedAmount || 0,
           invoice.fileHash || null,
+          invoice.isDeduction ? 1 : 0,
           timestamp
         )
       }
@@ -2872,6 +3050,9 @@ router.put('/:id', requireAuth, async (req, res) => {
         }
       }
     })
+
+    // 报销单更新成功后，清理该用户的临时上传记录
+    await db.run(`DELETE FROM user_uploaded_files WHERE user_id = ?`, userId)
 
     res.json({
       success: true,
@@ -3436,11 +3617,19 @@ router.post('/payment-batch/:batchId/verify-proof', requireAdmin, uploadPaymentP
     }
 
     const tempFileName = path.basename(req.file.path)
+    const batchFileBuffer = fs.readFileSync(req.file.path)
+    const batchFileHash = crypto.createHash('sha256').update(batchFileBuffer).digest('hex')
+    const batchVerifierId = req.session.userId!
 
-    // 将 OCR 结果存入缓存
+    // 将 OCR 结果存入缓存，绑定目标批次、验证人、文件哈希、交易流水号，防止重放
     ocrCache.set(tempFileName, {
       amount: ocrResult.amount,
       timestamp: Date.now(),
+      targetType: 'payment_batch',
+      targetId: batchId,
+      verifierId: batchVerifierId,
+      fileHash: batchFileHash,
+      proofNo: ocrResult.proofNo,
     })
 
     res.json({
@@ -3504,7 +3693,7 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
       return res.status(400).json({ success: false, message: '部分报销单状态异常' })
     }
 
-    // 使用服务端缓存的金额，防止客户端篡改
+    // 使用服务端缓存的金额，防止客户端篡改，严格校验目标批次和验证人
     let totalOcrAmount = 0
     for (const file of verifiedFiles) {
       const cached = ocrCache.get(file.tempFileName)
@@ -3512,6 +3701,13 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
         return res.status(400).json({
           success: false,
           message: `文件 ${file.originalFileName} 验证已过期，请重新验证`,
+        })
+      }
+      // 严格校验：必须是当前批次、当前管理员验证的回单
+      if (cached.targetType !== 'payment_batch' || cached.targetId !== batchId || cached.verifierId !== currentUserId) {
+        return res.status(403).json({
+          success: false,
+          message: `文件 ${file.originalFileName} 验证记录与当前批次不匹配，请重新验证`,
         })
       }
       totalOcrAmount += cached.amount
@@ -3525,7 +3721,47 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
       })
     }
 
-    // 移动临时文件到正式目录
+    // 收集哈希和交易流水号，先做去重校验，再落盘；校验失败则文件留在 temp 目录由定时清理处理
+    // 注意：必须同时获取 fileHash 和 proofNo，保持索引对应关系
+    const batchProofData = verifiedFiles
+      .map((f: any) => {
+        const cached = ocrCache.get(f.tempFileName)
+        return {
+          fileHash: cached?.fileHash || '',
+          proofNo: cached?.proofNo || ''
+        }
+      })
+      .filter(item => item.fileHash) // 只过滤有 fileHash 的项
+    const batchProofFileHashes = batchProofData.map(item => item.fileHash)
+    const batchProofNos = batchProofData.map(item => item.proofNo)
+
+    // 先检查哈希是否已被使用（防重放），校验失败则不落盘
+    for (const fileHash of batchProofFileHashes) {
+      const existing = await db.prepare(
+        `SELECT id FROM payment_proof_hashes WHERE file_hash = ?`
+      ).get(fileHash) as { id: string } | undefined
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: '付款回单已被其他付款记录使用，请重新上传',
+        })
+      }
+    }
+
+    // 检查交易流水号是否已被使用（防止同一笔交易的不同文件重复使用）
+    for (const proofNo of batchProofNos) {
+      if (!proofNo) continue // 允许未识别到电子回单号码的情况（兼容旧数据）
+      const existing = await db.prepare(
+        `SELECT id FROM payment_proof_hashes WHERE proof_no = ?`
+      ).get(proofNo) as { id: string } | undefined
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: `电子回单号码 ${proofNo} 已被使用，请勿重复提交同一张付款回单`,
+        })
+      }
+    }
+
     const paymentProofPaths: string[] = []
     for (const file of verifiedFiles) {
       const tempPath = path.join(tempDir, path.basename(file.tempFileName))
@@ -3550,6 +3786,16 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
         SET status = 'uploaded', payment_proof_path = ?, pay_time = ?, updated_at = ?
         WHERE id = ?
       `, paymentProofPath, now, now, batchId)
+
+      // 写入每张回单哈希和电子回单号码，防止后续重放
+      for (let i = 0; i < batchProofFileHashes.length; i++) {
+        const fileHash = batchProofFileHashes[i]
+        const proofNo = batchProofNos[i] || null
+        await txRun(client, `
+          INSERT INTO payment_proof_hashes (id, file_hash, proof_no, batch_id, created_at)
+          VALUES (?, ?, ?, ?, ?)
+        `, nanoid(), fileHash, proofNo, batchId, now)
+      }
 
       // 更新所有关联报销单状态
       for (const r of reimbursements) {
@@ -3578,6 +3824,11 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
         }
       }
     })
+
+    // 一次性消费：事务完成后从缓存中删除已使用的回单验证记录
+    for (const file of verifiedFiles) {
+      ocrCache.delete(file.tempFileName)
+    }
 
     console.log(`✅ 批量付款完成: ${batch.batch_no}, 共 ${reimbursements.length} 笔, 合计 ¥${expectedAmount.toFixed(2)}`)
 

@@ -46,15 +46,16 @@ router.get('/invoices/:filename', requireAuth, async (req, res) => {
         return res.status(403).json({ success: false, message: '无权访问此文件' })
       }
     } else {
-      // 数据库中没有记录，可能是草稿状态的报销单
-      // 检查文件是否存在于磁盘上（允许用户预览自己刚上传的文件）
-      console.log('⚠️ 数据库中未找到记录，检查文件是否存在于磁盘')
-      const fullPath = path.resolve(process.cwd(), filePath)
-      if (!fs.existsSync(fullPath)) {
-        console.log('❌ 文件不存在 - 磁盘上也没有')
-        return res.status(404).json({ success: false, message: '文件不存在' })
+      // 数据库中没有正式记录，检查是否为当前用户上传的草稿文件（查数据库，不依赖 session）
+      const uploadedRecord = await db.get(
+        `SELECT id FROM user_uploaded_files WHERE user_id = ? AND file_path = ?`,
+        userId, filePath
+      )
+      if (!uploadedRecord) {
+        console.log('❌ 数据库未找到记录且非当前用户上传文件，拒绝访问')
+        return res.status(403).json({ success: false, message: '无权访问此文件' })
       }
-      console.log('✅ 文件存在于磁盘，允许预览（草稿状态）')
+      console.log('✅ 匹配用户上传记录，允许草稿预览')
     }
 
     // 读取并返回文件

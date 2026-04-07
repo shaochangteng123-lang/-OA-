@@ -493,8 +493,8 @@ async function validateForm(): Promise<boolean> {
     return false
   }
 
-  if (invoice.invoiceList.value.length === 0) {
-    ElMessage.warning('请至少上传一张发票')
+  if (invoice.invoiceList.value.length === 0 && deductionItems.value.length === 0) {
+    ElMessage.warning('请至少上传一张发票或核减发票')
     return false
   }
 
@@ -514,12 +514,27 @@ function buildSubmitData() {
   const category = selectedType.value || '基础报销'
   const categoryLabel = selectedType.value ? selectedTypeLabel.value : '基础报销'
 
+  // 普通发票（不含 isDeduction）
+  const normalInvoices = invoice.getInvoicesForSubmit()
+
+  // 核减发票（合并进同一 invoices 数组，带 is_deduction 标记）
+  const deductionInvoiceItems = deductionItems.value.map(item => ({
+    amount: item.amount,
+    invoiceDate: item.invoiceDate,
+    invoiceNumber: item.invoiceNumber || '',
+    filePath: item.filePath || '',
+    fileHash: item.fileHash || '',
+    deductedAmount: 0,
+    actualAmount: 0,
+    isDeduction: true as const,
+  }))
+
   return {
     type: 'basic' as const,
     category,
     title: reimbursement.generateTitle(categoryLabel),
     description: formData.description,
-    invoices: invoice.getInvoicesForSubmit(),
+    invoices: [...normalInvoices, ...deductionInvoiceItems],
   }
 }
 

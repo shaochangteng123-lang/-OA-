@@ -101,17 +101,6 @@
                 </el-form-item>
               </div>
 
-              <div class="upload-deduction">
-                <el-form-item label="核减上传">
-                  <DeductionUploader
-                    v-model="deductionItems"
-                    :disabled="isReadonly"
-                    :total-invoice-amount="invoice.totalAmount.value"
-                    :yearly-deduction-used="0"
-                    :existing-invoices="invoice.invoiceList.value"
-                  />
-                </el-form-item>
-              </div>
             </div>
 
             <!-- 发票明细表格 -->
@@ -121,9 +110,6 @@
                 :readonly="isReadonly"
                 theme-color="#67c23a"
                 :approval-deduction-amount="approvalDeductionAmount"
-                :deduction-invoices="deductionItems"
-                :total-invoice-amount="invoice.totalAmount.value"
-                :yearly-deduction-used="yearlyDeductionUsed"
                 @delete="handleDeleteInvoice"
               />
             </el-form-item>
@@ -233,7 +219,6 @@ import type { FormInstance, FormRules } from 'element-plus'
 // 导入模块化组件
 import InvoiceUploader from '@/components/reimbursement/InvoiceUploader.vue'
 import ReceiptUploader from '@/components/reimbursement/ReceiptUploader.vue'
-import DeductionUploader from '@/components/reimbursement/DeductionUploader.vue'
 import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 
 // 导入 composables
@@ -280,8 +265,6 @@ const formRef = ref<FormInstance>()
 // 无票上传文件列表
 const receiptFileList = ref<any[]>([])
 
-// 核减发票列表
-const deductionItems = ref<any[]>([])
 
 // 表单验证规则
 const formRules: FormRules = {
@@ -314,8 +297,6 @@ const rejectReason = ref('')
 // 审批核减金额
 const approvalDeductionAmount = ref(0)
 
-// 年度累计核减金额
-const yearlyDeductionUsed = ref(0)
 
 // 数据是否已加载
 const dataLoaded = ref(false)
@@ -430,40 +411,13 @@ function handleDeleteReceipt(file: any): void {
 
 // 处理删除发票
 function handleDeleteInvoice(invoiceItem: any): void {
-  if (invoiceItem.isDeduction) {
-    // 删除核减发票
-    const index = deductionItems.value.findIndex(item =>
-      item.filePath === invoiceItem.filePath ||
-      item.invoiceNumber === invoiceItem.invoiceNumber
-    )
-    if (index > -1) {
-      deductionItems.value.splice(index, 1)
-    }
-  } else {
-    // 删除普通发票
-    const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
-    if (receiptIndex > -1) {
-      receiptFileList.value.splice(receiptIndex, 1)
-    }
-    invoice.deleteInvoiceById(invoiceItem.id)
+  const receiptIndex = receiptFileList.value.findIndex(file => file.uid === invoiceItem.fileUid)
+  if (receiptIndex > -1) {
+    receiptFileList.value.splice(receiptIndex, 1)
   }
+  invoice.deleteInvoiceById(invoiceItem.id)
 }
 
-// 获取年度累计核减金额
-async function fetchYearlyDeduction(excludeId?: string) {
-  try {
-    const url = excludeId
-      ? `/api/reimbursement/deduction-quota?excludeId=${excludeId}`
-      : '/api/reimbursement/deduction-quota'
-    const response = await fetch(url, { credentials: 'include' })
-    const result = await response.json()
-    if (result.success) {
-      yearlyDeductionUsed.value = result.data.yearlyDeductionTotal || 0
-    }
-  } catch (error) {
-    console.error('获取年度核减金额失败:', error)
-  }
-}
 
 // 返回
 function handleBack(): void {
@@ -643,12 +597,8 @@ onMounted(async () => {
       if (reimbursementScope.value && scopeMap.value[reimbursementScope.value]) {
         reimbursementScope.value = scopeMap.value[reimbursementScope.value]
       }
-      // 获取年度累计核减金额（排除当前报销单）
-      await fetchYearlyDeduction(reimbursement.reimbursementId.value)
     } else {
       await fetchScopeOptions()
-      // 获取年度累计核减金额
-      await fetchYearlyDeduction()
     }
   } catch (error) {
     console.error('❌ [商务] onMounted 异常:', error)
@@ -675,7 +625,6 @@ watch(
       batchInfo.value = null
       receiptFileList.value = []
       await loadDetail()
-      await fetchYearlyDeduction(newId)
     }
   }
 )
@@ -785,8 +734,7 @@ watch(
 }
 
 .upload-left,
-.upload-right,
-.upload-deduction {
+.upload-right {
   flex: 1;
   min-width: 0;
 }
@@ -797,8 +745,7 @@ watch(
   }
 
   .upload-left,
-  .upload-right,
-  .upload-deduction {
+  .upload-right {
     flex: 1 1 auto;
     width: 100%;
     min-width: 0;

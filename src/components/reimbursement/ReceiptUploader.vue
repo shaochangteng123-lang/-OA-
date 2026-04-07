@@ -28,7 +28,7 @@
       </div>
       <template #file="{ file }">
         <div class="receipt-preview" @dblclick="handlePreview(file)">
-          <img v-if="file.url || file.serverPath" :src="file.url || file.serverPath" class="preview-image" />
+          <img v-if="file.url || (file as any).serverPath" :src="file.url || (file as any).serverPath" class="preview-image" />
           <el-icon v-else class="image-icon"><Picture /></el-icon>
           <span class="file-name">{{ file.name }}</span>
           <el-icon v-if="!disabled" class="delete-icon" @click.stop="onDeleteFile(file)">
@@ -63,6 +63,7 @@
 import { computed, ref } from 'vue'
 import { Plus, Upload, Picture, Delete, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { showUploadError } from '@/utils/uploadError'
 import { toFileUrl } from '@/utils/file'
 
 // Props
@@ -135,14 +136,14 @@ function handleDrop(e: DragEvent): void {
     // 检查文件类型 - 只接受 JPG 和 PNG
     const isValidType = file.type === 'image/jpeg' || file.type === 'image/png'
     if (!isValidType) {
-      ElMessage.error(`${file.name} 不是JPG或PNG格式，已跳过`)
+      showUploadError(`${file.name} 不是JPG或PNG格式，已跳过`)
       continue
     }
 
     // 检查文件大小 - 改为 5M
     const maxSize = 5 * 1024 * 1024
     if (file.size > maxSize) {
-      ElMessage.error(`${file.name} 超过5MB，已跳过`)
+      showUploadError(`${file.name} 超过5MB，已跳过`)
       continue
     }
 
@@ -164,13 +165,13 @@ function beforeUpload(file: File): boolean {
   // 只接受 JPG 和 PNG 格式
   const isValidType = file.type === 'image/jpeg' || file.type === 'image/png'
   if (!isValidType) {
-    ElMessage.error('仅支持JPG、PNG图片格式')
+    showUploadError('仅支持JPG、PNG图片格式')
     return false
   }
 
   const maxSize = 5 * 1024 * 1024
   if (file.size > maxSize) {
-    ElMessage.error('文件大小不能超过5MB')
+    showUploadError('文件大小不能超过5MB')
     return false
   }
 

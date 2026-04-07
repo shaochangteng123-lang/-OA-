@@ -83,28 +83,44 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     isValidInvoice: false,
   }
 
+  // 判断是否为铁路电子客票
+  // "电子客票号"是铁路客票独有字段，普通发票不会有，单独出现即可确认
+  // 另外兼容 pdf-parse 能完整提取文本的情况（同时有"铁路电子客票"标题）
+  const textNoSpaceForRail = text.replace(/\s+/g, '')
+  const isRailTicket =
+    textNoSpaceForRail.includes('电子客票号') ||
+    (textNoSpaceForRail.includes('铁路电子客票') && textNoSpaceForRail.includes('12306'))
+
   // 1. 提取金额（价税合计）- 改进的匹配模式
   const amountPatterns = [
-    // 最高优先级：匹配大写金额后面紧跟的小写金额（支持换行和制表符）
-    // 例如：捌佰伍拾贰圆整 ¥852.00 或 贰佰肆拾玖圆整 \t¥249.00
-    // 这个模式优先级最高，因为大写金额后面的小写金额最准确
-    /[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\t\n]*[¥￥]\s*([\d,]+\.\d{2})/,
+    // 铁路电子客票专属：仅当确认是铁路客票时才匹配"票价"/"退票费"字段
+    // 普通票用"票价"，改签差额退票用"退票费"，两者都只在铁路客票下启用
+    ...(isRailTicket ? [
+      /票\s*价[：:\s]*[¥￥？?]?\s*([\d,]+\.?\d{0,2})/,
+      /退\s*票\s*费[：:\s]*[¥￥？?]?\s*([\d,]+\.?\d{0,2})/,
+    ] : []),
 
-    // 匹配 "价税合计" 后面的大写金额和小写金额（但要确保匹配的是大写金额后的小写金额）
-    // 例如：价税合计（大写） （小写）... ¥11.00 壹拾壹圆整
-    /价\s*税\s*合\s*计[\s\S]{0,200}?[¥￥]\s*([\d,]+\.\d{2})\s*[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分]/,
+    // 最高优先级：匹配大写金额后面紧跟的小写金额（支持换行和制表符）
+    // 补全所有中文大写数字：零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分
+    /[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\t\n]*[¥￥?？]\s*([\d,]+\.\d{2})/,
+
+    // 匹配 "价税合计" 后面的大写金额和小写金额
+    /价\s*税\s*合\s*计[\s\S]{0,200}?[¥￥?？]\s*([\d,]+\.\d{2})\s*[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分]/,
 
     // 匹配 "价税合计" 区域内的金额（支持换行和空格）
-    /价\s*税\s*合\s*计[\s\S]{0,150}?[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥]?\s*([\d,]+\.\d{2})/,
+    /价\s*税\s*合\s*计[\s\S]{0,150}?[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
 
-    // 匹配 "（小写）" 后面的金额（支持中英文括号）
-    /[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥]?\s*([\d,]+\.\d{2})/,
+    // 匹配 "（小写）" 后面的金额（¥ 和数字之间可以有空格，¥ 可能被识别为 ?）
+    /[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
 
-    // OCR 兼容：¥ 可能被识别为 "羊"、"¢" 等，匹配 "小写" 后面的金额
-    /小\s*写\s*[）)]\s*[¥￥羊¢]?\s*([\d,]+\.\d{2})/,
+    // OCR 特殊情况："（小写)" 和金额分行，金额在下一行（无 ¥ 前缀）
+    /[（(]\s*小\s*写\s*[）)]\s*\n\s*([\d,]+\.\d{2})/,
 
-    // OCR 兼容：匹配大写金额字符（含OCR误差）后面的数字金额
-    /[壹贰叁肆伍陆柒捌玖拾佰仟万亿圆整角分炳歪]+[\s\t\n]*[¥￥羊¢]?\s*([\d,]+\.\d{2})/,
+    // OCR 兼容：¥ 可能被识别为 "羊"、"¢"、"?" 等，匹配 "小写" 后面的金额
+    /小\s*写\s*[）)]\s*[¥￥羊¢?？]?\s*([\d,]+\.\d{2})/,
+
+    // OCR 兼容：匹配大写金额字符（含 OCR 误差，如 "参" 代替 "叁"）后面的数字金额
+    /[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分炳歪]+[\s\t\n]*[¥￥羊¢?？]?\s*([\d,]+\.\d{2})/,
 
     // 匹配 "合计" 后面的金额（但排除价税合计）
     /(?<!价\s*税\s*)合\s*计[：:\s]*[¥￥]?\s*([\d,]+\.\d{2})/,
@@ -276,12 +292,18 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
   }
 
   // 8. 提取报销类型（从项目名称中提取）
-  // 格式：*保险服务*附加公共场所 -> 提取 "保险服务"
-  const typePattern = /\*([^*]+)\*/
-  const typeMatch = text.match(typePattern)
-  if (typeMatch && typeMatch[1]) {
-    result.type = typeMatch[1].trim()
-    console.log('📋 提取到报销类型:', result.type)
+  // 铁路电子客票直接填充固定类型
+  if (isRailTicket) {
+    result.type = '铁路电子客票'
+    console.log('📋 铁路电子客票，自动填充报销类型:', result.type)
+  } else {
+    // 格式：*保险服务*附加公共场所 -> 提取 "保险服务"
+    const typePattern = /\*([^*]+)\*/
+    const typeMatch = text.match(typePattern)
+    if (typeMatch && typeMatch[1]) {
+      result.type = typeMatch[1].trim()
+      console.log('📋 提取到报销类型:', result.type)
+    }
   }
 
   // 判断是否为有效发票（严格验证：必须同时满足所有条件）
@@ -289,9 +311,21 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
   const hasInvoiceKeyword = textNoSpace.includes('发票') || textNoSpace.includes('電子發票')
   const hasAmount = result.amount > 0
   const hasDate = !!result.date && /^\d{4}-\d{2}-\d{2}$/.test(result.date)
-  const hasInvoiceNumber = !!result.invoiceNumber && result.invoiceNumber.length >= 8
 
-  result.isValidInvoice = hasInvoiceKeyword && hasAmount && hasDate && hasInvoiceNumber
+  // 铁路电子客票：发票号码 或 电子客票号 满足其一即可
+  const hasInvoiceNumber = !!result.invoiceNumber && result.invoiceNumber.length >= 8
+  const hasRailTicketNo = isRailTicket && textNoSpace.includes('电子客票号')
+
+  console.log('🔍 有效性验证:', {
+    isRailTicket,
+    hasInvoiceKeyword,
+    hasAmount,
+    hasDate,
+    hasInvoiceNumber,
+    hasRailTicketNo,
+  })
+
+  result.isValidInvoice = hasInvoiceKeyword && hasAmount && hasDate && (hasInvoiceNumber || hasRailTicketNo)
 
   console.log('✅ 发票解析完成:', {
     amount: result.amount,
@@ -381,8 +415,9 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
       result = parseInvoiceText(text)
     }
 
-    // 第二步：如果 pdf-parse 未提取到关键字段，回退到图片 OCR
-    const hasKeyFields = result && (result.amount > 0 || result.date || result.invoiceNumber)
+    // 第二步：如果 pdf-parse 未能提取完整关键字段（金额、日期、发票号 三者必须齐全），回退到图片 OCR
+    // 金额是最关键字段，只要金额识别失败就必须回退
+    const hasKeyFields = result && result.amount > 0 && result.date && result.invoiceNumber
     if (!hasKeyFields) {
       console.log('⚠️ pdf-parse 未提取到关键字段，回退到 PDF 转图片 + PaddleOCR...')
 
@@ -390,15 +425,19 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
         const imageText = await extractTextFromPdfViaImage(filePath)
 
         if (imageText && imageText.trim().length > 0) {
-          result = parseInvoiceText(imageText)
+          const imageResult = parseInvoiceText(imageText)
+          // 只有图片识别结果更完整时才替换
+          if (imageResult && imageResult.amount > 0 && imageResult.date && imageResult.invoiceNumber) {
+            result = imageResult
+          }
         }
       } catch (imageOcrError) {
         console.error('⚠️ 图片 OCR 回退也失败:', imageOcrError)
       }
     }
 
-    // 最终判断
-    if (!result || !result.isValidInvoice) {
+    // 最终判断：必须同时满足 isValidInvoice 和三个关键字段齐全
+    if (!result || !result.isValidInvoice || !result.amount || !result.date || !result.invoiceNumber) {
       throw new Error('此不是有效发票，请重新上传')
     }
 

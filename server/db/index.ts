@@ -687,6 +687,71 @@ export async function initDatabase() {
       console.log('ℹ️  is_deduction 字段已存在或迁移失败:', error.message)
     }
 
+    // 数据库迁移：新建 payment_proof_hashes 表，每张付款回单哈希单独一行，防止单张回单跨批次重放
+    try {
+      await ddlClient.query(`
+        CREATE TABLE IF NOT EXISTS payment_proof_hashes (
+          id TEXT PRIMARY KEY,
+          file_hash TEXT NOT NULL UNIQUE,
+          proof_no TEXT,
+          batch_id TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        )
+      `)
+
+      // 兼容旧表：检查 proof_no 列是否存在，不存在则添加（同时处理旧字段 transaction_id）
+      const proofNoCheck = await ddlClient.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'payment_proof_hashes' AND column_name = 'proof_no'
+      `)
+      if (proofNoCheck.rows.length === 0) {
+        // 检查是否有旧字段 transaction_id，有则重命名
+        const oldColCheck = await ddlClient.query(`
+          SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'payment_proof_hashes' AND column_name = 'transaction_id'
+        `)
+        if (oldColCheck.rows.length > 0) {
+          await ddlClient.query(`ALTER TABLE payment_proof_hashes RENAME COLUMN transaction_id TO proof_no`)
+          console.log('✅ 数据库迁移：transaction_id 重命名为 proof_no')
+        } else {
+          await ddlClient.query(`ALTER TABLE payment_proof_hashes ADD COLUMN proof_no TEXT`)
+          console.log('✅ 数据库迁移：payment_proof_hashes 添加 proof_no 字段')
+        }
+      }
+
+      // 为 proof_no 创建唯一索引（允许 NULL，但非 NULL 值必须唯一）
+      await ddlClient.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_proof_no
+        ON payment_proof_hashes (proof_no)
+        WHERE proof_no IS NOT NULL
+      `)
+
+      console.log('✅ 数据库迁移：payment_proof_hashes 表检查完成')
+    } catch (error: any) {
+      console.log('ℹ️  payment_proof_hashes 迁移失败:', error.message)
+    }
+
+    // 数据库迁移：新建 user_uploaded_files 表，替代 session 存储临时上传的发票文件
+    // 解决 session 过期/刷新后草稿发票无法预览的问题
+    try {
+      await ddlClient.query(`
+        CREATE TABLE IF NOT EXISTS user_uploaded_files (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          file_path TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(user_id, file_path)
+        )
+      `)
+      await ddlClient.query(`
+        CREATE INDEX IF NOT EXISTS idx_user_uploaded_files_user_id
+        ON user_uploaded_files (user_id)
+      `)
+      console.log('✅ 数据库迁移：user_uploaded_files 表检查完成')
+    } catch (error: any) {
+      console.log('ℹ️  user_uploaded_files 迁移失败:', error.message)
+    }
+
   // DDL 完成，销毁初始化连接，确保后续查询用干净的连接
   } finally {
     await ddlClient.end()

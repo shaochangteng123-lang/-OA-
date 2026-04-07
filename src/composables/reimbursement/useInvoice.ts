@@ -3,6 +3,7 @@
  */
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
+import { showUploadError } from '@/utils/uploadError'
 import { toFileUrl } from '@/utils/file'
 import {
   validateFile,
@@ -92,7 +93,7 @@ export function useInvoice() {
   function beforeUpload(file: File): boolean {
     const result = validateFile(file, UPLOAD_CONFIG.MAX_FILE_SIZE)
     if (!result.valid) {
-      ElMessage.error(result.message)
+      showUploadError(result.message)
       return false
     }
     return true
@@ -112,13 +113,13 @@ export function useInvoice() {
       fileName.endsWith('.bmp')
 
     if (isImageFile) {
-      ElMessage.error('请上传正确格式的发票')
+      showUploadError('请上传正确格式的发票')
       removeFromFileList(file.uid, fileListParam)
       return
     }
 
     if (file.raw && file.raw.type !== 'application/pdf') {
-      ElMessage.error('仅支持PDF文件，单个文件不超过5M')
+      showUploadError('仅支持PDF文件，单个文件不超过5M')
       removeFromFileList(file.uid, fileListParam)
       return
     }
@@ -156,7 +157,7 @@ export function useInvoice() {
         const amountResult = validateInvoiceAmount(amount)
         if (!amountResult.valid) {
           loadingMessage.close()
-          ElMessage.error(amountResult.message)
+          showUploadError(amountResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -165,7 +166,7 @@ export function useInvoice() {
         const duplicateResult = validateInvoiceDuplicate(invoiceNumber, invoiceNumbers.value)
         if (!duplicateResult.valid) {
           loadingMessage.close()
-          ElMessage.warning(duplicateResult.message)
+          showUploadError(duplicateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -182,7 +183,7 @@ export function useInvoice() {
             const dupData = await dupRes.json()
             if (dupData.success && dupData.data?.duplicate) {
               loadingMessage.close()
-              ElMessage.warning(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
+              showUploadError(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
               removeFromFileList(file.uid, fileListParam)
               return
             }
@@ -195,7 +196,7 @@ export function useInvoice() {
         const dateResult = validateInvoiceDate(date)
         if (!dateResult.valid) {
           loadingMessage.close()
-          ElMessage.error(dateResult.message)
+          showUploadError(dateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -218,13 +219,13 @@ export function useInvoice() {
         file.serverPath = result.data.filePath
       } else {
         loadingMessage.close()
-        ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
+        showUploadError(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error) {
       loadingMessage.close()
       console.error('发票识别失败:', error)
-      ElMessage.error(`${file.name} 识别失败，请重新上传`)
+      showUploadError(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
     }
   }
@@ -235,7 +236,7 @@ export function useInvoice() {
   async function handleReceiptChange(file: any, fileListParam: any[]): Promise<void> {
     // 校验文件格式
     if (file.raw && !file.raw.type.startsWith('image/')) {
-      ElMessage.error('仅支持图片文件')
+      showUploadError('仅支持图片文件')
       removeFromFileList(file.uid, fileListParam)
       return
     }
@@ -261,7 +262,7 @@ export function useInvoice() {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ message: '上传失败' }))
         loadingMessage.close()
-        ElMessage.error(errorData.message || `上传失败 (${response.status})`)
+        showUploadError(errorData.message || `上传失败 (${response.status})`)
         removeFromFileList(file.uid, fileListParam)
         return
       }
@@ -274,7 +275,7 @@ export function useInvoice() {
         // 校验金额 - 收据必须有金额
         if (!amount || amount <= 0) {
           loadingMessage.close()
-          ElMessage.error(`${file.name} 未能识别到金额，请上传更清晰的支付截图`)
+          showUploadError(`${file.name} 未能识别到金额，请上传更清晰的支付截图`)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -282,7 +283,7 @@ export function useInvoice() {
         const amountResult = validateInvoiceAmount(amount)
         if (!amountResult.valid) {
           loadingMessage.close()
-          ElMessage.error(amountResult.message)
+          showUploadError(amountResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -292,7 +293,7 @@ export function useInvoice() {
           const dateResult = validateInvoiceDate(date)
           if (!dateResult.valid) {
             loadingMessage.close()
-            ElMessage.error(dateResult.message)
+            showUploadError(dateResult.message)
             removeFromFileList(file.uid, fileListParam)
             return
           }
@@ -305,7 +306,7 @@ export function useInvoice() {
           )
           if (duplicateInvoice) {
             loadingMessage.close()
-            ElMessage.error(`发票号码 ${invoiceNumber} 已存在，请勿重复上传`)
+            showUploadError(`发票号码 ${invoiceNumber} 已存在，请勿重复上传`)
             removeFromFileList(file.uid, fileListParam)
             return
           }
@@ -329,13 +330,13 @@ export function useInvoice() {
         file.serverPath = result.data.filePath
       } else {
         loadingMessage.close()
-        ElMessage.error(`${file.name} 识别失败：${result.message || '未知错误'}`)
+        showUploadError(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error) {
       console.error('收据识别失败:', error)
       loadingMessage.close()
-      ElMessage.error(`${file.name} 识别失败，请重新上传`)
+      showUploadError(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
     }
   }

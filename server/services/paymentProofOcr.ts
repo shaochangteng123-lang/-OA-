@@ -19,6 +19,7 @@ export interface PaymentProofOcrResult {
   payee: string          // 收款人姓名
   payeeAccount: string   // 收款账号
   amount: number         // 金额
+  proofNo: string        // 电子回单号码（用于查重）
   rawText?: string       // 原始识别文本
 }
 
@@ -63,7 +64,12 @@ function parseChineseAmount(text: string): number {
         current = 0
         lastUnit = unit
       } else {
-        result += current * unit
+        // 处理省略"壹"的情况，如"拾贰元"应为12而非2
+        if (current === 0) {
+          result += unit
+        } else {
+          result += current * unit
+        }
         current = 0
         lastUnit = unit
       }
@@ -278,6 +284,46 @@ function extractAmount(text: string, textNoSpace: string): number {
 }
 
 /**
+ * 从文本中提取电子回单号码
+ * 各银行格式不同，常见格式：
+ * - 工商银行：电子回单号码：0909-6828-9049-1100
+ * - 建设银行：电子回单号：XXXXXXXXXXXXXXXX
+ * - 招商银行：凭证号码：XXXXXXXXXXXXXXXX
+ */
+function extractProofNo(text: string, textNoSpace: string): string {
+  // 电子回单号码字符集：数字、字母、连字符（支持工商银行 XXXX-XXXX-XXXX-XXXX 格式）
+  const idPattern = '[A-Za-z0-9][A-Za-z0-9\\-]{10,30}'
+
+  const patterns = [
+    new RegExp(`电子回单号码[：:\\s]*(${idPattern})`),   // 工商银行
+    new RegExp(`电子回单号[：:\\s]*(${idPattern})`),     // 建设银行等
+    new RegExp(`回单号码[：:\\s]*(${idPattern})`),
+    new RegExp(`回单编号[：:\\s]*(${idPattern})`),
+    new RegExp(`凭证号码[：:\\s]*(${idPattern})`),
+    new RegExp(`凭证编号[：:\\s]*(${idPattern})`),
+    new RegExp(`业务流水号[：:\\s]*(${idPattern})`),
+    new RegExp(`交易流水号[：:\\s]*(${idPattern})`),
+  ]
+
+  for (const p of patterns) {
+    const m = text.match(p) || textNoSpace.match(p)
+    if (m?.[1]) {
+      const no = m[1].trim().replace(/[-\s]+$/, '') // 去掉末尾多余的连字符或空格
+      // 排除银行卡号（纯数字且长度 16-19 位）
+      if (/^\d{16,19}$/.test(no)) {
+        console.log('⚠️  疑似银行卡号，跳过:', no)
+        continue
+      }
+      console.log('✅ 识别到电子回单号码:', no)
+      return no
+    }
+  }
+
+  console.log('⚠️  未识别到电子回单号码')
+  return ''
+}
+
+/**
  * 解析付款回单文本，提取所有字段
  */
 function parsePaymentProofText(text: string, result: PaymentProofOcrResult): void {
@@ -287,12 +333,14 @@ function parsePaymentProofText(text: string, result: PaymentProofOcrResult): voi
   result.payee = extractPayee(text, textNoSpace)
   result.payeeAccount = extractPayeeAccount(text)
   result.amount = extractAmount(text, textNoSpace)
+  result.proofNo = extractProofNo(text, textNoSpace)
 
   console.log('📋 解析结果:', {
     payer: result.payer || '未识别',
     payee: result.payee || '未识别',
     payeeAccount: result.payeeAccount || '未识别',
-    amount: result.amount || '未识别'
+    amount: result.amount || '未识别',
+    proofNo: result.proofNo || '未识别',
   })
 }
 
@@ -300,27 +348,77 @@ function parsePaymentProofText(text: string, result: PaymentProofOcrResult): voi
 
 /**
  * 验证是否为付款回单
- * 判断标准：文本中包含"银行"和"回单"关键字
+ * 必须全部通过：
+ * 1. 包含"银行"+"回单"基础关键字
+ * 2. 识别到金额 > 0
+ * 3. 识别到收款人和账号（两个都要有）
+ * 4. 包含银行特有关键字（电子回单号码 / 交易流水号 / 交易时间，至少一个）
+ * 5. 不包含系统界面特征（排除截图）
  */
-function validatePaymentProof(rawText: string): {
+function validatePaymentProof(rawText: string, result: PaymentProofOcrResult): {
   isValid: boolean
   reason?: string
 } {
   const textNoSpace = rawText.replace(/\s+/g, '')
 
+  // 1. 基础关键字：必须同时包含"银行"和"回单"
   const missingFields: string[] = []
-
-  if (!textNoSpace.includes('银行')) {
-    missingFields.push('银行')
-  }
-  if (!textNoSpace.includes('回单')) {
-    missingFields.push('回单')
-  }
-
+  if (!textNoSpace.includes('银行')) missingFields.push('银行')
+  if (!textNoSpace.includes('回单')) missingFields.push('回单')
   if (missingFields.length > 0) {
     return {
       isValid: false,
       reason: `此不是付款回单，缺少必要信息：${missingFields.join('、')}`
+    }
+  }
+
+  // 2. 必须识别到金额
+  if (!result.amount || result.amount <= 0) {
+    return {
+      isValid: false,
+      reason: '无法识别回单金额，请确认上传的是真实的银行付款回单'
+    }
+  }
+
+  // 3. 收款人和收款账号必须同时识别到
+  if (!result.payee || !result.payeeAccount) {
+    const missing: string[] = []
+    if (!result.payee) missing.push('收款人姓名')
+    if (!result.payeeAccount) missing.push('收款账号')
+    return {
+      isValid: false,
+      reason: `无法识别${missing.join('和')}，请确认上传的是真实的银行付款回单`
+    }
+  }
+
+  // 4. 必须包含银行特有关键字（至少一个）
+  // 电子回单号码：工商银行等
+  // 交易流水号 / 业务流水号：其他银行
+  // 交易时间 / 记账时间：通用
+  const bankSpecificKeywords = [
+    '电子回单号码', '电子回单号',
+    '交易流水号', '业务流水号',
+    '交易时间', '记账时间',
+  ]
+  const hasSpecificKeyword = bankSpecificKeywords.some(k => textNoSpace.includes(k))
+  if (!hasSpecificKeyword) {
+    return {
+      isValid: false,
+      reason: '此不是真实的银行付款回单，请上传包含电子回单号码或交易时间的银行电子回单'
+    }
+  }
+
+  // 5. 排除系统界面特征
+  const systemInterfaceKeywords = [
+    '上传付款回单', '将文件拖到此处', '点击上传',
+    '报销单号', '报销标题', '申请人', '审批时间',
+    '收款人信息', '开户行', '银行卡号',
+  ]
+  const hasSystemKeyword = systemInterfaceKeywords.some(k => textNoSpace.includes(k))
+  if (hasSystemKeyword) {
+    return {
+      isValid: false,
+      reason: '检测到系统界面特征，请上传真实的银行付款回单，而不是系统页面截图'
     }
   }
 
@@ -358,22 +456,23 @@ export async function recognizePaymentProof(
     console.log('📄 识别文本成功，长度:', text.length, '字符')
     console.log('📄 完整识别文本:\n---START---\n' + text + '\n---END---')
 
-    // 验证是否为银行回单
-    const validation = validatePaymentProof(text)
-    if (!validation.isValid) {
-      throw new Error(validation.reason || '此不是付款回单')
-    }
-
     const result: PaymentProofOcrResult = {
       payer: '',
       payee: '',
       payeeAccount: '',
       amount: 0,
+      proofNo: '',
       rawText: text,
     }
 
     // 解析文本，提取各字段
     parsePaymentProofText(text, result)
+
+    // 验证是否为银行回单（检查关键字和必要字段）
+    const validation = validatePaymentProof(text, result)
+    if (!validation.isValid) {
+      throw new Error(validation.reason || '此不是付款回单')
+    }
 
     console.log('📋 最终结果:', {
       payer: result.payer || '未识别',

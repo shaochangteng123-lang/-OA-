@@ -62,6 +62,7 @@
 import { ref, computed, watch } from 'vue'
 import { Plus, Document, Delete, InfoFilled, WarningFilled, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { showUploadError } from '@/utils/uploadError'
 import { api } from '@/utils/api'
 
 export interface DeductionItem {
@@ -141,25 +142,7 @@ async function handleDrop(e: DragEvent): Promise<void> {
   }
 }
 
-// 本次核减小计
-const currentSubtotal = computed(() =>
-  deductionItems.value.reduce((sum, item) => sum + Number(item.amount), 0)
-)
 
-// 本年累计（包括之前已审核的 + 本次）
-const yearlyTotal = computed(() =>
-  props.yearlyDeductionUsed + currentSubtotal.value
-)
-
-// 实际生效核减金额（不能超出发票总金额）
-const effectiveDeduction = computed(() =>
-  Math.min(currentSubtotal.value, props.totalInvoiceAmount)
-)
-
-// 实际报销金额
-const actualAmount = computed(() =>
-  Math.max(0, props.totalInvoiceAmount - effectiveDeduction.value)
-)
 
 function beforeUpload(file: File): boolean {
   // 检查是否是图片文件（与发票上传逻辑一致）
@@ -172,20 +155,20 @@ function beforeUpload(file: File): boolean {
     fileName.endsWith('.bmp')
 
   if (isImageFile) {
-    ElMessage.error('请上传正确格式的发票')
+    showUploadError('请上传正确格式的发票')
     return false
   }
 
   // 检查PDF格式
   if (file.type !== 'application/pdf') {
-    ElMessage.error('仅支持PDF文件')
+    showUploadError('仅支持PDF文件')
     return false
   }
 
   // 检查文件大小
   const maxSize = 5 * 1024 * 1024
   if (file.size > maxSize) {
-    ElMessage.error('文件大小不能超过5MB')
+    showUploadError('文件大小不能超过5MB')
     return false
   }
 
@@ -230,20 +213,16 @@ async function onFileChange(file: any): Promise<void> {
       // 前端查重1：检查核减列表中是否已存在
       const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === fileHash)
       if (duplicateInDeduction) {
-        ElMessage.error('此核减发票已上传，请勿重复上传')
-        if (uploadRef.value) {
-          uploadRef.value.handleRemove(file)
-        }
+        showUploadError('此核减发票已上传，请勿重复上传')
+        fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
         return
       }
 
       // 前端查重2：检查发票列表中是否已存在（交叉查重）
       const duplicateInInvoice = props.existingInvoices?.find((inv: any) => inv.fileHash === fileHash)
       if (duplicateInInvoice) {
-        ElMessage.error('此发票已在发票上传中上传，请勿重复上传')
-        if (uploadRef.value) {
-          uploadRef.value.handleRemove(file)
-        }
+        showUploadError('此发票已在发票上传中上传，请勿重复上传')
+        fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
         return
       }
 
@@ -259,7 +238,7 @@ async function onFileChange(file: any): Promise<void> {
       emit('file-change', newItem)
       ElMessage.success(`核减发票识别成功，金额：¥${newItem.amount.toFixed(2)}`)
     } else {
-      ElMessage.error(res.data.message || '上传失败')
+      showUploadError(res.data.message || '上传失败')
       // 上传失败，从 fileList 中移除该文件
       fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
     }
@@ -274,7 +253,7 @@ async function onFileChange(file: any): Promise<void> {
 
     // 优先显示后端返回的错误消息
     const errorMessage = err.response?.data?.message || '上传核减发票失败'
-    ElMessage.error(errorMessage)
+    showUploadError(errorMessage)
     // 上传失败，从 fileList 中移除该文件
     fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
   } finally {

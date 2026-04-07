@@ -11,8 +11,22 @@ import { nanoid } from 'nanoid'
 import { requireAuth, requireAdmin, requireRole } from '../middleware/auth.js'
 import { validateFilePath } from '../utils/file-validation.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
+import type { PoolClient } from 'pg'
 
 const router = Router()
+
+// 事务辅助函数
+function convertTxPlaceholders(sql: string): string {
+  let index = 0
+  return sql.replace(/\?/g, () => `$${++index}`)
+}
+async function txGet<T = any>(client: PoolClient, sql: string, ...params: any[]): Promise<T | undefined> {
+  const result = await client.query(convertTxPlaceholders(sql), params)
+  return result.rows[0] as T | undefined
+}
+async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise<void> {
+  await client.query(convertTxPlaceholders(sql), params)
+}
 
 // 格式化时间为中国时间，格式：YYYY-MM-DD HH:mm
 // 不依赖 Intl，避免 Alpine 容器 small-icu 导致乱码
@@ -2390,51 +2404,54 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
     const now = new Date().toISOString()
     const recordId = nanoid()
 
-    // 创建审批记录
-    await db.prepare(`
-      INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-      VALUES (?, ?, ?, ?, 'approve', ?, ?)
-    `).run(recordId, id, instance.current_step, userId, comment || null, now)
+    // 使用事务确保审批记录、实例状态、报销单状态原子性写入
+    await db.transaction(async (client) => {
+      // 创建审批记录
+      await txRun(client, `
+        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+        VALUES (?, ?, ?, ?, 'approve', ?, ?)
+      `, recordId, id, instance.current_step, userId, comment || null, now)
 
-    // 更新审批实例状态
-    await db.prepare(`
-      UPDATE approval_instances
-      SET status = 'approved', complete_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(now, now, id)
+      // 更新审批实例状态
+      await txRun(client, `
+        UPDATE approval_instances
+        SET status = 'approved', complete_time = ?, updated_at = ?
+        WHERE id = ?
+      `, now, now, id)
 
-    // 如果是报销单审批，同步更新报销单状态
-    if (instance.target_type === 'reimbursement') {
-      // 计算总核减金额
-      const invoices = await db.prepare(`
-        SELECT COALESCE(SUM(deducted_amount), 0) as total_deduction
-        FROM reimbursement_invoices
-        WHERE reimbursement_id = ?
-      `).get(instance.target_id) as { total_deduction: number }
+      // 如果是报销单审批，同步更新报销单状态
+      if (instance.target_type === 'reimbursement') {
+        // 计算总核减金额
+        const invoices = await txGet<{ total_deduction: number }>(client, `
+          SELECT COALESCE(SUM(deducted_amount), 0) as total_deduction
+          FROM reimbursement_invoices
+          WHERE reimbursement_id = ?
+        `, instance.target_id)
 
-      const totalDeduction = invoices?.total_deduction || 0
+        const totalDeduction = invoices?.total_deduction || 0
 
-      // 获取报销单实际金额（total_amount 已经是扣除核减后的金额）
-      const reimbursement = await db.prepare('SELECT total_amount FROM reimbursements WHERE id = ?').get(instance.target_id) as { total_amount: number } | undefined
-      const actualAmount = reimbursement?.total_amount || 0
+        // 获取报销单实际金额（total_amount 已经是扣除核减后的金额）
+        const reimbursement = await txGet<{ total_amount: number }>(client, 'SELECT total_amount FROM reimbursements WHERE id = ?', instance.target_id)
+        const actualAmount = reimbursement?.total_amount || 0
 
-      // 实际报销金额为0时（全额核减），直接完成，无需付款流程
-      if (actualAmount <= 0) {
-        await db.prepare(`
-          UPDATE reimbursements
-          SET status = 'completed', approve_time = ?, approver = ?, deduction_amount = ?, completed_time = ?, updated_at = ?
-          WHERE id = ?
-        `).run(now, userName || '系统', totalDeduction, now, now, instance.target_id)
-        console.log('✅ 报销单全额核减，直接完成:', instance.target_id, '核减金额:', totalDeduction)
-      } else {
-        await db.prepare(`
-          UPDATE reimbursements
-          SET status = 'approved', approve_time = ?, approver = ?, deduction_amount = ?, updated_at = ?
-          WHERE id = ?
-        `).run(now, userName || '系统', totalDeduction, now, instance.target_id)
-        console.log('✅ 同步更新报销单状态为已通过:', instance.target_id, '核减金额:', totalDeduction)
+        // 实际报销金额为0时（全额核减），直接完成，无需付款流程
+        if (actualAmount <= 0) {
+          await txRun(client, `
+            UPDATE reimbursements
+            SET status = 'completed', approve_time = ?, approver = ?, deduction_amount = ?, completed_time = ?, updated_at = ?
+            WHERE id = ?
+          `, now, userName || '系统', totalDeduction, now, now, instance.target_id)
+          console.log('✅ 报销单全额核减，直接完成:', instance.target_id, '核减金额:', totalDeduction)
+        } else {
+          await txRun(client, `
+            UPDATE reimbursements
+            SET status = 'approved', approve_time = ?, approver = ?, deduction_amount = ?, updated_at = ?
+            WHERE id = ?
+          `, now, userName || '系统', totalDeduction, now, instance.target_id)
+          console.log('✅ 同步更新报销单状态为已通过:', instance.target_id, '核减金额:', totalDeduction)
+        }
       }
-    }
+    })
 
     console.log('✅ 审批通过:', { instanceId: id, approverId: userId })
 
@@ -2503,30 +2520,33 @@ router.post('/:id/reject', requireRole(['super_admin', 'admin', 'general_manager
 
     const now = new Date().toISOString()
     const recordId = nanoid()
+    const rejectUserName = req.session?.user?.name
 
-    // 创建审批记录
-    await db.prepare(`
-      INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-      VALUES (?, ?, ?, ?, 'reject', ?, ?)
-    `).run(recordId, id, instance.current_step, userId, comment, now)
+    // 使用事务确保审批记录、实例状态、报销单状态原子性写入
+    await db.transaction(async (client) => {
+      // 创建审批记录
+      await txRun(client, `
+        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+        VALUES (?, ?, ?, ?, 'reject', ?, ?)
+      `, recordId, id, instance.current_step, userId, comment, now)
 
-    // 更新审批实例状态
-    await db.prepare(`
-      UPDATE approval_instances
-      SET status = 'rejected', complete_time = ?, updated_at = ?
-      WHERE id = ?
-    `).run(now, now, id)
-
-    // 如果是报销单审批，同步更新报销单状态
-    if (instance.target_type === 'reimbursement') {
-      const userName = req.session?.user?.name
-      await db.prepare(`
-        UPDATE reimbursements
-        SET status = 'rejected', approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
+      // 更新审批实例状态
+      await txRun(client, `
+        UPDATE approval_instances
+        SET status = 'rejected', complete_time = ?, updated_at = ?
         WHERE id = ?
-      `).run(now, userName || '系统', comment, now, instance.target_id)
-      console.log('✅ 同步更新报销单状态为已驳回:', instance.target_id)
-    }
+      `, now, now, id)
+
+      // 如果是报销单审批，同步更新报销单状态
+      if (instance.target_type === 'reimbursement') {
+        await txRun(client, `
+          UPDATE reimbursements
+          SET status = 'rejected', approve_time = ?, approver = ?, reject_reason = ?, updated_at = ?
+          WHERE id = ?
+        `, now, rejectUserName || '系统', comment, now, instance.target_id)
+        console.log('✅ 同步更新报销单状态为已驳回:', instance.target_id)
+      }
+    })
 
     console.log('✅ 审批驳回:', { instanceId: id, approverId: userId, reason: comment })
 

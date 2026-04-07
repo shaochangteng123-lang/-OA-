@@ -425,7 +425,7 @@ async function validateForm(checkAmount: boolean = false): Promise<boolean> {
   }
 
   // 提交时校验金额是否达到大额报销标准
-  if (checkAmount && invoice.totalAmount.value <= LARGE_AMOUNT_THRESHOLD) {
+  if (checkAmount && invoice.totalAmount.value < LARGE_AMOUNT_THRESHOLD) {
     ElMessage.warning(`发票总金额 ¥${invoice.totalAmount.value} 不足 ${LARGE_AMOUNT_THRESHOLD} 元，不属于大额报销范围，请使用基础报销`)
     return false
   }
