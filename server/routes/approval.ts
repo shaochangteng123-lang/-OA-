@@ -79,13 +79,14 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const monthEndBeijing = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59))
     const monthEnd = new Date(monthEndBeijing.getTime() - 8 * 60 * 60 * 1000).toISOString()
 
-    // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有
+    // 财务区审批中心：排除转正类型（转正只在人力资源区审批中心）
+    // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有报销
     const typeFilter = userRole === 'admin'
       ? `AND (
           ai.type IN ('reimbursement_basic', 'reimbursement_large')
           OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded'))
         )`
-      : ''
+      : `AND ai.target_type = 'reimbursement'`
 
     // admin 对 reimbursements 表的类型过滤（不经过 approval_instances）
     const reimbursementTypeFilter = userRole === 'admin'
@@ -593,6 +594,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
     const conditions: string[] = [
       `ai.status NOT IN ('rejected', 'withdrawn', 'cancelled')`,
       `(ai.target_type != 'reimbursement' OR r.id IS NOT NULL)`,
+      `ai.target_type != 'probation'`,
     ]
     const params: unknown[] = []
 
@@ -1393,8 +1395,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString()
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59).toISOString()
 
-    // 1. 待审批数量和金额（统计商务报销和转正申请）
-    // 商务报销统计
+    // 1. 待审批数量和金额（只统计商务报销，转正申请在人力资源区审批中心）
     const pendingReimbursement = await db.prepare(`
       SELECT COUNT(*) as count, COALESCE(SUM(r.total_amount), 0) as amount
       FROM approval_instances ai
@@ -1403,15 +1404,8 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
       AND r.type = 'business'
     `).get() as { count: number; amount: number }
 
-    // 转正申请统计
-    const pendingProbation = await db.prepare(`
-      SELECT COUNT(*) as count
-      FROM probation_confirmations
-      WHERE status = 'submitted'
-    `).get() as { count: number }
-
     const pendingStats = {
-      count: pendingReimbursement.count + pendingProbation.count,
+      count: pendingReimbursement.count,
       amount: pendingReimbursement.amount,
     }
 
@@ -1514,75 +1508,29 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
       reimbursement_status: string
     }>
 
-    // 查询待审批的转正申请
-    const probations = await db.prepare(`
-      SELECT
-        pc.id,
-        pc.employee_id,
-        pc.status,
-        pc.submit_time,
-        pc.created_at,
-        e.name as employee_name,
-        u.avatar_url as employee_avatar
-      FROM probation_confirmations pc
-      LEFT JOIN employee_profiles e ON pc.employee_id = e.id
-      LEFT JOIN users u ON e.user_id = u.id
-      WHERE pc.status = 'submitted'
-      ORDER BY pc.submit_time ASC
-    `).all() as Array<{
-      id: string
-      employee_id: string
-      status: string
-      submit_time: string
-      created_at: string
-      employee_name: string
-      employee_avatar: string | null
-    }>
-
-    // 合并商务报销和转正申请
-    const result = [
-      ...reimbursements.map((item) => ({
-        id: item.id,
-        type: 'business',
-        targetId: item.target_id,
-        targetType: item.target_type,
-        applicantId: item.applicant_id,
-        applicantName: item.applicant_name,
-        applicantAvatar: item.applicant_avatar,
-        currentStep: item.current_step,
-        status: item.status,
-        submitTime: formatDateTime(item.submit_time),
-        createdAt: formatDateTime(item.created_at),
-        reimbursementInfo: {
-          title: normalizeReimbursementTitle(item.reimbursement_title),
-          amount: item.reimbursement_amount,
-        },
-        reimbursementType: item.reimbursement_type,
-        reimbursementScope: item.reimbursement_scope,
-        client: item.client,
-        serviceTarget: item.service_target,
-        reimbursementStatus: item.reimbursement_status,
-      })),
-      ...probations.map((item) => ({
-        id: item.id,
-        type: 'probation',
-        targetId: item.id,
-        targetType: 'probation',
-        applicantId: item.employee_id,
-        applicantName: item.employee_name,
-        applicantAvatar: item.employee_avatar,
-        currentStep: 1,
-        status: item.status,
-        submitTime: formatDateTime(item.submit_time),
-        createdAt: formatDateTime(item.created_at),
-        reimbursementInfo: null,
-        reimbursementType: null,
-        reimbursementScope: null,
-        client: null,
-        serviceTarget: null,
-        reimbursementStatus: null,
-      })),
-    ]
+    // 只返回商务报销，转正申请在人力资源区审批中心处理
+    const result = reimbursements.map((item) => ({
+      id: item.id,
+      type: 'business',
+      targetId: item.target_id,
+      targetType: item.target_type,
+      applicantId: item.applicant_id,
+      applicantName: item.applicant_name,
+      applicantAvatar: item.applicant_avatar,
+      currentStep: item.current_step,
+      status: item.status,
+      submitTime: formatDateTime(item.submit_time),
+      createdAt: formatDateTime(item.created_at),
+      reimbursementInfo: {
+        title: normalizeReimbursementTitle(item.reimbursement_title),
+        amount: item.reimbursement_amount,
+      },
+      reimbursementType: item.reimbursement_type,
+      reimbursementScope: item.reimbursement_scope,
+      client: item.client,
+      serviceTarget: item.service_target,
+      reimbursementStatus: item.reimbursement_status,
+    }))
 
     res.json({
       success: true,
@@ -2149,14 +2097,15 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     const data: Record<string, any> = {}
 
     // Admin/Super Admin: 审批中心待办（包含所有未完成流程：pending、approved、payment_uploaded）
+    // 财务区审批中心：排除转正类型（转正只在人力资源区审批中心）
     if (user.role === 'admin' || user.role === 'super_admin') {
-      // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有
+      // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有报销
       const typeFilter = user.role === 'admin'
         ? `AND (
             ai.type IN ('reimbursement_basic', 'reimbursement_large')
             OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded'))
           )`
-        : ''
+        : `AND ai.target_type = 'reimbursement'`
       const approvalPending = await db.prepare(`
         SELECT COUNT(*) as count FROM approval_instances ai
         LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
@@ -2189,7 +2138,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         SELECT COUNT(*) as count
         FROM probation_confirmations pc
         INNER JOIN approval_instances ai ON ai.target_type = 'probation' AND ai.target_id = pc.id
-        WHERE pc.status = 'pending' AND ai.status = 'pending'
+        WHERE pc.status = 'submitted' AND ai.status = 'pending'
       `).get() as { count: number }
 
       // 总经理待审批 = 商务报销待审批 + 转正待审批
@@ -2227,7 +2176,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myReimbursementLargeRejected = rejectedMap['large'] || 0
     data.myReimbursementBusinessRejected = rejectedMap['business'] || 0
 
-    // 所有用户: 转正待提交（试用期且未提交申请）
+    // 所有用户: 转正待提交（试用期且被驳回）
     const profile = await db.prepare(`
       SELECT ep.id, ep.employment_status FROM employee_profiles ep
       WHERE ep.user_id = ?
@@ -2238,9 +2187,18 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         SELECT status FROM probation_confirmations WHERE employee_id = ?
       `).get(profile.id) as { status: string } | undefined
 
-      data.myProbationPending = !confirmation || confirmation.status === 'pending'
+      // 只有被驳回状态才显示待办提示
+      data.myProbationPending = confirmation?.status === 'rejected'
     } else {
       data.myProbationPending = false
+    }
+
+    // Admin: 转正被驳回数量（用于人力资源区菜单栏提示）
+    if (user.role === 'admin' || user.role === 'super_admin') {
+      const probationRejected = await db.prepare(`
+        SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'rejected'
+      `).get() as { count: number }
+      data.probationRejected = probationRejected.count
     }
 
     res.json({ success: true, data })

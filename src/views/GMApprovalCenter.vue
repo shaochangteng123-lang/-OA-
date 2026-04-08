@@ -85,10 +85,7 @@
             </el-table-column>
             <el-table-column label="标题/金额" min-width="150" align="center">
               <template #default="{ row }">
-                <div v-if="row.type === 'probation'">
-                  <div>转正申请</div>
-                </div>
-                <div v-else-if="row.reimbursementInfo">
+                <div v-if="row.reimbursementInfo">
                   <div>{{ normalizeReimbursementTitle(row.reimbursementInfo.title) }}</div>
                   <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
                     ¥{{ row.reimbursementInfo.amount.toFixed(2) }}
@@ -98,9 +95,8 @@
               </template>
             </el-table-column>
             <el-table-column label="类型" min-width="80" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.type === 'probation'" type="success" size="small">转正申请</el-tag>
-                <el-tag v-else type="primary" size="small">商务报销</el-tag>
+              <template #default>
+                <el-tag type="primary" size="small">商务报销</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
@@ -133,46 +129,28 @@
             <el-table-column label="操作" min-width="280" align="center">
               <template #default="{ row }">
                 <div class="action-buttons">
-                  <template v-if="row.type === 'probation'">
-                    <el-button
-                      type="primary"
-                      size="small"
-                      :icon="View"
-                      @click="handleViewProbation(row)"
-                    >
-                      详情
-                    </el-button>
-                    <el-button type="success" size="small" :icon="Check" @click="handleApproveProbation(row)">
-                      通过
-                    </el-button>
-                    <el-button type="danger" size="small" :icon="Close" @click="handleRejectProbation(row)">
-                      驳回
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <el-button
-                      type="primary"
-                      size="small"
-                      :icon="View"
-                      @click="handleViewReimbursement(row)"
-                    >
-                      详情
-                    </el-button>
-                    <el-button
-                      type="info"
-                      size="small"
-                      :icon="List"
-                      @click="handleViewApprovalProcess(row)"
-                    >
-                      审批流程
-                    </el-button>
-                    <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
-                      通过
-                    </el-button>
-                    <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
-                      驳回
-                    </el-button>
-                  </template>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :icon="View"
+                    @click="handleViewReimbursement(row)"
+                  >
+                    详情
+                  </el-button>
+                  <el-button
+                    type="info"
+                    size="small"
+                    :icon="List"
+                    @click="handleViewApprovalProcess(row)"
+                  >
+                    审批流程
+                  </el-button>
+                  <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
+                    通过
+                  </el-button>
+                  <el-button type="danger" size="small" :icon="Close" @click="handleReject(row)">
+                    驳回
+                  </el-button>
                 </div>
               </template>
             </el-table-column>

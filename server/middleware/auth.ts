@@ -68,5 +68,8 @@ export function requireRole(roles: string[]) {
 // 快捷中间件：仅管理员
 export const requireAdmin = requireRole(['super_admin', 'admin'])
 
+// 快捷中间件：管理员或总经理
+export const requireAdminOrGM = requireRole(['super_admin', 'admin', 'general_manager'])
+
 // 快捷中间件：仅超级管理员
 export const requireSuperAdmin = requireRole(['super_admin'])

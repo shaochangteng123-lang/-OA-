@@ -4,7 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
-import { requireAuth, requireAdmin } from '../middleware/auth.js'
+import { requireAuth, requireAdmin, requireAdminOrGM } from '../middleware/auth.js'
 import type { ProbationConfirmation, ProbationConfirmationWithEmployee, ProbationDocument, ProbationTemplate } from '../types/database.js'
 import { nanoid } from 'nanoid'
 
@@ -248,10 +248,10 @@ router.get('/templates/:id/download', requireAuth, async (req, res) => {
 
 // ==================== 转正申请管理 API ====================
 
-// 获取待转正员工列表（管理员）
-router.get('/list', requireAdmin, async (req, res) => {
+// 获取待转正员工列表（管理员或总经理）
+router.get('/list', requireAdminOrGM, async (req, res) => {
   try {
-    const { status, page = 1, pageSize = 20 } = req.query
+    const { status, thisMonth, page = 1, pageSize = 20 } = req.query
 
     // 使用 employee_profiles 表中的 hire_date 作为入职日期，保持与用户端一致
     let sql = `
@@ -269,6 +269,13 @@ router.get('/list', requireAdmin, async (req, res) => {
       params.push(status)
     }
 
+    if (thisMonth === '1' && status === 'approved') {
+      const now = new Date()
+      const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+      sql += ` AND pc.approve_time >= ?`
+      params.push(monthStart)
+    }
+
     // 获取总数
     let countSql = `
       SELECT COUNT(*) as total
@@ -276,10 +283,18 @@ router.get('/list', requireAdmin, async (req, res) => {
       LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
       WHERE 1=1
     `
+    const countParams: any[] = []
     if (status) {
       countSql += ` AND pc.status = ?`
+      countParams.push(status)
     }
-    const countResult = await db.prepare(countSql).get(...(status ? [status] : [])) as { total: number }
+    if (thisMonth === '1' && status === 'approved') {
+      const now = new Date()
+      const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+      countSql += ` AND pc.approve_time >= ?`
+      countParams.push(monthStart)
+    }
+    const countResult = await db.prepare(countSql).get(...countParams) as { total: number }
 
     // 分页
     const offset = (Number(page) - 1) * Number(pageSize)
@@ -329,7 +344,7 @@ router.get('/list', requireAdmin, async (req, res) => {
 })
 
 // 获取转正统计数据（管理员）
-router.get('/statistics', requireAdmin, async (req, res) => {
+router.get('/statistics', requireAdminOrGM, async (req, res) => {
   try {
     const total = await db.prepare(`
       SELECT COUNT(*) as count FROM probation_confirmations
@@ -426,6 +441,18 @@ router.get('/my-status', requireAuth, async (req, res) => {
       `).all(confirmation.id) as ProbationDocument[]
     }
 
+    // 是否有过提交历史（用于判断撤回后是否可以删除）
+    let hasHistory = false
+    if (confirmation) {
+      const historyCount = await db.prepare(`
+        SELECT COUNT(*) as count FROM approval_records ar
+        JOIN approval_instances ai ON ar.instance_id = ai.id
+        WHERE ai.target_id = ? AND ai.target_type = 'probation'
+        AND ar.action IN ('submit', 'resubmit')
+      `).get(confirmation.id) as { count: number } | undefined
+      hasHistory = (historyCount?.count ?? 0) > 0
+    }
+
     res.json({
       success: true,
       data: {
@@ -438,6 +465,7 @@ router.get('/my-status', requireAuth, async (req, res) => {
           employment_status: profile.employment_status
         },
         confirmation: confirmationData,
+        hasHistory,
         documents
       }
     })
@@ -479,26 +507,57 @@ router.post('/apply', requireAuth, async (req, res) => {
       }
     }
 
-    const now = new Date().toISOString()
-
-    if (existing) {
-      // 更新现有申请
-      await db.prepare(`
-        UPDATE probation_confirmations SET status = 'submitted', submit_time = ?, updated_at = ? WHERE id = ?
-      `).run(now, now, existing.id)
-
-      const updated = await db.prepare(`
-        SELECT * FROM probation_confirmations WHERE id = ?
-      `).get(existing.id)
-
-      res.json({
-        success: true,
-        message: '转正申请已提交',
-        data: updated
-      })
-    } else {
+    if (!existing) {
       return res.status(400).json({ success: false, message: '转正记录不存在，请联系管理员' })
     }
+
+    // 检查是否已上传文件
+    const docCount = await db.prepare(`
+      SELECT COUNT(*) as count FROM probation_documents WHERE confirmation_id = ?
+    `).get(existing.id) as { count: number }
+    if (Number(docCount.count) === 0) {
+      return res.status(400).json({ success: false, message: '请先上传转正申请表' })
+    }
+
+    const now = new Date().toISOString()
+
+    // 更新转正申请状态为已提交
+    await db.prepare(`
+      UPDATE probation_confirmations SET status = 'submitted', submit_time = ?, updated_at = ? WHERE id = ?
+    `).run(now, now, existing.id)
+
+    // 将旧的审批实例（如有）关闭，然后新建审批实例（支持驳回后重新提交）
+    const hadRejected = existing.status === 'rejected'
+    await db.prepare(`
+      UPDATE approval_instances SET status = 'cancelled', updated_at = ?
+      WHERE target_id = ? AND target_type = 'probation' AND status = 'pending'
+    `).run(now, existing.id)
+
+    const instanceId = nanoid()
+    await db.prepare(`
+      INSERT INTO approval_instances (
+        id, flow_id, type, target_id, target_type,
+        applicant_id, current_step, status, submit_time, created_at, updated_at
+      ) VALUES (?, NULL, 'probation', ?, 'probation', ?, 1, 'pending', ?, ?, ?)
+    `).run(instanceId, existing.id, userId, now, now, now)
+
+    // 如果是驳回后重新提交，记录 resubmit；否则记录 submit
+    const submitAction = hadRejected ? 'resubmit' : 'submit'
+    const submitComment = hadRejected ? '员工驳回后重新提交转正申请' : '员工提交转正申请'
+    await db.prepare(`
+      INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+      VALUES (?, ?, 0, ?, ?, ?, ?)
+    `).run(nanoid(), instanceId, userId, submitAction, submitComment, now)
+
+    const updated = await db.prepare(`
+      SELECT * FROM probation_confirmations WHERE id = ?
+    `).get(existing.id)
+
+    res.json({
+      success: true,
+      message: '转正申请已提交',
+      data: updated
+    })
   } catch (error) {
     console.error('提交转正申请失败:', error)
     res.status(500).json({ success: false, message: '提交转正申请失败' })
@@ -526,14 +585,41 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
       return res.status(400).json({ success: false, message: '请先完成入职信息填写' })
     }
 
-    // 获取转正申请
-    const confirmation = await db.prepare(`
-      SELECT id FROM probation_confirmations WHERE employee_id = ?
-    `).get(profile.id) as { id: string } | undefined
+    // 获取或创建转正申请记录
+    let confirmation = await db.prepare(`
+      SELECT id, status FROM probation_confirmations WHERE employee_id = ?
+    `).get(profile.id) as { id: string; status: string } | undefined
 
+    // 如果转正记录不存在，自动创建一个
     if (!confirmation) {
+      // 计算试用期截止日期（入职 + 6个月）
+      const hireDate = await db.prepare(`
+        SELECT hire_date FROM employee_profiles WHERE id = ?
+      `).get(profile.id) as { hire_date: string } | undefined
+
+      let probationEndDate: string | null = null
+      if (hireDate?.hire_date) {
+        const hireDateObj = new Date(hireDate.hire_date)
+        hireDateObj.setMonth(hireDateObj.getMonth() + 6)
+        probationEndDate = hireDateObj.toISOString().split('T')[0]
+      }
+
+      const confirmationId = nanoid()
+      const now = new Date().toISOString()
+
+      await db.prepare(`
+        INSERT INTO probation_confirmations (
+          id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `).run(confirmationId, profile.id, hireDate?.hire_date || null, probationEndDate, now, now)
+
+      confirmation = { id: confirmationId, status: 'pending' }
+    }
+
+    // 检查状态：已通过的不能再上传
+    if (confirmation.status === 'approved') {
       fs.unlinkSync(file.path)
-      return res.status(400).json({ success: false, message: '转正记录不存在' })
+      return res.status(400).json({ success: false, message: '转正已通过，无法上传文件' })
     }
 
     // 移动文件到正确目录
@@ -578,34 +664,9 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
       SELECT * FROM probation_documents WHERE id = ?
     `).get(docId)
 
-    // 自动提交转正申请：如果状态是 pending，则更新为 submitted 并创建审批实例
-    const currentConfirmation = await db.prepare(`
-      SELECT id, status, employee_id FROM probation_confirmations WHERE id = ?
-    `).get(confirmation.id) as { id: string; status: string; employee_id: string } | undefined
-
-    if (currentConfirmation && currentConfirmation.status === 'pending') {
-      const submitTime = new Date().toISOString()
-
-      // 更新转正申请状态为 submitted
-      await db.prepare(`
-        UPDATE probation_confirmations
-        SET status = 'submitted', submit_time = ?, updated_at = ?
-        WHERE id = ?
-      `).run(submitTime, submitTime, currentConfirmation.id)
-
-      // 创建审批实例
-      const instanceId = nanoid()
-      await db.prepare(`
-        INSERT INTO approval_instances (
-          id, flow_id, type, target_id, target_type,
-          applicant_id, current_step, status, submit_time, created_at, updated_at
-        ) VALUES (?, NULL, 'probation', ?, 'probation', ?, 1, 'pending', ?, ?, ?)
-      `).run(instanceId, currentConfirmation.id, userId, submitTime, submitTime, submitTime)
-    }
-
     res.json({
       success: true,
-      message: currentConfirmation?.status === 'pending' ? '文件上传成功，已自动提交转正申请' : '文件上传成功',
+      message: '文件上传成功',
       data: document
     })
   } catch (error) {
@@ -727,7 +788,7 @@ router.get('/my-doc/:docId/download', requireAuth, async (req, res) => {
 })
 
 // 获取转正申请详情（管理员）
-router.get('/:id', requireAdmin, async (req, res) => {
+router.get('/:id', requireAdminOrGM, async (req, res) => {
   try {
     const { id } = req.params
 
@@ -806,40 +867,46 @@ router.get('/:id/approval-flow', requireAuth, async (req, res) => {
       return res.status(403).json({ success: false, message: '无权查看该审批流程' })
     }
 
-    // 获取审批实例
-    const instance = await db.prepare(`
+    // 获取所有审批实例（支持多次提交的完整历史）
+    const instances = await db.prepare(`
       SELECT * FROM approval_instances
       WHERE target_id = ? AND target_type = 'probation'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(id) as any
+      ORDER BY created_at ASC
+    `).all(id) as any[]
 
-    // 获取审批记录
+    // 获取所有实例的审批记录
     let records: any[] = []
-    if (instance) {
-      records = await db.prepare(`
+    for (const inst of instances) {
+      const instRecords = await db.prepare(`
         SELECT
-          ar.id,
-          ar.instance_id,
-          ar.step,
-          ar.approver_id,
-          ar.action,
-          ar.comment,
-          ar.action_time,
-          u.name as approver_name,
-          u.role as approver_role
+          ar.id, ar.instance_id, ar.step, ar.approver_id,
+          ar.action, ar.comment, ar.action_time,
+          u.name as approver_name, u.role as approver_role
         FROM approval_records ar
         LEFT JOIN users u ON ar.approver_id = u.id
         WHERE ar.instance_id = ?
         ORDER BY ar.step ASC, ar.action_time ASC
-      `).all(instance.id) as any[]
+      `).all(inst.id) as any[]
+      records.push(...instRecords)
     }
+
+    // 按时间排序
+    records.sort((a, b) => new Date(a.action_time).getTime() - new Date(b.action_time).getTime())
+
+    // 最新的审批实例（用于状态判断）
+    const instance = instances[instances.length - 1] || null
+
+    // 获取当前总经理姓名（用于待审批状态的下一步提示）
+    const gmUser = await db.prepare(`
+      SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
+    `).get() as { name: string } | undefined
 
     res.json({
       success: true,
       data: {
         instance,
-        records
+        records,
+        gmName: gmUser?.name || null
       }
     })
   } catch (error) {
@@ -890,10 +957,10 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '审批实例不存在' })
     }
 
-    // 获取管理员用户ID（用于抄送）
-    const adminUser = await db.prepare(`
-      SELECT id FROM users WHERE role IN ('admin', 'super_admin') LIMIT 1
-    `).get() as { id: string } | undefined
+    // 获取所有管理员用户（用于抄送）
+    const adminUsers = await db.prepare(`
+      SELECT id FROM users WHERE role IN ('admin', 'super_admin')
+    `).all() as { id: string }[]
 
     // 使用事务处理多表更新
     await db.transaction(async (client) => {
@@ -917,11 +984,11 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
         VALUES (?, ?, 1, ?, 'approve', ?, ?)
       `, nanoid(), instance.id, approverId, comment || '审批通过', now)
 
-      // 4. 创建管理员抄送记录
-      if (adminUser) {
+      // 4. 为每个管理员创建抄送记录
+      for (const adminUser of adminUsers) {
         await txRun(client, `
           INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-          VALUES (?, ?, 2, ?, 'cc', '已抄送', ?)
+          VALUES (?, ?, 2, ?, 'cc', '已抄送存档', ?)
         `, nanoid(), instance.id, adminUser.id, now)
       }
 
@@ -1027,6 +1094,83 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('拒绝转正申请失败:', error)
     res.status(500).json({ success: false, message: '拒绝转正申请失败' })
+  }
+})
+
+// 员工硬删除转正记录（仅驳回状态可操作）
+router.delete('/my-record', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId
+    const profile = await db.prepare(`SELECT id FROM employee_profiles WHERE user_id = ?`).get(userId) as { id: string } | undefined
+    if (!profile) return res.status(400).json({ success: false, message: '员工信息不存在' })
+
+    const confirmation = await db.prepare(`SELECT id, status FROM probation_confirmations WHERE employee_id = ?`).get(profile.id) as { id: string; status: string } | undefined
+    if (!confirmation) return res.status(404).json({ success: false, message: '转正记录不存在' })
+
+    if (confirmation.status !== 'rejected' && confirmation.status !== 'pending') {
+      return res.status(400).json({ success: false, message: '只有被驳回或撤回的申请才能删除' })
+    }
+
+    if (confirmation.status === 'pending') {
+      // 检查是否有提交历史（撤回后才能删除）
+      const historyCount = await db.prepare(`
+        SELECT COUNT(*) as count FROM approval_records ar
+        JOIN approval_instances ai ON ar.instance_id = ai.id
+        WHERE ai.target_id = ? AND ai.target_type = 'probation'
+        AND ar.action IN ('submit', 'resubmit')
+      `).get(confirmation.id) as { count: number } | undefined
+      if ((historyCount?.count ?? 0) === 0) {
+        return res.status(400).json({ success: false, message: '只有被驳回或撤回的申请才能删除' })
+      }
+    }
+
+    // 删除物理文件
+    const docs = await db.prepare(`SELECT file_path FROM probation_documents WHERE confirmation_id = ?`).all(confirmation.id) as { file_path: string }[]
+    for (const doc of docs) {
+      const fp = path.join(process.cwd(), doc.file_path)
+      if (fs.existsSync(fp)) fs.unlinkSync(fp)
+    }
+
+    // 删除相关数据库记录
+    await db.prepare(`DELETE FROM probation_documents WHERE confirmation_id = ?`).run(confirmation.id)
+    await db.prepare(`DELETE FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE target_id = ? AND target_type = 'probation')`).run(confirmation.id)
+    await db.prepare(`DELETE FROM approval_instances WHERE target_id = ? AND target_type = 'probation'`).run(confirmation.id)
+    await db.prepare(`DELETE FROM probation_confirmations WHERE id = ?`).run(confirmation.id)
+
+    res.json({ success: true, message: '转正记录已删除' })
+  } catch (error) {
+    console.error('删除转正记录失败:', error)
+    res.status(500).json({ success: false, message: '删除转正记录失败' })
+  }
+})
+
+// 员工撤回已提交的转正申请
+router.post('/my-record/withdraw', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId
+    const profile = await db.prepare(`SELECT id FROM employee_profiles WHERE user_id = ?`).get(userId) as { id: string } | undefined
+    if (!profile) return res.status(400).json({ success: false, message: '员工信息不存在' })
+
+    const confirmation = await db.prepare(`SELECT id, status FROM probation_confirmations WHERE employee_id = ?`).get(profile.id) as { id: string; status: string } | undefined
+    if (!confirmation) return res.status(404).json({ success: false, message: '转正记录不存在' })
+    if (confirmation.status !== 'submitted') return res.status(400).json({ success: false, message: '只有待审批的申请才能撤回' })
+
+    const now = new Date().toISOString()
+
+    // 撤回：状态改回 pending，取消审批实例，记录撤回操作
+    const instance = await db.prepare(`SELECT id FROM approval_instances WHERE target_id = ? AND target_type = 'probation' AND status = 'pending'`).get(confirmation.id) as { id: string } | undefined
+
+    await db.prepare(`UPDATE probation_confirmations SET status = 'pending', submit_time = NULL, updated_at = ? WHERE id = ?`).run(now, confirmation.id)
+
+    if (instance) {
+      await db.prepare(`UPDATE approval_instances SET status = 'cancelled', updated_at = ? WHERE id = ?`).run(now, instance.id)
+      await db.prepare(`INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time) VALUES (?, ?, 0, ?, 'withdraw', '员工撤回转正申请', ?)`).run(nanoid(), instance.id, userId, now)
+    }
+
+    res.json({ success: true, message: '转正申请已撤回' })
+  } catch (error) {
+    console.error('撤回转正申请失败:', error)
+    res.status(500).json({ success: false, message: '撤回转正申请失败' })
   }
 })
 
@@ -1193,7 +1337,7 @@ router.post('/:id/submit', requireAdmin, async (req, res) => {
 })
 
 // 下载转正文件（管理员）
-router.get('/:id/documents/:docId/download', requireAdmin, async (req, res) => {
+router.get('/:id/documents/:docId/download', requireAdminOrGM, async (req, res) => {
   try {
     const { id, docId } = req.params
 

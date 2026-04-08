@@ -415,4 +415,17 @@ app.use(helmet())
 - 2026-01-31: 优化转正管理 API，确保管理员端与用户端数据一致（入职日期、试用期截止日期动态计算）
 - 2026-01-23: 添加报销管理路由，支持发票上传和OCR识别功能
 - 2026-01-22: 创建文档，描述 API 路由模块核心功能
+- 2026-04-07: 修复财务区审批中心错误显示转正申请记录的问题
+  - GET /api/approval/statistics：super_admin 的 typeFilter 增加 `AND ai.target_type = 'reimbursement'` 排除转正记录
+  - GET /api/approval/pending：条件增加 `ai.target_type != 'probation'` 排除转正记录
+  - GET /api/approval/pending-counts：super_admin 的 typeFilter 增加 `AND ai.target_type = 'reimbursement'` 排除转正记录
+  - 转正申请只应出现在人力资源区审批中心（总经理审批）
+- 2026-04-08: 转正模块优化
+  - DELETE /api/probation/my-record：允许撤回后（pending 且有历史提交记录）删除转正记录，不再仅限 rejected 状态
+  - GET /api/approval/pending-counts：修复总经理 probationPending 查询条件错误（`pc.status = 'pending'` 改为 `pc.status = 'submitted'`），确保员工提交后总经理菜单栏角标正确显示
+  - 前端审批流程时间线过滤 withdraw 记录，撤回后重新提交不再显示撤回历史
+- 2026-04-08: 转正模块优化
+  - DELETE /api/probation/my-record：允许撤回后（pending 且有历史提交记录）删除，不再仅限 rejected 状态
+  - GET /api/approval/pending-counts：修复总经理 probationPending 查询条件错误（`pc.status = 'pending'` 改为 `pc.status = 'submitted'`），确保员工提交后总经理菜单栏角标正确显示
+  - 前端审批流程时间线过滤 withdraw 记录，撤回后重新提交不再显示撤回节点
 - 2026-04-02: 财务区安全与一致性修复 - PUT /api/reimbursement/:id 补齐 is_deduction 字段写入；/:id/deduction-invoices POST 接口增加 filePath session 归属校验；核减发票删除前强制 validateFilePath；付款回单 OCR cache 绑定 targetType/targetId/verifierId/fileHash，提交时严格匹配并一次性消费；审批通过/驳回改为事务写入；商务报销 client/service_target 更新时同步双写；大额报销后端阈值已统一为 >=1000（<1000 拒绝）
