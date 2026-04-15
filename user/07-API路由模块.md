@@ -36,6 +36,8 @@ API 路由模块是后端的核心，负责处理所有 HTTP 请求，提供 RES
 - [server/routes/projects.ts](../server/routes/projects.ts) - 项目管理相关路由
 - [server/routes/users.ts](../server/routes/users.ts) - 用户管理相关路由
 - [server/routes/reimbursement.ts](../server/routes/reimbursement.ts) - 报销管理相关路由
+- [server/routes/probation.ts](../server/routes/probation.ts) - 转正管理相关路由
+- [server/routes/resignation.ts](../server/routes/resignation.ts) - 离职管理相关路由
 
 ### 主入口
 - [server/index.ts](../server/index.ts) - Express 应用入口
@@ -92,18 +94,45 @@ PUT    /api/users/:id/role        // 更新用户角色
 PUT    /api/users/:id/status      // 启用/禁用用户
 ```
 
-### 报销路由 (`/api/reimbursement`)
+### 员工路由 (`/api/employees`)
 ```typescript
-POST   /api/reimbursement/upload-invoice  // 上传发票并进行OCR识别
-POST   /api/reimbursement/compress-pdf    // 压缩PDF文件
-GET    /api/reimbursement/list            // 获取报销单列表（默认显示最近一个月，按创建时间升序）
-GET    /api/reimbursement/records         // 获取报销记录（报销统计用，显示所有历史数据）
-GET    /api/reimbursement/statistics      // 获取报销统计数据
-GET    /api/reimbursement/:id             // 获取报销单详情
-POST   /api/reimbursement                 // 创建报销单
-PUT    /api/reimbursement/:id             // 更新报销单
-DELETE /api/reimbursement/:id             // 删除报销单
+GET    /api/employees/list                          // 获取员工列表
+GET    /api/employees/statistics                    // 获取员工统计数据
+GET    /api/employees/:id                           // 获取单个员工信息
+PUT    /api/employees/:id                           // 更新员工信息
+DELETE /api/employees/:id                           // 删除员工信息
+GET    /api/employees/:id/documents                 // 获取员工人事档案文件
+POST   /api/employees/:id/documents                 // 上传员工人事档案文件
+DELETE /api/employees/:id/documents/:docId          // 删除员工人事档案文件
+GET    /api/employees/:id/documents/:docId/download // 下载/预览员工人事档案文件
+GET    /api/employees/:id/resignation-archive       // 获取员工离职档案（离职类型、离职附件、工作交接单）
 ```
+
+### 离职路由 (`/api/resignation`)
+```typescript
+GET    /api/resignation/templates                         // 获取离职模板列表
+POST   /api/resignation/templates                         // 管理员上传离职模板
+DELETE /api/resignation/templates/:id                     // 管理员删除离职模板
+GET    /api/resignation/templates/:id/download            // 下载/预览离职模板
+GET    /api/resignation/handover-candidates               // 获取交接人候选列表
+GET    /api/resignation/my-request                        // 获取我的离职申请
+POST   /api/resignation/my-request                        // 保存离职申请草稿
+POST   /api/resignation/my-request/upload-application     // 上传离职申请表
+POST   /api/resignation/my-request/upload-handover        // 上传离职人交接单
+POST   /api/resignation/my-request/upload-document        // 通用文档上传（补充材料）
+DELETE /api/resignation/my-request/documents/:docId       // 删除已上传的文档
+POST   /api/resignation/my-request/submit                 // 提交离职申请
+POST   /api/resignation/my-request/confirm                // 离职人确认交接完成
+GET    /api/resignation/handover-task                     // 获取待我处理的交接任务
+POST   /api/resignation/:id/handover-upload               // 交接人上传交接单
+POST   /api/resignation/:id/handover-confirm              // 交接人确认交接完成
+GET    /api/resignation/management                        // 管理员获取离职申请列表
+GET    /api/resignation/management/:id                    // 管理员获取离职详情
+POST   /api/resignation/management/:id/approve            // 管理员审批通过离职申请
+POST   /api/resignation/management/:id/reject             // 管理员驳回离职申请
+GET    /api/resignation/requests/:id/documents/:docId/download // 下载离职附件
+```
+
 
 **数据显示规则：**
 - `/api/reimbursement/list`：默认显示最近一个月的数据，按创建时间升序排列（早的在下，晚的在上）
@@ -191,7 +220,14 @@ app.use((err, req, res, next) => {
 }
 ```
 
-## 路由示例
+## 更新日志
+
+- 2026-04-12: 新增离职通用文档上传和删除接口
+  - `POST /api/resignation/my-request/upload-document` 支持上传所有类型的离职补充材料（终止劳动关系证明、固定资产交接单等）
+  - `DELETE /api/resignation/my-request/documents/:docId` 支持删除已上传的文档，仅允许文档所属申请人删除自己上传的文档
+  - 修复补充材料上传时使用错误接口导致的服务器错误
+- 2026-04-10: 新增员工离职档案聚合接口，支持员工详情中查看离职类型、离职附件和工作交接单，并在无离职申请记录时按员工离职状态兜底展示
+- 2026-04-09: 新增离职管理 API 路由说明，包含模板管理、交接确认、管理员审批和附件下载接口
 
 ### 创建日程
 ```typescript
@@ -361,6 +397,55 @@ app.use(helmet())
 
 ## 更新日志
 
+- 2026-04-14: 离职管理审批流程与删除功能修复
+  - 新增 `DELETE /api/resignation/management/:id`：管理员删除草稿或已驳回的离职申请
+  - 修复 `POST /api/resignation/my-request/submit`：驳回后重新提交时记录"重新提交离职申请"日志（区别于首次提交）
+- 2026-04-10: 调整离职页面结构与管理员模板入口展示
+  - 前端员工端离职页增加“离职管理｜待我处理”内部切换，不新增新路由
+  - 管理员端离职模板管理区仅展示 5 类补充模板入口，接口结构本身不变
+- 2026-04-09: 离职接口支持按离职原因动态校验必传材料，并扩展模板类型
+  - `POST /api/resignation/my-request/submit` 会按离职类型校验员工侧必传材料是否齐全，并返回缺失材料信息
+  - `GET /api/resignation/management/:id` 补充返回 `requiredDocumentTypes`、`missingDocumentTypes`，供管理端详情展示缺项
+  - `POST /api/resignation/templates` 支持上传离职申请表、交接单、终止/解除劳动关系证明、固定资产交接单、离职经济补偿协议书、离职其他费用结算约定、合伙人离任分红结算模板
+  - 当前离职补充材料规则包含终止/解除劳动关系证明、固定资产交接单、离职经济补偿协议书、离职其他费用结算约定；其中离职经济补偿协议书仅在“被辞退”时必传
+- 2026-04-09: 人力资源区上传接口统一为仅支持 PDF
+  - `POST /api/probation/upload-doc`、`POST /api/probation/templates` 仅支持 PDF
+  - `POST /api/employees/:id/documents`、`POST /api/employees/onboarding/templates` 仅支持 PDF
+  - 对应前端页面已统一标注“仅支持 PDF”，后端也统一使用 PDF 白名单兜底
+- 2026-04-09: 转正文件上传统一收敛为 PDF
+  - `POST /api/probation/upload-doc` 仅支持 PDF 文件上传
+  - `POST /api/probation/templates` 仅支持 PDF 模板上传
+  - 转正文件继续通过浏览器内打开 PDF 查看，不再支持 DOC/DOCX/图片上传
+- 2026-04-09: 支持转正 DOCX 文件在线预览
+  - 员工端与总经理端复用统一的 DOCX 预览组件，通过现有下载接口拉取 blob 后在弹窗内渲染
+  - `.doc` 文件继续下载查看，PDF/图片保持原在线查看行为
+  - 现有转正文件下载接口继续复用，无需新增专门的预览接口
+- 2026-04-09: 调整转正列表接口提交时间为首次送审时间
+  - `GET /api/probation/list` 的 `submit_time` 改为优先返回审批记录中第一次 `submit/resubmit` 的 `action_time`
+  - 避免返回材料上传时间或最后一次重提时间，确保与管理端“提交时间”业务语义一致
+- 2026-04-09: 调整转正列表接口提交时间语义
+  - `GET /api/probation/list` 的 `submit_time` 改为优先返回该申请最早上传材料时间 `probation_documents.created_at`
+  - 当无上传材料记录时，再回退到审批记录中的 `submit/resubmit` 时间，避免将审批节点时间误显示为材料提交时间
+- 2026-04-09: 修正转正列表接口提交时间返回逻辑
+  - `GET /api/probation/list` 的 `submit_time` 改为优先返回审批记录中最近一次 `submit/resubmit` 的 `action_time`
+  - 避免申请表主表字段在重提或代提等流程场景下与真实提交动作时间不一致
+- 2026-04-09: 优化转正文件预览与下载接口行为
+  - `GET /api/probation/templates/:id/download` 按文件类型返回 `inline/attachment`，图片和 PDF 在线查看，DOC/DOCX 下载查看
+  - `GET /api/probation/my-doc/:docId/download` 调整为同样的预览/下载策略
+  - `GET /api/probation/:id/documents/:docId/download` 补齐总经理端转正文件下载接口，并按文件类型返回合适的 Content-Disposition
+- 2026-04-08: 新增转正申请说明展示能力
+  - `probation_confirmations` 新增 `application_comment` 字段，用于存储员工提交转正申请时填写的说明
+  - `POST /api/probation/upload-doc` 支持同时保存申请说明
+  - `POST /api/probation/apply` 在 submit/resubmit 审批记录中带出申请说明，供审批流程展示
+  - 转正详情与审批流程页面同步展示申请说明；驳回后仍不允许撤回，只能删除记录
+- 2026-04-08: 优化员工端转正页默认展示规则
+  - `GET /api/probation/my-status` 在无真实转正记录且用户未转正时，返回虚拟 `pending` 状态，前端默认显示“实习期”
+  - `/api/probation/my-status` 返回的 `probation_end_date` 继续按入职时间加 6 个月计算
+  - 员工端转正页面将“剩余天数”改为展示试用期总天数（截止时间减入职时间），并在“转正申请表”列直接显示上传入口和已上传文件
+- 2026-04-08: 修复员工端转正记录删除后按钮显示与测试清理说明
+  - `GET /api/probation/my-status` 新增 `hasRealConfirmation` 返回字段，用于区分真实转正记录与试用期虚拟 `pending` 状态
+  - `GET /api/probation/my-status` 保留 `hasHistory`，供前端判断撤回后是否允许删除记录
+  - `DELETE /api/probation/my-record` 可清理当前用户的转正主记录、转正文件、审批实例、审批记录及关联物理文件，用于重新测试转正流程
 - 2026-04-03: 修复报销模块安全和逻辑缺陷
   - 核减发票上传：新增服务端金额校验，防止客户端篡改金额（`deductionOcrCache` 缓存校验）
   - 银行回单提交：修复 fileHash 与 proofNo 错位绑定问题（单笔和批量付款）
@@ -429,3 +514,10 @@ app.use(helmet())
   - GET /api/approval/pending-counts：修复总经理 probationPending 查询条件错误（`pc.status = 'pending'` 改为 `pc.status = 'submitted'`），确保员工提交后总经理菜单栏角标正确显示
   - 前端审批流程时间线过滤 withdraw 记录，撤回后重新提交不再显示撤回节点
 - 2026-04-02: 财务区安全与一致性修复 - PUT /api/reimbursement/:id 补齐 is_deduction 字段写入；/:id/deduction-invoices POST 接口增加 filePath session 归属校验；核减发票删除前强制 validateFilePath；付款回单 OCR cache 绑定 targetType/targetId/verifierId/fileHash，提交时严格匹配并一次性消费；审批通过/驳回改为事务写入；商务报销 client/service_target 更新时同步双写；大额报销后端阈值已统一为 >=1000（<1000 拒绝）
+- 2026-04-12: 员工数据合同到期功能
+  - POST /api/employees/my-profile：保存/创建员工信息时根据 hire_date 自动计算 contract_end_date（+1年）
+  - PUT /api/employees/:id：管理员编辑员工信息时同步计算 contract_end_date
+  - GET /api/employees/list：员工列表排序优先展示合同到期前10天的员工（置顶），返回 contract_end_date 字段
+- 2026-04-12: 转正管理全员显示优化
+  - GET /api/probation/list：全部查询（无 status 参数）和 status=pending 时，通过 UNION ALL 查询包含未提交转正申请的实习期员工（虚拟记录 id 以 `virtual_` 开头）
+  - GET /api/probation/statistics：pending 和 total 计数包含未申请转正的实习期员工数量

@@ -1,11 +1,6 @@
 <template>
   <div class="probation-container">
     <el-card class="page-card">
-      <template #header>
-        <div class="card-header">
-          <h2>转正申请</h2>
-        </div>
-      </template>
 
       <!-- 加载中 -->
       <div v-if="loading" class="loading-wrapper">
@@ -18,16 +13,24 @@
       </div>
 
       <div v-else class="my-probation">
+        <!-- 已是正式职工横幅（直接设为在职，无需转正流程） -->
+        <el-result
+          v-if="isActiveEmployee"
+          icon="success"
+          title="您已是正式职工，不需要进行转正审批"
+          class="approved-banner"
+        />
+
         <!-- 已转正成功横幅 -->
         <el-result
-          v-if="myStatus.confirmation?.status === 'approved'"
+          v-else-if="myStatus.confirmation?.status === 'approved'"
           icon="success"
           title="恭喜，您已正式转正！"
           :sub-title="`转正时间：${formatDateTime(myStatus.confirmation?.approve_time)}`"
           class="approved-banner"
         >
           <template #extra>
-            <el-button type="primary" @click="approvalFlowDialogVisible = true">查看审批流程</el-button>
+            <el-button type="primary" @click="handleViewApprovalFlow">查看审批流程</el-button>
           </template>
         </el-result>
 
@@ -68,129 +71,180 @@
           show-icon
           style="margin-bottom: 16px;"
         >
-          <template #title>请下载统一模板填写后上传提交</template>
+          <template #title>请下载统一模板填写后，上传 PDF 版本提交</template>
         </el-alert>
 
-        <!-- 转正信息表格 -->
-        <el-table
-          :data="[myStatus.confirmation]"
-          stripe
-          style="width: 100%"
-          :header-cell-style="{ textAlign: 'center' }"
-          :cell-style="{ textAlign: 'center' }"
-        >
-          <el-table-column type="index" label="序号" width="60" />
-          <el-table-column label="申请人" min-width="80">
-            <template #default>{{ myStatus.profile?.name || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="部门" min-width="100">
-            <template #default>{{ myStatus.profile?.department || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="职位" min-width="100">
-            <template #default>{{ myStatus.profile?.position || '-' }}</template>
-          </el-table-column>
-          <el-table-column label="入职时间" min-width="90">
-            <template #default>{{ formatDate(myStatus.profile?.hire_date) }}</template>
-          </el-table-column>
-          <el-table-column label="试用期截止" min-width="90">
-            <template #default>{{ formatDate(myStatus.confirmation?.probation_end_date) }}</template>
-          </el-table-column>
-          <el-table-column label="剩余天数" min-width="70">
-            <template #default>
-              <span :class="getRemainingDaysClass(myStatus.confirmation?.probation_end_date)">
-                {{ getRemainingDays(myStatus.confirmation?.probation_end_date) }}
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column label="转正申请模板" min-width="100">
-            <template #default>
-              <el-button v-if="templates.length > 0" type="primary" link size="small" @click="handleDownloadTemplate(templates[0])">
-                下载模板
-              </el-button>
-              <span v-else class="text-gray">暂无模板</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="转正申请表" min-width="150">
-            <template #default>
-              <template v-if="myStatus.documents && myStatus.documents.length > 0">
-                <el-button type="primary" link size="small" @click="handleViewDocs">
-                  查看文件 ({{ myStatus.documents.length }})
-                </el-button>
-                <el-button
-                  v-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
-                  type="danger"
-                  link
-                  size="small"
-                  @click="handleDeleteDoc(myStatus.documents[0])"
-                >
-                  删除
-                </el-button>
-              </template>
-              <el-upload
-                v-else-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
-                :action="uploadUrl"
-                :headers="uploadHeaders"
-                :before-upload="beforeUpload"
-                :on-success="handleUploadSuccess"
-                :on-error="handleUploadError"
-                :show-file-list="false"
-                :with-credentials="true"
-                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
-              >
-                <el-button type="primary" size="small">上传文件</el-button>
-              </el-upload>
-              <span v-else class="text-gray">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" min-width="80">
-            <template #default>
-              <el-tag :type="getStatusType(myStatus.confirmation?.status)" size="small">
+        <div class="probation-layout">
+          <el-card shadow="hover" class="summary-card">
+            <div class="summary-header">
+              <div>
+                <div class="section-title">当前状态</div>
+                <div class="summary-name">{{ myStatus.profile?.name || '-' }}</div>
+                <div class="summary-subtitle">
+                  {{ myStatus.profile?.department || '-' }} · {{ myStatus.profile?.position || '-' }}
+                </div>
+              </div>
+              <el-tag :type="getStatusType(myStatus.confirmation?.status)" size="large" effect="light">
                 {{ getStatusText(myStatus.confirmation?.status) }}
               </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" min-width="200">
-            <template #default>
-              <el-button type="primary" link @click="handleViewDetail">查看详情</el-button>
-              <el-button
-                v-if="canSubmit"
-                type="success"
-                link
-                :loading="submitting"
-                @click="handleSubmitApplication"
-              >
-                提交申请
-              </el-button>
-              <!-- 只有已提交/已审批/已驳回才显示审批流程 -->
-              <el-button
-                v-if="['submitted', 'approved', 'rejected'].includes(myStatus.confirmation?.status ?? '')"
-                type="info"
-                link
-                @click="handleViewApprovalFlow"
-              >
-                审批流程
-              </el-button>
-              <!-- 撤回：仅待审批状态 -->
-              <el-button
-                v-if="myStatus.confirmation?.status === 'submitted'"
-                type="warning"
-                link
-                @click="handleWithdraw"
-              >
-                撤回申请
-              </el-button>
-              <!-- 硬删除：驳回或撤回后（pending 且有历史记录）状态 -->
-              <el-button
-                v-if="myStatus.confirmation?.status === 'rejected' || (myStatus.confirmation?.status === 'pending' && (approvalFlowData?.records?.length ?? 0) > 0)"
-                type="danger"
-                link
-                @click="handleDeleteRecord"
-              >
-                删除记录
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+            </div>
+
+            <div class="info-grid">
+              <div class="info-item">
+                <span class="info-label">入职时间</span>
+                <span class="info-value">{{ formatDate(myStatus.profile?.hire_date) }}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">试用期截止</span>
+                <span class="info-value">{{ formatDate(myStatus.confirmation?.probation_end_date) }}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">剩余天数</span>
+                <span class="info-value">{{ getRemainingDays(myStatus.profile?.hire_date, myStatus.confirmation?.probation_end_date) }}</span>
+              </div>
+            </div>
+
+            <div class="summary-actions">
+              <div class="section-title">当前操作</div>
+              <div class="actions-row">
+                <el-button type="primary" plain @click="handleViewDetail">查看详情</el-button>
+                <el-button
+                  v-if="canSubmit && !isActiveEmployee"
+                  type="success"
+                  :loading="submitting"
+                  @click="handleSubmitApplication"
+                >
+                  提交申请
+                </el-button>
+                <el-button
+                  v-if="!isActiveEmployee && ['submitted', 'approved', 'rejected'].includes(myStatus.confirmation?.status ?? '')"
+                  type="info"
+                  plain
+                  @click="handleViewApprovalFlow"
+                >
+                  审批流程
+                </el-button>
+                <el-button
+                  v-if="!isActiveEmployee && myStatus.confirmation?.status === 'submitted'"
+                  type="warning"
+                  plain
+                  @click="handleWithdraw"
+                >
+                  撤回申请
+                </el-button>
+                <el-button
+                  v-if="!isActiveEmployee && canDeleteRecord"
+                  type="danger"
+                  plain
+                  @click="handleDeleteRecord"
+                >
+                  删除记录
+                </el-button>
+              </div>
+            </div>
+          </el-card>
+
+          <div class="content-grid single-column">
+            <el-card shadow="hover" class="materials-card">
+              <div class="section-title">申请材料</div>
+              <div class="materials-block">
+                <div class="material-row material-panel">
+                  <span class="material-label">转正申请模板</span>
+                  <el-button v-if="templates.length > 0" type="primary" link @click="handleDownloadTemplate(templates[0])">
+                    下载模板
+                  </el-button>
+                  <span v-else class="text-gray">暂无模板</span>
+                </div>
+
+                <div class="material-row material-column material-panel">
+                  <span class="material-label">转正申请表</span>
+                  <div class="probation-doc-cell">
+                    <template v-if="myStatus.documents && myStatus.documents.length > 0">
+                      <div
+                        v-for="doc in myStatus.documents"
+                        :key="doc.id"
+                        class="probation-doc-item"
+                      >
+                        <el-button type="primary" link size="small" @click="handleDownload(doc)">
+                          {{ doc.file_name }}
+                        </el-button>
+                        <el-button
+                          v-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
+                          type="danger"
+                          link
+                          size="small"
+                          @click="handleDeleteDoc(doc)"
+                        >
+                          删除
+                        </el-button>
+                      </div>
+                    </template>
+                    <el-input
+                      v-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
+                      v-model="applicationComment"
+                      type="textarea"
+                      :rows="2"
+                      placeholder="请输入转正申请说明"
+                      class="probation-comment-input"
+                    />
+                    <el-upload
+                      v-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
+                      :action="uploadUrl"
+                      :headers="uploadHeaders"
+                      :data="{ application_comment: applicationComment }"
+                      :before-upload="beforeUpload"
+                      :on-success="handleUploadSuccess"
+                      :on-error="handleUploadError"
+                      :show-file-list="false"
+                      :with-credentials="true"
+                      accept=".pdf"
+                    >
+                      <el-button type="primary">上传 PDF</el-button>
+                    </el-upload>
+                    <span
+                      v-if="myStatus.confirmation?.status === 'pending' || myStatus.confirmation?.status === 'rejected'"
+                      class="upload-tip"
+                    >
+                      仅支持 PDF，大小不超过 10MB
+                    </span>
+                    <span v-else-if="!myStatus.documents || myStatus.documents.length === 0" class="text-gray">-</span>
+                  </div>
+                </div>
+              </div>
+            </el-card>
+          </div>
+        </div>
+
+        <!-- 历史转正记录 -->
+        <div v-if="myStatus.probationHistory && myStatus.probationHistory.length > 0" class="history-section">
+          <el-card shadow="hover" class="history-card">
+            <div class="section-title">历史转正记录</div>
+            <el-table :data="myStatus.probationHistory" stripe size="small">
+              <el-table-column label="入职时间" min-width="110" align="center">
+                <template #default="{ row }">{{ formatDate(row.hire_date) }}</template>
+              </el-table-column>
+              <el-table-column label="试用期截止" min-width="110" align="center">
+                <template #default="{ row }">{{ formatDate(row.probation_end_date) }}</template>
+              </el-table-column>
+              <el-table-column label="转正状态" min-width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="getStatusType(row.status)" size="small">
+                    {{ getStatusText(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="审批时间" min-width="140" align="center">
+                <template #default="{ row }">{{ row.approve_time ? formatDateTime(row.approve_time) : '-' }}</template>
+              </el-table-column>
+              <el-table-column label="重置原因" min-width="180" align="center">
+                <template #default="{ row }">{{ row.reset_reason || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="重置时间" min-width="140" align="center">
+                <template #default="{ row }">{{ formatDateTime(row.reset_at) }}</template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </div>
       </div>
     </el-card>
 
@@ -207,6 +261,9 @@
             <el-tag :type="getStatusType(myStatus.confirmation?.status)">
               {{ getStatusText(myStatus.confirmation?.status) }}
             </el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item v-if="myStatus.confirmation?.application_comment" label="申请说明" :span="2">
+            <div class="comment-content">{{ myStatus.confirmation.application_comment }}</div>
           </el-descriptions-item>
           <el-descriptions-item v-if="myStatus.confirmation?.submit_time" label="提交时间" :span="2">
             {{ formatDateTime(myStatus.confirmation?.submit_time) }}
@@ -239,7 +296,6 @@
       </template>
     </el-dialog>
 
-    <!-- 审批流程对话框（统一样式） -->
     <el-dialog v-model="approvalFlowDialogVisible" title="审批流程" width="560px" :close-on-click-modal="false">
       <div v-if="myStatus" class="flow-dialog">
         <!-- 基本信息 -->
@@ -247,12 +303,12 @@
           <el-descriptions-item label="申请人">{{ myStatus.profile?.name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="部门">{{ myStatus.profile?.department || '-' }}</el-descriptions-item>
           <el-descriptions-item label="当前状态">
-            <el-tag :type="getStatusType(myStatus.confirmation?.status)" size="small">
-              {{ getStatusText(myStatus.confirmation?.status) }}
+            <el-tag :type="getStatusType(approvalFlowData?.confirmation?.status || myStatus.confirmation?.status)" size="small">
+              {{ getStatusText(approvalFlowData?.confirmation?.status || myStatus.confirmation?.status) }}
             </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="提交时间">
-            {{ myStatus.confirmation?.submit_time ? formatDateTime(myStatus.confirmation.submit_time) : '-' }}
+            {{ approvalFlowData?.confirmation?.submit_time ? formatDateTime(approvalFlowData.confirmation.submit_time) : '-' }}
           </el-descriptions-item>
         </el-descriptions>
 
@@ -271,10 +327,14 @@
             <!-- submit/resubmit/withdraw 显示描述文字，其他显示 tag -->
             <div v-if="['submit', 'resubmit', 'withdraw'].includes(record.action)" class="tl-desc">
               <template v-if="record.action === 'withdraw'">{{ record.approver_name }} 撤回了转正申请</template>
-              <template v-else-if="record.action === 'resubmit'">{{ record.approver_name }} 重新提交了转正申请</template>
+              <template v-else-if="record.action === 'resubmit'">
+                {{ record.approver_name }} 重新提交了转正申请
+                <div v-if="record.comment" class="tl-comment">{{ formatSubmitComment(record.comment) }}</div>
+              </template>
               <template v-else>
                 {{ record.approver_name }}
                 {{ (approvalFlowData?.records || []).filter((r: any) => r.action === 'submit' || r.action === 'resubmit').indexOf(record) > 0 ? '重新提交了转正申请' : '提交了转正申请' }}
+                <div v-if="record.comment" class="tl-comment">{{ formatSubmitComment(record.comment) }}</div>
               </template>
             </div>
             <template v-else>
@@ -294,7 +354,7 @@
 
           <!-- 下一步：待审批 -->
           <el-timeline-item
-            v-if="myStatus.confirmation?.status === 'submitted'"
+            v-if="(approvalFlowData?.confirmation?.status || myStatus.confirmation?.status) === 'submitted'"
             timestamp="待审批"
             placement="top"
             type="warning"
@@ -307,7 +367,7 @@
 
           <!-- 下一步：驳回后重新提交 -->
           <el-timeline-item
-            v-if="myStatus.confirmation?.status === 'rejected'"
+            v-if="(approvalFlowData?.confirmation?.status || myStatus.confirmation?.status) === 'rejected'"
             timestamp="待处理"
             placement="top"
             type="warning"
@@ -318,8 +378,8 @@
 
           <!-- 已通过 -->
           <el-timeline-item
-            v-if="myStatus.confirmation?.status === 'approved'"
-            :timestamp="myStatus.confirmation?.approve_time ? formatDateTime(myStatus.confirmation.approve_time) : ''"
+            v-if="(approvalFlowData?.confirmation?.status || myStatus.confirmation?.status) === 'approved'"
+            :timestamp="approvalFlowData?.confirmation?.approve_time ? formatDateTime(approvalFlowData.confirmation.approve_time) : (myStatus.confirmation?.approve_time ? formatDateTime(myStatus.confirmation.approve_time) : '')"
             placement="top"
             type="success"
           >
@@ -367,6 +427,7 @@ interface ProbationConfirmation {
   approve_time: string | null
   approver_id: number | null
   approver_comment: string | null
+  application_comment: string | null
   created_at: string
   updated_at: string
 }
@@ -383,7 +444,25 @@ interface EmployeeProfile {
 interface MyProbationStatus {
   profile: EmployeeProfile | null
   confirmation: ProbationConfirmation | null
+  hasHistory: boolean
+  hasRealConfirmation: boolean
   documents: ProbationDocument[]
+  probationHistory: ProbationHistoryRecord[]
+}
+
+interface ProbationHistoryRecord {
+  id: string
+  employee_id: string
+  hire_date: string | null
+  probation_end_date: string | null
+  status: string
+  submit_time: string | null
+  approve_time: string | null
+  approver_comment: string | null
+  application_comment: string | null
+  reset_reason: string | null
+  reset_at: string
+  new_hire_date: string | null
 }
 
 interface ProbationTemplate {
@@ -404,6 +483,15 @@ const detailDialogVisible = ref(false)
 const approvalFlowDialogVisible = ref(false)
 const approvalFlowData = ref<any>(null)
 const flowLoading = ref(false)
+const applicationComment = ref('')
+
+// 判断是否为在职员工（直接设为在职，无需转正流程）
+const isActiveEmployee = computed(() => {
+  const profile = myStatus.value?.profile
+  const confirmation = myStatus.value?.confirmation
+  // employment_status 为 active 且没有转正记录（或转正记录不是通过审批流程获得的）
+  return profile?.employment_status === 'active' && (!confirmation || confirmation.status !== 'approved')
+})
 
 const uploadUrl = computed(() => '/api/probation/upload-doc')
 const uploadHeaders = computed(() => ({}))
@@ -414,12 +502,22 @@ const canSubmit = computed(() => {
   return hasDoc && (status === 'pending' || status === 'rejected')
 })
 
+const canDeleteRecord = computed(() => {
+  const status = myStatus.value?.confirmation?.status
+  const hasRealConfirmation = myStatus.value?.hasRealConfirmation ?? false
+  const hasHistory = myStatus.value?.hasHistory ?? false
+
+  if (!hasRealConfirmation) return false
+  return status === 'rejected' || (status === 'pending' && hasHistory)
+})
+
 const fetchMyStatus = async () => {
   loading.value = true
   try {
     const response = await axios.get('/api/probation/my-status')
     if (response.data.success) {
       myStatus.value = response.data.data
+      applicationComment.value = response.data.data?.confirmation?.application_comment || ''
     }
   } catch (error: any) {
     ElMessage.error(error.response?.data?.message || '获取转正状态失败')
@@ -451,7 +549,9 @@ const handleSubmitApplication = async () => {
       type: 'info'
     })
     submitting.value = true
-    const response = await axios.post('/api/probation/apply')
+    const response = await axios.post('/api/probation/apply', {
+      comment: applicationComment.value,
+    })
     if (response.data.success) {
       ElMessage.success('转正申请已提交，等待总经理审批')
       fetchMyStatus()
@@ -469,16 +569,6 @@ const handleSubmitApplication = async () => {
 
 const handleViewDetail = () => {
   detailDialogVisible.value = true
-}
-
-const handleViewDocs = () => {
-  const docs = myStatus.value?.documents
-  if (!docs || docs.length === 0) return
-  if (docs.length === 1) {
-    window.open(`/api/probation/my-doc/${docs[0].id}/download`, '_blank')
-  } else {
-    detailDialogVisible.value = true
-  }
 }
 
 const handleDownload = (doc: ProbationDocument) => {
@@ -503,10 +593,10 @@ const handleDeleteDoc = async (doc: ProbationDocument) => {
 }
 
 const beforeUpload = (file: { type: string; size: number }) => {
-  const isValidType = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png'].includes(file.type)
+  const isValidType = ['application/pdf'].includes(file.type)
   const isLt10M = file.size / 1024 / 1024 < 10
   if (!isValidType) {
-    ElMessage.error('只支持 PDF、DOC、DOCX、JPG、PNG 格式的文件')
+    ElMessage.error('只支持 PDF 格式的文件')
     return false
   }
   if (!isLt10M) {
@@ -536,8 +626,8 @@ const handleViewApprovalFlow = async () => {
     return
   }
   approvalFlowData.value = null
-  approvalFlowDialogVisible.value = true
   flowLoading.value = true
+  approvalFlowDialogVisible.value = true
   try {
     const response = await axios.get(`/api/probation/${myStatus.value.confirmation.id}/approval-flow`)
     if (response.data.success) {
@@ -612,19 +702,17 @@ const getActionTitle = (record: any) => {
   return record.approver_name || '总经理'
 }
 
-const getRemainingDays = (endDate: string | null | undefined) => {
+const formatSubmitComment = (comment: string | null | undefined) => {
+  if (!comment) return ''
+  return comment.replace(/^员工(?:驳回后)?重新?提交转正申请；?/, '').replace(/^员工提交转正申请；?/, '').trim() || comment
+}
+
+const getRemainingDays = (_hireDate: string | null | undefined, endDate: string | null | undefined) => {
   if (!endDate) return '-'
   const diff = dayjs(endDate).startOf('day').diff(dayjs().startOf('day'), 'day')
   if (diff < 0) return '已到期'
+  if (diff === 0) return '今天到期'
   return `${diff}天`
-}
-
-const getRemainingDaysClass = (endDate: string | null | undefined) => {
-  if (!endDate) return ''
-  const diff = dayjs(endDate).startOf('day').diff(dayjs().startOf('day'), 'day')
-  if (diff < 0) return 'text-danger'
-  if (diff <= 7) return 'text-warning'
-  return ''
 }
 
 const formatDate = (date: string | null | undefined) => {
@@ -721,6 +809,178 @@ onMounted(() => {
   flex: 1;
 }
 
+.probation-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.summary-card,
+.materials-card {
+  border-radius: 16px;
+  border: 1px solid #ebeef5;
+}
+
+.summary-card :deep(.el-card__body),
+.materials-card :deep(.el-card__body) {
+  padding: 24px;
+}
+
+.summary-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #909399;
+  margin-bottom: 8px;
+}
+
+.summary-name {
+  font-size: 24px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.2;
+}
+
+.summary-subtitle {
+  margin-top: 6px;
+  font-size: 14px;
+  color: #606266;
+}
+
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  background: #f8fafc;
+  border: 1px solid #eef2f7;
+  border-radius: 12px;
+}
+
+.info-label {
+  font-size: 13px;
+  color: #909399;
+}
+
+.info-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.summary-actions {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #eef2f7;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.content-grid.single-column {
+  grid-template-columns: 1fr;
+}
+
+.materials-block {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.material-panel {
+  padding: 18px;
+  border: 1px solid #eef2f7;
+  border-radius: 12px;
+  background: #fafcff;
+}
+
+.material-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.material-column {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.material-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.probation-doc-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px dashed #dcdfe6;
+  border-radius: 12px;
+  background: #fafcff;
+}
+
+.probation-doc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f2f5;
+}
+
+.probation-doc-item:last-child {
+  border-bottom: none;
+}
+
+.probation-comment-input :deep(.el-textarea__inner) {
+  border-radius: 10px;
+  min-height: 82px;
+}
+
+.actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.actions-row .el-button {
+  min-width: 108px;
+}
+
+@media (max-width: 1024px) {
+  .info-grid,
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .summary-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .approved-banner {
   margin-bottom: 20px;
   padding: 20px;
@@ -803,5 +1063,18 @@ onMounted(() => {
   margin-top: 6px;
   font-size: 13px;
   color: #909399;
+}
+
+.history-section {
+  margin-top: 20px;
+}
+
+.history-card {
+  border-radius: 16px;
+  border: 1px solid #ebeef5;
+}
+
+.history-card :deep(.el-card__body) {
+  padding: 24px;
 }
 </style>

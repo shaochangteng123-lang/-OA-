@@ -20,6 +20,11 @@ export interface PendingCounts {
   myReimbursementBusinessRejected: number
   // 用户: 转正待提交
   myProbationPending: boolean
+  // 用户: 离职待办
+  myResignationPending: number
+  myHandoverPending: number
+  // 管理员: 离职待审批
+  resignationPending: number
 }
 
 export const usePendingStore = defineStore('pending', () => {
@@ -34,6 +39,9 @@ export const usePendingStore = defineStore('pending', () => {
     myReimbursementLargeRejected: 0,
     myReimbursementBusinessRejected: 0,
     myProbationPending: false,
+    myResignationPending: 0,
+    myHandoverPending: 0,
+    resignationPending: 0,
   })
 
   const loading = ref(false)

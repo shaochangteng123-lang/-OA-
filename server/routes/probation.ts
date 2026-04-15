@@ -10,6 +10,15 @@ import { nanoid } from 'nanoid'
 
 const router = Router()
 
+function isInlinePreviewMimeType(mimeType: string | null | undefined): boolean {
+  return !!mimeType && [
+    'application/pdf',
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+  ].includes(mimeType)
+}
+
 function convertPlaceholders(sql: string): string {
   let index = 0
   return sql.replace(/\?/g, () => `$${++index}`)
@@ -54,16 +63,11 @@ const uploadProbationDoc = multer({
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = [
       'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ]
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 PDF、JPG、PNG、DOC、DOCX 格式的文件'))
+      cb(new Error('只支持 PDF 格式的文件'))
     }
   },
 })
@@ -86,16 +90,11 @@ const uploadTemplate = multer({
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = [
       'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ]
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 PDF、JPG、PNG、DOC、DOCX 格式的文件'))
+      cb(new Error('只支持 PDF 格式的文件'))
     }
   },
 })
@@ -236,7 +235,8 @@ router.get('/templates/:id/download', requireAuth, async (req, res) => {
     }
 
     res.setHeader('Content-Type', template.mime_type || 'application/octet-stream')
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(template.file_name)}"`)
+    const disposition = isInlinePreviewMimeType(template.mime_type) ? 'inline' : 'attachment'
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(template.file_name)}"`)
 
     const fileStream = fs.createReadStream(filePath)
     fileStream.pipe(res)
@@ -253,52 +253,95 @@ router.get('/list', requireAdminOrGM, async (req, res) => {
   try {
     const { status, thisMonth, page = 1, pageSize = 20 } = req.query
 
-    // 使用 employee_profiles 表中的 hire_date 作为入职日期，保持与用户端一致
-    let sql = `
-      SELECT pc.*, ep.name as employee_name, ep.department as employee_department,
-             ep.position as employee_position, ep.mobile as employee_mobile,
-             ep.hire_date as employee_hire_date
-      FROM probation_confirmations pc
-      LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
-      WHERE 1=1
-    `
+    // 当没有 status 筛选（全部查询）或 status=pending 时，需要包含没有转正记录的实习期员工
+    const includeNonApplied = !status || status === 'pending'
+
+    let sql: string
+    let countSql: string
     const params: any[] = []
-
-    if (status) {
-      sql += ` AND pc.status = ?`
-      params.push(status)
-    }
-
-    if (thisMonth === '1' && status === 'approved') {
-      const now = new Date()
-      const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-      sql += ` AND pc.approve_time >= ?`
-      params.push(monthStart)
-    }
-
-    // 获取总数
-    let countSql = `
-      SELECT COUNT(*) as total
-      FROM probation_confirmations pc
-      LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
-      WHERE 1=1
-    `
     const countParams: any[] = []
-    if (status) {
-      countSql += ` AND pc.status = ?`
+
+    if (includeNonApplied) {
+      // UNION ALL：已有转正记录的员工 + 没有转正记录的实习期员工
+      const part1Where = status === 'pending' ? `WHERE pc.status = 'pending'` : 'WHERE 1=1'
+
+      sql = `
+        SELECT pc.id, pc.employee_id, pc.hire_date, pc.probation_end_date, pc.status,
+               pc.submit_time, pc.approve_time, pc.approver_id, pc.approver_comment,
+               pc.application_comment, pc.created_at, pc.updated_at,
+               ep.name as employee_name, ep.department as employee_department,
+               ep.position as employee_position, ep.mobile as employee_mobile,
+               ep.hire_date as employee_hire_date
+        FROM probation_confirmations pc
+        LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+        ${part1Where}
+
+        UNION ALL
+
+        SELECT 'virtual_' || ep2.id as id, ep2.id as employee_id, ep2.hire_date,
+               NULL as probation_end_date, 'pending' as status,
+               NULL as submit_time, NULL as approve_time, NULL as approver_id,
+               NULL as approver_comment, NULL as application_comment,
+               ep2.created_at, ep2.updated_at,
+               ep2.name as employee_name, ep2.department as employee_department,
+               ep2.position as employee_position, ep2.mobile as employee_mobile,
+               ep2.hire_date as employee_hire_date
+        FROM employee_profiles ep2
+        WHERE ep2.employment_status = 'probation'
+          AND ep2.status = 'submitted'
+          AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc2 WHERE pc2.employee_id = ep2.id)
+      `
+
+      countSql = `
+        SELECT (
+          (SELECT COUNT(*) FROM probation_confirmations pc
+           LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+           ${part1Where})
+          +
+          (SELECT COUNT(*) FROM employee_profiles ep2
+           WHERE ep2.employment_status = 'probation'
+             AND ep2.status = 'submitted'
+             AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc2 WHERE pc2.employee_id = ep2.id))
+        ) as total
+      `
+    } else {
+      // 有具体 status 筛选（submitted/approved/rejected），只查 probation_confirmations
+      sql = `
+        SELECT pc.*, ep.name as employee_name, ep.department as employee_department,
+               ep.position as employee_position, ep.mobile as employee_mobile,
+               ep.hire_date as employee_hire_date
+        FROM probation_confirmations pc
+        LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+        WHERE pc.status = ?
+      `
+      params.push(status)
+
+      countSql = `
+        SELECT COUNT(*) as total
+        FROM probation_confirmations pc
+        WHERE pc.status = ?
+      `
       countParams.push(status)
+
+      if (thisMonth === '1' && status === 'approved') {
+        const now = new Date()
+        const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+        sql += ` AND pc.approve_time >= ?`
+        params.push(monthStart)
+        countSql += ` AND pc.approve_time >= ?`
+        countParams.push(monthStart)
+      }
     }
-    if (thisMonth === '1' && status === 'approved') {
-      const now = new Date()
-      const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
-      countSql += ` AND pc.approve_time >= ?`
-      countParams.push(monthStart)
-    }
+
     const countResult = await db.prepare(countSql).get(...countParams) as { total: number }
 
-    // 分页
+    // 分页（用子查询包裹 UNION 结果）
     const offset = (Number(page) - 1) * Number(pageSize)
-    sql += ` ORDER BY pc.created_at DESC LIMIT ? OFFSET ?`
+    if (includeNonApplied) {
+      sql = `SELECT * FROM (${sql}) AS combined ORDER BY combined.created_at DESC LIMIT ? OFFSET ?`
+    } else {
+      sql += ` ORDER BY pc.created_at DESC LIMIT ? OFFSET ?`
+    }
     params.push(Number(pageSize), offset)
 
     const list = await db.prepare(sql).all(...params) as (ProbationConfirmationWithEmployee & { employee_hire_date?: string })[]
@@ -309,6 +352,16 @@ router.get('/list', requireAdminOrGM, async (req, res) => {
         SELECT * FROM probation_documents WHERE confirmation_id = ? ORDER BY created_at DESC
       `).all(item.id) as ProbationDocument[]
 
+      const firstSubmitRecord = await db.prepare(`
+        SELECT ar.action_time
+        FROM approval_records ar
+        JOIN approval_instances ai ON ar.instance_id = ai.id
+        WHERE ai.target_id = ? AND ai.target_type = 'probation'
+          AND ar.action IN ('submit', 'resubmit')
+        ORDER BY ar.action_time ASC
+        LIMIT 1
+      `).get(item.id) as { action_time: string } | undefined
+
       // 使用员工表中的入职日期，动态计算试用期截止日期（与用户端 /my-status 保持一致）
       const hireDate = item.employee_hire_date || item.hire_date
       let probationEndDate = item.probation_end_date
@@ -318,13 +371,20 @@ router.get('/list', requireAdminOrGM, async (req, res) => {
         probationEndDate = hireDateObj.toISOString().split('T')[0]
       }
 
+      // 获取历史转正记录
+      const probationHistoryRecords = await db.prepare(`
+        SELECT * FROM probation_history WHERE employee_id = ? ORDER BY reset_at DESC
+      `).all(item.employee_id) as any[]
+
       return {
         ...item,
         documents,
+        submit_time: firstSubmitRecord?.action_time || item.submit_time,
         // 使用员工表中的入职日期
         hire_date: hireDate,
         // 使用动态计算的试用期截止日期
-        probation_end_date: probationEndDate
+        probation_end_date: probationEndDate,
+        probation_history: probationHistoryRecords
       }
     }))
 
@@ -346,6 +406,15 @@ router.get('/list', requireAdminOrGM, async (req, res) => {
 // 获取转正统计数据（管理员）
 router.get('/statistics', requireAdminOrGM, async (req, res) => {
   try {
+    // 计算没有转正记录的实习期员工数量
+    const nonAppliedProbation = await db.prepare(`
+      SELECT COUNT(*) as count FROM employee_profiles
+      WHERE employment_status = 'probation'
+        AND status = 'submitted'
+        AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc WHERE pc.employee_id = employee_profiles.id)
+    `).get() as { count: number }
+    const nonAppliedCount = Number(nonAppliedProbation.count)
+
     const total = await db.prepare(`
       SELECT COUNT(*) as count FROM probation_confirmations
     `).get() as { count: number }
@@ -369,8 +438,8 @@ router.get('/statistics', requireAdminOrGM, async (req, res) => {
     res.json({
       success: true,
       data: {
-        total: Number(total.count),
-        pending: Number(pending.count),
+        total: Number(total.count) + nonAppliedCount,
+        pending: Number(pending.count) + nonAppliedCount,
         submitted: Number(submitted.count),
         approved: Number(approved.count),
         rejected: Number(rejected.count)
@@ -420,8 +489,8 @@ router.get('/my-status', requireAuth, async (req, res) => {
         ...confirmation,
         probation_end_date: probationEndDate || confirmation.probation_end_date
       }
-    } else if (profile.employment_status === 'probation') {
-      // 试用期员工但还没有转正申请记录，构造虚拟记录
+    } else if (profile.employment_status !== 'active') {
+      // 未转正员工但还没有转正申请记录，构造虚拟记录
       confirmationData = {
         id: '',
         employee_id: profile.id,
@@ -441,6 +510,24 @@ router.get('/my-status', requireAuth, async (req, res) => {
       `).all(confirmation.id) as ProbationDocument[]
     }
 
+    let firstSubmitTime: string | null = confirmation?.submit_time || null
+    if (confirmation) {
+      const firstSubmitRecord = await db.prepare(`
+        SELECT ar.action_time
+        FROM approval_records ar
+        JOIN approval_instances ai ON ar.instance_id = ai.id
+        WHERE ai.target_id = ? AND ai.target_type = 'probation'
+          AND ar.action IN ('submit', 'resubmit')
+        ORDER BY ar.action_time ASC
+        LIMIT 1
+      `).get(confirmation.id) as { action_time: string } | undefined
+      firstSubmitTime = firstSubmitRecord?.action_time || confirmation.submit_time || null
+      confirmationData = {
+        ...confirmationData,
+        submit_time: firstSubmitTime,
+      }
+    }
+
     // 是否有过提交历史（用于判断撤回后是否可以删除）
     let hasHistory = false
     if (confirmation) {
@@ -452,6 +539,11 @@ router.get('/my-status', requireAuth, async (req, res) => {
       `).get(confirmation.id) as { count: number } | undefined
       hasHistory = (historyCount?.count ?? 0) > 0
     }
+
+    // 获取历史转正记录（管理员将员工改回实习期时归档的记录）
+    const probationHistoryRecords = await db.prepare(`
+      SELECT * FROM probation_history WHERE employee_id = ? ORDER BY reset_at DESC
+    `).all(profile.id) as any[]
 
     res.json({
       success: true,
@@ -466,7 +558,9 @@ router.get('/my-status', requireAuth, async (req, res) => {
         },
         confirmation: confirmationData,
         hasHistory,
-        documents
+        hasRealConfirmation: !!confirmation,
+        documents,
+        probationHistory: probationHistoryRecords
       }
     })
   } catch (error) {
@@ -479,6 +573,11 @@ router.get('/my-status', requireAuth, async (req, res) => {
 router.post('/apply', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
+    const applicationComment = typeof req.body?.comment === 'string'
+      ? req.body.comment.trim() || null
+      : typeof req.body?.application_comment === 'string'
+        ? req.body.application_comment.trim() || null
+        : null
 
     // 获取当前用户的员工信息
     const profile = await db.prepare(`
@@ -495,8 +594,8 @@ router.post('/apply', requireAuth, async (req, res) => {
 
     // 检查是否已有转正申请
     const existing = await db.prepare(`
-      SELECT id, status FROM probation_confirmations WHERE employee_id = ?
-    `).get(profile.id) as { id: string; status: string } | undefined
+      SELECT id, status, application_comment FROM probation_confirmations WHERE employee_id = ?
+    `).get(profile.id) as { id: string; status: string; application_comment: string | null } | undefined
 
     if (existing) {
       if (existing.status === 'submitted') {
@@ -523,8 +622,8 @@ router.post('/apply', requireAuth, async (req, res) => {
 
     // 更新转正申请状态为已提交
     await db.prepare(`
-      UPDATE probation_confirmations SET status = 'submitted', submit_time = ?, updated_at = ? WHERE id = ?
-    `).run(now, now, existing.id)
+      UPDATE probation_confirmations SET status = 'submitted', submit_time = ?, application_comment = ?, updated_at = ? WHERE id = ?
+    `).run(now, applicationComment, now, existing.id)
 
     // 将旧的审批实例（如有）关闭，然后新建审批实例（支持驳回后重新提交）
     const hadRejected = existing.status === 'rejected'
@@ -543,7 +642,10 @@ router.post('/apply', requireAuth, async (req, res) => {
 
     // 如果是驳回后重新提交，记录 resubmit；否则记录 submit
     const submitAction = hadRejected ? 'resubmit' : 'submit'
-    const submitComment = hadRejected ? '员工驳回后重新提交转正申请' : '员工提交转正申请'
+    const baseSubmitComment = hadRejected ? '员工驳回后重新提交转正申请' : '员工提交转正申请'
+    const submitComment = applicationComment
+      ? `${baseSubmitComment}；说明：${applicationComment}`
+      : baseSubmitComment
     await db.prepare(`
       INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
       VALUES (?, ?, 0, ?, ?, ?, ?)
@@ -568,7 +670,7 @@ router.post('/apply', requireAuth, async (req, res) => {
 router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async (req, res) => {
   try {
     const userId = req.session.userId
-    const { originalFileName } = req.body
+    const { originalFileName, application_comment } = req.body
     const file = req.file
 
     if (!file) {
@@ -587,8 +689,8 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
 
     // 获取或创建转正申请记录
     let confirmation = await db.prepare(`
-      SELECT id, status FROM probation_confirmations WHERE employee_id = ?
-    `).get(profile.id) as { id: string; status: string } | undefined
+      SELECT id, status, application_comment FROM probation_confirmations WHERE employee_id = ?
+    `).get(profile.id) as { id: string; status: string; application_comment: string | null } | undefined
 
     // 如果转正记录不存在，自动创建一个
     if (!confirmation) {
@@ -609,17 +711,32 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
 
       await db.prepare(`
         INSERT INTO probation_confirmations (
-          id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
-      `).run(confirmationId, profile.id, hireDate?.hire_date || null, probationEndDate, now, now)
+          id, employee_id, hire_date, probation_end_date, status, application_comment, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+      `).run(confirmationId, profile.id, hireDate?.hire_date || null, probationEndDate, application_comment?.trim() || null, now, now)
 
-      confirmation = { id: confirmationId, status: 'pending' }
+      confirmation = {
+        id: confirmationId,
+        status: 'pending',
+        application_comment: application_comment?.trim() || null,
+      }
+    }
+
+    if (!confirmation) {
+      fs.unlinkSync(file.path)
+      return res.status(400).json({ success: false, message: '转正记录不存在' })
     }
 
     // 检查状态：已通过的不能再上传
     if (confirmation.status === 'approved') {
       fs.unlinkSync(file.path)
       return res.status(400).json({ success: false, message: '转正已通过，无法上传文件' })
+    }
+
+    if (confirmation.status === 'pending' || confirmation.status === 'rejected') {
+      await db.prepare(`
+        UPDATE probation_confirmations SET application_comment = ?, updated_at = ? WHERE id = ?
+      `).run(application_comment?.trim() || null, new Date().toISOString(), confirmation.id)
     }
 
     // 移动文件到正确目录
@@ -777,7 +894,8 @@ router.get('/my-doc/:docId/download', requireAuth, async (req, res) => {
     }
 
     res.setHeader('Content-Type', document.mime_type || 'application/octet-stream')
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.file_name)}"`)
+    const disposition = isInlinePreviewMimeType(document.mime_type) ? 'inline' : 'attachment'
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(document.file_name)}"`)
 
     const fileStream = fs.createReadStream(filePath)
     fileStream.pipe(res)
@@ -893,6 +1011,8 @@ router.get('/:id/approval-flow', requireAuth, async (req, res) => {
     // 按时间排序
     records.sort((a, b) => new Date(a.action_time).getTime() - new Date(b.action_time).getTime())
 
+    const firstSubmitRecord = records.find(record => record.action === 'submit' || record.action === 'resubmit')
+
     // 最新的审批实例（用于状态判断）
     const instance = instances[instances.length - 1] || null
 
@@ -905,6 +1025,12 @@ router.get('/:id/approval-flow', requireAuth, async (req, res) => {
       success: true,
       data: {
         instance,
+        confirmation: {
+          status: confirmation.status,
+          submit_time: firstSubmitRecord?.action_time || confirmation.submit_time,
+          approve_time: confirmation.approve_time,
+          approver_comment: confirmation.approver_comment,
+        },
         records,
         gmName: gmUser?.name || null
       }
@@ -1355,7 +1481,8 @@ router.get('/:id/documents/:docId/download', requireAdminOrGM, async (req, res) 
     }
 
     res.setHeader('Content-Type', document.mime_type || 'application/octet-stream')
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.file_name)}"`)
+    const disposition = isInlinePreviewMimeType(document.mime_type) ? 'inline' : 'attachment'
+    res.setHeader('Content-Disposition', `${disposition}; filename="${encodeURIComponent(document.file_name)}"`)
 
     const fileStream = fs.createReadStream(filePath)
     fileStream.pipe(res)

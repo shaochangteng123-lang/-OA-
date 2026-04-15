@@ -144,7 +144,7 @@
               :collapsed="sidebarCollapsed"
               tooltip-content="转正"
               :badge="probationBadge"
-              badge-type="warning"
+              badge-type="danger"
             />
             <SidebarMenuItem
               path="/resignation"
@@ -152,6 +152,8 @@
               :icon="SwitchButton"
               :collapsed="sidebarCollapsed"
               tooltip-content="离职"
+              :badge="resignationBadge"
+              badge-type="danger"
             />
             <SidebarMenuItem
               path="/leave"
@@ -177,6 +179,8 @@
               :icon="List"
               :collapsed="sidebarCollapsed"
               tooltip-content="员工数据"
+              :badge="employeeDataBadge"
+              badge-type="danger"
             />
           </SidebarGroup>
 
@@ -397,11 +401,15 @@ const hrGroupHasBadge = computed(() => {
   const counts = pendingStore.counts
   // 用户的转正待提交
   const userProbation = counts.myProbationPending
+  // 用户的离职待办
+  const userResignation = (counts.myResignationPending || 0) + (counts.myHandoverPending || 0)
   // 管理员的转正待审批
   const adminProbation = isAdmin.value ? counts.probationPending : 0
+  // 管理员的离职待审批
+  const adminResignation = isAdmin.value ? (counts.resignationPending || 0) : 0
   // 总经理的转正待审批
   const gmProbation = isGeneralManager.value ? counts.probationPending : 0
-  return userProbation || adminProbation > 0 || gmProbation > 0
+  return userProbation || userResignation > 0 || adminProbation > 0 || adminResignation > 0 || gmProbation > 0
 })
 
 // 计算各个报销类型的待办数量（包含待确认收款和已驳回）
@@ -436,6 +444,22 @@ const probationBadge = computed(() => {
   return undefined
 })
 
+const resignationBadge = computed(() => {
+  if (isAdmin.value && pendingStore.counts.resignationPending > 0) {
+    return pendingStore.counts.resignationPending
+  }
+
+  const total = (pendingStore.counts.myResignationPending || 0) + (pendingStore.counts.myHandoverPending || 0)
+  return total > 0 ? total : undefined
+})
+
+// 管理员「员工数据」菜单待办：转正待审批 + 离职待审批
+const employeeDataBadge = computed(() => {
+  if (!isAdmin.value) return undefined
+  const total = (pendingStore.counts.probationPending || 0) + (pendingStore.counts.resignationPending || 0)
+  return total > 0 ? total : undefined
+})
+
 // 页面标题
 const pageTitle = computed(() => {
   const routeTitles: Record<string, string> = {
@@ -450,10 +474,10 @@ const pageTitle = computed(() => {
     '/business-reimbursement/create': '', // 不显示标题
     '/reimbursement-statistics': '', // 不显示标题
     '/reimbursement-management': '', // 不显示标题
-    '/onboarding': '入职',
-    '/probation': '转正',
-    '/resignation': '离职',
-    '/employee-data': '员工数据',
+    '/onboarding': '',
+    '/probation': '',
+    '/resignation': '',
+    '/employee-data': '',
     '/leave': '请假',
     '/projects': '项目管理',
     '/project-initiation': '项目立项',

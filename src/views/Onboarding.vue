@@ -1,12 +1,6 @@
 <template>
   <div class="onboarding-container">
     <el-card class="page-card">
-      <template #header>
-        <div class="card-header">
-          <h2>入职管理</h2>
-        </div>
-      </template>
-
       <el-tabs v-model="activeTab" class="content-tabs">
         <!-- 员工基础信息 Tab -->
         <el-tab-pane label="员工基础信息" name="profile">
@@ -197,6 +191,16 @@
                       </el-select>
                     </el-form-item>
                   </el-col>
+                  <el-col :span="8">
+                    <el-form-item label="员工状态" prop="employmentStatus">
+                      <el-select v-model="formData.employmentStatus" placeholder="请选择员工状态" style="width: 100%" disabled>
+                        <el-option label="在职" value="active" />
+                        <el-option label="试用期" value="probation" />
+                        <el-option label="已离职" value="resigned" />
+                        <el-option label="休假中" value="on_leave" />
+                      </el-select>
+                    </el-form-item>
+                  </el-col>
                 </el-row>
               </div>
 
@@ -255,7 +259,7 @@
                 style="margin-bottom: 20px"
               >
                 <template #title>
-                  以下是您的入职所需文件，请下载相关文件填写后上交
+                  以下是您的入职所需文件，请下载相关文件填写后转换为 PDF 再上交
                 </template>
               </el-alert>
 
@@ -457,6 +461,7 @@ const formData = reactive({
   hireDate: '',
   department: '',
   position: '',
+  employmentStatus: '',
   bankAccountName: '',
   bankAccountPhone: '',
   bankName: '',
@@ -561,6 +566,7 @@ const fetchProfile = async () => {
       formData.hireDate = data.hire_date || ''
       formData.department = data.department || ''
       formData.position = data.position || ''
+      formData.employmentStatus = data.employment_status || ''
       formData.bankAccountName = data.bank_account_name || ''
       formData.bankAccountPhone = data.bank_account_phone || ''
       formData.bankName = data.bank_name || ''
@@ -600,6 +606,7 @@ const handleReset = () => {
     formData.hireDate = data.hire_date || ''
     formData.department = data.department || ''
     formData.position = data.position || ''
+    formData.employmentStatus = data.employment_status || ''
     formData.bankAccountName = data.bank_account_name || ''
     formData.bankAccountPhone = data.bank_account_phone || ''
     formData.bankName = data.bank_name || ''

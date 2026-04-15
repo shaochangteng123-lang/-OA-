@@ -62,9 +62,14 @@ temp/
 *.bak3
 *.backup
 
-# 上传的文件
-uploads/invoices/*.pdf
-uploads/invoices/*.jpg
+# 上传的文件（用户上传内容，不纳入版本控制）
+uploads/
+
+# 数据库文件（根目录）
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # OCR 训练数据
 *.traineddata

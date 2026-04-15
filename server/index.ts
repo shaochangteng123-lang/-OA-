@@ -27,6 +27,7 @@ import reimbursementScopeRoutes from './routes/reimbursement-scope.js'
 import approvalRoutes from './routes/approval.js'
 import employeesRoutes from './routes/employees.js'
 import probationRoutes from './routes/probation.js'
+import resignationRoutes from './routes/resignation.js'
 import filesRoutes from './routes/files.js'
 import { shutdownOcrDaemon } from './services/ocrDaemon.js'
 
@@ -90,6 +91,7 @@ app.use('/api/reimbursement-scope', reimbursementScopeRoutes)
 app.use('/api/approval', approvalRoutes)
 app.use('/api/employees', employeesRoutes)
 app.use('/api/probation', probationRoutes)
+app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
 
 app.get('/api/health', (_req, res) => {

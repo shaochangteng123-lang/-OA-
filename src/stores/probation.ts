@@ -26,6 +26,7 @@ export interface ProbationConfirmation {
   approve_time: string | null
   approver_id: string | null
   approver_comment: string | null
+  application_comment: string | null
   created_at: string
   updated_at: string
 }
@@ -91,6 +92,8 @@ export const useProbationStore = defineStore('probation', () => {
   const myStatus = ref<{
     profile: { id: string; hire_date: string; employment_status: string } | null
     confirmation: ProbationConfirmation | null
+    hasHistory: boolean
+    hasRealConfirmation: boolean
     documents: ProbationDocument[]
   } | null>(null)
   const myStatusLoading = ref(false)

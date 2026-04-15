@@ -76,28 +76,28 @@ router.get('/', requireAuth, async (req, res) => {
   try {
     const { role, status, keyword } = req.query
 
-    let query = 'SELECT * FROM users WHERE 1=1'
+    let query = 'SELECT u.*, ep.employment_status FROM users u LEFT JOIN employee_profiles ep ON u.id = ep.user_id WHERE 1=1'
     const params: unknown[] = []
 
     if (role) {
-      query += ' AND role = ?'
+      query += ' AND u.role = ?'
       params.push(role)
     }
 
     if (status) {
-      query += ' AND status = ?'
+      query += ' AND u.status = ?'
       params.push(status)
     }
 
     if (keyword) {
-      query += ' AND (name LIKE ? OR email LIKE ? OR mobile LIKE ?)'
+      query += ' AND (u.name LIKE ? OR u.email LIKE ? OR u.mobile LIKE ?)'
       const searchTerm = `%${keyword}%`
       params.push(searchTerm, searchTerm, searchTerm)
     }
 
-    query += ' ORDER BY created_at DESC'
+    query += ' ORDER BY u.created_at DESC'
 
-    const users = await db.prepare(query).all(...params) as UserRow[]
+    const users = await db.prepare(query).all(...params) as (UserRow & { employment_status?: string })[]
 
     // 转换数据格式，移除敏感信息
     const result = users.map((user) => ({
@@ -112,6 +112,7 @@ router.get('/', requireAuth, async (req, res) => {
       department: user.department,
       position: user.position,
       employeeNo: user.employee_no,
+      employmentStatus: user.employment_status || null,
       bankAccountName: user.bank_account_name,
       bankAccountPhone: user.bank_account_phone,
       bankName: user.bank_name,
@@ -137,7 +138,7 @@ router.get('/', requireAuth, async (req, res) => {
 // 更新用户信息
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { id, username, name, password, email, mobile, role, status, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
+    const { id, username, name, password, email, mobile, role, status, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber, employmentStatus } = req.body
     const now = new Date().toISOString()
 
     if (!id) {
@@ -248,6 +249,21 @@ router.post('/', requireAuth, async (req, res) => {
       id
     )
 
+    // 同步更新 employee_profiles 的 employment_status
+    if (employmentStatus) {
+      const profile = await db.prepare('SELECT id FROM employee_profiles WHERE user_id = ?').get(id)
+      if (profile) {
+        await db.prepare('UPDATE employee_profiles SET employment_status = ?, updated_at = ? WHERE user_id = ?').run(employmentStatus, now, id)
+      } else {
+        // 如果还没有 profile 记录，创建一条草稿
+        const profileId = nanoid()
+        await db.prepare(
+          `INSERT INTO employee_profiles (id, user_id, name, employment_status, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'draft', ?, ?)`
+        ).run(profileId, id, name || username || '', employmentStatus, now, now)
+      }
+    }
+
     res.json({
       success: true,
       data: { id },
@@ -314,7 +330,7 @@ router.get('/next-employee-no', requireAdmin, async (req, res) => {
 // 创建新用户（管理员可用）
 router.post('/create', requireAdmin, async (req, res) => {
   try {
-    const { username, password, email, mobile, role, department, position, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
+    const { username, password, email, mobile, role, department, position, employmentStatus, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
 
     // 验证必填字段
     if (!username || !password || !email || !mobile || !department || !position) {
@@ -423,6 +439,30 @@ router.post('/create', requireAdmin, async (req, res) => {
     )
 
     console.log('✅ 创建用户成功:', { userId, username, employeeNo, role: role || 'user' })
+
+    // 同步创建 employee_profiles 记录
+    if (employmentStatus) {
+      const profileId = nanoid()
+      await db.prepare(
+        `INSERT INTO employee_profiles (id, user_id, name, employee_no, department, position, email, mobile, employment_status, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)`
+      ).run(profileId, userId, username, employeeNo, department, position, email || null, mobile, employmentStatus, now, now)
+
+      // 如果是实习期，自动创建转正记录
+      if (employmentStatus === 'probation') {
+        const hireDate = now.split('T')[0]
+        const hireDateObj = new Date(hireDate)
+        hireDateObj.setMonth(hireDateObj.getMonth() + 6)
+        const probationEndDate = hireDateObj.toISOString().split('T')[0]
+
+        const confirmationId = nanoid()
+        await db.prepare(`
+          INSERT INTO probation_confirmations (
+            id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        `).run(confirmationId, profileId, hireDate, probationEndDate, now, now)
+      }
+    }
 
     res.json({
       success: true,

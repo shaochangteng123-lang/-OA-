@@ -2176,6 +2176,29 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myReimbursementLargeRejected = rejectedMap['large'] || 0
     data.myReimbursementBusinessRejected = rejectedMap['business'] || 0
 
+    // 所有用户: 离职相关待办
+    const myResignationPending = await db.prepare(`
+      SELECT COUNT(*) as count FROM resignation_requests
+      WHERE employee_user_id = ? AND status IN ('draft', 'rejected', 'handover_confirmed')
+    `).get(userId) as { count: number }
+    data.myResignationPending = myResignationPending.count
+
+    const myHandoverPending = await db.prepare(`
+      SELECT COUNT(*) as count FROM resignation_requests
+      WHERE handover_user_id = ? AND (
+        (status = 'submitted' AND handover_confirm_time IS NULL)
+        OR status = 'handover_rejected'
+      )
+    `).get(userId) as { count: number }
+    data.myHandoverPending = myHandoverPending.count
+
+    if (user.role === 'admin' || user.role === 'super_admin') {
+      const resignationPending = await db.prepare(`
+        SELECT COUNT(*) as count FROM resignation_requests WHERE status = 'mutual_confirmed'
+      `).get() as { count: number }
+      data.resignationPending = resignationPending.count
+    }
+
     // 所有用户: 转正待提交（试用期且被驳回）
     const profile = await db.prepare(`
       SELECT ep.id, ep.employment_status FROM employee_profiles ep

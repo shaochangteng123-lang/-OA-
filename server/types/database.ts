@@ -223,6 +223,7 @@ export interface EmployeeProfile {
   emergency_phone: string | null
   address: string | null
   hire_date: string | null
+  contract_end_date: string | null
   department: string | null
   position: string | null
   bank_account_name: string | null
@@ -276,6 +277,7 @@ export interface ProbationConfirmation {
   approve_time: string | null
   approver_id: string | null
   approver_comment: string | null
+  application_comment: string | null
   created_at: string
   updated_at: string
 }
@@ -316,4 +318,100 @@ export interface ProbationTemplate {
   uploaded_by: string
   uploaded_by_name: string | null
   created_at: string
+}
+
+// 离职申请状态
+export type ResignationStatus =
+  | 'draft'
+  | 'submitted'
+  | 'handover_confirmed'
+  | 'mutual_confirmed'
+  | 'approved'
+  | 'rejected'
+  | 'handover_rejected'  // 仅驳回给交接人，离职人无感知
+
+// 离职类型
+export type ResignationType = 'voluntary' | 'contract_end' | 'dismissal'
+
+// 离职申请
+export interface ResignationRequest {
+  id: string
+  employee_id: string
+  employee_user_id: string
+  handover_user_id: string
+  handover_name: string | null
+  resign_type: ResignationType
+  resign_date: string
+  reason: string | null
+  status: ResignationStatus
+  reject_target: 'employee' | 'handover' | 'both' | null
+  employee_confirm_time: string | null
+  handover_confirm_time: string | null
+  submit_time: string | null
+  approve_time: string | null
+  approver_id: string | null
+  approver_comment: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ResignationRequestWithEmployee extends ResignationRequest {
+  employee_name: string
+  employee_department: string | null
+  employee_position: string | null
+  employee_mobile: string | null
+}
+
+export type ResignationDocumentType =
+  | 'application_form'
+  | 'handover_form_employee'
+  | 'handover_form_handover'
+  | 'termination_proof'
+  | 'asset_handover'
+  | 'compensation_agreement'
+  | 'expense_settlement_agreement'
+
+export type ResignationTemplateType =
+  | 'application_form'
+  | 'handover_form'
+  | 'termination_proof'
+  | 'asset_handover'
+  | 'compensation_agreement'
+  | 'expense_settlement_agreement'
+  | 'partner_dividend_settlement'
+export type ResignationUploaderRole = 'employee' | 'handover' | 'admin'
+
+// 离职附件
+export interface ResignationDocument {
+  id: string
+  request_id: string
+  document_type: ResignationDocumentType
+  uploader_role: ResignationUploaderRole
+  file_name: string
+  file_path: string
+  file_size: number | null
+  mime_type: string | null
+  uploaded_by: string
+  uploaded_by_name: string | null
+  created_at: string
+}
+
+// 离职模板
+export interface ResignationTemplate {
+  id: string
+  template_type: ResignationTemplateType
+  name: string
+  file_name: string
+  file_path: string
+  file_size: number | null
+  mime_type: string | null
+  uploaded_by: string
+  uploaded_by_name: string | null
+  created_at: string
+}
+
+export interface EmployeeResignationArchive {
+  request: ResignationRequestWithEmployee | null
+  documents: ResignationDocument[]
+  fallback_from_employee_status?: boolean
 }

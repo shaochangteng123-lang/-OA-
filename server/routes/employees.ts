@@ -4,10 +4,23 @@ import fs from 'fs'
 import path from 'path'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
-import type { EmployeeProfile, EmployeeDocument } from '../types/database.js'
+import type { EmployeeProfile, EmployeeDocument, EmployeeResignationArchive } from '../types/database.js'
 import { nanoid } from 'nanoid'
 
 const router = Router()
+
+// 根据入职日期计算合同到期日期（+1年）
+function calculateContractEndDate(hireDate: string | null | undefined): string | null {
+  if (!hireDate) return null
+  try {
+    const date = new Date(hireDate)
+    if (isNaN(date.getTime())) return null
+    date.setFullYear(date.getFullYear() + 1)
+    return date.toISOString().split('T')[0] // YYYY-MM-DD
+  } catch {
+    return null
+  }
+}
 
 // 员工档案文件上传目录
 const employeeDocsDir = path.join(process.cwd(), 'uploads', 'employee-documents')
@@ -41,16 +54,11 @@ const uploadEmployeeDoc = multer({
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = [
       'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ]
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 PDF、JPG、PNG、DOC、DOCX 格式的文件'))
+      cb(new Error('只支持 PDF 格式的文件'))
     }
   },
 })
@@ -159,9 +167,9 @@ router.get('/my-profile', requireAuth, async (req, res) => {
     // 如果没有 employee_profiles 记录，从 users 表获取基本信息
     if (!profile) {
       const user = await db.prepare(`
-        SELECT id, name, email, mobile, employee_no, department, position,
-               bank_account_name, bank_account_phone, bank_name, bank_account_number
-        FROM users WHERE id = ?
+        SELECT u.id, u.name, u.email, u.mobile, u.employee_no, u.department, u.position,
+               u.bank_account_name, u.bank_account_phone, u.bank_name, u.bank_account_number
+        FROM users u WHERE u.id = ?
       `).get(userId) as any | undefined
 
       if (user) {
@@ -179,6 +187,7 @@ router.get('/my-profile', requireAuth, async (req, res) => {
             bank_account_phone: user.bank_account_phone,
             bank_name: user.bank_name,
             bank_account_number: user.bank_account_number,
+            employment_status: null,
             status: null
           }
         })
@@ -236,6 +245,7 @@ router.post('/my-profile', requireAuth, async (req, res) => {
           emergency_phone = ?,
           address = ?,
           hire_date = ?,
+          contract_end_date = ?,
           department = ?,
           position = ?,
           bank_account_name = ?,
@@ -262,6 +272,7 @@ router.post('/my-profile', requireAuth, async (req, res) => {
         data.emergency_phone || null,
         data.address || null,
         data.hire_date || null,
+        calculateContractEndDate(data.hire_date),
         data.department || null,
         data.position || null,
         data.bank_account_name || null,
@@ -290,10 +301,10 @@ router.post('/my-profile', requireAuth, async (req, res) => {
           id_number, native_place, ethnicity, marital_status,
           education, school, major, mobile, email,
           emergency_contact, emergency_phone, address,
-          hire_date, department, position,
+          hire_date, contract_end_date, department, position,
           bank_account_name, bank_account_phone, bank_name, bank_account_number,
           status, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
       `).run(
         id,
         userId,
@@ -314,6 +325,7 @@ router.post('/my-profile', requireAuth, async (req, res) => {
         data.emergency_phone || null,
         data.address || null,
         data.hire_date || null,
+        calculateContractEndDate(data.hire_date),
         data.department || null,
         data.position || null,
         data.bank_account_name || null,
@@ -348,8 +360,8 @@ router.post('/my-profile/submit', requireAuth, async (req, res) => {
 
     // 检查是否已有记录
     const existing = await db.prepare(`
-      SELECT id, status, name, hire_date FROM employee_profiles WHERE user_id = ?
-    `).get(userId) as { id: string; status: string; name: string; hire_date: string | null } | undefined
+      SELECT id, status, name, hire_date, employment_status FROM employee_profiles WHERE user_id = ?
+    `).get(userId) as { id: string; status: string; name: string; hire_date: string | null; employment_status: string | null } | undefined
 
     if (!existing) {
       return res.status(400).json({
@@ -373,10 +385,11 @@ router.post('/my-profile/submit', requireAuth, async (req, res) => {
       })
     }
 
-    // 更新状态为已提交，并设置在职状态为实习期
+    // 更新状态为已提交，仅在未设置 employment_status 时默认为 probation
+    const newEmploymentStatus = existing.employment_status || 'probation'
     await db.prepare(`
-      UPDATE employee_profiles SET status = 'submitted', employment_status = 'probation', updated_at = ? WHERE id = ?
-    `).run(now, existing.id)
+      UPDATE employee_profiles SET status = 'submitted', employment_status = ?, updated_at = ? WHERE id = ?
+    `).run(newEmploymentStatus, now, existing.id)
 
     // 计算试用期结束日期（入职日期 + 6个月）
     let probationEndDate = now.split('T')[0] // 默认为今天
@@ -503,9 +516,17 @@ router.get('/list', requireAdmin, async (req, res) => {
     const countSql = sql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM')
     const countResult = await db.prepare(countSql).get(...params) as { total: number }
 
-    // 分页
+    // 分页，合同到期前10天的员工置顶
     const offset = (Number(page) - 1) * Number(pageSize)
-    sql += ` ORDER BY ep.created_at DESC LIMIT ? OFFSET ?`
+    sql += ` ORDER BY
+      CASE WHEN ep.contract_end_date IS NOT NULL
+           AND ep.contract_end_date::date <= (CURRENT_DATE + INTERVAL '10 days')
+           AND ep.contract_end_date::date >= CURRENT_DATE
+           AND ep.employment_status != 'resigned'
+           THEN 0 ELSE 1 END,
+      ep.contract_end_date ASC NULLS LAST,
+      ep.created_at DESC
+      LIMIT ? OFFSET ?`
     params.push(Number(pageSize), offset)
 
     const list = await db.prepare(sql).all(...params) as EmployeeProfile[]
@@ -548,6 +569,92 @@ router.get('/:id', requireAdmin, async (req, res) => {
   }
 })
 
+// 获取员工离职档案（管理员）
+router.get('/:id/resignation-archive', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const employee = await db.prepare(`
+      SELECT id, user_id, name, department, position, mobile, employment_status, updated_at
+      FROM employee_profiles WHERE id = ?
+    `).get(id) as {
+      id: string
+      user_id: string | null
+      name: string
+      department: string | null
+      position: string | null
+      mobile: string | null
+      employment_status: string | null
+      updated_at: string
+    } | undefined
+
+    if (!employee) {
+      return res.status(404).json({ success: false, message: '员工信息不存在' })
+    }
+
+    const request = await db.prepare(`
+      SELECT rr.*, ep.name as employee_name, ep.department as employee_department,
+             ep.position as employee_position, ep.mobile as employee_mobile
+      FROM resignation_requests rr
+      LEFT JOIN employee_profiles ep ON rr.employee_id = ep.id
+      WHERE rr.employee_id = ?
+    `).get(id) as EmployeeResignationArchive['request']
+
+    if (!request) {
+      const shouldFallback = employee.employment_status === 'resigned'
+
+      return res.json({
+        success: true,
+        data: {
+          request: shouldFallback
+            ? {
+                id: `employee-status-${employee.id}`,
+                employee_id: employee.id,
+                employee_user_id: employee.user_id || '',
+                handover_user_id: '',
+                handover_name: null,
+                resign_type: 'voluntary',
+                resign_date: '',
+                reason: null,
+                status: 'approved',
+                employee_confirm_time: null,
+                handover_confirm_time: null,
+                submit_time: null,
+                approve_time: employee.updated_at || null,
+                approver_id: null,
+                approver_comment: '该员工暂无离职申请记录，当前信息根据员工状态兜底展示',
+                created_at: employee.updated_at,
+                updated_at: employee.updated_at,
+                employee_name: employee.name,
+                employee_department: employee.department,
+                employee_position: employee.position,
+                employee_mobile: employee.mobile,
+              }
+            : null,
+          documents: [],
+          fallback_from_employee_status: shouldFallback,
+        } satisfies EmployeeResignationArchive,
+      })
+    }
+
+    const documents = await db.prepare(`
+      SELECT * FROM resignation_documents WHERE request_id = ? ORDER BY created_at DESC
+    `).all(request.id) as EmployeeResignationArchive['documents']
+
+    res.json({
+      success: true,
+      data: {
+        request,
+        documents,
+        fallback_from_employee_status: false,
+      } satisfies EmployeeResignationArchive,
+    })
+  } catch (error) {
+    console.error('获取员工离职档案失败:', error)
+    res.status(500).json({ success: false, message: '获取员工离职档案失败' })
+  }
+})
+
 // 更新员工信息（管理员）
 router.put('/:id', requireAdmin, async (req, res) => {
   try {
@@ -556,11 +663,77 @@ router.put('/:id', requireAdmin, async (req, res) => {
     const now = new Date().toISOString()
 
     const existing = await db.prepare(`
-      SELECT id FROM employee_profiles WHERE id = ?
-    `).get(id)
+      SELECT id, employment_status, hire_date FROM employee_profiles WHERE id = ?
+    `).get(id) as { id: string; employment_status: string | null; hire_date: string | null } | undefined
 
     if (!existing) {
       return res.status(404).json({ success: false, message: '员工信息不存在' })
+    }
+
+    // 检测是否将员工状态改回实习期（需要重新走转正流程）
+    const isResetToProbation = data.employment_status === 'probation' && existing.employment_status !== 'probation'
+
+    if (isResetToProbation) {
+      // 归档旧转正记录到 probation_history
+      const oldConfirmation = await db.prepare(`
+        SELECT * FROM probation_confirmations WHERE employee_id = ?
+      `).get(id) as any | undefined
+
+      if (oldConfirmation) {
+        const historyId = nanoid()
+        await db.prepare(`
+          INSERT INTO probation_history (
+            id, employee_id, confirmation_id, hire_date, probation_end_date,
+            status, submit_time, approve_time, approver_id, approver_comment,
+            application_comment, reset_reason, reset_by, reset_at, new_hire_date, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          historyId,
+          id,
+          oldConfirmation.id,
+          oldConfirmation.hire_date,
+          oldConfirmation.probation_end_date,
+          oldConfirmation.status,
+          oldConfirmation.submit_time,
+          oldConfirmation.approve_time,
+          oldConfirmation.approver_id,
+          oldConfirmation.approver_comment,
+          oldConfirmation.application_comment,
+          data.reset_reason || '管理员将员工状态改为实习期',
+          req.session.userId,
+          now,
+          data.hire_date || null,
+          now
+        )
+
+        // 删除旧转正文件的物理文件
+        const oldDocs = await db.prepare(`
+          SELECT file_path FROM probation_documents WHERE confirmation_id = ?
+        `).all(oldConfirmation.id) as { file_path: string }[]
+        for (const doc of oldDocs) {
+          const fp = path.join(process.cwd(), doc.file_path)
+          if (fs.existsSync(fp)) fs.unlinkSync(fp)
+        }
+
+        // 删除旧转正相关的数据库记录
+        await db.prepare(`DELETE FROM probation_documents WHERE confirmation_id = ?`).run(oldConfirmation.id)
+        await db.prepare(`DELETE FROM approval_records WHERE instance_id IN (SELECT id FROM approval_instances WHERE target_id = ? AND target_type = 'probation')`).run(oldConfirmation.id)
+        await db.prepare(`DELETE FROM approval_instances WHERE target_id = ? AND target_type = 'probation'`).run(oldConfirmation.id)
+        await db.prepare(`DELETE FROM probation_confirmations WHERE id = ?`).run(oldConfirmation.id)
+      }
+
+      // 用新的入职日期创建新的转正记录
+      const newHireDate = data.hire_date || now.split('T')[0]
+      const hireDateObj = new Date(newHireDate)
+      hireDateObj.setMonth(hireDateObj.getMonth() + 6)
+      const newProbationEndDate = hireDateObj.toISOString().split('T')[0]
+
+      const confirmationId = nanoid()
+      await db.prepare(`
+        INSERT INTO probation_confirmations (
+          id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?)
+      `).run(confirmationId, id, newHireDate, newProbationEndDate, now, now)
     }
 
     await db.prepare(`
@@ -582,6 +755,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
         emergency_phone = ?,
         address = ?,
         hire_date = ?,
+        contract_end_date = ?,
         department = ?,
         position = ?,
         bank_account_name = ?,
@@ -610,6 +784,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
       data.emergency_phone || null,
       data.address || null,
       data.hire_date || null,
+      calculateContractEndDate(data.hire_date),
       data.department || null,
       data.position || null,
       data.bank_account_name || null,
@@ -629,7 +804,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
     res.json({
       success: true,
       data: updated,
-      message: '更新成功'
+      message: isResetToProbation ? '已将员工改为实习期，需重新走转正审批流程' : '更新成功'
     })
   } catch (error) {
     console.error('更新员工信息失败:', error)
@@ -875,16 +1050,11 @@ const uploadOnboardingTemplate = multer({
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = [
       'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ]
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 PDF、JPG、PNG、DOC、DOCX 格式的文件'))
+      cb(new Error('只支持 PDF 格式的文件'))
     }
   },
 })

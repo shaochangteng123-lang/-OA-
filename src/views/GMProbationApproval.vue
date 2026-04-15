@@ -59,6 +59,13 @@
       <el-table-column label="试用期截止" min-width="100" align="center">
         <template #default="{ row }">{{ formatDateOnly(row.probation_end_date) }}</template>
       </el-table-column>
+      <el-table-column label="剩余天数" min-width="90" align="center">
+        <template #default="{ row }">
+          <span :class="{ 'text-danger': getRemainingDaysNum(row.probation_end_date) < 0, 'text-warning': getRemainingDaysNum(row.probation_end_date) <= 30 && getRemainingDaysNum(row.probation_end_date) >= 0 }">
+            {{ getRemainingDaysText(row.probation_end_date) }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" min-width="85" align="center">
         <template #default="{ row }">
           <el-tag :type="getProbationStatusType(row.status)" size="small">
@@ -72,26 +79,32 @@
       <el-table-column label="操作" min-width="240" align="center">
         <template #default="{ row }">
           <div class="action-buttons">
-            <el-button type="primary" size="small" :icon="View" @click="handleViewProbation(row)">
-              详情
-            </el-button>
-            <!-- 已提交/已审批/已驳回都显示审批流程按钮 -->
-            <el-button
-              v-if="['submitted', 'approved', 'rejected'].includes(row.status)"
-              type="info"
-              size="small"
-              :icon="List"
-              @click="handleViewApprovalFlow(row)"
-            >
-              审批流程
-            </el-button>
-            <template v-if="row.status === 'submitted'">
-              <el-button type="success" size="small" :icon="Check" @click="handleApproveProbation(row)">
-                通过
+            <!-- 虚拟记录（未提交过转正申请的实习期员工）不显示操作按钮 -->
+            <template v-if="isVirtualRecord(row)">
+              <span class="no-action-text">未申请转正</span>
+            </template>
+            <template v-else>
+              <el-button type="primary" size="small" :icon="View" @click="handleViewProbation(row)">
+                详情
               </el-button>
-              <el-button type="danger" size="small" :icon="Close" @click="handleRejectProbation(row)">
-                驳回
+              <!-- 已提交/已审批/已驳回都显示审批流程按钮 -->
+              <el-button
+                v-if="['submitted', 'approved', 'rejected'].includes(row.status)"
+                type="info"
+                size="small"
+                :icon="List"
+                @click="handleViewApprovalFlow(row)"
+              >
+                审批流程
               </el-button>
+              <template v-if="row.status === 'submitted'">
+                <el-button type="success" size="small" :icon="Check" @click="handleApproveProbation(row)">
+                  通过
+                </el-button>
+                <el-button type="danger" size="small" :icon="Close" @click="handleRejectProbation(row)">
+                  驳回
+                </el-button>
+              </template>
             </template>
           </div>
         </template>
@@ -108,6 +121,11 @@
           <el-descriptions-item label="手机">{{ detailRow.employee_mobile || '-' }}</el-descriptions-item>
           <el-descriptions-item label="入职日期">{{ formatDateOnly(detailRow.hire_date) }}</el-descriptions-item>
           <el-descriptions-item label="试用期截止">{{ formatDateOnly(detailRow.probation_end_date) }}</el-descriptions-item>
+          <el-descriptions-item label="剩余天数">
+            <span :class="{ 'text-danger': getRemainingDaysNum(detailRow.probation_end_date) < 0, 'text-warning': getRemainingDaysNum(detailRow.probation_end_date) <= 30 && getRemainingDaysNum(detailRow.probation_end_date) >= 0 }">
+              {{ getRemainingDaysText(detailRow.probation_end_date) }}
+            </span>
+          </el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag :type="getProbationStatusType(detailRow.status)" size="small">
               {{ getProbationStatusText(detailRow.status) }}
@@ -115,6 +133,9 @@
           </el-descriptions-item>
           <el-descriptions-item label="提交时间">
             {{ detailRow.submit_time ? formatDateTime(detailRow.submit_time) : '-' }}
+          </el-descriptions-item>
+          <el-descriptions-item v-if="detailRow.application_comment" label="申请说明" :span="2">
+            {{ detailRow.application_comment }}
           </el-descriptions-item>
           <el-descriptions-item v-if="detailRow.approve_time" label="审批时间" :span="2">
             {{ formatDateTime(detailRow.approve_time) }}
@@ -138,6 +159,34 @@
             </el-table-column>
           </el-table>
           <el-empty v-else description="暂无上传文件" />
+        </div>
+        <!-- 历史转正记录 -->
+        <div v-if="detailRow.probation_history && detailRow.probation_history.length > 0" style="margin-top: 20px;">
+          <div style="font-weight: 600; margin-bottom: 10px; color: #303133;">历史转正记录</div>
+          <el-table :data="detailRow.probation_history" stripe size="small">
+            <el-table-column label="入职时间" min-width="100" align="center">
+              <template #default="{ row: h }">{{ formatDateOnly(h.hire_date) }}</template>
+            </el-table-column>
+            <el-table-column label="试用期截止" min-width="100" align="center">
+              <template #default="{ row: h }">{{ formatDateOnly(h.probation_end_date) }}</template>
+            </el-table-column>
+            <el-table-column label="转正状态" min-width="80" align="center">
+              <template #default="{ row: h }">
+                <el-tag :type="getProbationStatusType(h.status)" size="small">
+                  {{ getProbationStatusText(h.status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="审批时间" min-width="130" align="center">
+              <template #default="{ row: h }">{{ h.approve_time ? formatDateTime(h.approve_time) : '-' }}</template>
+            </el-table-column>
+            <el-table-column label="重置原因" min-width="160">
+              <template #default="{ row: h }">{{ h.reset_reason || '-' }}</template>
+            </el-table-column>
+            <el-table-column label="重置时间" min-width="130" align="center">
+              <template #default="{ row: h }">{{ formatDateTime(h.reset_at) }}</template>
+            </el-table-column>
+          </el-table>
         </div>
       </div>
       <template #footer>
@@ -176,10 +225,14 @@
             <div class="tl-title">{{ getActionTitle(record) }}</div>
             <div v-if="['submit', 'resubmit', 'withdraw'].includes(record.action)" class="tl-desc">
               <template v-if="record.action === 'withdraw'">{{ record.approver_name }} 撤回了转正申请</template>
-              <template v-else-if="record.action === 'resubmit'">{{ record.approver_name }} 重新提交了转正申请</template>
+              <template v-else-if="record.action === 'resubmit'">
+                {{ record.approver_name }} 重新提交了转正申请
+                <div v-if="record.comment" class="tl-comment">{{ formatSubmitComment(record.comment) }}</div>
+              </template>
               <template v-else>
                 {{ record.approver_name }}
                 {{ flowRecords.filter((r: any) => r.action === 'submit' || r.action === 'resubmit').indexOf(record) > 0 ? '重新提交了转正申请' : '提交了转正申请' }}
+                <div v-if="record.comment" class="tl-comment">{{ formatSubmitComment(record.comment) }}</div>
               </template>
             </div>
             <template v-else>
@@ -282,6 +335,11 @@ const displayList = computed(() => {
   })
 })
 
+// 判断是否为虚拟记录（没有提交过转正申请的实习期员工）
+function isVirtualRecord(row: any): boolean {
+  return typeof row.id === 'string' && row.id.startsWith('virtual_')
+}
+
 function handleSearch() {
   appliedSearch.name = searchForm.name
   appliedSearch.department = searchForm.department
@@ -357,9 +415,31 @@ function getActionTitle(record: any) {
   return record.approver_name || '总经理'
 }
 
+function formatSubmitComment(comment: string | null | undefined) {
+  if (!comment) return ''
+  return comment.replace(/^员工(?:驳回后)?重新?提交转正申请；?/, '').replace(/^员工提交转正申请；?/, '').trim() || comment
+}
+
 function formatDateOnly(dateStr: string) {
   if (!dateStr) return '-'
   return dateStr.split('T')[0].split(' ')[0]
+}
+
+function getRemainingDaysNum(endDate: string | null | undefined): number {
+  if (!endDate) return -1
+  const end = new Date(endDate.split('T')[0])
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  end.setHours(0, 0, 0, 0)
+  return Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24))
+}
+
+function getRemainingDaysText(endDate: string | null | undefined): string {
+  if (!endDate) return '-'
+  const days = getRemainingDaysNum(endDate)
+  if (days < 0) return '已到期'
+  if (days === 0) return '今天到期'
+  return `${days}天`
 }
 
 function formatDateTime(dateStr: string) {
@@ -543,6 +623,12 @@ onMounted(() => {
   gap: 6px;
   flex-wrap: nowrap;
   justify-content: center;
+  align-items: center;
+}
+
+.no-action-text {
+  color: #909399;
+  font-size: 13px;
 }
 
 .flow-dialog {
@@ -588,5 +674,20 @@ onMounted(() => {
   margin-top: 6px;
   font-size: 13px;
   color: #909399;
+}
+
+.text-danger {
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+.text-warning {
+  color: #e6a23c;
+  font-weight: 600;
+}
+
+.no-action-text {
+  color: #909399;
+  font-size: 13px;
 }
 </style>

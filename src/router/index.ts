@@ -126,7 +126,7 @@ const routes: RouteRecordRaw[] = [
         path: '/employee-data',
         name: 'EmployeeData',
         component: () => import('@/views/EmployeeData.vue'),
-        meta: { title: '员工数据', requiresAdmin: true },
+        meta: { title: '', requiresAdmin: true },
       },
       {
         path: '/leave',

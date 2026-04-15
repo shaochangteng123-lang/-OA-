@@ -39,14 +39,15 @@ def get_ocr_engine():
     try:
         from paddleocr import PaddleOCR
         # 使用 PP-OCRv4 mobile 轻量模型，内存占用小，适合容器环境
+        # 启用文档方向分类和变形矫正，提高扫描件/副本发票的识别率
         _ocr_engine = PaddleOCR(
-            use_textline_orientation=False,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
+            use_textline_orientation=True,
+            use_doc_orientation_classify=True,
+            use_doc_unwarping=True,
             lang="ch",
             ocr_version="PP-OCRv4",
-            text_det_box_thresh=0.3,
-            text_det_unclip_ratio=1.6,
+            text_det_box_thresh=0.25,
+            text_det_unclip_ratio=1.8,
         )
         _ocr_type = "paddleocr"
         return _ocr_engine, _ocr_type

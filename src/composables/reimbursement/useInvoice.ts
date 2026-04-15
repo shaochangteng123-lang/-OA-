@@ -57,7 +57,7 @@ export function useInvoice() {
   const fileList = ref<any[]>([])
   // 发票ID计数器
   let invoiceIdCounter = 0
-  // 当月已使用的运输/交通/汽油/柴油类发票额度（从后端获取）
+  // 当月已使用的运输/交通/汽油/柴油/通行费类发票额度（从后端获取）
   const monthlyUsedQuota = ref<number>(0)
 
   // 计算总金额（所有发票金额的总和，不考虑核减）
@@ -370,7 +370,7 @@ export function useInvoice() {
   }
 
   /**
-   * 获取当月运输/交通/汽油/柴油类发票已使用额度
+   * 获取当月运输/交通/汽油/柴油/通行费类发票已使用额度
    * @param excludeReimbursementId 要排除的报销单ID（编辑模式下排除当前报销单）
    */
   async function fetchMonthlyUsedQuota(excludeReimbursementId?: string): Promise<void> {
@@ -396,11 +396,11 @@ export function useInvoice() {
 
   /**
    * 重新计算核减金额
-   * 对于基础报销，运输服务、汽油、柴油类发票合计限额1500元
+   * 对于基础报销，运输服务、汽油、柴油、通行费类发票合计限额1500元
    * 需要考虑当月已使用的额度（跨报销单累计）
    */
   function recalculateDeductions(): void {
-    // 找出所有运输服务、汽油、柴油类发票
+    // 找出所有运输服务、汽油、柴油、通行费类发票
     const transportAndFuelInvoices = invoiceList.value.filter(inv => {
       const category = inv.category?.toLowerCase() || ''
       return (
@@ -408,6 +408,7 @@ export function useInvoice() {
         category.includes('交通') ||
         category.includes('汽油') ||
         category.includes('柴油') ||
+        category.includes('通行费') ||
         category.includes('transport') ||
         category.includes('gas') ||
         category.includes('diesel')
@@ -423,7 +424,7 @@ export function useInvoice() {
     // 计算剩余可用额度 = 1500 - 当月已使用额度
     const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota.value)
 
-    // 如果当月已使用额度 >= 1500，本次上传的所有运输/交通/汽油/柴油类发票全部核减
+    // 如果当月已使用额度 >= 1500，本次上传的所有运输/交通/汽油/柴油/通行费类发票全部核减
     if (monthlyUsedQuota.value >= 1500) {
       transportAndFuelInvoices.forEach(inv => {
         inv.deductedAmount = inv.amount
@@ -471,6 +472,7 @@ export function useInvoice() {
         category.includes('交通') ||
         category.includes('汽油') ||
         category.includes('柴油') ||
+        category.includes('通行费') ||
         category.includes('transport') ||
         category.includes('gas') ||
         category.includes('diesel')

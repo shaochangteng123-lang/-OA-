@@ -486,6 +486,7 @@ export async function initDatabase() {
       emergency_phone TEXT,
       address TEXT,
       hire_date TEXT,
+      contract_end_date TEXT,
       department TEXT,
       position TEXT,
       status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted')),
@@ -525,6 +526,7 @@ export async function initDatabase() {
       approve_time TEXT,
       approver_id TEXT REFERENCES users(id),
       approver_comment TEXT,
+      application_comment TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
@@ -555,6 +557,73 @@ export async function initDatabase() {
       mime_type TEXT,
       uploaded_by TEXT NOT NULL REFERENCES users(id),
       uploaded_by_name TEXT,
+      created_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS resignation_requests (
+      id TEXT PRIMARY KEY,
+      employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      employee_user_id TEXT NOT NULL REFERENCES users(id),
+      handover_user_id TEXT NOT NULL REFERENCES users(id),
+      handover_name TEXT,
+      resign_type TEXT NOT NULL CHECK(resign_type IN ('voluntary', 'contract_end', 'dismissal')),
+      resign_date TEXT NOT NULL,
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected')),
+      employee_confirm_time TEXT,
+      handover_confirm_time TEXT,
+      submit_time TEXT,
+      approve_time TEXT,
+      approver_id TEXT REFERENCES users(id),
+      approver_comment TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(employee_id)
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS resignation_documents (
+      id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL REFERENCES resignation_requests(id) ON DELETE CASCADE,
+      document_type TEXT NOT NULL CHECK(document_type IN ('application_form', 'handover_form', 'handover_form_employee', 'handover_form_handover', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement')),
+      uploader_role TEXT NOT NULL CHECK(uploader_role IN ('employee', 'handover', 'admin')),
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL REFERENCES users(id),
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL,
+      is_current INTEGER NOT NULL DEFAULT 1
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS resignation_templates (
+      id TEXT PRIMARY KEY,
+      template_type TEXT NOT NULL CHECK(template_type IN ('application_form', 'handover_form', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement', 'partner_dividend_settlement')),
+      name TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL REFERENCES users(id),
+      uploaded_by_name TEXT,
+      created_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS resignation_audit_logs (
+      id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL REFERENCES resignation_requests(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      operator_id TEXT NOT NULL REFERENCES users(id),
+      operator_name TEXT,
+      comment TEXT,
       created_at TEXT NOT NULL
     )
   `)
@@ -671,6 +740,13 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_probation_confirmations_employee_id ON probation_confirmations(employee_id);
     CREATE INDEX IF NOT EXISTS idx_probation_confirmations_status ON probation_confirmations(status);
     CREATE INDEX IF NOT EXISTS idx_probation_documents_confirmation_id ON probation_documents(confirmation_id);
+    CREATE INDEX IF NOT EXISTS idx_resignation_requests_employee_id ON resignation_requests(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_resignation_requests_employee_user_id ON resignation_requests(employee_user_id);
+    CREATE INDEX IF NOT EXISTS idx_resignation_requests_handover_user_id ON resignation_requests(handover_user_id);
+    CREATE INDEX IF NOT EXISTS idx_resignation_requests_status ON resignation_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_resignation_documents_request_id ON resignation_documents(request_id);
+    CREATE INDEX IF NOT EXISTS idx_resignation_documents_type ON resignation_documents(document_type);
+    CREATE INDEX IF NOT EXISTS idx_resignation_templates_type ON resignation_templates(template_type);
     CREATE INDEX IF NOT EXISTS idx_onboarding_templates_file_type ON onboarding_templates(file_type);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_parent_id ON reimbursement_scopes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_sort_order ON reimbursement_scopes(sort_order);
@@ -752,6 +828,120 @@ export async function initDatabase() {
       console.log('ℹ️  user_uploaded_files 迁移失败:', error.message)
     }
 
+    // 数据库迁移：employee_profiles 添加 contract_end_date 字段
+    try {
+      const contractEndCol = await ddlClient.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'employee_profiles' AND column_name = 'contract_end_date'
+      `)
+      if (contractEndCol.rows.length === 0) {
+        await ddlClient.query(`ALTER TABLE employee_profiles ADD COLUMN contract_end_date TEXT`)
+        // 根据已有 hire_date 回填 contract_end_date（+1年）
+        await ddlClient.query(`
+          UPDATE employee_profiles
+          SET contract_end_date = TO_CHAR((hire_date::date + INTERVAL '1 year'), 'YYYY-MM-DD')
+          WHERE hire_date IS NOT NULL AND contract_end_date IS NULL
+        `)
+        console.log('✅ 数据库迁移：employee_profiles 添加 contract_end_date 字段')
+      }
+    } catch (error: any) {
+      console.log('ℹ️  contract_end_date 迁移失败:', error.message)
+    }
+
+    // 数据库迁移：新建 probation_history 表，记录管理员将员工改回实习期时的历史转正记录
+    try {
+      await ddlClient.query(`
+        CREATE TABLE IF NOT EXISTS probation_history (
+          id TEXT PRIMARY KEY,
+          employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
+          confirmation_id TEXT,
+          hire_date TEXT,
+          probation_end_date TEXT,
+          status TEXT,
+          submit_time TEXT,
+          approve_time TEXT,
+          approver_id TEXT,
+          approver_comment TEXT,
+          application_comment TEXT,
+          reset_reason TEXT,
+          reset_by TEXT REFERENCES users(id),
+          reset_at TEXT NOT NULL,
+          new_hire_date TEXT,
+          created_at TEXT NOT NULL
+        )
+      `)
+      await ddlClient.query(`
+        CREATE INDEX IF NOT EXISTS idx_probation_history_employee_id
+        ON probation_history (employee_id)
+      `)
+      console.log('✅ 数据库迁移：probation_history 表检查完成')
+    } catch (error: any) {
+      console.log('ℹ️  probation_history 迁移失败:', error.message)
+    }
+
+    // 数据库迁移：更新 resignation_templates 的 template_type CHECK 约束，支持全部 7 种模板类型
+    try {
+      await ddlClient.query(`
+        ALTER TABLE resignation_templates
+        DROP CONSTRAINT IF EXISTS resignation_templates_template_type_check
+      `)
+      await ddlClient.query(`
+        ALTER TABLE resignation_templates
+        ADD CONSTRAINT resignation_templates_template_type_check
+        CHECK(template_type IN ('application_form', 'handover_form', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement', 'partner_dividend_settlement'))
+      `)
+      console.log('✅ 数据库迁移：resignation_templates template_type 约束已更新')
+    } catch (error: any) {
+      console.log('ℹ️  resignation_templates 约束迁移失败:', error.message)
+    }
+
+    // 数据库迁移：扩展 resignation_documents.document_type 的 CHECK 约束
+    // 旧约束只允许 'application_form' 和 'handover_form'，
+    // 需要支持 'handover_form_employee'、'handover_form_handover'、'termination_proof'、
+    // 'asset_handover'、'compensation_agreement'、'expense_settlement_agreement'
+    try {
+      // 检查当前约束是否需要更新
+      const constraintCheck = await ddlClient.query(`
+        SELECT conname, pg_get_constraintdef(oid) as def
+        FROM pg_constraint
+        WHERE conrelid = 'resignation_documents'::regclass
+          AND conname = 'resignation_documents_document_type_check'
+      `)
+
+      if (constraintCheck.rows.length > 0) {
+        const currentDef = constraintCheck.rows[0].def as string
+        // 如果约束中不包含 'handover_form_employee'，说明是旧约束，需要更新
+        if (!currentDef.includes('handover_form_employee')) {
+          // 先将旧类型数据迁移为新类型
+          await ddlClient.query(`
+            UPDATE resignation_documents SET document_type = 'handover_form_employee'
+            WHERE document_type = 'handover_form' AND uploader_role = 'employee'
+          `)
+          await ddlClient.query(`
+            UPDATE resignation_documents SET document_type = 'handover_form_handover'
+            WHERE document_type = 'handover_form' AND uploader_role = 'handover'
+          `)
+
+          // 删除旧约束，添加新约束
+          await ddlClient.query(`
+            ALTER TABLE resignation_documents DROP CONSTRAINT resignation_documents_document_type_check
+          `)
+          await ddlClient.query(`
+            ALTER TABLE resignation_documents ADD CONSTRAINT resignation_documents_document_type_check
+            CHECK (document_type IN (
+              'application_form', 'handover_form',
+              'handover_form_employee', 'handover_form_handover',
+              'termination_proof', 'asset_handover',
+              'compensation_agreement', 'expense_settlement_agreement'
+            ))
+          `)
+          console.log('✅ 数据库迁移：resignation_documents document_type 约束已更新')
+        }
+      }
+    } catch (error: any) {
+      console.log('ℹ️  resignation_documents document_type 约束迁移:', error.message)
+    }
+
   // DDL 完成，销毁初始化连接，确保后续查询用干净的连接
   } finally {
     await ddlClient.end()
@@ -818,6 +1008,48 @@ export async function initDatabase() {
       now
     )
     console.log('✅ 初始化默认部门职位配置')
+  }
+
+  // 数据库迁移：resignation_documents 添加 is_current 字段
+  try {
+    const colCheck = await db.get<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'resignation_documents' AND column_name = 'is_current'
+    `)
+    if (!colCheck) {
+      await db.run(`ALTER TABLE resignation_documents ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1`)
+      console.log('✅ 数据库迁移：resignation_documents 添加 is_current 字段')
+    }
+  } catch (error: any) {
+    console.log('ℹ️  is_current 字段迁移:', error.message)
+  }
+
+  // 数据库迁移：resignation_requests 添加 reject_target 字段，记录驳回对象
+  try {
+    const rejectTargetCheck = await db.get<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'resignation_requests' AND column_name = 'reject_target'
+    `)
+    if (!rejectTargetCheck) {
+      await db.run(`ALTER TABLE resignation_requests ADD COLUMN reject_target TEXT`)
+      console.log('✅ 数据库迁移：resignation_requests 添加 reject_target 字段')
+    }
+  } catch (error: any) {
+    console.log('ℹ️  reject_target 字段迁移:', error.message)
+  }
+
+  // 数据库迁移：resignation_requests 的 status CHECK 约束增加 handover_rejected
+  try {
+    await db.run(`
+      ALTER TABLE resignation_requests DROP CONSTRAINT IF EXISTS resignation_requests_status_check
+    `)
+    await db.run(`
+      ALTER TABLE resignation_requests ADD CONSTRAINT resignation_requests_status_check
+      CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected'))
+    `)
+    console.log('✅ 数据库迁移：resignation_requests status 约束已更新')
+  } catch (error: any) {
+    console.log('ℹ️  resignation_requests status 约束迁移:', error.message)
   }
 
   console.log('✅ PostgreSQL 数据库表初始化完成')

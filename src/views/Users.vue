@@ -48,6 +48,20 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="员工状态" width="110" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getEmploymentStatusTagType(row.employmentStatus)" size="small">
+              {{ getEmploymentStatusText(row.employmentStatus) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="员工状态" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag :type="getEmploymentStatusTagType(row.employmentStatus)" size="small">
+              {{ getEmploymentStatusText(row.employmentStatus) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="department" label="部门" min-width="150" align="center" />
         <el-table-column label="最后登录" width="180" align="center">
           <template #default="{ row }">
@@ -134,6 +148,13 @@
             <el-option label="访客" value="guest" />
           </el-select>
         </el-form-item>
+        <el-form-item label="员工状态" prop="employmentStatus">
+          <el-select v-model="createForm.employmentStatus" style="width: 100%">
+            <el-option label="实习期" value="probation" />
+            <el-option label="在职" value="active" />
+            <el-option label="已离职" value="resigned" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
@@ -182,6 +203,13 @@
           <el-select v-model="editForm.status" style="width: 100%">
             <el-option label="激活" value="active" />
             <el-option label="停用" value="inactive" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="员工状态" prop="employmentStatus">
+          <el-select v-model="editForm.employmentStatus" style="width: 100%">
+            <el-option label="实习期" value="probation" />
+            <el-option label="在职" value="active" />
+            <el-option label="已离职" value="resigned" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -345,6 +373,7 @@ const createForm = reactive({
   role: 'user',
   department: '',
   position: '',
+  employmentStatus: 'probation',
 })
 
 // 手机号验证器
@@ -395,6 +424,9 @@ const createRules: FormRules = {
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
   ],
+  employmentStatus: [
+    { required: true, message: '请选择员工状态', trigger: 'change' },
+  ],
 }
 
 // 编辑用户相关
@@ -412,6 +444,7 @@ const editForm = reactive({
   status: 'active',
   department: '',
   position: '',
+  employmentStatus: 'probation',
   bankAccountName: '',
   bankAccountPhone: '',
   bankName: '',
@@ -462,6 +495,9 @@ const editRules: FormRules = {
   ],
   status: [
     { required: true, message: '请选择状态', trigger: 'change' },
+  ],
+  employmentStatus: [
+    { required: true, message: '请选择员工状态', trigger: 'change' },
   ],
   bankAccountPhone: [
     { validator: validateEditMobile, trigger: 'blur' },
@@ -537,6 +573,28 @@ function getRoleText(role: string) {
   return roleMap[role] || '未知'
 }
 
+// 员工状态标签颜色
+function getEmploymentStatusTagType(status: string): ElementPlusTagType {
+  const map: Record<string, ElementPlusTagType> = {
+    active: 'success',
+    probation: 'warning',
+    resigned: 'info',
+    on_leave: 'warning',
+  }
+  return map[status] || 'info'
+}
+
+// 员工状态文本
+function getEmploymentStatusText(status: string) {
+  const map: Record<string, string> = {
+    active: '在职',
+    probation: '试用期',
+    resigned: '已离职',
+    on_leave: '休假中',
+  }
+  return map[status] || '未设置'
+}
+
 // 格式化日期
 function formatDate(dateStr: string) {
   return format(new Date(dateStr), 'yyyy-MM-dd HH:mm', { locale: zhCN })
@@ -582,6 +640,7 @@ async function showCreateDialog() {
   createForm.role = 'user'
   createForm.department = ''
   createForm.position = ''
+  createForm.employmentStatus = 'probation'
   createDialogVisible.value = true
   // 获取下一个员工编号
   try {
@@ -636,6 +695,7 @@ function editUser(user: UserType) {
   editForm.bankAccountPhone = (user as any).bankAccountPhone || ''
   editForm.bankName = (user as any).bankName || ''
   editForm.bankAccountNumber = (user as any).bankAccountNumber || ''
+  editForm.employmentStatus = (user as any).employmentStatus || 'probation'
   editEmployeeNo.value = (user as any).employeeNo || '-'
   editDialogVisible.value = true
   nextTick(() => {
@@ -670,6 +730,7 @@ async function handleEditUser() {
       bankAccountPhone: editForm.bankAccountPhone || null,
       bankName: editForm.bankName || null,
       bankAccountNumber: editForm.bankAccountNumber || null,
+      employmentStatus: editForm.employmentStatus,
     })
     if (res.data.success) {
       ElMessage.success('保存成功')

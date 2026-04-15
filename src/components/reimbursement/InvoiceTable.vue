@@ -69,10 +69,10 @@
     <div v-if="showDeduction && hasTransportFuelInvoices && !approvalDeductionAmount" class="deduction-notice">
       <div class="notice-detail-list">
         <div class="notice-detail-row">
-          <span class="detail-text">本次运输/交通/汽油/柴油类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
+          <span class="detail-text">本次运输/交通/汽油/柴油/通行费类发票小计：¥{{ transportFuelSubtotal.toFixed(2) }}</span>
         </div>
         <div class="notice-detail-row">
-          <span class="detail-text">本月累计运输/交通/汽油/柴油类金额：¥{{ (monthlyUsedQuota + transportFuelSubtotal).toFixed(2) }}<span class="detail-limit">（月度上限 ¥1500.00）</span></span>
+          <span class="detail-text">本月累计运输/交通/汽油/柴油/通行费类金额：¥{{ (monthlyUsedQuota + transportFuelSubtotal).toFixed(2) }}<span class="detail-limit">（月度上限 ¥1500.00）</span></span>
         </div>
         <div class="notice-detail-row deduction-row">
           <span class="detail-text">核减金额（超出部分不作为报销）：<span class="deducted-highlight">-¥{{ totalDeductedAmount }}</span></span>
@@ -237,18 +237,19 @@ const totalDeductedAmount = computed(() => {
   return totalDeductedAmountNumber.value.toFixed(2)
 })
 
-// 是否有运输/交通/汽油/柴油类发票
+// 是否有运输/交通/汽油/柴油/通行费类发票
 const hasTransportFuelInvoices = computed(() => {
   return props.invoiceList.some(item => {
     const category = item.category?.toLowerCase() || ''
     return category.includes('运输') ||
       category.includes('交通') ||
       category.includes('汽油') ||
-      category.includes('柴油')
+      category.includes('柴油') ||
+      category.includes('通行费')
   })
 })
 
-// 运输服务/汽油类发票小计（原始金额）
+// 运输服务/汽油/通行费类发票小计（原始金额）
 const transportFuelSubtotal = computed(() => {
   const totalCents = props.invoiceList.reduce((acc, item) => {
     const category = item.category?.toLowerCase() || ''
@@ -256,7 +257,8 @@ const transportFuelSubtotal = computed(() => {
       category.includes('运输') ||
       category.includes('交通') ||
       category.includes('汽油') ||
-      category.includes('柴油')
+      category.includes('柴油') ||
+      category.includes('通行费')
     if (isTransportOrFuel) {
       return acc + Math.round(item.amount * 100)
     }
@@ -310,7 +312,7 @@ const yearlyTotalDeduction = computed(() => {
   return props.yearlyDeductionUsed + currentTotalDeduction.value
 })
 
-// 有效核减金额（用于计算实际报销金额）= 仅运输/交通/汽油/柴油类超额核减
+// 有效核减金额（用于计算实际报销金额）= 仅运输/交通/汽油/柴油/通行费类超额核减
 // 核减发票不参与实际报销金额计算，只用于统计展示
 const effectiveDeduction = computed(() => {
   return totalDeductedAmountNumber.value
