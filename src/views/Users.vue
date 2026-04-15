@@ -287,12 +287,11 @@
           <h4>{{ currentDepartment }} - 职位列表</h4>
           <el-button size="small" type="primary" :icon="Plus" @click="showAddPositionInput">添加职位</el-button>
         </div>
-        <el-input v-if="addPositionInputVisible" v-model="newPositionName" placeholder="输入职位名称" size="small" style="margin-bottom: 12px">
-          <template #append>
-            <el-button :icon="Check" @click="addPosition" />
-            <el-button :icon="Close" @click="cancelAddPosition" />
-          </template>
-        </el-input>
+        <div v-if="addPositionInputVisible" style="display: flex; gap: 8px; margin-bottom: 12px">
+          <el-input v-model="newPositionName" placeholder="输入职位名称" size="small" @keyup.enter="addPosition" @keyup.esc="cancelAddPosition" />
+          <el-button :icon="Check" size="small" type="primary" @click="addPosition" />
+          <el-button :icon="Close" size="small" @click="cancelAddPosition" />
+        </div>
         <el-table :data="currentPositions" border>
           <el-table-column label="职位名称" prop="name" />
           <el-table-column label="操作" width="100">

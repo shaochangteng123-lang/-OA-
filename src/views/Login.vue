@@ -78,7 +78,6 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { User, Lock } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { api } from '@/utils/api'
@@ -129,14 +128,26 @@ async function handleLogin() {
     })
 
     if (response.data.success) {
-      ElMessage.success('登录成功')
       await authStore.checkSession()
-      const redirect = (route.query.redirect as string) || '/'
-      router.push(redirect)
+      // 登录后先检查入职信息是否已完成，未完成则跳转到入职页面（弹窗由 Onboarding 页面展示）
+      if (!authStore.hasCompletedOnboarding) {
+        router.push({ name: 'Onboarding' })
+      } else {
+        const redirect = (route.query.redirect as string) || '/'
+        router.push(redirect)
+      }
     }
   } catch (err: any) {
-    error.value = err.response?.data?.message || '登录失败，请检查用户名和密码'
-    ElMessage.error(error.value)
+    const status = err.response?.status
+    const serverMsg = err.response?.data?.message
+
+    if (status === 500 || status === undefined) {
+      error.value = '服务器错误，请稍后重试'
+    } else if (serverMsg) {
+      error.value = serverMsg
+    } else {
+      error.value = '登录失败，请检查用户名和密码'
+    }
   } finally {
     loading.value = false
   }
@@ -144,10 +155,19 @@ async function handleLogin() {
 
 // 检查是否已登录
 onMounted(async () => {
-  // 如果已经登录，跳转到首页
+  // 检查是否因登录过期被重定向过来
+  if (route.query.reason === 'expired') {
+    error.value = '登录已过期，请重新登录'
+  }
+
+  // 如果已经登录，检查入职状态后跳转
   if (authStore.isLoggedIn) {
-    const redirect = (route.query.redirect as string) || '/'
-    router.push(redirect)
+    if (!authStore.hasCompletedOnboarding) {
+      router.push({ name: 'Onboarding' })
+    } else {
+      const redirect = (route.query.redirect as string) || '/'
+      router.push(redirect)
+    }
     return
   }
 
@@ -157,8 +177,12 @@ onMounted(async () => {
   loading.value = false
 
   if (isLoggedIn) {
-    const redirect = (route.query.redirect as string) || '/'
-    router.push(redirect)
+    if (!authStore.hasCompletedOnboarding) {
+      router.push({ name: 'Onboarding' })
+    } else {
+      const redirect = (route.query.redirect as string) || '/'
+      router.push(redirect)
+    }
   }
 })
 </script>

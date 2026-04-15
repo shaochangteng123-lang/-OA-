@@ -440,13 +440,13 @@ router.post('/create', requireAdmin, async (req, res) => {
 
     console.log('✅ 创建用户成功:', { userId, username, employeeNo, role: role || 'user' })
 
-    // 同步创建 employee_profiles 记录
-    if (employmentStatus) {
+    // 同步创建 employee_profiles 记录（状态为草稿，等待用户自行完善并提交）
+    {
       const profileId = nanoid()
       await db.prepare(
         `INSERT INTO employee_profiles (id, user_id, name, employee_no, department, position, email, mobile, employment_status, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?)`
-      ).run(profileId, userId, username, employeeNo, department, position, email || null, mobile, employmentStatus, now, now)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`
+      ).run(profileId, userId, username, employeeNo, department, position, email || null, mobile, employmentStatus || null, now, now)
 
       // 如果是实习期，自动创建转正记录
       if (employmentStatus === 'probation') {
@@ -519,27 +519,67 @@ router.delete('/:id', requireAdmin, async (req, res) => {
 
     // 使用事务删除用户及其关联数据
     await db.transaction(async (client) => {
-      // 删除用户的关联数据
+      // 1. 删除用户的基础关联数据
       await txRun(client, 'DELETE FROM user_preferences WHERE user_id = ?', id)
       await txRun(client, 'DELETE FROM user_activities WHERE user_id = ?', id)
       await txRun(client, 'DELETE FROM drafts WHERE user_id = ?', id)
       await txRun(client, 'DELETE FROM calendar_events WHERE user_id = ?', id)
       await txRun(client, 'DELETE FROM worklogs WHERE user_id = ?', id)
       await txRun(client, 'DELETE FROM projects WHERE user_id = ?', id)
+      await txRun(client, 'DELETE FROM user_uploaded_files WHERE user_id = ?', id)
+
+      // 2. 删除报销相关数据（先删子表再删主表）
+      await txRun(client, 'DELETE FROM reimbursement_deductions WHERE user_id = ?', id)
+      const reimbursements = await txAll<{ id: string }>(client, 'SELECT id FROM reimbursements WHERE user_id = ?', id)
+      for (const r of reimbursements) {
+        await txRun(client, 'DELETE FROM reimbursement_invoices WHERE reimbursement_id = ?', r.id)
+        await txRun(client, 'DELETE FROM reimbursement_deduction_invoices WHERE reimbursement_id = ?', r.id)
+        await txRun(client, 'DELETE FROM payment_batch_items WHERE reimbursement_id = ?', r.id)
+      }
       await txRun(client, 'DELETE FROM reimbursements WHERE user_id = ?', id)
 
-      // 删除审批相关数据
-      // 先获取该用户作为申请人的审批实例ID
+      // 3. 删除该用户作为付款人的付款批次（先删批次项目再删批次）
+      const paymentBatches = await txAll<{ id: string }>(client, 'SELECT id FROM payment_batches WHERE payer_id = ?', id)
+      for (const b of paymentBatches) {
+        await txRun(client, 'DELETE FROM payment_batch_items WHERE batch_id = ?', b.id)
+      }
+      await txRun(client, 'DELETE FROM payment_batches WHERE payer_id = ?', id)
+
+      // 4. 删除审批相关数据
       const approvalInstances = await txAll<{ id: string }>(client, 'SELECT id FROM approval_instances WHERE applicant_id = ?', id)
       for (const instance of approvalInstances) {
         await txRun(client, 'DELETE FROM approval_records WHERE instance_id = ?', instance.id)
       }
       await txRun(client, 'DELETE FROM approval_instances WHERE applicant_id = ?', id)
-
       // 删除该用户作为审批人的记录
       await txRun(client, 'DELETE FROM approval_records WHERE approver_id = ?', id)
 
-      // 最后删除用户
+      // 5. 删除离职申请相关数据（作为申请人或交接人）
+      const resignations = await txAll<{ id: string }>(
+        client,
+        'SELECT id FROM resignation_requests WHERE employee_user_id = ? OR handover_user_id = ?',
+        id, id
+      )
+      for (const r of resignations) {
+        await txRun(client, 'DELETE FROM resignation_documents WHERE request_id = ?', r.id)
+        await txRun(client, 'DELETE FROM resignation_audit_logs WHERE request_id = ?', r.id)
+      }
+      await txRun(client, 'DELETE FROM resignation_requests WHERE employee_user_id = ? OR handover_user_id = ?', id, id)
+
+      // 6. 删除人事档案相关数据
+      const employeeProfiles = await txAll<{ id: string }>(client, 'SELECT id FROM employee_profiles WHERE user_id = ?', id)
+      for (const ep of employeeProfiles) {
+        await txRun(client, 'DELETE FROM employee_documents WHERE employee_id = ?', ep.id)
+        const probations = await txAll<{ id: string }>(client, 'SELECT id FROM probation_confirmations WHERE employee_id = ?', ep.id)
+        for (const pb of probations) {
+          await txRun(client, 'DELETE FROM probation_documents WHERE confirmation_id = ?', pb.id)
+        }
+        await txRun(client, 'DELETE FROM probation_confirmations WHERE employee_id = ?', ep.id)
+        await txRun(client, 'DELETE FROM probation_history WHERE employee_id = ?', ep.id)
+      }
+      await txRun(client, 'DELETE FROM employee_profiles WHERE user_id = ?', id)
+
+      // 7. 最后删除用户
       await txRun(client, 'DELETE FROM users WHERE id = ?', id)
     })
 

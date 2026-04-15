@@ -164,7 +164,7 @@ router.get('/my-profile', requireAuth, async (req, res) => {
       }
     }
 
-    // 如果没有 employee_profiles 记录，从 users 表获取基本信息
+    // 如果没有 employee_profiles 记录，从 users 表获取基本信息，并自动创建草稿记录
     if (!profile) {
       const user = await db.prepare(`
         SELECT u.id, u.name, u.email, u.mobile, u.employee_no, u.department, u.position,
@@ -173,23 +173,18 @@ router.get('/my-profile', requireAuth, async (req, res) => {
       `).get(userId) as any | undefined
 
       if (user) {
+        // 自动创建一条草稿记录（预填基本信息）
+        const profileId = nanoid()
+        const now = new Date().toISOString()
+        await db.prepare(`
+          INSERT INTO employee_profiles (id, user_id, name, employee_no, department, position, email, mobile, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+        `).run(profileId, user.id, user.name, user.employee_no, user.department, user.position, user.email || null, user.mobile, now, now)
+
+        const newProfile = await db.prepare(`SELECT * FROM employee_profiles WHERE id = ?`).get(profileId) as any
         return res.json({
           success: true,
-          data: {
-            user_id: user.id,
-            name: user.name,
-            email: user.email,
-            mobile: user.mobile,
-            employee_no: user.employee_no,
-            department: user.department,
-            position: user.position,
-            bank_account_name: user.bank_account_name,
-            bank_account_phone: user.bank_account_phone,
-            bank_name: user.bank_name,
-            bank_account_number: user.bank_account_number,
-            employment_status: null,
-            status: null
-          }
+          data: newProfile
         })
       }
     }
@@ -226,6 +221,7 @@ router.post('/my-profile', requireAuth, async (req, res) => {
 
     if (existing) {
       // 更新现有记录
+      // 注意：department、position、employment_status 由管理员在用户管理中分配，用户不可自行修改
       await db.prepare(`
         UPDATE employee_profiles SET
           employee_no = ?,
@@ -246,8 +242,6 @@ router.post('/my-profile', requireAuth, async (req, res) => {
           address = ?,
           hire_date = ?,
           contract_end_date = ?,
-          department = ?,
-          position = ?,
           bank_account_name = ?,
           bank_account_phone = ?,
           bank_name = ?,
@@ -273,8 +267,6 @@ router.post('/my-profile', requireAuth, async (req, res) => {
         data.address || null,
         data.hire_date || null,
         calculateContractEndDate(data.hire_date),
-        data.department || null,
-        data.position || null,
         data.bank_account_name || null,
         data.bank_account_phone || null,
         data.bank_name || null,
@@ -663,15 +655,17 @@ router.put('/:id', requireAdmin, async (req, res) => {
     const now = new Date().toISOString()
 
     const existing = await db.prepare(`
-      SELECT id, employment_status, hire_date FROM employee_profiles WHERE id = ?
-    `).get(id) as { id: string; employment_status: string | null; hire_date: string | null } | undefined
+      SELECT id, employment_status, hire_date, status FROM employee_profiles WHERE id = ?
+    `).get(id) as { id: string; employment_status: string | null; hire_date: string | null; status: string } | undefined
 
     if (!existing) {
       return res.status(404).json({ success: false, message: '员工信息不存在' })
     }
 
     // 检测是否将员工状态改回实习期（需要重新走转正流程）
-    const isResetToProbation = data.employment_status === 'probation' && existing.employment_status !== 'probation'
+    // 只有当请求中明确传入 employment_status 时才处理状态变更
+    const requestedEmploymentStatus = data.employment_status
+    const isResetToProbation = requestedEmploymentStatus === 'probation' && existing.employment_status !== 'probation'
 
     if (isResetToProbation) {
       // 归档旧转正记录到 probation_history
@@ -762,7 +756,6 @@ router.put('/:id', requireAdmin, async (req, res) => {
         bank_account_phone = ?,
         bank_name = ?,
         bank_account_number = ?,
-        status = ?,
         employment_status = ?,
         updated_at = ?
       WHERE id = ?
@@ -791,8 +784,7 @@ router.put('/:id', requireAdmin, async (req, res) => {
       data.bank_account_phone || null,
       data.bank_name || null,
       data.bank_account_number || null,
-      data.status || 'draft',
-      data.employment_status || 'active',
+      requestedEmploymentStatus || existing.employment_status,   // 如果请求中传了 employment_status 则更新，否则保持原有
       now,
       id
     )

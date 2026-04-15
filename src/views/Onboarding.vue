@@ -177,28 +177,34 @@
                   </el-col>
                   <el-col :span="8">
                     <el-form-item label="所属部门" prop="department">
-                      <el-select v-model="formData.department" placeholder="请选择部门" style="width: 100%" :disabled="profileData?.status === 'submitted'">
-                        <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
-                      </el-select>
+                      <el-tooltip content="所属部门由管理员分配，如需修改请联系管理员" placement="top">
+                        <el-select v-model="formData.department" placeholder="请选择部门" style="width: 100%" disabled>
+                          <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
+                        </el-select>
+                      </el-tooltip>
                     </el-form-item>
                   </el-col>
                 </el-row>
                 <el-row :gutter="24">
                   <el-col :span="8">
                     <el-form-item label="职位" prop="position">
-                      <el-select v-model="formData.position" placeholder="请先选择部门" :disabled="!formData.department || profileData?.status === 'submitted'" style="width: 100%">
-                        <el-option v-for="pos in getPositions(formData.department)" :key="pos" :label="pos" :value="pos" />
-                      </el-select>
+                      <el-tooltip content="职位由管理员分配，如需修改请联系管理员" placement="top">
+                        <el-select v-model="formData.position" placeholder="请先选择部门" disabled style="width: 100%">
+                          <el-option v-for="pos in getPositions(formData.department)" :key="pos" :label="pos" :value="pos" />
+                        </el-select>
+                      </el-tooltip>
                     </el-form-item>
                   </el-col>
                   <el-col :span="8">
                     <el-form-item label="员工状态" prop="employmentStatus">
-                      <el-select v-model="formData.employmentStatus" placeholder="请选择员工状态" style="width: 100%" disabled>
-                        <el-option label="在职" value="active" />
-                        <el-option label="试用期" value="probation" />
-                        <el-option label="已离职" value="resigned" />
-                        <el-option label="休假中" value="on_leave" />
-                      </el-select>
+                      <el-tooltip content="员工状态由管理员设置，如需修改请联系管理员" placement="top">
+                        <el-select v-model="formData.employmentStatus" placeholder="请选择员工状态" style="width: 100%" disabled>
+                          <el-option label="在职" value="active" />
+                          <el-option label="试用期" value="probation" />
+                          <el-option label="已离职" value="resigned" />
+                          <el-option label="休假中" value="on_leave" />
+                        </el-select>
+                      </el-tooltip>
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -845,11 +851,24 @@ const formatFileSize = (size: number | null) => {
   return `${(size / 1024 / 1024).toFixed(1)} MB`
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadDeptPositionConfig()
   fetchProfile()
   fetchMyDocuments()
   onboardingStore.fetchTemplates()
+
+  // 入职信息未提交时弹窗提示
+  if (!authStore.hasCompletedOnboarding) {
+    await ElMessageBox.alert(
+      '欢迎加入！请先完善您的个人信息，填写完成后即可正常使用系统。',
+      '请完善个人信息',
+      {
+        confirmButtonText: '确认',
+        type: 'info',
+        showClose: false,
+      }
+    )
+  }
 })
 </script>
 

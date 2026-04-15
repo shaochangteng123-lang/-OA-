@@ -218,11 +218,10 @@ const handleReceiptChange = async (file: any, fileList: any[]) => {
       // 发现重复，删除刚上传的发票
       ElMessage.error('此发票已在核减上传中上传，请勿重复上传')
       invoice.deleteInvoiceById(latestInvoice.id)
-      return
     }
   }
-
-  receiptFileList.value = fileList
+  // 注意：不在这里赋值 receiptFileList，el-upload 通过 v-model 自动维护文件列表，
+  // 多张并发上传时手动赋值 fileList 快照会导致后完成的覆盖先完成的，造成文件显示丢失
 }
 
 // 处理删除文件

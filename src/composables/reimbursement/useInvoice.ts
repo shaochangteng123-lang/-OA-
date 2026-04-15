@@ -59,6 +59,10 @@ export function useInvoice() {
   let invoiceIdCounter = 0
   // 当月已使用的运输/交通/汽油/柴油/通行费类发票额度（从后端获取）
   const monthlyUsedQuota = ref<number>(0)
+  // 正在识别中的无票上传请求：fileUid → AbortController
+  const receiptAbortMap = new Map<string | number, AbortController>()
+  // 正在识别中的发票上传请求：fileUid → AbortController
+  const invoiceAbortMap = new Map<string | number, AbortController>()
 
   // 计算总金额（所有发票金额的总和，不考虑核减）
   const totalAmount = computed(() => {
@@ -101,6 +105,8 @@ export function useInvoice() {
 
   /**
    * 处理文件变化 - 上传并OCR识别
+   * 策略：任何失败都移除缩略图，只有识别成功时才保留缩略图。
+   * 识别过程中若用户点击删除按钮，则中断请求并移除缩略图。
    */
   async function handleFileChange(file: any, fileListParam: any[]): Promise<void> {
     // 校验文件格式
@@ -124,6 +130,10 @@ export function useInvoice() {
       return
     }
 
+    // 创建 AbortController，用于支持识别过程中的中断
+    const abortController = new AbortController()
+    invoiceAbortMap.set(file.uid, abortController)
+
     // 调用后端API进行发票OCR识别
     const loadingMessage = ElMessage.info({
       message: `正在识别发票 ${file.name}...`,
@@ -140,6 +150,7 @@ export function useInvoice() {
         method: 'POST',
         body: uploadFormData,
         credentials: 'include',
+        signal: abortController.signal,
       })
 
       const result: UploadResponse = await response.json()
@@ -179,6 +190,7 @@ export function useInvoice() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ invoiceNumber }),
               credentials: 'include',
+              signal: abortController.signal,
             })
             const dupData = await dupRes.json()
             if (dupData.success && dupData.data?.duplicate) {
@@ -187,7 +199,8 @@ export function useInvoice() {
               removeFromFileList(file.uid, fileListParam)
               return
             }
-          } catch (e) {
+          } catch (e: any) {
+            if (e?.name === 'AbortError') throw e // 向上传递中断异常
             console.warn('发票全局查重请求失败:', e)
           }
         }
@@ -222,24 +235,44 @@ export function useInvoice() {
         showUploadError(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
-    } catch (error) {
+    } catch (error: any) {
       loadingMessage.close()
+      // 用户主动中断（点击删除按钮），静默处理，不弹错误提示
+      if (error?.name === 'AbortError') {
+        removeFromFileList(file.uid, fileListParam)
+        return
+      }
       console.error('发票识别失败:', error)
       showUploadError(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
+    } finally {
+      // 清理 AbortController
+      invoiceAbortMap.delete(file.uid)
     }
   }
 
   /**
    * 处理收据/支付截图变化 - 上传并OCR识别
+   * 策略：任何失败（格式/大小不合法、上传失败、OCR失败、校验失败、查重失败）都移除缩略图；
+   * 只有识别成功时才保留缩略图。
+   * 识别过程中若用户点击删除按钮，则中断请求并移除缩略图。
    */
   async function handleReceiptChange(file: any, fileListParam: any[]): Promise<void> {
-    // 校验文件格式
+    // 校验文件格式 —— 格式不合法，移除缩略图
     if (file.raw && !file.raw.type.startsWith('image/')) {
       showUploadError('仅支持图片文件')
       removeFromFileList(file.uid, fileListParam)
       return
     }
+
+    // 拖拽上传时 file.url 可能未设置，立即补设 ObjectURL 确保缩略图始终显示
+    if (file.raw && file.raw.type.startsWith('image/') && !file.url) {
+      file.url = URL.createObjectURL(file.raw)
+    }
+
+    // 创建 AbortController，用于支持识别过程中的中断
+    const abortController = new AbortController()
+    receiptAbortMap.set(file.uid, abortController)
 
     // 调用后端API进行收据OCR识别
     const loadingMessage = ElMessage.info({
@@ -256,6 +289,7 @@ export function useInvoice() {
         method: 'POST',
         body: uploadFormData,
         credentials: 'include',
+        signal: abortController.signal,
       })
 
       // 检查 HTTP 状态码
@@ -263,6 +297,7 @@ export function useInvoice() {
         const errorData = await response.json().catch(() => ({ message: '上传失败' }))
         loadingMessage.close()
         showUploadError(errorData.message || `上传失败 (${response.status})`)
+        // 上传失败，移除缩略图
         removeFromFileList(file.uid, fileListParam)
         return
       }
@@ -272,10 +307,10 @@ export function useInvoice() {
       if (result.success && result.data?.ocrResult) {
         const { amount, date, invoiceNumber, type } = result.data.ocrResult
 
-        // 校验金额 - 收据必须有金额
+        // 校验金额 - 收据必须有金额，失败则移除缩略图
         if (!amount || amount <= 0) {
           loadingMessage.close()
-          showUploadError(`${file.name} 未能识别到金额，请上传更清晰的支付截图`)
+          showUploadError(`${file.name} 未能识别到金额，请重新上传`)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -288,7 +323,7 @@ export function useInvoice() {
           return
         }
 
-        // 校验日期
+        // 校验日期，失败则移除缩略图
         if (date) {
           const dateResult = validateInvoiceDate(date)
           if (!dateResult.valid) {
@@ -299,7 +334,7 @@ export function useInvoice() {
           }
         }
 
-        // 本地查重：检查当前发票列表中是否已有相同的交易单号
+        // 本地查重，失败则移除缩略图
         if (invoiceNumber) {
           const duplicateInvoice = invoiceList.value.find(
             inv => inv.invoiceNumber === invoiceNumber
@@ -330,14 +365,24 @@ export function useInvoice() {
         file.serverPath = result.data.filePath
       } else {
         loadingMessage.close()
+        // OCR 识别失败，移除缩略图
         showUploadError(`${file.name} 识别失败：${result.message || '未知错误'}`)
         removeFromFileList(file.uid, fileListParam)
       }
-    } catch (error) {
-      console.error('收据识别失败:', error)
+    } catch (error: any) {
       loadingMessage.close()
+      // 用户主动中断（点击删除按钮），静默处理，不弹错误提示
+      if (error?.name === 'AbortError') {
+        removeFromFileList(file.uid, fileListParam)
+        return
+      }
+      console.error('收据识别失败:', error)
+      // 其他异常，移除缩略图
       showUploadError(`${file.name} 识别失败，请重新上传`)
       removeFromFileList(file.uid, fileListParam)
+    } finally {
+      // 清理 AbortController
+      receiptAbortMap.delete(file.uid)
     }
   }
 
@@ -487,8 +532,21 @@ export function useInvoice() {
 
   /**
    * 删除发票（通过文件）
+   * 若该文件正在识别中（发票或无票），则同时中断识别请求
    */
   function deleteInvoiceByFile(fileUid: string | number): void {
+    // 若发票正在识别中，中断请求
+    const invoiceAbort = invoiceAbortMap.get(fileUid)
+    if (invoiceAbort) {
+      invoiceAbort.abort()
+      invoiceAbortMap.delete(fileUid)
+    }
+    // 若无票正在识别中，中断请求
+    const receiptAbort = receiptAbortMap.get(fileUid)
+    if (receiptAbort) {
+      receiptAbort.abort()
+      receiptAbortMap.delete(fileUid)
+    }
     // 从文件列表中移除
     const fileIndex = fileList.value.findIndex(f => f.uid === fileUid)
     if (fileIndex > -1) {

@@ -19,10 +19,23 @@ OCR Worker - 多引擎图片文字识别
 import sys
 import json
 import os
+import signal
 
 # 抑制 PaddleOCR 的日志输出
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_allocator_strategy"] = "auto_growth"
+
+# 在 --daemon 模式下忽略 SIGTERM，避免被 tsx watch 热重载时意外杀死
+# Node.js 子进程在父进程重启时会向子进程发送 SIGTERM，
+# 但 OCR 常驻进程需要保持运行以避免冷启动开销
+def _ignore_sigterm(signum, frame):
+    pass
+
+if "--daemon" in sys.argv:
+    try:
+        signal.signal(signal.SIGTERM, _ignore_sigterm)
+    except Exception:
+        pass  # 部分环境可能不支持，忽略
 
 # 全局单例，避免重复初始化
 _ocr_engine = None

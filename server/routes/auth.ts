@@ -31,7 +31,8 @@ router.post('/login', async (req, res) => {
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: '用户名或密码错误',
+        message: '该用户未注册，请联系管理员进行注册',
+        code: 'USER_NOT_FOUND',
       })
     }
 
@@ -56,7 +57,8 @@ router.post('/login', async (req, res) => {
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        message: '用户名或密码错误',
+        message: '密码错误，请重新输入',
+        code: 'WRONG_PASSWORD',
       })
     }
 
@@ -107,7 +109,8 @@ router.post('/login', async (req, res) => {
     console.error('❌ 登录失败:', error)
     res.status(500).json({
       success: false,
-      message: '登录失败，请稍后重试',
+      message: '服务器错误，请稍后重试',
+      code: 'SERVER_ERROR',
     })
   }
 })

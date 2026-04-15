@@ -183,8 +183,11 @@ const handleFileChange = async (file: any, fileList: any[]) => {
 
 // 处理无票上传变化
 const handleReceiptChange = async (file: any, fileList: any[]) => {
-  await invoice.handleReceiptChange(file, fileList)
+  // 先更新文件列表（保留缩略图），再进行OCR识别
+  // 若先调用 handleReceiptChange，识别失败时会调用 removeFromFileList 修改 fileList 引用，
+  // 再用 receiptFileList.value = fileList 赋值会漏掉失败前已有的文件
   receiptFileList.value = fileList
+  await invoice.handleReceiptChange(file, fileList)
 }
 
 // 处理删除文件

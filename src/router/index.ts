@@ -281,7 +281,12 @@ router.beforeEach(async (to, _from, next) => {
     if (!authStore.isLoggedIn) {
       const isLoggedIn = await authStore.checkSession()
       if (!isLoggedIn) {
-        next({ name: 'Login', query: { redirect: to.fullPath } })
+        // 如果有 redirect 参数，说明是从受保护页面被踢出（登录已过期）
+        const query: Record<string, string> = { redirect: to.fullPath }
+        if (to.fullPath !== '/') {
+          query.reason = 'expired'
+        }
+        next({ name: 'Login', query })
         return
       }
     }
@@ -305,9 +310,8 @@ router.beforeEach(async (to, _from, next) => {
     }
 
     // 检查入职信息是否已提交（跳过入职页面本身和标记为跳过检查的页面）
-    // 超级管理员不受此限制
-    const role = authStore.user?.role
-    if (!to.meta.skipOnboardingCheck && !authStore.hasCompletedOnboarding && role !== 'super_admin') {
+    // 所有角色（包括管理员）均需完成入职信息
+    if (!to.meta.skipOnboardingCheck && !authStore.hasCompletedOnboarding) {
       // 显示提示信息
       ElMessage.warning('请填写完入职基础信息后使用')
       next({ name: 'Onboarding' })

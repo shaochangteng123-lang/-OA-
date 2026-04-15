@@ -42,7 +42,9 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const response = await api.get('/api/employees/my-profile')
       if (response.data.success && response.data.data) {
-        profileStatus.value = response.data.data.status || 'draft'
+        const status = response.data.data.status
+        // status 为 null / undefined / 'none' 时均视为未填写
+        profileStatus.value = (status === 'submitted' || status === 'draft') ? status : 'none'
       } else {
         // 没有员工信息记录
         profileStatus.value = 'none'

@@ -445,18 +445,20 @@ const probationBadge = computed(() => {
 })
 
 const resignationBadge = computed(() => {
-  if (isAdmin.value && pendingStore.counts.resignationPending > 0) {
-    return pendingStore.counts.resignationPending
-  }
-
-  const total = (pendingStore.counts.myResignationPending || 0) + (pendingStore.counts.myHandoverPending || 0)
+  // 管理员待审批（排除自己的申请，已在后端过滤）
+  const adminPending = isAdmin.value ? (pendingStore.counts.resignationPending || 0) : 0
+  // 自己作为离职人/交接人的待办
+  const myPending = (pendingStore.counts.myResignationPending || 0) + (pendingStore.counts.myHandoverPending || 0)
+  const total = adminPending + myPending
   return total > 0 ? total : undefined
 })
 
-// 管理员「员工数据」菜单待办：转正待审批 + 离职待审批
+// 管理员「员工数据」菜单待办：转正待审批 + 离职待审批（含自己的申请）
 const employeeDataBadge = computed(() => {
   if (!isAdmin.value) return undefined
-  const total = (pendingStore.counts.probationPending || 0) + (pendingStore.counts.resignationPending || 0)
+  // resignationPending 已排除自己，再加上自己的离职待办
+  const resignationTotal = (pendingStore.counts.resignationPending || 0) + (pendingStore.counts.myResignationPending || 0)
+  const total = (pendingStore.counts.probationPending || 0) + resignationTotal
   return total > 0 ? total : undefined
 })
 

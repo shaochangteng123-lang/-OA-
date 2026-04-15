@@ -193,8 +193,9 @@ const handleFileChange = async (file: any, fileList: any[]) => {
 
 // 处理无票上传变化
 const handleReceiptChange = async (file: any, fileList: any[]) => {
-  await invoice.handleReceiptChange(file, fileList)
+  // 先赋值让缩略图立即显示，再异步识别；识别失败时 handleReceiptChange 内部会从 fileList 中移除
   receiptFileList.value = fileList
+  await invoice.handleReceiptChange(file, fileList)
 }
 
 // 处理删除文件

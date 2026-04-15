@@ -437,9 +437,6 @@
                   <h3>离职申请列表</h3>
                   <div class="filter-actions">
                     <el-select v-model="resignationStatusFilter" placeholder="全部状态" clearable style="width: 180px" @change="handleResignationFilterChange">
-                      <el-option label="草稿" value="draft" />
-                      <el-option label="待交接人处理" value="submitted" />
-                      <el-option label="待离职人确认" value="handover_confirmed" />
                       <el-option label="待管理员审批" value="mutual_confirmed" />
                       <el-option label="已通过" value="approved" />
                       <el-option label="已驳回" value="rejected" />
@@ -1151,7 +1148,7 @@ const pendingStore = usePendingStore()
 
 // 待操作事项计数
 const probationPendingCount = computed(() => pendingStore.counts.probationPending)
-const resignationPendingCount = computed(() => pendingStore.counts.resignationPending)
+const resignationPendingCount = computed(() => (pendingStore.counts.resignationPending || 0) + (pendingStore.counts.myResignationPending || 0))
 
 // 转正管理相关
 const probationStatusFilter = ref('')

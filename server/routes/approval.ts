@@ -2176,10 +2176,12 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myReimbursementLargeRejected = rejectedMap['large'] || 0
     data.myReimbursementBusinessRejected = rejectedMap['business'] || 0
 
-    // 所有用户: 离职相关待办
+    // 所有用户: 离职相关待办（需要离职人本人操作的状态）
+    // rejected = 被驳回需重新提交；handover_confirmed = 需离职人确认交接完成
+    // 不包含 draft、handover_rejected（驳回给交接人，离职人无需操作）
     const myResignationPending = await db.prepare(`
       SELECT COUNT(*) as count FROM resignation_requests
-      WHERE employee_user_id = ? AND status IN ('draft', 'rejected', 'handover_confirmed')
+      WHERE employee_user_id = ? AND status IN ('submitted', 'handover_confirmed', 'mutual_confirmed', 'rejected')
     `).get(userId) as { count: number }
     data.myResignationPending = myResignationPending.count
 
@@ -2194,8 +2196,9 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
 
     if (user.role === 'admin' || user.role === 'super_admin') {
       const resignationPending = await db.prepare(`
-        SELECT COUNT(*) as count FROM resignation_requests WHERE status = 'mutual_confirmed'
-      `).get() as { count: number }
+        SELECT COUNT(*) as count FROM resignation_requests
+        WHERE status = 'mutual_confirmed' AND employee_user_id != ?
+      `).get(userId) as { count: number }
       data.resignationPending = resignationPending.count
     }
 

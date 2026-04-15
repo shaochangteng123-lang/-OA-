@@ -1195,6 +1195,9 @@ router.get('/management', requireAdmin, async (req, res) => {
     if (status) {
       sql += ' AND rr.status = ?'
       params.push(status)
+    } else {
+      // 默认只显示双方已完成确认后的记录（mutual_confirmed、approved、rejected）
+      sql += ` AND rr.status IN ('mutual_confirmed', 'approved', 'rejected')`
     }
 
     sql += ' ORDER BY rr.updated_at DESC'

@@ -156,6 +156,14 @@ function handleDrop(e: DragEvent): void {
     validFiles.forEach(file => {
       // 使用 el-upload 的内部方法添加文件，这样只会触发一次 on-change
       uploadRef.value.handleStart(file)
+      // handleStart 不会触发 on-change，需要手动创建预览 URL
+      // 找到刚添加的文件对象，设置 url 以便缩略图显示
+      const uploadFile = fileList.value.find(
+        (f: any) => f.raw === file || f.name === file.name
+      )
+      if (uploadFile && !uploadFile.url) {
+        uploadFile.url = URL.createObjectURL(file)
+      }
     })
   }
 }

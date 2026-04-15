@@ -116,6 +116,14 @@ async function startDaemon(): Promise<void> {
     // -u 参数禁用 Python 的 stdout/stderr 缓冲，确保管道通信不丢行
     const proc = spawn(pythonCmd, ['-u', workerPath, '--daemon'], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      // 显式传入环境变量，禁用联网检查，避免网络超时；同时允许内存自动增长
+      env: {
+        ...process.env,
+        PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: 'True',
+        FLAGS_allocator_strategy: 'auto_growth',
+        // 使进程忽略 SIGTERM（tsx watch 热重载时会发送 SIGTERM 给子进程）
+        // Python 侧在 --daemon 模式下已通过 signal.signal 捕获处理
+      },
     })
 
     daemonProcess = proc
@@ -129,12 +137,13 @@ async function startDaemon(): Promise<void> {
     })
 
     let gotReady = false
+    // 首次启动需要下载/加载模型，延长超时至 180 秒
     const startTimeout = setTimeout(() => {
       if (!gotReady) {
         cleanup()
-        reject(new Error('PaddleOCR 常驻进程启动超时（60秒）'))
+        reject(new Error('PaddleOCR 常驻进程启动超时（180秒）'))
       }
-    }, 60000)
+    }, 180000)
 
     // 直接监听 stdout 的 data 事件，比 readline 更可靠
     proc.stdout!.on('data', (chunk: Buffer) => {
@@ -214,10 +223,10 @@ export async function callPaddleOcr(filePath: string): Promise<string> {
       const idx = requestQueue.findIndex(r => r.timer === timer)
       if (idx !== -1) requestQueue.splice(idx, 1)
       // 超时说明常驻进程可能卡住了，重启它
-      console.warn('⚠️ PaddleOCR 识别超时（60秒），重启常驻进程')
+      console.warn('⚠️ PaddleOCR 识别超时（90秒），重启常驻进程')
       cleanup()
-      reject(new Error('PaddleOCR 识别超时（60秒）'))
-    }, 60000)
+      reject(new Error('PaddleOCR 识别超时（90秒）'))
+    }, 90000)
 
     requestQueue.push({ resolve, reject, timer })
 

@@ -63,7 +63,6 @@ import { ref, computed, watch } from 'vue'
 import { Plus, Document, Delete, InfoFilled, WarningFilled, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { showUploadError } from '@/utils/uploadError'
-import { api } from '@/utils/api'
 
 export interface DeductionItem {
   id?: string
@@ -100,6 +99,8 @@ const uploadRef = ref()
 const uploading = ref(false)
 const fileList = ref<any[]>([])
 const isDragging = ref(false)
+// 正在识别中的核减上传请求：fileUid → AbortController
+const deductionAbortMap = new Map<string | number, AbortController>()
 
 const deductionItems = computed(() => props.modelValue || [])
 
@@ -187,6 +188,10 @@ async function onFileChange(file: any): Promise<void> {
     return
   }
 
+  // 创建 AbortController，用于支持识别过程中的中断
+  const abortController = new AbortController()
+  deductionAbortMap.set(file.uid, abortController)
+
   uploading.value = true
   // 显示持久化的识别提示（duration: 0 表示不自动关闭）
   const loadingMessage = ElMessage({
@@ -199,16 +204,20 @@ async function onFileChange(file: any): Promise<void> {
     const formData = new FormData()
     formData.append('invoice', file.raw)
 
-    const res = await api.post('/api/reimbursement/upload-deduction-invoice', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 180000, // 3分钟，OCR识别可能耗时较长
+    const res = await fetch('/api/reimbursement/upload-deduction-invoice', {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+      signal: abortController.signal,
     })
 
     // 关闭识别提示
     loadingMessage.close()
 
-    if (res.data.success) {
-      const { filePath, fileHash, ocrResult } = res.data.data
+    const data = await res.json()
+
+    if (data.success) {
+      const { filePath, fileHash, ocrResult } = data.data
 
       // 前端查重1：检查核减列表中是否已存在
       const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === fileHash)
@@ -238,7 +247,7 @@ async function onFileChange(file: any): Promise<void> {
       emit('file-change', newItem)
       ElMessage.success(`核减发票识别成功，金额：¥${newItem.amount.toFixed(2)}`)
     } else {
-      showUploadError(res.data.message || '上传失败')
+      showUploadError(data.message || '上传失败')
       // 上传失败，从 fileList 中移除该文件
       fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
     }
@@ -246,63 +255,36 @@ async function onFileChange(file: any): Promise<void> {
     // 关闭识别提示
     loadingMessage.close()
 
-    console.log('[DeductionUploader] 上传错误:', err)
-    console.log('[DeductionUploader] err.response:', err.response)
-    console.log('[DeductionUploader] err.response?.data:', err.response?.data)
-    console.log('[DeductionUploader] err.message:', err.message)
+    // 用户主动中断（点击删除按钮），静默处理，不弹错误提示
+    if (err?.name === 'AbortError') {
+      fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+      return
+    }
 
     // 优先显示后端返回的错误消息
-    const errorMessage = err.response?.data?.message || '上传核减发票失败'
+    const errorMessage = err.response?.data?.message || err.message || '上传核减发票失败'
     showUploadError(errorMessage)
     // 上传失败，从 fileList 中移除该文件
     fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
   } finally {
     uploading.value = false
+    deductionAbortMap.delete(file.uid)
   }
 }
 
 function handleFileRemove(file: any): void {
-  console.log('=== 删除文件调试信息 ===')
-  console.log('file 对象:', file)
-  console.log('file.uid:', file.uid)
-  console.log('file.url:', file.url)
-  console.log('file.name:', file.name)
-  console.log('file.status:', file.status)
-  console.log('当前 deductionItems:', deductionItems.value)
+  // 通过 uid 查找对应的 deductionItem（uid 通常是 fileHash）
+  let index = deductionItems.value.findIndex(item => item.fileHash === file.uid)
 
-  // 通过 uid 或 url 查找对应的 deductionItem
-  let index = -1
-
-  // 方法1：通过 uid 查找（uid 通常是 fileHash）
-  if (file.uid) {
-    index = deductionItems.value.findIndex(item => item.fileHash === file.uid)
-    console.log('方法1（通过 uid）查找结果:', index)
-  }
-
-  // 方法2：如果方法1失败，通过 url/filePath 查找
+  // 若 uid 匹配不到，尝试通过 url/filePath 查找
   if (index === -1 && file.url) {
     index = deductionItems.value.findIndex(item => item.filePath === file.url)
-    console.log('方法2（通过 url）查找结果:', index)
   }
-
-  // 方法3：如果前两个方法都失败，通过 name 查找
-  if (index === -1 && file.name) {
-    index = deductionItems.value.findIndex(item =>
-      item.invoiceNumber === file.name ||
-      file.name.includes(item.invoiceNumber)
-    )
-    console.log('方法3（通过 name）查找结果:', index)
-  }
-
-  console.log('最终找到的索引:', index)
 
   if (index > -1) {
-    console.log('删除索引为', index, '的项目')
     removeItem(index)
   } else {
-    console.log('未在 deductionItems 中找到，可能是上传失败的文件，直接从 upload 组件删除')
-    // 如果在 deductionItems 中找不到，说明可能是上传失败的文件
-    // 直接调用 upload 组件的删除方法
+    // 未在 deductionItems 中找到，说明是上传失败或识别中的文件，直接从 upload 组件删除
     if (uploadRef.value) {
       uploadRef.value.handleRemove(file)
     }
@@ -310,6 +292,12 @@ function handleFileRemove(file: any): void {
 }
 
 function onDeleteFile(file: any): void {
+  // 若正在识别中，中断请求
+  const abortController = deductionAbortMap.get(file.uid)
+  if (abortController) {
+    abortController.abort()
+    deductionAbortMap.delete(file.uid)
+  }
   handleFileRemove(file)
 }
 

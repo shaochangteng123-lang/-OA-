@@ -131,8 +131,8 @@
                 <div class="upload-actions">
                   <el-button v-if="employeeApplication" type="primary" link @click="openDocument(employeeApplication)">{{ employeeApplication.file_name }}</el-button>
                   <el-button v-if="employeeApplication && canEditDocs" type="danger" link @click="handleDeleteDocument(employeeApplication)">删除</el-button>
-                  <el-upload :show-file-list="false" :before-upload="beforeUploadPdf('application_form')" accept=".pdf">
-                    <el-button type="primary">上传文件</el-button>
+                  <el-upload :show-file-list="false" :before-upload="beforeUploadPdf('application_form')" accept=".pdf" :disabled="!canEditDocs">
+                    <el-button type="primary" :disabled="!canEditDocs">上传文件</el-button>
                   </el-upload>
                 </div>
               </div>
@@ -141,8 +141,8 @@
                 <div class="upload-actions">
                   <el-button v-if="employeeHandover" type="primary" link @click="openDocument(employeeHandover)">{{ employeeHandover.file_name }}</el-button>
                   <el-button v-if="employeeHandover && canEditDocs" type="danger" link @click="handleDeleteDocument(employeeHandover)">删除</el-button>
-                  <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('employee')" accept=".pdf,.jpg,.jpeg,.png">
-                    <el-button type="primary">上传文件</el-button>
+                  <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('employee')" accept=".pdf,.jpg,.jpeg,.png" :disabled="!canEditDocs">
+                    <el-button type="primary" :disabled="!canEditDocs">上传文件</el-button>
                   </el-upload>
                 </div>
               </div>
@@ -160,8 +160,8 @@
                 <div class="upload-actions">
                   <el-button v-if="item.file" type="primary" link @click="openDocument(item.file)">{{ item.file.file_name }}</el-button>
                   <el-button v-if="item.file && canEditDocs" type="danger" link @click="handleDeleteDocument(item.file)">删除</el-button>
-                  <el-upload :show-file-list="false" :before-upload="beforeUploadAttachment(item.type)" accept=".pdf,.jpg,.jpeg,.png">
-                    <el-button type="primary">上传文件</el-button>
+                  <el-upload :show-file-list="false" :before-upload="beforeUploadAttachment(item.type)" accept=".pdf,.jpg,.jpeg,.png" :disabled="!canEditDocs">
+                    <el-button type="primary" :disabled="!canEditDocs">上传文件</el-button>
                   </el-upload>
                 </div>
               </div>

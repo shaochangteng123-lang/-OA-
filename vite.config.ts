@@ -30,6 +30,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 8899,
     strictPort: true,
+    allowedHosts: 'all',
     hmr: {
       clientPort: 8899,
     },
@@ -39,14 +40,14 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://127.0.0.1:3000',
         changeOrigin: true,
         cookieDomainRewrite: 'localhost',
         secure: false,
         ws: true,
       },
       '/uploads': {
-        target: 'http://localhost:3000',
+        target: 'http://127.0.0.1:3000',
         changeOrigin: true,
         secure: false,
       },
