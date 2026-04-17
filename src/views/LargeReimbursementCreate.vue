@@ -1,11 +1,15 @@
 <template>
   <div class="create-reimbursement-container">
     <el-card class="page-card">
+      <!-- 大额报销 - 橙色顶部色条 -->
+      <div class="page-type-bar page-type-bar--large"></div>
+
       <template #header>
         <div class="card-header">
           <div class="header-left">
             <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
             <h2>新建大额报销单</h2>
+            <span class="page-type-badge page-type-badge--large">大额</span>
           </div>
         </div>
       </template>
@@ -84,7 +88,7 @@
             <el-button :loading="submitting" @click="handleSaveDraft">
               保存草稿
             </el-button>
-            <el-button type="primary" :loading="submitting" @click="handleSubmit">
+            <el-button class="submit-btn submit-btn--large" :loading="submitting" @click="handleSubmit">
               提交审批
             </el-button>
           </div>
@@ -337,6 +341,27 @@ onMounted(() => {
   box-shadow: none;
 }
 
+/* 顶部色条 */
+.page-type-bar {
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.page-type-bar--large { background-color: #e6a23c; }
+
+/* 类型 Badge */
+.page-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.page-type-badge--large { background-color: #e6a23c; }
+
 .page-card :deep(.el-card__header) {
   padding: 16px 24px;
   border-bottom: 1px solid #e4e7ed;
@@ -447,5 +472,18 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.submit-btn {
+  font-weight: 600;
+}
+.submit-btn--large {
+  --el-button-bg-color: #e6a23c;
+  --el-button-border-color: #e6a23c;
+  --el-button-hover-bg-color: #ebb563;
+  --el-button-hover-border-color: #ebb563;
+  --el-button-active-bg-color: #cf9236;
+  --el-button-active-border-color: #cf9236;
+  --el-button-text-color: #fff;
 }
 </style>

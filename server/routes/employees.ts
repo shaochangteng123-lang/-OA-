@@ -508,15 +508,14 @@ router.get('/list', requireAdmin, async (req, res) => {
     const countSql = sql.replace(/SELECT[\s\S]*?FROM/, 'SELECT COUNT(*) as total FROM')
     const countResult = await db.prepare(countSql).get(...params) as { total: number }
 
-    // 分页，合同到期前10天的员工置顶
+    // 分页，合同到期（含已过期）且未处理的员工置顶，其余按员工编号升序
     const offset = (Number(page) - 1) * Number(pageSize)
     sql += ` ORDER BY
       CASE WHEN ep.contract_end_date IS NOT NULL
            AND ep.contract_end_date::date <= (CURRENT_DATE + INTERVAL '10 days')
-           AND ep.contract_end_date::date >= CURRENT_DATE
            AND ep.employment_status != 'resigned'
            THEN 0 ELSE 1 END,
-      ep.contract_end_date ASC NULLS LAST,
+      ep.employee_no ASC NULLS LAST,
       ep.created_at DESC
       LIMIT ? OFFSET ?`
     params.push(Number(pageSize), offset)

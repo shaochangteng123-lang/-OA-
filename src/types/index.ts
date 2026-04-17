@@ -16,6 +16,7 @@ export interface User {
   lastLoginAt?: string
   createdAt?: string
   updatedAt?: string
+  forceChangePassword?: boolean
 }
 
 export type UserRole = 'super_admin' | 'admin' | 'general_manager' | 'user' | 'guest'

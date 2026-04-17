@@ -552,16 +552,21 @@ const form = reactive({
 const myProfile = computed(() => resignationStore.myData?.profile || null)
 const myRequest = computed(() => resignationStore.myRequest)
 const myTemplates = computed(() => resignationStore.myTemplates)
-const visibleTemplates = computed(() => {
-  const hiddenTemplateTypes = new Set<ResignationTemplateType>([
-    'termination_proof',
-    'asset_handover',
-    'compensation_agreement',
-    'expense_settlement_agreement',
-    'partner_dividend_settlement',
-  ])
-  return myTemplates.value.filter(template => !hiddenTemplateTypes.has(template.template_type))
-})
+const TEMPLATE_TYPE_ORDER: ResignationTemplateType[] = [
+  'application_form',
+  'handover_form',
+  'termination_proof',
+  'asset_handover',
+  'compensation_agreement',
+  'expense_settlement_agreement',
+  'partner_dividend_settlement',
+]
+const visibleTemplates = computed(() =>
+  [...myTemplates.value].sort(
+    (a, b) =>
+      TEMPLATE_TYPE_ORDER.indexOf(a.template_type) - TEMPLATE_TYPE_ORDER.indexOf(b.template_type),
+  ),
+)
 const myDocuments = computed(() => resignationStore.myDocuments)
 const currentResignType = computed<ResignationType>(() => (form.resign_type || 'voluntary') as ResignationType)
 
@@ -1555,14 +1560,23 @@ const handleOpenDetailDialog = async () => {
   line-height: 1.6;
 }
 
-.template-list,
+.template-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
 .upload-block {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.template-item,
+.template-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f0f2f5;
+}
+
 .upload-row {
   padding: 12px 0;
   border-bottom: 1px solid #f0f2f5;

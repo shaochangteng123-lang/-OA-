@@ -7,25 +7,14 @@
     @dragenter.prevent
     :class="{ 'is-dragging': isDragging }"
   >
-    <el-upload
-      ref="uploadRef"
-      action="#"
-      :auto-upload="false"
-      :before-upload="beforeUpload"
-      :on-change="onFileChange"
-      :on-remove="handleFileRemove"
-      accept=".pdf"
-      list-type="picture-card"
-      class="deduction-upload"
-      :disabled="disabled || uploading"
-      multiple
-      :file-list="fileList"
-    >
-      <div class="upload-trigger">
-        <el-icon class="upload-icon"><Plus /></el-icon>
-        <div class="upload-text">上传核减发票</div>
-      </div>
-      <template #file="{ file }">
+    <!-- 文件卡片 + 上传按钮横向排列，完全自管理，不依赖 el-upload 的 file-list -->
+    <div class="deduction-upload-area">
+      <!-- 已识别成功 & 识别中的文件卡片 -->
+      <div
+        v-for="file in displayList"
+        :key="file.uid"
+        class="deduction-card"
+      >
         <div class="invoice-preview" @dblclick="handlePreview(file)">
           <el-icon class="pdf-icon"><Document /></el-icon>
           <span class="file-name">{{ file.name }}</span>
@@ -33,8 +22,27 @@
             <Delete />
           </el-icon>
         </div>
-      </template>
-    </el-upload>
+      </div>
+
+      <!-- 上传按钮 -->
+      <el-upload
+        v-if="!disabled"
+        ref="uploadRef"
+        action="#"
+        :auto-upload="false"
+        :show-file-list="false"
+        :before-upload="beforeUpload"
+        :on-change="onFileChange"
+        accept=".pdf"
+        class="deduction-upload-btn"
+        multiple
+      >
+        <div class="upload-trigger">
+          <el-icon class="upload-icon"><Plus /></el-icon>
+          <div class="upload-text">上传核减发票</div>
+        </div>
+      </el-upload>
+    </div>
 
     <div class="upload-header">
       <div class="upload-tip">
@@ -59,7 +67,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { Plus, Document, Delete, InfoFilled, WarningFilled, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { showUploadError } from '@/utils/uploadError'
@@ -96,7 +104,8 @@ const emit = defineEmits<{
 }>()
 
 const uploadRef = ref()
-const uploading = ref(false)
+// 正在识别中的任务计数（支持并发上传多张）
+const uploadingCount = ref(0)
 const fileList = ref<any[]>([])
 const isDragging = ref(false)
 // 正在识别中的核减上传请求：fileUid → AbortController
@@ -104,24 +113,24 @@ const deductionAbortMap = new Map<string | number, AbortController>()
 
 const deductionItems = computed(() => props.modelValue || [])
 
-// 同步 deductionItems 到 fileList
-watch(() => props.modelValue, (newVal) => {
-  if (newVal && newVal.length > 0) {
-    fileList.value = newVal.map((item, index) => ({
-      uid: item.fileHash || `deduction-${index}`,
-      name: item.invoiceNumber || `核减发票-${index + 1}.pdf`,
-      url: item.filePath,
-      status: 'success',
-      deductionItem: item
-    }))
-  } else {
-    fileList.value = []
-  }
-}, { immediate: true, deep: true })
+// displayList = 已识别成功（来自 props.modelValue） + 正在识别中（临时条目）
+// 两份数据各自独立维护，不互相干扰
+const uploadingList = ref<any[]>([])  // 仅存正在识别中的临时条目
+
+const displayList = computed(() => {
+  const successItems = deductionItems.value.map((item, index) => ({
+    uid: item.fileHash || `deduction-${index}`,
+    name: item.invoiceNumber || `核减发票-${index + 1}.pdf`,
+    url: item.filePath,
+    status: 'success',
+    deductionItem: item,
+  }))
+  return [...successItems, ...uploadingList.value]
+})
 
 // 拖拽进入
 function handleDragOver(_e: DragEvent): void {
-  if (props.disabled || uploading.value) return
+  if (props.disabled) return
   isDragging.value = true
 }
 
@@ -133,14 +142,13 @@ function handleDragLeave(_e: DragEvent): void {
 // 拖拽放下
 async function handleDrop(e: DragEvent): Promise<void> {
   isDragging.value = false
-  if (props.disabled || uploading.value) return
+  if (props.disabled) return
   const files = Array.from(e.dataTransfer?.files || [])
-  for (const file of files) {
-    if (beforeUpload(file)) {
-      const fakeFile = { raw: file, name: file.name, uid: Date.now() + Math.random() }
-      await onFileChange(fakeFile)
-    }
-  }
+  const validFiles = files
+    .filter(file => beforeUpload(file))
+    .map(file => ({ raw: file, name: file.name, uid: Date.now() + Math.random() }))
+  // 并发上传所有文件，互不阻塞
+  await Promise.all(validFiles.map(fakeFile => onFileChange(fakeFile)))
 }
 
 
@@ -179,20 +187,20 @@ function beforeUpload(file: File): boolean {
 async function onFileChange(file: any): Promise<void> {
   if (!file.raw) return
 
-  // 先进行前端验证，如果验证失败则立即删除文件
+  // 先进行前端验证，如果验证失败则立即返回
   if (!beforeUpload(file.raw)) {
-    // 验证失败，立即删除文件
-    if (uploadRef.value) {
-      uploadRef.value.handleRemove(file)
-    }
     return
   }
+
+  // 立即把临时条目加入 uploadingList，让图标马上出现
+  const tempEntry = { uid: file.uid, name: file.name, status: 'uploading', raw: file.raw }
+  uploadingList.value = [...uploadingList.value, tempEntry]
 
   // 创建 AbortController，用于支持识别过程中的中断
   const abortController = new AbortController()
   deductionAbortMap.set(file.uid, abortController)
 
-  uploading.value = true
+  uploadingCount.value++
   // 显示持久化的识别提示（duration: 0 表示不自动关闭）
   const loadingMessage = ElMessage({
     message: '正在识别核减发票...',
@@ -242,14 +250,15 @@ async function onFileChange(file: any): Promise<void> {
         filePath,
         fileHash,
       }
+      // 识别成功：从 uploadingList 移除临时条目（displayList 的 computed 会自动加入 success 条目）
+      uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
       const updated = [...deductionItems.value, newItem]
       emit('update:modelValue', updated)
       emit('file-change', newItem)
       ElMessage.success(`核减发票识别成功，金额：¥${newItem.amount.toFixed(2)}`)
     } else {
       showUploadError(data.message || '上传失败')
-      // 上传失败，从 fileList 中移除该文件
-      fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+      uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
     }
   } catch (err: any) {
     // 关闭识别提示
@@ -257,37 +266,35 @@ async function onFileChange(file: any): Promise<void> {
 
     // 用户主动中断（点击删除按钮），静默处理，不弹错误提示
     if (err?.name === 'AbortError') {
-      fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+      uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
       return
     }
 
     // 优先显示后端返回的错误消息
     const errorMessage = err.response?.data?.message || err.message || '上传核减发票失败'
     showUploadError(errorMessage)
-    // 上传失败，从 fileList 中移除该文件
-    fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+    uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
   } finally {
-    uploading.value = false
+    uploadingCount.value = Math.max(0, uploadingCount.value - 1)
     deductionAbortMap.delete(file.uid)
   }
 }
 
 function handleFileRemove(file: any): void {
-  // 通过 uid 查找对应的 deductionItem（uid 通常是 fileHash）
-  let index = deductionItems.value.findIndex(item => item.fileHash === file.uid)
+  // 先尝试从 uploadingList 中移除（识别中的临时条目）
+  const inUploading = uploadingList.value.some((f: any) => f.uid === file.uid)
+  if (inUploading) {
+    uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
+    return
+  }
 
-  // 若 uid 匹配不到，尝试通过 url/filePath 查找
+  // 再尝试从 deductionItems 中查找已成功条目并删除
+  let index = deductionItems.value.findIndex(item => item.fileHash === file.uid)
   if (index === -1 && file.url) {
     index = deductionItems.value.findIndex(item => item.filePath === file.url)
   }
-
   if (index > -1) {
     removeItem(index)
-  } else {
-    // 未在 deductionItems 中找到，说明是上传失败或识别中的文件，直接从 upload 组件删除
-    if (uploadRef.value) {
-      uploadRef.value.handleRemove(file)
-    }
   }
 }
 
@@ -323,6 +330,66 @@ function removeItem(idx: number): void {
   display: flex;
   flex-direction: column;
   position: relative;
+}
+
+/* 上传区域：文件卡片 + 上传按钮横排 */
+.deduction-upload-area {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 116px;
+  align-items: flex-start;
+  align-content: flex-start;
+}
+
+/* 每个文件卡片，与原 el-upload picture-card 尺寸一致 */
+.deduction-card {
+  width: 100px;
+  height: 100px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* 上传按钮，样式与原 picture-card 一致 */
+.deduction-upload-btn {
+  width: 100px;
+  height: 100px;
+  flex-shrink: 0;
+}
+
+.deduction-upload-btn :deep(.el-upload) {
+  width: 100px;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #fbfdff;
+  border: 1px dashed #c0ccda;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.deduction-upload-btn :deep(.el-upload:hover) {
+  border-color: #e6a23c;
+}
+
+.deduction-upload-btn :deep(.el-upload:hover) .upload-icon {
+  color: #e6a23c;
+}
+
+.deduction-upload-btn :deep(.el-upload:hover) .upload-text {
+  color: #e6a23c;
+}
+
+@media (max-width: 768px) {
+  .deduction-card,
+  .deduction-upload-btn,
+  .deduction-upload-btn :deep(.el-upload) {
+    width: 80px;
+    height: 80px;
+  }
 }
 
 .deduction-upload {

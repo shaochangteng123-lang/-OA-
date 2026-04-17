@@ -1,11 +1,15 @@
 <template>
   <div class="create-reimbursement-container">
     <el-card class="page-card">
+      <!-- 商务报销 - 青绿色顶部色条 -->
+      <div class="page-type-bar page-type-bar--business"></div>
+
       <template #header>
         <div class="card-header">
           <div class="header-left">
             <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
             <h2>新建商务报销单</h2>
+            <span class="page-type-badge page-type-badge--business">商务</span>
           </div>
         </div>
       </template>
@@ -93,7 +97,7 @@
             <el-button :loading="submitting" @click="handleSaveDraft">
               保存草稿
             </el-button>
-            <el-button type="primary" :loading="submitting" @click="handleSubmit">
+            <el-button class="submit-btn submit-btn--business" :loading="submitting" @click="handleSubmit">
               提交审批
             </el-button>
           </div>
@@ -193,8 +197,9 @@ const handleFileChange = async (file: any, fileList: any[]) => {
 
 // 处理无票上传变化
 const handleReceiptChange = async (file: any, fileList: any[]) => {
-  // 先赋值让缩略图立即显示，再异步识别；识别失败时 handleReceiptChange 内部会从 fileList 中移除
-  receiptFileList.value = fileList
+  // 先浅拷贝赋值，触发响应式更新让缩略图立即显示；再异步识别
+  // 识别失败时 useInvoice.handleReceiptChange 内部会从 fileList 中移除对应项
+  receiptFileList.value = [...fileList]
   await invoice.handleReceiptChange(file, fileList)
 }
 
@@ -357,6 +362,27 @@ onMounted(() => {
   box-shadow: none;
 }
 
+/* 顶部色条 */
+.page-type-bar {
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.page-type-bar--business { background-color: #13c2c2; }
+
+/* 类型 Badge */
+.page-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.page-type-badge--business { background-color: #13c2c2; }
+
 .page-card :deep(.el-card__header) {
   padding: 16px 24px;
   border-bottom: 1px solid #e4e7ed;
@@ -467,5 +493,18 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 12px;
+}
+
+.submit-btn {
+  font-weight: 600;
+}
+.submit-btn--business {
+  --el-button-bg-color: #13c2c2;
+  --el-button-border-color: #13c2c2;
+  --el-button-hover-bg-color: #33d1d1;
+  --el-button-hover-border-color: #33d1d1;
+  --el-button-active-bg-color: #0fa8a8;
+  --el-button-active-border-color: #0fa8a8;
+  --el-button-text-color: #fff;
 }
 </style>

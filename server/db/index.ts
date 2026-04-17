@@ -676,6 +676,93 @@ export async function initDatabase() {
     )
   `)
 
+    // ==================== 请假管理相关表 ====================
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_type_configs (
+      id TEXT PRIMARY KEY,
+      code TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      requires_attachment BOOLEAN DEFAULT FALSE,
+      requires_balance_check BOOLEAN DEFAULT TRUE,
+      default_days NUMERIC(5,1),
+      description TEXT,
+      sort_order INTEGER DEFAULT 0,
+      is_active BOOLEAN DEFAULT TRUE,
+      created_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_balances (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      leave_type_code TEXT NOT NULL REFERENCES leave_type_configs(code),
+      year INTEGER NOT NULL,
+      total_days NUMERIC(5,1) NOT NULL,
+      used_days NUMERIC(5,1) NOT NULL DEFAULT 0,
+      pending_days NUMERIC(5,1) NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, leave_type_code, year)
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_requests (
+      id TEXT PRIMARY KEY,
+      request_no TEXT UNIQUE NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      applicant_name TEXT NOT NULL,
+      applicant_department TEXT,
+      leave_type_code TEXT NOT NULL REFERENCES leave_type_configs(code),
+      leave_type_name TEXT NOT NULL,
+      start_date TEXT NOT NULL,
+      start_half TEXT NOT NULL,
+      end_date TEXT NOT NULL,
+      end_half TEXT NOT NULL,
+      total_days NUMERIC(5,1) NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      approver_id TEXT REFERENCES users(id),
+      approver_name TEXT,
+      reject_reason TEXT,
+      approved_at TEXT,
+      rejected_at TEXT,
+      cancelled_at TEXT,
+      submitted_at TEXT NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      original_id TEXT REFERENCES leave_requests(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_attachments (
+      id TEXT PRIMARY KEY,
+      leave_request_id TEXT NOT NULL REFERENCES leave_requests(id) ON DELETE CASCADE,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER,
+      mime_type TEXT,
+      uploaded_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_approval_logs (
+      id TEXT PRIMARY KEY,
+      leave_request_id TEXT NOT NULL REFERENCES leave_requests(id),
+      operator_id TEXT NOT NULL REFERENCES users(id),
+      operator_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      comment TEXT,
+      created_at TEXT NOT NULL
+    )
+  `)
+
     await ddlClient.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
@@ -750,6 +837,12 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_onboarding_templates_file_type ON onboarding_templates(file_type);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_parent_id ON reimbursement_scopes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_sort_order ON reimbursement_scopes(sort_order);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_user_id ON leave_requests(user_id);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_status ON leave_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_approver_id ON leave_requests(approver_id);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_dates ON leave_requests(start_date, end_date);
+    CREATE INDEX IF NOT EXISTS idx_leave_balances_user_year ON leave_balances(user_id, year);
+    CREATE INDEX IF NOT EXISTS idx_leave_approval_logs_req_id ON leave_approval_logs(leave_request_id);
   `)
 
     // 数据库迁移：添加 is_deduction 字段
@@ -1050,6 +1143,45 @@ export async function initDatabase() {
     console.log('✅ 数据库迁移：resignation_requests status 约束已更新')
   } catch (error: any) {
     console.log('ℹ️  resignation_requests status 约束迁移:', error.message)
+  }
+
+  // 初始化假期类型配置
+  const existingLeaveTypes = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM leave_type_configs')
+  if (Number(existingLeaveTypes?.count || 0) === 0) {
+    const now = new Date().toISOString()
+    const leaveTypes = [
+      { id: 'lt_annual', code: 'annual', name: '年假', requires_attachment: false, requires_balance_check: true, default_days: 5, description: '法定年假，根据工龄计算：工龄<1年无年假，1-10年5天，10-20年10天，20年以上15天', sort_order: 1 },
+      { id: 'lt_personal', code: 'personal', name: '事假', requires_attachment: false, requires_balance_check: false, default_days: 999, description: '个人原因请假，无余额限制', sort_order: 2 },
+      { id: 'lt_sick', code: 'sick', name: '病假', requires_attachment: true, requires_balance_check: true, default_days: 30, description: '因病请假，需提供三甲医院病历或假条', sort_order: 3 },
+      { id: 'lt_compensatory', code: 'compensatory', name: '调休假', requires_attachment: false, requires_balance_check: true, default_days: 0, description: '加班后的调休，由管理员手动调整余额', sort_order: 4 },
+      { id: 'lt_marriage', code: 'marriage', name: '婚假', requires_attachment: false, requires_balance_check: true, default_days: 3, description: '法定婚假3天', sort_order: 5 },
+      { id: 'lt_maternity', code: 'maternity', name: '产假', requires_attachment: false, requires_balance_check: true, default_days: 98, description: '法定产假98天', sort_order: 6 },
+      { id: 'lt_paternity', code: 'paternity', name: '陪产假', requires_attachment: false, requires_balance_check: true, default_days: 15, description: '法定陪产假15天', sort_order: 7 },
+    ]
+    for (const lt of leaveTypes) {
+      await db.run(
+        `INSERT INTO leave_type_configs (id, code, name, requires_attachment, requires_balance_check, default_days, description, sort_order, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, ?)`,
+        lt.id, lt.code, lt.name, lt.requires_attachment, lt.requires_balance_check, lt.default_days, lt.description, lt.sort_order, now
+      )
+    }
+    console.log('✅ 初始化假期类型配置（7种）')
+  }
+
+  // 数据库迁移：users 表添加 force_change_password 字段
+  try {
+    const colCheck = await db.get<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'users' AND column_name = 'force_change_password'
+    `)
+    if (!colCheck) {
+      await db.run(`ALTER TABLE users ADD COLUMN force_change_password BOOLEAN NOT NULL DEFAULT false`)
+      console.log('✅ 数据库迁移：users 添加 force_change_password 字段')
+    } else {
+      console.log('✅ 数据库迁移：force_change_password 字段已存在')
+    }
+  } catch (error: any) {
+    console.log('ℹ️  force_change_password 字段迁移:', error.message)
   }
 
   console.log('✅ PostgreSQL 数据库表初始化完成')

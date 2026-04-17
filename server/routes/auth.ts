@@ -76,6 +76,7 @@ router.post('/login', async (req, res) => {
         email: user.email || '',
         avatar_url: user.avatar_url,
         role: user.role,
+        forceChangePassword: user.force_change_password,
       }
 
       // 保存session
@@ -101,6 +102,7 @@ router.post('/login', async (req, res) => {
           email: user.email,
           avatar_url: user.avatar_url,
           role: user.role,
+          forceChangePassword: user.force_change_password,
         },
       },
       message: '登录成功',
@@ -170,10 +172,10 @@ router.post('/change-password', requireAuth, async (req, res) => {
       })
     }
 
-    // 更新密码
+    // 更新密码，同时清除强制修改密码标记
     const newPasswordHash = await hashPassword(newPassword)
     const now = new Date().toISOString()
-    await db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(newPasswordHash, now, userId)
+    await db.prepare('UPDATE users SET password_hash = ?, force_change_password = false, updated_at = ? WHERE id = ?').run(newPasswordHash, now, userId)
 
     console.log('✅ 密码修改成功:', { userId, userName: user.name })
 
@@ -211,7 +213,7 @@ router.get('/session', (req, res) => {
 })
 
 // 获取当前用户信息（用于前端 auth store）
-router.get('/user', (req, res) => {
+router.get('/user', async (req, res) => {
   console.log('📋 检查用户会话:', {
     hasSession: !!req.session,
     userId: req.session?.userId,
@@ -219,10 +221,23 @@ router.get('/user', (req, res) => {
   })
 
   if (req.session?.userId && req.session?.user) {
-    res.json({
-      success: true,
-      data: req.session.user,
-    })
+    // 从数据库读取最新的 force_change_password 状态
+    try {
+      const dbUser = await db.prepare('SELECT force_change_password FROM users WHERE id = ?').get(req.session.userId) as { force_change_password: boolean } | undefined
+      const forceChangePassword = dbUser?.force_change_password ?? false
+      res.json({
+        success: true,
+        data: {
+          ...req.session.user,
+          forceChangePassword,
+        },
+      })
+    } catch {
+      res.json({
+        success: true,
+        data: req.session.user,
+      })
+    }
   } else {
     res.status(401).json({
       success: false,

@@ -1,9 +1,20 @@
 <template>
   <div class="basic-reimbursement-container">
     <el-card class="page-card">
+      <!-- 基础报销 - 蓝色顶部色条 -->
+      <div class="page-type-bar page-type-bar--basic"></div>
+
       <template #header>
         <div class="card-header">
-          <el-button type="primary" :icon="Plus" @click="handleCreate">
+          <div class="page-title-area">
+            <span class="page-type-badge page-type-badge--basic">基础</span>
+            <span class="page-title-text">基础报销</span>
+          </div>
+          <el-button
+            :icon="Plus"
+            class="action-btn action-btn--basic"
+            @click="handleCreate"
+          >
             新建报销单
           </el-button>
         </div>
@@ -937,6 +948,55 @@ onMounted(() => {
   border-radius: 0;
   border: none;
   box-shadow: none;
+  position: relative;
+}
+
+/* 顶部色条 */
+.page-type-bar {
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.page-type-bar--basic { background-color: #409eff; }
+
+/* 页面标题区域 */
+.page-title-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-title-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+/* 类型 Badge */
+.page-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.page-type-badge--basic { background-color: #409eff; }
+
+/* 主操作按钮 */
+.action-btn {
+  font-weight: 600;
+}
+.action-btn--basic {
+  --el-button-bg-color: #409eff;
+  --el-button-border-color: #409eff;
+  --el-button-hover-bg-color: #66b1ff;
+  --el-button-hover-border-color: #66b1ff;
+  --el-button-active-bg-color: #3a8ee6;
+  --el-button-active-border-color: #3a8ee6;
+  --el-button-text-color: #fff;
 }
 
 .page-card :deep(.el-card__header) {
@@ -952,7 +1012,7 @@ onMounted(() => {
 
 .card-header {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
 }
 

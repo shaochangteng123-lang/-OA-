@@ -484,7 +484,7 @@
           <!-- 请假管理 Tab -->
           <el-tab-pane label="请假管理" name="leave">
             <div class="tab-content">
-              <el-empty description="请假管理功能开发中..." />
+              <LeaveAdminPanel />
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -1085,6 +1085,7 @@ import { useProbationStore, type ProbationTemplate } from '@/stores/probation'
 import { useResignationStore, type ResignationDocumentType, type ResignationTemplate } from '@/stores/resignation'
 import { usePendingStore } from '@/stores/pending'
 import { api } from '@/utils/api'
+import LeaveAdminPanel from '@/components/leave/LeaveAdminPanel.vue'
 
 type ResignationTemplateType =
   | 'application_form'
@@ -2136,7 +2137,7 @@ const getEmploymentStatusText = (status: string | null) => {
   return textMap[status || 'active'] || '在职'
 }
 
-// 判断合同是否即将到期（10天内）
+// 判断合同是否需要标红（10天内到期 或 已过期，且未处理/未离职）
 const isContractExpiring = (row: EmployeeProfile) => {
   if (!row.contract_end_date || row.employment_status === 'resigned') return false
   const endDate = new Date(row.contract_end_date)
@@ -2144,7 +2145,7 @@ const isContractExpiring = (row: EmployeeProfile) => {
   today.setHours(0, 0, 0, 0)
   endDate.setHours(0, 0, 0, 0)
   const diffDays = (endDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
-  return diffDays >= 0 && diffDays <= 10
+  return diffDays <= 10
 }
 
 // 表格行样式：合同到期前10天标红

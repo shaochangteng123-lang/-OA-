@@ -13,7 +13,7 @@
       </el-table-column>
       <el-table-column prop="amount" label="金额" width="100" align="center">
         <template #default="{ row }">
-          ¥{{ row.amount }}
+          ¥{{ Number(row.amount).toFixed(2) }}
         </template>
       </el-table-column>
       <el-table-column prop="invoiceDate" label="开票日期" width="130" align="center">

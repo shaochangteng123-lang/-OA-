@@ -309,6 +309,8 @@ router.beforeEach(async (to, _from, next) => {
       }
     }
 
+    // 注意：强制修改密码通过 MainLayout 弹窗处理，不在此做路由跳转
+
     // 检查入职信息是否已提交（跳过入职页面本身和标记为跳过检查的页面）
     // 所有角色（包括管理员）均需完成入职信息
     if (!to.meta.skipOnboardingCheck && !authStore.hasCompletedOnboarding) {

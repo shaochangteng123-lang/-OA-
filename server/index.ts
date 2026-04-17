@@ -29,6 +29,7 @@ import employeesRoutes from './routes/employees.js'
 import probationRoutes from './routes/probation.js'
 import resignationRoutes from './routes/resignation.js'
 import filesRoutes from './routes/files.js'
+import leaveRoutes from './routes/leave.js'
 import { shutdownOcrDaemon } from './services/ocrDaemon.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -93,6 +94,7 @@ app.use('/api/employees', employeesRoutes)
 app.use('/api/probation', probationRoutes)
 app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
+app.use('/api/leave', leaveRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ success: true, message: 'Server is running', timestamp: new Date().toISOString() })
@@ -182,6 +184,75 @@ const setupReimbursementCleanup = () => {
   console.log('✅ 月末报销数据自动归档任务已启动（归档已完成/已拒绝且超过90天的报销单）')
 }
 
+/**
+ * 每年 1 月 1 日 00:05 重置假期余额：为所有活跃用户初始化新一年的余额记录
+ * 不删除历史年份数据，仅为新年度插入初始余额（不覆盖已存在的记录）
+ */
+const setupLeaveBalanceReset = () => {
+  const runReset = async () => {
+    try {
+      const now = new Date()
+      // 只在 1 月 1 日执行
+      if (now.getMonth() !== 0 || now.getDate() !== 1) return
+
+      const year = now.getFullYear()
+      console.log(`📅 开始初始化 ${year} 年假期余额...`)
+
+      // 获取所有活跃用户
+      const users = await db.prepare(`SELECT id FROM users WHERE status = 'active'`).all<{ id: string }>()
+      // 获取所有活跃假期类型
+      const types = await db.prepare(`SELECT code, default_days FROM leave_type_configs WHERE is_active = true`).all<{ code: string; default_days: number }>()
+
+      let initialized = 0
+      let updated = 0
+      const nowStr = now.toISOString()
+
+      for (const user of users) {
+        for (const type of types) {
+          let totalDays = Number(type.default_days ?? 0)
+          if (type.code === 'annual') {
+            const { calculateAnnualLeaveDays } = await import('./services/leaveCalculator.js')
+            const profile = await db.prepare(`SELECT hire_date FROM employee_profiles WHERE user_id = ? AND status = 'submitted'`).get<{ hire_date: string | null }>(user.id)
+            totalDays = profile?.hire_date ? calculateAnnualLeaveDays(profile.hire_date, year) : 0
+          }
+
+          const existing = await db.prepare(`SELECT id FROM leave_balances WHERE user_id = ? AND leave_type_code = ? AND year = ?`).get(user.id, type.code, year)
+          if (existing) {
+            // 已存在记录：重置已用天数和待审批天数，重新计算总天数（确保真正清零）
+            await db.prepare(`UPDATE leave_balances SET total_days = ?, used_days = 0, pending_days = 0, updated_at = ? WHERE user_id = ? AND leave_type_code = ? AND year = ?`).run(totalDays, nowStr, user.id, type.code, year)
+            updated++
+          } else {
+            const { nanoid } = await import('nanoid')
+            await db.prepare(`INSERT INTO leave_balances (id, user_id, leave_type_code, year, total_days, used_days, pending_days, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)`).run(nanoid(), user.id, type.code, year, totalDays, nowStr, nowStr)
+            initialized++
+          }
+        }
+      }
+
+      console.log(`✅ ${year} 年假期余额重置完成：新建 ${initialized} 条，更新清零 ${updated} 条`)
+    } catch (error) {
+      console.error('假期余额年度重置失败:', error)
+    }
+  }
+
+  // 每天 00:05 检查一次，只在 1 月 1 日执行重置
+  const scheduleReset = () => {
+    const now = new Date()
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 5, 0)
+    let delay = target.getTime() - now.getTime()
+    if (delay < 0) delay += 24 * 60 * 60 * 1000
+    setTimeout(() => {
+      void runReset()
+      setInterval(() => {
+        void runReset()
+      }, 24 * 60 * 60 * 1000)
+    }, delay)
+  }
+
+  scheduleReset()
+  console.log('✅ 假期余额年度重置任务已启动（每年 1 月 1 日 00:05 自动执行）')
+}
+
 async function start() {
   console.log('Initializing database...')
   await initDatabase()
@@ -191,6 +262,7 @@ async function start() {
   initNotionClient()
 
   setupReimbursementCleanup()
+  setupLeaveBalanceReset()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server is running on port ${PORT}`)

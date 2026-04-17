@@ -417,8 +417,8 @@ router.post('/create', requireAdmin, async (req, res) => {
     const employeeNo = await generateEmployeeNumber()
 
     await db.prepare(`
-      INSERT INTO users (id, username, password_hash, name, email, mobile, role, status, department, position, bank_account_name, bank_account_phone, bank_name, bank_account_number, employee_no, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO users (id, username, password_hash, name, email, mobile, role, status, department, position, bank_account_name, bank_account_phone, bank_name, bank_account_number, employee_no, force_change_password, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, true, ?, ?)
     `).run(
       userId,
       username,
@@ -629,10 +629,10 @@ router.post('/:id/reset-password', requireAdmin, async (req, res) => {
       })
     }
 
-    // 更新密码
+    // 更新密码，同时设置强制修改密码标记
     const passwordHash = await hashPassword(newPassword)
     const now = new Date().toISOString()
-    await db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(passwordHash, now, id)
+    await db.prepare('UPDATE users SET password_hash = ?, force_change_password = true, updated_at = ? WHERE id = ?').run(passwordHash, now, id)
 
     console.log('✅ 重置密码成功:', { userId: id, userName: user.name })
 

@@ -1,13 +1,26 @@
 <template>
   <div class="large-reimbursement-container">
     <el-card class="page-card">
-      <div class="content-wrapper">
-        <!-- 操作按钮 -->
-        <div class="action-bar">
-          <el-button type="primary" :icon="Plus" @click="handleCreate">
+      <!-- 大额报销 - 橙色顶部色条 -->
+      <div class="page-type-bar page-type-bar--large"></div>
+
+      <template #header>
+        <div class="card-header">
+          <div class="page-title-area">
+            <span class="page-type-badge page-type-badge--large">大额</span>
+            <span class="page-title-text">大额报销</span>
+          </div>
+          <el-button
+            :icon="Plus"
+            class="action-btn action-btn--large"
+            @click="handleCreate"
+          >
             新建大额报销单
           </el-button>
         </div>
+      </template>
+
+      <div class="content-wrapper">
 
         <!-- 提示信息 -->
         <el-alert
@@ -973,6 +986,54 @@ onMounted(() => {
   box-shadow: none;
 }
 
+/* 顶部色条 */
+.page-type-bar {
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.page-type-bar--large { background-color: #e6a23c; }
+
+/* 页面标题区域 */
+.page-title-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-title-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+/* 类型 Badge */
+.page-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.page-type-badge--large { background-color: #e6a23c; }
+
+/* 主操作按钮 */
+.action-btn {
+  font-weight: 600;
+}
+.action-btn--large {
+  --el-button-bg-color: #e6a23c;
+  --el-button-border-color: #e6a23c;
+  --el-button-hover-bg-color: #ebb563;
+  --el-button-hover-border-color: #ebb563;
+  --el-button-active-bg-color: #cf9236;
+  --el-button-active-border-color: #cf9236;
+  --el-button-text-color: #fff;
+}
+
 .page-card :deep(.el-card__header) {
   padding: 16px 24px;
   border-bottom: 1px solid #e4e7ed;
@@ -1001,13 +1062,6 @@ onMounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
-}
-
-.action-bar {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  margin-bottom: 16px;
 }
 
 .page-title {

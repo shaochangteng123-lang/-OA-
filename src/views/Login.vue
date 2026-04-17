@@ -15,6 +15,10 @@
         <h2 class="login-title">欢迎登录</h2>
         <p class="login-subtitle">请使用账号密码登录</p>
 
+        <div v-if="passwordChanged" class="password-changed-tip">
+          <el-alert title="密码已修改成功，请使用新密码登录" type="success" :closable="false" show-icon />
+        </div>
+
         <el-form
           ref="loginFormRef"
           :model="loginForm"
@@ -89,6 +93,7 @@ const authStore = useAuthStore()
 const loginFormRef = ref<FormInstance>()
 const loading = ref(false)
 const error = ref('')
+const passwordChanged = ref(false)
 
 // 登录表单
 const loginForm = reactive({
@@ -129,7 +134,7 @@ async function handleLogin() {
 
     if (response.data.success) {
       await authStore.checkSession()
-      // 登录后先检查入职信息是否已完成，未完成则跳转到入职页面（弹窗由 Onboarding 页面展示）
+      // 登录后检查入职信息是否已完成，未完成则跳转到入职页面
       if (!authStore.hasCompletedOnboarding) {
         router.push({ name: 'Onboarding' })
       } else {
@@ -155,12 +160,17 @@ async function handleLogin() {
 
 // 检查是否已登录
 onMounted(async () => {
+  // 检查是否因密码修改后重定向过来
+  if (route.query.changed === '1') {
+    passwordChanged.value = true
+  }
+
   // 检查是否因登录过期被重定向过来
   if (route.query.reason === 'expired') {
     error.value = '登录已过期，请重新登录'
   }
 
-  // 如果已经登录，检查入职状态后跳转
+  // 如果已经登录，检查强制修改密码和入职状态后跳转
   if (authStore.isLoggedIn) {
     if (!authStore.hasCompletedOnboarding) {
       router.push({ name: 'Onboarding' })
@@ -265,6 +275,10 @@ onMounted(async () => {
   font-size: 14px;
   color: #666;
   text-align: center;
+}
+
+.password-changed-tip {
+  margin-bottom: 20px;
 }
 
 .login-button {

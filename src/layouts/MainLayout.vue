@@ -1,5 +1,67 @@
 <template>
   <div class="app-layout">
+    <!-- 强制修改密码弹窗：登录后检测到需要修改密码时弹出，不可关闭 -->
+    <el-dialog
+      :model-value="showChangePasswordDialog"
+      title="请修改初始密码"
+      width="460px"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="true"
+      align-center
+      @close="handleCancelChangePassword"
+    >
+      <el-alert
+        title="为保障账号安全，请立即将初始密码修改为个人密码，修改后需重新登录。"
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 20px"
+      />
+      <el-form
+        ref="cpFormRef"
+        :model="cpForm"
+        :rules="cpRules"
+        label-width="100px"
+      >
+        <el-form-item label="当前密码" prop="currentPassword">
+          <el-input
+            v-model="cpForm.currentPassword"
+            type="password"
+            placeholder="请输入初始密码"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="新密码" prop="newPassword">
+          <el-input
+            v-model="cpForm.newPassword"
+            type="password"
+            placeholder="至少6个字符"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="确认密码" prop="confirmPassword">
+          <el-input
+            v-model="cpForm.confirmPassword"
+            type="password"
+            placeholder="再次输入新密码"
+            show-password
+            @keyup.enter="handleForceChangePassword"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button
+          type="primary"
+          :loading="cpLoading"
+          style="width: 100%"
+          @click="handleForceChangePassword"
+        >
+          修改密码并重新登录
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 侧边栏 - 固定浮动 -->
     <aside
       class="app-sidebar"
@@ -314,6 +376,8 @@ import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
 import { ElMessage } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
+import { api } from '@/utils/api'
 import {
   Calendar,
   Document,
@@ -347,6 +411,57 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const pendingStore = usePendingStore()
+
+// ===================== 强制修改密码弹窗 =====================
+const showChangePasswordDialog = computed(() => !!authStore.forceChangePassword)
+const cpFormRef = ref<FormInstance>()
+const cpLoading = ref(false)
+const cpForm = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
+
+const validateCpConfirm = (_rule: any, value: string, callback: any) => {
+  if (!value) callback(new Error('请确认新密码'))
+  else if (value !== cpForm.newPassword) callback(new Error('两次输入的密码不一致'))
+  else callback()
+}
+
+const cpRules: FormRules = {
+  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, message: '密码至少6个字符', trigger: 'blur' },
+  ],
+  confirmPassword: [{ required: true, validator: validateCpConfirm, trigger: 'blur' }],
+}
+
+async function handleForceChangePassword() {
+  if (!cpFormRef.value) return
+  try { await cpFormRef.value.validate() } catch { return }
+  try {
+    cpLoading.value = true
+    await api.post('/api/auth/change-password', {
+      currentPassword: cpForm.currentPassword,
+      newPassword: cpForm.newPassword,
+    })
+    ElMessage.success('密码修改成功，请用新密码重新登录')
+    await api.post('/api/auth/logout')
+    authStore.user = null
+    window.location.href = '/login?changed=1'
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '密码修改失败')
+  } finally {
+    cpLoading.value = false
+  }
+}
+
+// 点 X 关闭弹窗 → 直接退出登录
+async function handleCancelChangePassword() {
+  try {
+    await api.post('/api/auth/logout')
+  } catch {}
+  authStore.user = null
+  window.location.href = '/login'
+}
+// ============================================================
 
 // 侧边栏折叠状态 - 默认折叠，默认不锁定
 const sidebarCollapsed = ref(true)
@@ -480,7 +595,7 @@ const pageTitle = computed(() => {
     '/probation': '',
     '/resignation': '',
     '/employee-data': '',
-    '/leave': '请假',
+    '/leave': '',
     '/projects': '项目管理',
     '/project-initiation': '项目立项',
     '/project-progress': '项目进度',

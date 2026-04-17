@@ -17,6 +17,7 @@ export interface User {
   bank_account_phone: string | null
   bank_name: string | null
   bank_account_number: string | null
+  force_change_password: boolean
   created_at: string
   updated_at: string
   last_login_at: string | null

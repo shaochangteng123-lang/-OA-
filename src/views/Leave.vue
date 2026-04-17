@@ -1,367 +1,106 @@
 <template>
-  <div class="leave-container">
-    <el-card class="page-card">
+  <div class="leave-page">
+    <!-- 假期余额卡片 -->
+    <el-card class="balance-card-wrapper" shadow="never">
       <template #header>
-        <div class="card-header">
-          <h2>请假管理</h2>
-          <el-button type="primary" :icon="Plus" @click="handleCreate">
-            新建请假申请
-          </el-button>
-        </div>
+        <span class="card-title">我的假期余额（{{ currentYear }}年）</span>
       </template>
+      <LeaveBalancePanel ref="balancePanelRef" />
+    </el-card>
 
-      <div class="content-wrapper">
-        <!-- 筛选区域 -->
-        <div class="filter-section">
-          <el-form :inline="true" :model="filterForm" class="filter-form">
-            <el-form-item label="状态">
-              <el-select v-model="filterForm.status" placeholder="全部状态" clearable>
-                <el-option label="待审批" value="pending" />
-                <el-option label="已批准" value="approved" />
-                <el-option label="已驳回" value="rejected" />
-                <el-option label="已取消" value="cancelled" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="请假类型">
-              <el-select v-model="filterForm.leaveType" placeholder="全部类型" clearable>
-                <el-option label="年假" value="annual" />
-                <el-option label="事假" value="personal" />
-                <el-option label="病假" value="sick" />
-                <el-option label="婚假" value="marriage" />
-                <el-option label="产假" value="maternity" />
-                <el-option label="陪产假" value="paternity" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="请假日期">
-              <el-date-picker
-                v-model="filterForm.dateRange"
-                type="daterange"
-                range-separator="至"
-                start-placeholder="开始日期"
-                end-placeholder="结束日期"
-              />
-            </el-form-item>
-            <el-form-item>
-              <el-button type="primary" :icon="Search" @click="handleSearch">
-                查询
-              </el-button>
-              <el-button :icon="Refresh" @click="handleReset">重置</el-button>
-            </el-form-item>
-          </el-form>
-        </div>
+    <!-- 主内容区 -->
+    <div class="main-content">
+      <!-- 左侧：申请表单 -->
+      <el-card class="form-card" shadow="never">
+        <template #header>
+          <span class="card-title">发起请假申请</span>
+        </template>
+        <LeaveRequestForm @submitted="handleSubmitted" />
+      </el-card>
 
-        <!-- 请假列表 -->
-        <el-table
-          v-loading="loading"
-          :data="leaveList"
-          stripe
-          style="width: 100%"
-        >
-          <el-table-column prop="id" label="申请编号" min-width="100" />
-          <el-table-column prop="applicant" label="申请人" min-width="80" />
-          <el-table-column prop="department" label="部门" min-width="100" />
-          <el-table-column prop="leaveType" label="请假类型" min-width="80">
-            <template #default="{ row }">
-              <el-tag :type="getLeaveTypeColor(row.leaveType)" size="small">
-                {{ getLeaveTypeText(row.leaveType) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="startDate" label="开始日期" min-width="100" />
-          <el-table-column prop="endDate" label="结束日期" min-width="100" />
-          <el-table-column prop="days" label="请假天数" min-width="80">
-            <template #default="{ row }">
-              <span class="days-text">{{ row.days }} 天</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="reason" label="请假事由" min-width="120" show-overflow-tooltip />
-          <el-table-column prop="status" label="状态" min-width="80">
-            <template #default="{ row }">
-              <el-tag :type="getStatusType(row.status)">
-                {{ getStatusText(row.status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" min-width="150">
-            <template #default="{ row }">
-              <el-button link type="primary" size="small" @click="handleView(row)">
-                查看
-              </el-button>
-              <el-button
-                v-if="row.status === 'pending'"
-                link
-                type="success"
-                size="small"
-                @click="handleApprove(row)"
-              >
-                审批
-              </el-button>
-              <el-button
-                v-if="row.status === 'pending'"
-                link
-                type="danger"
-                size="small"
-                @click="handleCancel(row)"
-              >
-                取消
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+      <!-- 右侧：待我审批（仅管理员/经理可见） -->
+      <el-card v-if="canApprove" class="pending-card" shadow="never">
+        <template #header>
+          <span class="card-title">待我审批</span>
+        </template>
+        <LeavePendingList ref="pendingListRef" @approved="handleApproved" />
+      </el-card>
+    </div>
 
-        <!-- 分页 -->
-        <div class="pagination-wrapper">
-          <el-pagination
-            v-model:current-page="pagination.page"
-            v-model:page-size="pagination.pageSize"
-            :total="pagination.total"
-            :page-sizes="[10, 20, 50, 100]"
-            layout="total, sizes, prev, pager, next, jumper"
-            @size-change="handleSizeChange"
-            @current-change="handlePageChange"
-          />
-        </div>
-      </div>
+    <!-- 我的申请记录 -->
+    <el-card class="list-card" shadow="never">
+      <template #header>
+        <span class="card-title">我的申请记录</span>
+      </template>
+      <LeaveRequestList ref="requestListRef" @refresh="handleRefresh" />
     </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Search, Refresh } from '@element-plus/icons-vue'
+import { ref, computed } from 'vue'
+import { useAuthStore } from '@/stores/auth'
+import LeaveBalancePanel from '@/components/leave/LeaveBalancePanel.vue'
+import LeaveRequestForm from '@/components/leave/LeaveRequestForm.vue'
+import LeaveRequestList from '@/components/leave/LeaveRequestList.vue'
+import LeavePendingList from '@/components/leave/LeavePendingList.vue'
 
-// 筛选表单
-const filterForm = reactive({
-  status: '',
-  leaveType: '',
-  dateRange: null as [Date, Date] | null,
+const authStore = useAuthStore()
+const balancePanelRef = ref()
+const requestListRef = ref()
+const pendingListRef = ref()
+
+const currentYear = new Date().getFullYear()
+
+const canApprove = computed(() => {
+  const role = authStore.user?.role
+  return role === 'admin' || role === 'super_admin' || role === 'general_manager'
 })
 
-// 分页
-const pagination = reactive({
-  page: 1,
-  pageSize: 10,
-  total: 0,
-})
-
-// 加载状态
-const loading = ref(false)
-
-// 请假列表
-const leaveList = ref([
-  {
-    id: 'LV202601001',
-    applicant: '张三',
-    department: '技术部',
-    leaveType: 'annual',
-    startDate: '2026-02-01',
-    endDate: '2026-02-03',
-    days: 3,
-    reason: '回老家过年',
-    status: 'approved',
-  },
-  {
-    id: 'LV202601002',
-    applicant: '李四',
-    department: '市场部',
-    leaveType: 'sick',
-    startDate: '2026-01-25',
-    endDate: '2026-01-26',
-    days: 2,
-    reason: '感冒发烧需要休息',
-    status: 'pending',
-  },
-  {
-    id: 'LV202601003',
-    applicant: '王五',
-    department: '财务部',
-    leaveType: 'personal',
-    startDate: '2026-01-28',
-    endDate: '2026-01-28',
-    days: 1,
-    reason: '家中有事需要处理',
-    status: 'pending',
-  },
-])
-
-// 获取请假类型文本
-const getLeaveTypeText = (type: string) => {
-  const textMap: Record<string, string> = {
-    annual: '年假',
-    personal: '事假',
-    sick: '病假',
-    marriage: '婚假',
-    maternity: '产假',
-    paternity: '陪产假',
-  }
-  return textMap[type] || type
+function handleSubmitted() {
+  balancePanelRef.value?.refresh()
+  requestListRef.value?.refresh()
 }
 
-// 获取请假类型颜色
-const getLeaveTypeColor = (type: string) => {
-  const colorMap: Record<string, any> = {
-    annual: 'success',
-    personal: 'info',
-    sick: 'warning',
-    marriage: 'danger',
-    maternity: 'primary',
-    paternity: 'primary',
-  }
-  return colorMap[type] || ''
+function handleApproved() {
+  balancePanelRef.value?.refresh()
+  requestListRef.value?.refresh()
 }
 
-// 获取状态类型
-const getStatusType = (status: string) => {
-  const typeMap: Record<string, any> = {
-    pending: 'warning',
-    approved: 'success',
-    rejected: 'danger',
-    cancelled: 'info',
-  }
-  return typeMap[status] || 'info'
+function handleRefresh() {
+  balancePanelRef.value?.refresh()
+  pendingListRef.value?.refresh()
 }
-
-// 获取状态文本
-const getStatusText = (status: string) => {
-  const textMap: Record<string, string> = {
-    pending: '待审批',
-    approved: '已批准',
-    rejected: '已驳回',
-    cancelled: '已取消',
-  }
-  return textMap[status] || status
-}
-
-// 新建请假申请
-const handleCreate = () => {
-  ElMessage.info('新建请假申请功能开发中...')
-}
-
-// 查询
-const handleSearch = () => {
-  loading.value = true
-  setTimeout(() => {
-    loading.value = false
-    ElMessage.success('查询完成')
-  }, 500)
-}
-
-// 重置
-const handleReset = () => {
-  filterForm.status = ''
-  filterForm.leaveType = ''
-  filterForm.dateRange = null
-  handleSearch()
-}
-
-// 查看详情
-const handleView = (row: any) => {
-  ElMessage.info(`查看请假申请：${row.id}`)
-}
-
-// 审批
-const handleApprove = (row: any) => {
-  ElMessage.info(`审批请假申请：${row.id}`)
-}
-
-// 取消
-const handleCancel = (_row: any) => {
-  ElMessageBox.confirm('确定要取消这条请假申请吗？', '提示', {
-    confirmButtonText: '确定',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
-    .then(() => {
-      ElMessage.success('已取消请假申请')
-    })
-    .catch(() => {
-      ElMessage.info('操作已取消')
-    })
-}
-
-// 分页变化
-const handleSizeChange = (size: number) => {
-  pagination.pageSize = size
-  handleSearch()
-}
-
-const handlePageChange = (page: number) => {
-  pagination.page = page
-  handleSearch()
-}
-
-// 组件挂载
-onMounted(() => {
-  pagination.total = leaveList.value.length
-})
 </script>
 
 <style scoped>
-/* 容器高度填满可用空间，使用负 margin 抵消 MainLayout 的 padding */
-.leave-container {
-  height: calc(100vh - 60px);
-  margin: calc(-1 * var(--yl-main-padding-y, 24px)) calc(-1 * var(--yl-main-padding-x, 45px));
-  padding: 0;
+.leave-page {
+  margin: -24px -45px;
+  padding: 16px 16px 16px 16px;
+  width: calc(100% + 90px);
+  box-sizing: border-box;
 }
-
-.page-card {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  border-radius: 0;
-  border: none;
-}
-
-.page-card :deep(.el-card__header) {
-  padding: 16px 24px;
-  border-bottom: 1px solid #e4e7ed;
-}
-
-.page-card :deep(.el-card__body) {
-  flex: 1;
-  padding: 24px;
-  overflow: auto;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.card-header h2 {
-  margin: 0;
-  font-size: 18px;
+.card-title {
+  font-size: 14px;
   font-weight: 600;
   color: #303133;
 }
-
-.content-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+.balance-card-wrapper {
+  margin-bottom: 16px;
 }
-
-.filter-section {
-  margin-bottom: 20px;
-  padding: 16px;
-  background-color: #f5f7fa;
-  border-radius: 4px;
+.main-content {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 16px;
+  margin-bottom: 16px;
 }
-
-.filter-form {
-  margin: 0;
+@media (max-width: 1100px) {
+  .main-content {
+    grid-template-columns: 1fr;
+  }
 }
-
-.days-text {
-  color: #409eff;
-  font-weight: 600;
-}
-
-.pagination-wrapper {
-  margin-top: 20px;
-  display: flex;
-  justify-content: flex-end;
+.form-card, .pending-card, .list-card {
+  height: fit-content;
 }
 </style>
+

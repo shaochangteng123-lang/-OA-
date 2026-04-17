@@ -1,11 +1,15 @@
 <template>
   <div class="create-reimbursement-container">
     <el-card class="page-card">
+      <!-- 基础报销 - 蓝色顶部色条 -->
+      <div class="page-type-bar page-type-bar--basic"></div>
+
       <template #header>
         <div class="card-header">
           <div class="header-left">
             <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
             <h2>新建基础报销单</h2>
+            <span class="page-type-badge page-type-badge--basic">基础</span>
           </div>
         </div>
       </template>
@@ -399,6 +403,27 @@ onMounted(async () => {
   border: none;
   box-shadow: none;
 }
+
+/* 顶部色条 */
+.page-type-bar {
+  height: 4px;
+  width: 100%;
+  flex-shrink: 0;
+}
+.page-type-bar--basic { background-color: #409eff; }
+
+/* 类型 Badge */
+.page-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.page-type-badge--basic { background-color: #409eff; }
 
 .page-card :deep(.el-card__header) {
   padding: 16px 24px;

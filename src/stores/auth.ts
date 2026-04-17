@@ -9,6 +9,8 @@ type ProfileStatus = 'none' | 'draft' | 'submitted'
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const isLoggedIn = computed(() => !!user.value)
+  // 是否需要强制修改密码
+  const forceChangePassword = computed(() => !!user.value?.forceChangePassword)
 
   // 员工信息状态
   const profileStatus = ref<ProfileStatus>('none')
@@ -86,6 +88,7 @@ export const useAuthStore = defineStore('auth', () => {
   return {
     user,
     isLoggedIn,
+    forceChangePassword,
     profileStatus,
     hasCompletedOnboarding,
     checkSession,
