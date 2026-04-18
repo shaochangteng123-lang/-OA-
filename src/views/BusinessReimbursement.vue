@@ -334,8 +334,11 @@
                     <!-- 批量付款金额对照 -->
                     <div v-if="batchInfoForDialog" class="batch-amount-compare">
                       <div class="batch-compare-header">
-                        <el-tag type="warning" size="small">批量付款</el-tag>
-                        <span class="batch-compare-no">批次号：{{ batchInfoForDialog.batchNo }}</span>
+                        <el-tag type="warning" size="small">合并打款</el-tag>
+                        <span v-if="batchInfoForDialog.batchNo" class="batch-compare-no">批次号：{{ batchInfoForDialog.batchNo }}</span>
+                      </div>
+                      <div class="batch-compare-detail">
+                        本次付款合计 <strong>¥{{ batchInfoForDialog.totalAmount.toFixed(2) }}</strong>，包含 {{ batchInfoForDialog.reimbursements.length }} 笔报销：
                       </div>
                       <div class="batch-compare-list">
                         <div
@@ -349,10 +352,6 @@
                           <span class="batch-compare-title">{{ r.title }}</span>
                           <span class="batch-compare-amount">¥{{ parseFloat(r.amount).toFixed(2) }}</span>
                         </div>
-                      </div>
-                      <div class="batch-compare-total">
-                        <span>回单付款总额</span>
-                        <span class="batch-compare-total-amount">¥{{ batchInfoForDialog.totalAmount.toFixed(2) }}</span>
                       </div>
                     </div>
                     <!-- 付款回单展示 -->
@@ -779,6 +778,28 @@ const handleView = async (row: any) => {
           // 批次信息加载失败不影响主流程
         }
       }
+      // 银行回单PDF合并打款：通过报销单ID反查关联的其他报销单
+      if (!batchInfoForDialog.value && result.data.paymentProofPath?.includes('bank-receipts')) {
+        try {
+          const brRes = await fetch(`/api/bank-receipts/by-reimbursement/${row.id}`, {
+            credentials: 'include',
+          })
+          const brResult = await brRes.json()
+          if (brResult.success && brResult.data) {
+            batchInfoForDialog.value = {
+              batchNo: '',
+              totalAmount: brResult.data.totalAmount,
+              reimbursements: brResult.data.reimbursements.map((r: any) => ({
+                id: r.id,
+                title: r.title,
+                amount: r.amount,
+              })),
+            }
+          }
+        } catch (e) {
+          // 银行回单关联查询失败不影响主流程
+        }
+      }
       approvalDialogVisible.value = true
     } else {
       ElMessage.error(result.message || '获取详情失败')
@@ -822,7 +843,7 @@ const handleConfirmReceipt = async () => {
         </div>`
       }).join('')
       confirmMsg = `<div style="text-align:left;">
-        <p style="margin-bottom:8px;">本次为<strong>批量付款</strong>，回单金额包含多笔报销：</p>
+        <p style="margin-bottom:8px;">本次为<strong>合并打款</strong>，回单金额包含多笔报销：</p>
         <div style="margin-bottom:8px;">${items}</div>
         <div style="display:flex;justify-content:space-between;padding:8px;background:#f0f9eb;border-radius:4px;font-weight:600;">
           <span>回单付款总额</span>
@@ -1273,6 +1294,12 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 8px;
+}
+
+.batch-compare-detail {
+  font-size: 13px;
+  color: #78350f;
   margin-bottom: 8px;
 }
 

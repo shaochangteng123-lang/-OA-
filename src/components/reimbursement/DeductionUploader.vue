@@ -24,17 +24,18 @@
         </div>
       </div>
 
-      <!-- 上传按钮 -->
+      <!-- 上传按钮（disabled 时保留容器以维持布局，隐藏内容） -->
       <el-upload
-        v-if="!disabled"
         ref="uploadRef"
         action="#"
         :auto-upload="false"
         :show-file-list="false"
         :before-upload="beforeUpload"
         :on-change="onFileChange"
+        :disabled="disabled"
         accept=".pdf"
         class="deduction-upload-btn"
+        :class="{ 'is-disabled': disabled }"
         multiple
       >
         <div class="upload-trigger">
@@ -576,6 +577,11 @@ function removeItem(idx: number): void {
 .drag-icon {
   font-size: 48px;
   color: #409eff;
+}
+
+.deduction-upload-btn.is-disabled :deep(.el-upload) {
+  cursor: not-allowed;
+  background-color: #fbfdff;
 }
 
 .drag-text {

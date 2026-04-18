@@ -12,14 +12,16 @@ export function toFileUrl(filePath: string): string {
   if (filePath.startsWith('http://') || filePath.startsWith('https://')) return filePath
   if (filePath.startsWith('/api/files/')) return filePath
 
+  // 银行回单图片
+  const bankMatch = filePath.match(/(?:\/?)uploads\/bank-receipts\/(.+)/)
+  if (bankMatch) return `/api/files/bank-receipts/${bankMatch[1]}`
+
   const match = filePath.match(/(?:\/?)uploads\/invoices\/(.+)/)
   if (match) {
     const filename = match[1]
-    // 付款回单文件（包含 payment-proof- 或 payment-proof-batch- 前缀）映射到专用端点
     if (filename.startsWith('payment-proof-') || filename.startsWith('payment-proof-batch-')) {
       return `/api/files/payment-proofs/${filename}`
     }
-    // 普通发票文件映射到发票端点
     return `/api/files/invoices/${filename}`
   }
 

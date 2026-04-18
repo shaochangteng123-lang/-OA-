@@ -1184,5 +1184,44 @@ export async function initDatabase() {
     console.log('ℹ️  force_change_password 字段迁移:', error.message)
   }
 
+  // 工行回单自动化处理表
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS bank_receipt_batches (
+      id TEXT PRIMARY KEY,
+      pdf_path TEXT NOT NULL,
+      total_pages INTEGER DEFAULT 0,
+      total_receipts INTEGER DEFAULT 0,
+      matched_count INTEGER DEFAULT 0,
+      unmatched_count INTEGER DEFAULT 0,
+      uploaded_by TEXT REFERENCES users(id),
+      status TEXT CHECK(status IN ('processing', 'done', 'failed')) DEFAULT 'processing',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS bank_receipts (
+      id TEXT PRIMARY KEY,
+      batch_id TEXT REFERENCES bank_receipt_batches(id) ON DELETE CASCADE,
+      image_path TEXT NOT NULL,
+      page_no INTEGER NOT NULL,
+      position TEXT CHECK(position IN ('full', 'top', 'bottom')) DEFAULT 'full',
+      ocr_payee TEXT,
+      ocr_amount NUMERIC(12,2),
+      ocr_remark TEXT,
+      ocr_raw_json TEXT,
+      parsed_type TEXT CHECK(parsed_type IN ('basic', 'large', 'business')),
+      parsed_name TEXT,
+      parsed_month TEXT,
+      match_status TEXT CHECK(match_status IN ('matched', 'unmatched')) DEFAULT 'unmatched',
+      matched_reimbursement_id TEXT REFERENCES reimbursements(id),
+      payment_batch_id TEXT REFERENCES payment_batches(id),
+      matched_by TEXT REFERENCES users(id),
+      matched_at TEXT,
+      created_at TEXT NOT NULL
+    )
+  `)
+
   console.log('✅ PostgreSQL 数据库表初始化完成')
 }

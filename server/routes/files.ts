@@ -118,4 +118,47 @@ router.get('/payment-proofs/:filename', requireAuth, async (req, res) => {
   }
 })
 
+// 下载银行回单图片
+router.get('/bank-receipts/*', requireAuth, async (req, res) => {
+  try {
+    const subPath = (req.params as any)[0]
+    const filePath = `uploads/bank-receipts/${subPath}`
+
+    if (!validateFilePath(filePath)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+
+    const userId = req.session.userId!
+    const user = await db.get('SELECT role FROM users WHERE id = ?', userId)
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+
+    // 非管理员：检查该回单是否属于自己的报销单
+    if (!isAdmin) {
+      const reimbursement = await db.get(
+        `SELECT user_id FROM reimbursements WHERE payment_proof_path = ? AND is_deleted = false`,
+        filePath,
+      )
+      if (!reimbursement || reimbursement.user_id !== userId) {
+        // 也可能是合并打款：同一张回单对应多笔报销，检查其中是否有属于当前用户的
+        const ownedReimbursement = await db.get(
+          `SELECT id FROM reimbursements WHERE payment_proof_path = ? AND user_id = ? AND is_deleted = false`,
+          filePath, userId,
+        )
+        if (!ownedReimbursement) {
+          return res.status(403).json({ success: false, message: '无权访问' })
+        }
+      }
+    }
+
+    const fullPath = path.resolve(process.cwd(), filePath)
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ success: false, message: '文件不存在' })
+    }
+
+    res.sendFile(fullPath)
+  } catch (error) {
+    res.status(500).json({ success: false, message: '下载失败' })
+  }
+})
+
 export default router

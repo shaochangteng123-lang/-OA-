@@ -237,9 +237,13 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
         applicantName: r.applicant_name,
         applicantAvatar: r.applicant_avatar,
         approveTime: formatDateTime(r.approve_time),
+        payTime: formatDateTime(r.pay_time),
+        paymentUploadTime: formatDateTime(r.payment_upload_time),
+        paymentProofPath: r.payment_proof_path,
         userId: r.user_id,
         reimbursementScope: r.reimbursement_scope,
         invoiceCategories: formatInvoiceCategories(r.invoice_categories),
+        paymentBatchId: r.payment_batch_id,
       })),
     })
   } catch (error) {
@@ -521,9 +525,9 @@ router.get('/by-target', requireAuth, async (req, res) => {
 
     // 获取报销单最新状态（用于前端实时展示）
     const reimbursement = await db.prepare(`
-      SELECT status, description, payment_proof_path, pay_time, payment_upload_time, completed_time, receipt_confirmed_by
+      SELECT status, description, payment_proof_path, pay_time, payment_upload_time, completed_time, receipt_confirmed_by, payment_batch_id
       FROM reimbursements WHERE id = ?
-    `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null } | undefined
+    `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null; payment_batch_id: string | null } | undefined
 
     // 查询管理员和总经理的名字（用于审批流程显示）
     const adminUser = await db.prepare(`
@@ -555,6 +559,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
         reimbursementStatus: reimbursement?.status,
         reimbursementDescription: reimbursement?.description,
         paymentProofPath: reimbursement?.payment_proof_path,
+        paymentBatchId: reimbursement?.payment_batch_id,
         payTime: reimbursement?.pay_time ? formatDateTime(reimbursement.pay_time) : null,
         paymentUploadTime: reimbursement?.payment_upload_time ? formatDateTime(reimbursement.payment_upload_time) : null,
         completedTime: reimbursement?.completed_time ? formatDateTime(reimbursement.completed_time) : null,

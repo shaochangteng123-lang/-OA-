@@ -63,6 +63,7 @@ async function main() {
 
     let deletedBatchItems = 0
     let deletedBatches = 0
+    let deletedBankReceipts = 0
 
     await db.transaction(async (client) => {
       // 先删除审批记录
@@ -94,6 +95,10 @@ async function main() {
       const r5 = await client.query(`DELETE FROM payment_batch_items`)
       deletedBatchItems = r5.rowCount ?? 0
 
+      // 删除所有银行回单
+      const r8 = await client.query(`DELETE FROM bank_receipts`)
+      deletedBankReceipts = r8.rowCount ?? 0
+
       // 删除报销单（引用 payment_batches）
       const r6 = await client.query(`DELETE FROM reimbursements`)
       deletedReimbursements = r6.rowCount ?? 0
@@ -108,6 +113,7 @@ async function main() {
     console.log(`  ✓ 删除 ${deletedInvoices} 条发票明细`)
     console.log(`  ✓ 删除 ${deletedDeductions} 条核减金额统计`)
     console.log(`  ✓ 删除 ${deletedBatchItems} 条批量付款项目`)
+    console.log(`  ✓ 删除 ${deletedBankReceipts} 条银行回单`)
     console.log(`  ✓ 删除 ${deletedBatches} 条批量付款`)
     console.log(`  ✓ 删除 ${deletedReimbursements} 条报销单`)
 

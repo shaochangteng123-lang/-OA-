@@ -30,6 +30,7 @@ import probationRoutes from './routes/probation.js'
 import resignationRoutes from './routes/resignation.js'
 import filesRoutes from './routes/files.js'
 import leaveRoutes from './routes/leave.js'
+import bankReceiptsRoutes from './routes/bank-receipts.js'
 import { shutdownOcrDaemon } from './services/ocrDaemon.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -95,6 +96,7 @@ app.use('/api/probation', probationRoutes)
 app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
 app.use('/api/leave', leaveRoutes)
+app.use('/api/bank-receipts', bankReceiptsRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ success: true, message: 'Server is running', timestamp: new Date().toISOString() })

@@ -397,8 +397,8 @@
           </el-table>
 
           <!-- 批量付款操作栏 -->
-          <div v-if="selectedUnpaidItems.length > 0" class="batch-action-bar">
-            <div class="batch-info">
+          <div class="batch-action-bar" :class="{ 'has-selection': selectedUnpaidItems.length > 0 }">
+            <div class="batch-info" v-if="selectedUnpaidItems.length > 0">
               <span>已选 <strong>{{ selectedUnpaidItems.length }}</strong> 笔</span>
               <span class="batch-amount">合计 <strong>¥{{ selectedUnpaidTotalAmount.toFixed(2) }}</strong></span>
               <span v-if="!isSamePayee" class="batch-warning">
@@ -410,18 +410,117 @@
                 请选择同一报销类型进行付款
               </span>
             </div>
-            <el-button
-              type="success"
-              :icon="Money"
-              :disabled="!isSamePayee || !isSameType || batchPaymentLoading"
-              :loading="batchPaymentLoading"
-              @click="handleBatchPayment"
-            >
-              批量付款
-            </el-button>
+            <div style="margin-left: auto; display: flex; gap: 8px;">
+              <el-button
+                v-if="selectedUnpaidItems.length > 0"
+                type="success"
+                :icon="Money"
+                :disabled="!isSamePayee || !isSameType || batchPaymentLoading"
+                :loading="batchPaymentLoading"
+                @click="handleBatchPayment"
+              >
+                批量付款
+              </el-button>
+              <el-button type="primary" :icon="Upload" :disabled="!unpaidList.some(r => r.status === 'approved')" @click="bankReceiptUploadVisible = true">
+                上传工行回单PDF
+              </el-button>
+            </div>
+          </div>
+
+          <!-- 未认领回单区域 -->
+          <div v-if="unmatchedReceipts.length > 0" class="unmatched-receipts-section">
+            <div class="unmatched-header">
+              <el-icon color="#e6a23c"><WarningFilled /></el-icon>
+              <span>待认领回单（{{ unmatchedReceipts.length }} 笔）</span>
+              <el-button link type="primary" @click="loadUnmatchedReceipts">刷新</el-button>
+              <el-button link type="danger" @click="clearAllUnmatched">一键删除</el-button>
+            </div>
+            <div class="unmatched-list">
+              <div v-for="receipt in unmatchedReceipts" :key="receipt.id" class="unmatched-item">
+                <img :src="toFileUrl(receipt.image_path)" class="receipt-thumb" @click="previewReceiptImage(receipt.image_path)" />
+                <div class="receipt-info">
+                  <div class="receipt-remark">{{ receipt.ocr_remark || '备注未识别' }}</div>
+                  <div class="receipt-amount" v-if="receipt.ocr_amount">¥{{ Number(receipt.ocr_amount).toFixed(2) }}</div>
+                  <div class="receipt-meta">收款人：{{ receipt.ocr_payee || '-' }}</div>
+                </div>
+                <el-button type="primary" size="small" @click="openManualMatch(receipt)">认领</el-button>
+                <el-button size="small" type="danger" plain @click="skipReceipt(receipt.id)">删除</el-button>
+              </div>
+            </div>
           </div>
         </el-card>
       </el-tab-pane>
+
+      <!-- 上传工行回单PDF 对话框 -->
+      <el-dialog v-model="bankReceiptUploadVisible" title="上传工行回单PDF" width="480px" :close-on-click-modal="false" :close-on-press-escape="false" :show-close="!bankReceiptProcessing">
+        <div v-if="bankReceiptProcessing" class="upload-processing">
+          <el-icon class="is-loading" :size="40"><Loading /></el-icon>
+          <p>正在处理回单，请稍候...</p>
+        </div>
+        <div v-else-if="bankReceiptResult" class="upload-result">
+          <el-result
+            icon="success"
+            title="处理完成"
+            :sub-title="`共识别 ${bankReceiptResult.total_receipts} 笔，自动匹配 ${bankReceiptResult.matched_count} 笔，待认领 ${bankReceiptResult.unmatched_count} 笔`"
+          />
+        </div>
+        <el-upload
+          v-else
+          drag
+          accept=".pdf"
+          :auto-upload="false"
+          :limit="1"
+          :on-change="handleBankReceiptFileChange"
+          :file-list="bankReceiptFileList"
+        >
+          <el-icon :size="40"><UploadFilled /></el-icon>
+          <div class="el-upload__text">拖拽 PDF 到此处，或 <em>点击上传</em></div>
+          <template #tip>
+            <div class="el-upload__tip">仅支持工商银行企业网银下载的付款回单 PDF</div>
+          </template>
+        </el-upload>
+        <template #footer>
+          <el-button @click="closeBankReceiptDialog">{{ bankReceiptResult ? '关闭' : '取消' }}</el-button>
+          <el-button v-if="!bankReceiptResult" type="primary" :disabled="!bankReceiptFile || bankReceiptProcessing" @click="submitBankReceiptPdf">
+            开始处理
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 人工认领对话框 -->
+      <el-dialog v-model="manualMatchVisible" title="手动认领回单" width="600px">
+        <div v-if="matchingReceipt" class="manual-match-content">
+          <div class="match-receipt-preview">
+            <img :src="toFileUrl(matchingReceipt.image_path)" style="max-width: 100%; border: 1px solid #eee;" />
+          </div>
+          <div style="margin: 12px 0; color: #666; font-size: 13px;">
+            OCR识别：{{ matchingReceipt.ocr_remark || '备注未识别' }}
+            <span v-if="matchingReceipt.ocr_amount"> | ¥{{ Number(matchingReceipt.ocr_amount).toFixed(2) }}</span>
+          </div>
+          <el-select
+            v-model="manualMatchReimbursementId"
+            placeholder="选择对应的报销单"
+            filterable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="item in unpaidList.filter(r => r.status === 'approved')"
+              :key="item.id"
+              :label="`${item.applicantName} - ${item.title} - ¥${Number(item.amount).toFixed(2)}`"
+              :value="item.id"
+            />
+          </el-select>
+        </div>
+        <template #footer>
+          <el-button @click="manualMatchVisible = false">取消</el-button>
+          <el-button type="primary" :disabled="!manualMatchReimbursementId" @click="submitManualMatch">确认认领</el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 回单图片预览 -->
+      <el-dialog v-model="receiptPreviewVisible" title="回单预览" width="55%" top="5vh">
+        <img :src="receiptPreviewUrl" style="width: 80%; display: block; margin: 0 auto;" />
+      </el-dialog>
 
       <!-- 已付款 -->
       <el-tab-pane label="已付款" name="paid">
@@ -545,6 +644,22 @@
                 <el-tag :type="row.status === 'completed' ? 'success' : 'warning'" size="small">
                   {{ row.status === 'completed' ? '已确认收款' : '待确认收款' }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="付款回单" min-width="100" align="center">
+              <template #default="{ row }">
+                <template v-if="row.paymentProofPath">
+                  <img
+                    v-if="isImagePath(row.paymentProofPath.split(',')[0])"
+                    :src="toFileUrl(row.paymentProofPath.split(',')[0])"
+                    class="proof-thumb"
+                    @click="handlePreviewPaymentProof(row.paymentProofPath.split(',')[0])"
+                  />
+                  <el-button v-else link type="primary" :icon="Document" @click="handlePreviewPaymentProof(row.paymentProofPath.split(',')[0])">
+                    查看回单
+                  </el-button>
+                </template>
+                <span v-else style="color: #999; font-size: 12px;">-</span>
               </template>
             </el-table-column>
             <el-table-column label="操作" min-width="100"  align="center">
@@ -1158,6 +1273,25 @@
               <div class="timeline-content">
                 <div class="timeline-title">上传付款凭证</div>
                 <div class="timeline-desc">财务已上传付款凭证</div>
+                <!-- 合并打款关联报销单 -->
+                <div v-if="approvalBatchInfo && approvalBatchInfo.reimbursementCount > 1" class="approval-batch-info">
+                  <div class="approval-batch-header">
+                    <el-tag type="warning" size="small">合并打款</el-tag>
+                    <span class="approval-batch-total">本次付款合计 <strong>¥{{ approvalBatchInfo.totalAmount.toFixed(2) }}</strong>，共 {{ approvalBatchInfo.reimbursementCount }} 笔</span>
+                  </div>
+                  <div class="approval-batch-list">
+                    <div
+                      v-for="r in approvalBatchInfo.reimbursements"
+                      :key="r.id"
+                      class="approval-batch-item"
+                      :class="{ 'is-current': r.id === currentApprovalRecord?.targetId }"
+                    >
+                      <el-tag v-if="r.id === currentApprovalRecord?.targetId" type="primary" size="small" style="margin-right: 4px;">本笔</el-tag>
+                      <span class="approval-batch-title">{{ r.title }}</span>
+                      <span class="approval-batch-amount">¥{{ r.amount.toFixed(2) }}</span>
+                    </div>
+                  </div>
+                </div>
                 <!-- 付款回单展示 -->
                 <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                   <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
@@ -1462,7 +1596,7 @@ import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled } from '@element-plus/icons-vue'
+import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled, Upload, UploadFilled, Loading } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { toFileUrl, isImageFile } from '@/utils/file'
 import { usePendingStore } from '@/stores/pending'
@@ -1572,6 +1706,130 @@ const paidFilterForm = reactive({
 const unpaidTableRef = ref()
 const selectedUnpaidItems = ref<ReimbursementItem[]>([])
 const batchPaymentLoading = ref(false)
+
+// 工行回单上传
+const bankReceiptUploadVisible = ref(false)
+const bankReceiptProcessing = ref(false)
+const bankReceiptResult = ref<any>(null)
+const bankReceiptFile = ref<File | null>(null)
+const bankReceiptFileList = ref<any[]>([])
+const unmatchedReceipts = ref<any[]>([])
+const manualMatchVisible = ref(false)
+const matchingReceipt = ref<any>(null)
+const manualMatchReimbursementId = ref('')
+const receiptPreviewVisible = ref(false)
+const receiptPreviewUrl = ref('')
+
+function handleBankReceiptFileChange(file: any) {
+  bankReceiptFile.value = file.raw
+  bankReceiptFileList.value = [file]
+}
+
+async function submitBankReceiptPdf() {
+  if (!bankReceiptFile.value) return
+  bankReceiptProcessing.value = true
+  try {
+    const formData = new FormData()
+    formData.append('pdf', bankReceiptFile.value)
+    const res = await api.post('/api/bank-receipts/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+    if (res.data.success) {
+      const { batchId } = res.data.data
+      // 轮询批次状态
+      await pollBatchStatus(batchId)
+    } else {
+      ElMessage.error(res.data.message || '上传失败')
+      bankReceiptProcessing.value = false
+    }
+  } catch {
+    ElMessage.error('上传失败，请重试')
+    bankReceiptProcessing.value = false
+  }
+}
+
+async function pollBatchStatus(batchId: string) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000))
+    try {
+      const res = await api.get(`/api/bank-receipts/batch/${batchId}`)
+      if (res.data.success && res.data.data.batch.status === 'done') {
+        bankReceiptProcessing.value = false
+        bankReceiptResult.value = res.data.data.batch
+        await loadUnmatchedReceipts()
+        await handleQueryUnpaidList()
+        return
+      }
+      if (res.data.data?.batch?.status === 'failed') {
+        bankReceiptProcessing.value = false
+        ElMessage.error('回单处理失败，请重试')
+        return
+      }
+    } catch {}
+  }
+}
+
+function closeBankReceiptDialog() {
+  bankReceiptUploadVisible.value = false
+  bankReceiptProcessing.value = false
+  bankReceiptResult.value = null
+  bankReceiptFile.value = null
+  bankReceiptFileList.value = []
+}
+
+async function loadUnmatchedReceipts() {
+  try {
+    const res = await api.get('/api/bank-receipts/unmatched')
+    if (res.data.success) unmatchedReceipts.value = res.data.data
+  } catch {}
+}
+
+function openManualMatch(receipt: any) {
+  matchingReceipt.value = receipt
+  manualMatchReimbursementId.value = ''
+  manualMatchVisible.value = true
+}
+
+async function submitManualMatch() {
+  if (!matchingReceipt.value || !manualMatchReimbursementId.value) return
+  try {
+    const res = await api.post(`/api/bank-receipts/${matchingReceipt.value.id}/match`, {
+      reimbursementId: manualMatchReimbursementId.value,
+    })
+    if (res.data.success) {
+      ElMessage.success('认领成功')
+      manualMatchVisible.value = false
+      await loadUnmatchedReceipts()
+      await handleQueryUnpaidList()
+    } else {
+      ElMessage.error(res.data.message || '认领失败')
+    }
+  } catch {
+    ElMessage.error('认领失败，请重试')
+  }
+}
+
+function previewReceiptImage(imagePath: string) {
+  receiptPreviewUrl.value = toFileUrl(imagePath)
+  receiptPreviewVisible.value = true
+}
+
+async function skipReceipt(receiptId: string) {
+  try {
+    await api.post(`/api/bank-receipts/${receiptId}/skip`)
+    await loadUnmatchedReceipts()
+  } catch {
+    ElMessage.error('操作失败')
+  }
+}
+
+async function clearAllUnmatched() {
+  try {
+    await ElMessageBox.confirm('确认删除所有待认领回单？', '提示', { type: 'warning' })
+    await api.delete('/api/bank-receipts/unmatched/all')
+    unmatchedReceipts.value = []
+  } catch {}
+}
 
 const selectedUnpaidTotalAmount = computed(() => {
   return selectedUnpaidItems.value.reduce((sum, item) => sum + item.amount, 0)
@@ -1889,6 +2147,7 @@ interface ApprovalRecordItem {
 const approvalProcessDialogVisible = ref(false)
 const currentApprovalRecord = ref<ApprovalProcessRecord | null>(null)
 const approvalRecords = ref<ApprovalRecordItem[]>([])
+const approvalBatchInfo = ref<{ totalAmount: number; reimbursementCount: number; reimbursements: any[] } | null>(null)
 
 // 付款回单预览
 const paymentProofDialogVisible = ref(false)
@@ -2670,16 +2929,51 @@ async function loadApprovalRecords(reimbursementId: string) {
         if (res.data.data.receiptConfirmedBy) {
           currentApprovalRecord.value.receiptConfirmedBy = res.data.data.receiptConfirmedBy
         }
-        // 更新详细说明
         if (res.data.data.reimbursementDescription) {
           currentApprovalRecord.value.description = res.data.data.reimbursementDescription
         }
-        // 更新审批人名字
         if (res.data.data.adminApproverName) {
           currentApprovalRecord.value.adminApproverName = res.data.data.adminApproverName
         }
         if (res.data.data.gmApproverName) {
           currentApprovalRecord.value.gmApproverName = res.data.data.gmApproverName
+        }
+
+        // 合并打款信息查询（两种流程）
+        approvalBatchInfo.value = null
+        const proofPath = res.data.data.paymentProofPath || ''
+        const paymentBatchId = res.data.data.paymentBatchId || ''
+
+        if (proofPath.includes('bank-receipts')) {
+          // 银行回单PDF流程
+          try {
+            const brRes = await api.get(`/api/bank-receipts/by-reimbursement/${reimbursementId}`)
+            if (brRes.data.success && brRes.data.data) {
+              approvalBatchInfo.value = {
+                totalAmount: brRes.data.data.totalAmount,
+                reimbursementCount: brRes.data.data.reimbursements.length,
+                reimbursements: brRes.data.data.reimbursements,
+              }
+            }
+          } catch {}
+        } else if (paymentBatchId) {
+          // 旧批量付款流程
+          try {
+            const batchRes = await api.get(`/api/reimbursement/payment-batch/${paymentBatchId}`)
+            if (batchRes.data.success && batchRes.data.data.reimbursements.length > 1) {
+              const batchData = batchRes.data.data
+              approvalBatchInfo.value = {
+                totalAmount: batchData.totalAmount,
+                reimbursementCount: batchData.reimbursements.length,
+                reimbursements: batchData.reimbursements.map((r: any) => ({
+                  id: r.id,
+                  title: r.title,
+                  amount: r.amount,
+                  applicantName: r.applicant,
+                })),
+              }
+            }
+          } catch {}
         }
       }
     }
@@ -3409,6 +3703,8 @@ onMounted(() => {
   // 加载员工列表和报销范围列表（用于全部查询筛选）
   loadEmployeeList()
   loadScopeList()
+  // 加载未认领回单
+  loadUnmatchedReceipts()
   // activeTab 通过 computed 自动从 URL 读取，不需要手动设置
   const tab = activeTab.value
   // 如果是返回到 all tab，先恢复查询状态
@@ -3929,6 +4225,69 @@ onMounted(() => {
   font-size: 12px;
 }
 
+/* 审批流程弹窗-合并打款信息 */
+.approval-batch-info {
+  margin: 10px 0 8px;
+  border: 1px solid #f0a020;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fffbf0;
+}
+
+.approval-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fef8e7;
+  border-bottom: 1px solid #f0a020;
+}
+
+.approval-batch-total {
+  font-size: 13px;
+  color: #666;
+}
+
+.approval-batch-total strong {
+  color: #e6a23c;
+  font-size: 14px;
+}
+
+.approval-batch-list {
+  padding: 4px 0;
+}
+
+.approval-batch-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid #f5ead0;
+}
+
+.approval-batch-item:last-child {
+  border-bottom: none;
+}
+
+.approval-batch-item.is-current {
+  background: #fff8e6;
+}
+
+.approval-batch-title {
+  flex: 1;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-batch-amount {
+  color: #409eff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* 预览对话框样式 */
 .preview-dialog-content {
   display: flex;
@@ -4091,12 +4450,19 @@ onMounted(() => {
 .batch-action-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 12px 16px;
   margin-top: 12px;
-  background: #f0f9eb;
-  border: 1px solid #e1f3d8;
+  background: #f5f7fa;
+  border: 1px solid #e4e7ed;
   border-radius: 6px;
+  gap: 12px;
+}
+
+.batch-action-bar.has-selection {
+  background: #f0f9eb;
+  border-color: #e1f3d8;
+  justify-content: space-between;
 }
 
 .batch-info {
@@ -4117,6 +4483,104 @@ onMounted(() => {
   gap: 4px;
   color: #e6a23c;
   font-size: 13px;
+}
+
+.unmatched-receipts-section {
+  margin-top: 16px;
+  border: 1px solid #faecd8;
+  border-radius: 6px;
+  background: #fdf6ec;
+  padding: 12px 16px;
+}
+
+.unmatched-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #e6a23c;
+  margin-bottom: 12px;
+}
+
+.unmatched-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.unmatched-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #fff;
+  border: 1px solid #f0d9b5;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.receipt-thumb {
+  width: 80px;
+  height: 60px;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid #eee;
+}
+
+.proof-thumb {
+  width: 60px;
+  height: 45px;
+  object-fit: cover;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid #67c23a;
+  transition: transform 0.2s;
+}
+
+.proof-thumb:hover {
+  transform: scale(1.05);
+}
+
+.receipt-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.receipt-remark {
+  font-size: 13px;
+  color: #303133;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.receipt-amount {
+  font-size: 14px;
+  font-weight: 600;
+  color: #409eff;
+  margin-bottom: 2px;
+}
+
+.receipt-meta {
+  font-size: 12px;
+  color: #909399;
+}
+
+.upload-processing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 0;
+  color: #606266;
+  gap: 16px;
+}
+
+.manual-match-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 </style>
 

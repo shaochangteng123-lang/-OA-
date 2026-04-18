@@ -148,8 +148,8 @@
             <!-- 批量付款批次信息 -->
             <div v-if="batchInfo" class="batch-info-card">
               <div class="batch-info-header">
-                <el-tag type="warning" size="small">批量付款</el-tag>
-                <span class="batch-no">批次号：{{ batchInfo.batchNo }}</span>
+                <el-tag type="warning" size="small">合并打款</el-tag>
+                <span v-if="batchInfo.batchNo" class="batch-no">批次号：{{ batchInfo.batchNo }}</span>
               </div>
               <div class="batch-info-detail">
                 本次付款合计 <strong>¥{{ batchInfo.totalAmount.toFixed(2) }}</strong>，包含 {{ batchInfo.reimbursementCount }} 笔报销：
@@ -554,6 +554,29 @@ async function loadDetail(): Promise<void> {
         }
       } catch (e) {
         // 批次信息加载失败不影响主流程
+      }
+    }
+
+    // 银行回单PDF合并打款：通过报销单ID反查关联的其他报销单（bankReceiptProcessor流程）
+    if (!batchInfo.value && (data as any).paymentProofPath?.includes('bank-receipts')) {
+      try {
+        const brRes = await api.get(`/api/bank-receipts/by-reimbursement/${reimbursement.reimbursementId.value}`)
+        if (brRes.data.success && brRes.data.data) {
+          const brData = brRes.data.data
+          batchInfo.value = {
+            batchNo: '',
+            totalAmount: brData.totalAmount,
+            reimbursementCount: brData.reimbursements.length,
+            reimbursements: brData.reimbursements.map((r: any) => ({
+              id: r.id,
+              title: r.title,
+              amount: r.amount,
+              applicant: r.applicantName,
+            })),
+          }
+        }
+      } catch (e) {
+        // 银行回单关联查询失败不影响主流程
       }
     }
 
