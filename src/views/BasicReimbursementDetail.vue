@@ -188,7 +188,7 @@
               <div class="payment-proof-content">
                 <div v-for="(proofUrl, idx) in paymentProofPaths" :key="idx" class="payment-proof-item" @click="handlePreviewPaymentProof(proofUrl)">
                   <template v-if="isImagePath(proofUrl)">
-                    <img :src="proofUrl" class="payment-proof-image" alt="付款回单" />
+                    <img :src="proofUrl" class="payment-proof-image" alt="付款回单" @error="handleProofImageError" />
                   </template>
                   <template v-else>
                     <div class="payment-proof-pdf">
@@ -364,6 +364,15 @@ function isImageFilePath(filePath?: string): boolean {
     || normalizedPath.endsWith('.bmp')
     || normalizedPath.endsWith('.webp')
   }
+
+// 付款回单图片加载失败处理
+function handleProofImageError(e: Event) {
+  const img = e.target as HTMLImageElement
+  img.style.display = 'none'
+  api.get('/api/auth/user').catch(() => {
+    window.location.href = '/login'
+  })
+}
 
 // 预览付款回单
 function handlePreviewPaymentProof(url?: string): void {

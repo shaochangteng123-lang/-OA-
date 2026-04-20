@@ -437,7 +437,7 @@
             </div>
             <div class="unmatched-list">
               <div v-for="receipt in unmatchedReceipts" :key="receipt.id" class="unmatched-item">
-                <img :src="toFileUrl(receipt.image_path)" class="receipt-thumb" @click="previewReceiptImage(receipt.image_path)" />
+                <img :src="toFileUrl(receipt.image_path)" class="receipt-thumb" @click="previewReceiptImage(receipt.image_path)" @error="handleProofImageError" />
                 <div class="receipt-info">
                   <div class="receipt-remark">{{ receipt.ocr_remark || '备注未识别' }}</div>
                   <div class="receipt-amount" v-if="receipt.ocr_amount">¥{{ Number(receipt.ocr_amount).toFixed(2) }}</div>
@@ -469,19 +469,20 @@
           drag
           accept=".pdf"
           :auto-upload="false"
-          :limit="1"
+          multiple
           :on-change="handleBankReceiptFileChange"
+          :on-remove="handleBankReceiptFileRemove"
           :file-list="bankReceiptFileList"
         >
           <el-icon :size="40"><UploadFilled /></el-icon>
           <div class="el-upload__text">拖拽 PDF 到此处，或 <em>点击上传</em></div>
           <template #tip>
-            <div class="el-upload__tip">仅支持工商银行企业网银下载的付款回单 PDF</div>
+            <div class="el-upload__tip">支持同时上传多个 PDF（如主账户 + 商务账户回单），仅支持工商银行企业网银下载的付款回单</div>
           </template>
         </el-upload>
         <template #footer>
           <el-button @click="closeBankReceiptDialog">{{ bankReceiptResult ? '关闭' : '取消' }}</el-button>
-          <el-button v-if="!bankReceiptResult" type="primary" :disabled="!bankReceiptFile || bankReceiptProcessing" @click="submitBankReceiptPdf">
+          <el-button v-if="!bankReceiptResult" type="primary" :disabled="bankReceiptFileList.length === 0 || bankReceiptProcessing" @click="submitBankReceiptPdf">
             开始处理
           </el-button>
         </template>
@@ -1120,6 +1121,7 @@
       v-model="approvalProcessDialogVisible"
       title="审批流程"
       width="650px"
+      top="5vh"
       :close-on-click-modal="false"
     >
       <div v-if="currentApprovalRecord" class="approval-process-detail">
@@ -1296,7 +1298,7 @@
                 <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
                   <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
                     <template v-if="isImagePath(proofUrl)">
-                      <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" />
+                      <img :src="toFileUrl(proofUrl)" class="proof-image" alt="付款回单" @error="handleProofImageError" />
                     </template>
                     <template v-else>
                       <div class="proof-pdf">
@@ -1711,7 +1713,7 @@ const batchPaymentLoading = ref(false)
 const bankReceiptUploadVisible = ref(false)
 const bankReceiptProcessing = ref(false)
 const bankReceiptResult = ref<any>(null)
-const bankReceiptFile = ref<File | null>(null)
+const bankReceiptFiles = ref<File[]>([])
 const bankReceiptFileList = ref<any[]>([])
 const unmatchedReceipts = ref<any[]>([])
 const manualMatchVisible = ref(false)
@@ -1721,16 +1723,21 @@ const receiptPreviewVisible = ref(false)
 const receiptPreviewUrl = ref('')
 
 function handleBankReceiptFileChange(file: any) {
-  bankReceiptFile.value = file.raw
-  bankReceiptFileList.value = [file]
+  bankReceiptFiles.value.push(file.raw)
+  bankReceiptFileList.value = [...bankReceiptFileList.value, file]
+}
+
+function handleBankReceiptFileRemove(file: any) {
+  bankReceiptFileList.value = bankReceiptFileList.value.filter(f => f.uid !== file.uid)
+  bankReceiptFiles.value = bankReceiptFileList.value.map(f => f.raw).filter(Boolean)
 }
 
 async function submitBankReceiptPdf() {
-  if (!bankReceiptFile.value) return
+  if (bankReceiptFiles.value.length === 0) return
   bankReceiptProcessing.value = true
   try {
     const formData = new FormData()
-    formData.append('pdf', bankReceiptFile.value)
+    bankReceiptFiles.value.forEach(f => formData.append('pdfs', f))
     const res = await api.post('/api/bank-receipts/upload', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
@@ -1773,7 +1780,7 @@ function closeBankReceiptDialog() {
   bankReceiptUploadVisible.value = false
   bankReceiptProcessing.value = false
   bankReceiptResult.value = null
-  bankReceiptFile.value = null
+  bankReceiptFiles.value = []
   bankReceiptFileList.value = []
 }
 
@@ -1812,6 +1819,14 @@ async function submitManualMatch() {
 function previewReceiptImage(imagePath: string) {
   receiptPreviewUrl.value = toFileUrl(imagePath)
   receiptPreviewVisible.value = true
+}
+
+function handleProofImageError(e: Event) {
+  const img = e.target as HTMLImageElement
+  img.style.display = 'none'
+  api.get('/api/auth/user').catch(() => {
+    window.location.href = '/login'
+  })
 }
 
 async function skipReceipt(receiptId: string) {
@@ -2912,8 +2927,10 @@ async function loadApprovalRecords(reimbursementId: string) {
       approvalRecords.value = res.data.data.records || []
 
       // 用最新的报销单状态覆盖弹窗数据
-      if (currentApprovalRecord.value && res.data.data.reimbursementStatus) {
-        currentApprovalRecord.value.status = res.data.data.reimbursementStatus
+      if (currentApprovalRecord.value) {
+        if (res.data.data.reimbursementStatus) {
+          currentApprovalRecord.value.status = res.data.data.reimbursementStatus
+        }
         if (res.data.data.paymentProofPath) {
           currentApprovalRecord.value.paymentProofPath = res.data.data.paymentProofPath
         }
@@ -2938,43 +2955,41 @@ async function loadApprovalRecords(reimbursementId: string) {
         if (res.data.data.gmApproverName) {
           currentApprovalRecord.value.gmApproverName = res.data.data.gmApproverName
         }
+      }
 
-        // 合并打款信息查询（两种流程）
-        approvalBatchInfo.value = null
-        const proofPath = res.data.data.paymentProofPath || ''
-        const paymentBatchId = res.data.data.paymentBatchId || ''
+      // 合并打款信息查询（独立执行，不依赖 reimbursementStatus）
+      approvalBatchInfo.value = null
+      const proofPath = res.data.data.paymentProofPath || currentApprovalRecord.value?.paymentProofPath || ''
+      const paymentBatchId = res.data.data.paymentBatchId || ''
 
-        if (proofPath.includes('bank-receipts')) {
-          // 银行回单PDF流程
-          try {
-            const brRes = await api.get(`/api/bank-receipts/by-reimbursement/${reimbursementId}`)
-            if (brRes.data.success && brRes.data.data) {
-              approvalBatchInfo.value = {
-                totalAmount: brRes.data.data.totalAmount,
-                reimbursementCount: brRes.data.data.reimbursements.length,
-                reimbursements: brRes.data.data.reimbursements,
-              }
+      if (proofPath.includes('bank-receipts')) {
+        try {
+          const brRes = await api.get(`/api/bank-receipts/by-reimbursement/${reimbursementId}`)
+          if (brRes.data.success && brRes.data.data) {
+            approvalBatchInfo.value = {
+              totalAmount: brRes.data.data.totalAmount,
+              reimbursementCount: brRes.data.data.reimbursements.length,
+              reimbursements: brRes.data.data.reimbursements,
             }
-          } catch {}
-        } else if (paymentBatchId) {
-          // 旧批量付款流程
-          try {
-            const batchRes = await api.get(`/api/reimbursement/payment-batch/${paymentBatchId}`)
-            if (batchRes.data.success && batchRes.data.data.reimbursements.length > 1) {
-              const batchData = batchRes.data.data
-              approvalBatchInfo.value = {
-                totalAmount: batchData.totalAmount,
-                reimbursementCount: batchData.reimbursements.length,
-                reimbursements: batchData.reimbursements.map((r: any) => ({
-                  id: r.id,
-                  title: r.title,
-                  amount: r.amount,
-                  applicantName: r.applicant,
-                })),
-              }
+          }
+        } catch {}
+      } else if (paymentBatchId) {
+        try {
+          const batchRes = await api.get(`/api/reimbursement/payment-batch/${paymentBatchId}`)
+          if (batchRes.data.success && batchRes.data.data.reimbursements.length > 1) {
+            const batchData = batchRes.data.data
+            approvalBatchInfo.value = {
+              totalAmount: batchData.totalAmount,
+              reimbursementCount: batchData.reimbursements.length,
+              reimbursements: batchData.reimbursements.map((r: any) => ({
+                id: r.id,
+                title: r.title,
+                amount: r.amount,
+                applicantName: r.applicant,
+              })),
             }
-          } catch {}
-        }
+          }
+        } catch {}
       }
     }
   } catch (error) {

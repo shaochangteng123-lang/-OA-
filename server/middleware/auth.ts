@@ -2,7 +2,9 @@ import { Request, Response, NextFunction } from 'express'
 import { db } from '../db/index.js'
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.isLoggedIn || !req.session.userId) {
+  const userId = req.session.userId || req.session.user?.id
+  const isLoggedIn = req.session.isLoggedIn || !!req.session.user?.id
+  if (!isLoggedIn || !userId) {
     console.log('🔒 认证失败:', {
       path: req.path,
       sessionId: req.sessionID,
@@ -14,18 +16,24 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
       message: '未登录或登录已过期',
     })
   }
+  // 兼容旧 session：补全 userId 字段
+  if (!req.session.userId && req.session.user?.id) {
+    req.session.userId = req.session.user.id
+  }
   next()
 }
 
 export function requireRole(roles: string[]) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    // 确保用户已登录
-    if (!req.session.userId) {
+    const userId = req.session.userId || req.session.user?.id
+    if (!userId) {
       return res.status(401).json({
         success: false,
         message: '未登录或登录已过期',
       })
     }
+    // 兼容旧 session
+    if (!req.session.userId) req.session.userId = userId
 
     try {
       // 从数据库查询用户角色

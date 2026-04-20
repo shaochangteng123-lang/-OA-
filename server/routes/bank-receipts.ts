@@ -3,6 +3,7 @@ import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
 import { nanoid } from 'nanoid'
+import { PDFDocument } from 'pdf-lib'
 import { requireAdmin } from '../middleware/auth.js'
 import { db } from '../db/index.js'
 import { processBankReceiptPdf } from '../services/bankReceiptProcessor.js'
@@ -29,10 +30,11 @@ const uploadPdf = multer({
 
 /**
  * POST /api/bank-receipts/upload
- * 上传工行整份回单PDF，异步处理
+ * 上传工行回单PDF（支持多个PDF，自动合并后处理）
  */
-router.post('/upload', requireAdmin, uploadPdf.single('pdf'), async (req, res) => {
-  if (!req.file) {
+router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, res) => {
+  const files = req.files as Express.Multer.File[]
+  if (!files || files.length === 0) {
     res.status(400).json({ success: false, message: '请上传 PDF 文件' })
     return
   }
@@ -40,13 +42,30 @@ router.post('/upload', requireAdmin, uploadPdf.single('pdf'), async (req, res) =
   const currentUserId = (req.session as any).userId
   const batchId = `brb_${nanoid(10)}`
   const now = new Date().toISOString()
-
-  // 移动PDF到正式目录
   const pdfFileName = `batch-${batchId}.pdf`
   const pdfPath = path.join(bankReceiptsDir, pdfFileName)
-  fs.renameSync(req.file.path, pdfPath)
 
-  // 创建批次记录
+  try {
+    if (files.length === 1) {
+      fs.renameSync(files[0].path, pdfPath)
+    } else {
+      // 合并多个PDF
+      const merged = await PDFDocument.create()
+      for (const file of files) {
+        const bytes = fs.readFileSync(file.path)
+        const doc = await PDFDocument.load(bytes)
+        const pages = await merged.copyPages(doc, doc.getPageIndices())
+        pages.forEach(p => merged.addPage(p))
+        fs.unlinkSync(file.path)
+      }
+      fs.writeFileSync(pdfPath, await merged.save())
+    }
+  } catch (err) {
+    files.forEach(f => { try { fs.unlinkSync(f.path) } catch {} })
+    res.status(500).json({ success: false, message: 'PDF 合并失败' })
+    return
+  }
+
   await db.run(
     `INSERT INTO bank_receipt_batches (id, pdf_path, uploaded_by, status, created_at, updated_at)
      VALUES (?, ?, ?, 'processing', ?, ?)`,
@@ -55,7 +74,6 @@ router.post('/upload', requireAdmin, uploadPdf.single('pdf'), async (req, res) =
 
   res.json({ success: true, data: { batchId } })
 
-  // 异步处理（不阻塞响应）
   const outputDir = path.join(bankReceiptsDir, batchId)
   fs.mkdirSync(outputDir, { recursive: true })
 

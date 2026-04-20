@@ -85,13 +85,26 @@ router.get('/payment-proofs/:filename', requireAuth, async (req, res) => {
       return res.status(403).json({ success: false, message: '非法文件路径' })
     }
 
-    // 查询该回单是否属于当前用户的报销单
-    const proof = await db.get(
+    // 查询该回单是否属于当前用户的报销单或批量付款
+    let proof = await db.get(
       `SELECT r.user_id, r.type
        FROM reimbursements r
        WHERE r.payment_proof_path LIKE ?`,
       `%${filename}%`
     )
+
+    // 如果在 reimbursements 中没找到，查询 payment_batches 表
+    if (!proof) {
+      const batch = await db.get(
+        `SELECT pb.payer_id as user_id
+         FROM payment_batches pb
+         WHERE pb.payment_proof_path LIKE ?`,
+        `%${filename}%`
+      )
+      if (batch) {
+        proof = { user_id: batch.user_id, type: 'batch' }
+      }
+    }
 
     if (!proof) {
       return res.status(404).json({ success: false, message: '文件不存在' })
@@ -130,23 +143,16 @@ router.get('/bank-receipts/*', requireAuth, async (req, res) => {
 
     const userId = req.session.userId!
     const user = await db.get('SELECT role FROM users WHERE id = ?', userId)
-    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin' || user?.role === 'general_manager'
 
-    // 非管理员：检查该回单是否属于自己的报销单
+    // 非管理员/总经理：检查该回单是否属于自己的报销单
     if (!isAdmin) {
-      const reimbursement = await db.get(
-        `SELECT user_id FROM reimbursements WHERE payment_proof_path = ? AND is_deleted = false`,
-        filePath,
+      const ownedReimbursement = await db.get(
+        `SELECT id FROM reimbursements WHERE payment_proof_path LIKE ? AND user_id = ? AND is_deleted = false`,
+        `%${subPath}%`, userId,
       )
-      if (!reimbursement || reimbursement.user_id !== userId) {
-        // 也可能是合并打款：同一张回单对应多笔报销，检查其中是否有属于当前用户的
-        const ownedReimbursement = await db.get(
-          `SELECT id FROM reimbursements WHERE payment_proof_path = ? AND user_id = ? AND is_deleted = false`,
-          filePath, userId,
-        )
-        if (!ownedReimbursement) {
-          return res.status(403).json({ success: false, message: '无权访问' })
-        }
+      if (!ownedReimbursement) {
+        return res.status(403).json({ success: false, message: '无权访问' })
       }
     }
 

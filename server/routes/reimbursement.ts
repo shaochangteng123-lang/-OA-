@@ -2519,9 +2519,7 @@ router.post('/:id/confirm-receipt', requireAuth, async (req, res) => {
 router.get('/:id', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
-    const userId = req.session.user?.id
-    const userRole = req.session.user?.role
-
+    const userId = req.session.user?.id || req.session.userId
     if (!userId) {
       return res.status(401).json({
         success: false,
@@ -2530,6 +2528,13 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
 
     const { db } = await import('../db/index.js')
+
+    // 获取用户角色（优先从 session.user 取，否则从数据库查）
+    let userRole = req.session.user?.role
+    if (!userRole) {
+      const userRecord = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+      userRole = userRecord?.role
+    }
 
     // 管理员可以查看所有报销单，总经理只能查看商务报销，普通用户只能查看自己的
     const isAdmin = userRole === 'super_admin' || userRole === 'admin'
@@ -2558,7 +2563,7 @@ router.get('/:id', requireAuth, async (req, res) => {
           created_at as createTime, updated_at as updateTime,
           payment_batch_id as paymentBatchId
         FROM reimbursements
-        WHERE id = ?
+        WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE
       `).get(id)
     } else if (isGM) {
       // 总经理只能查看商务报销
@@ -2582,7 +2587,7 @@ router.get('/:id', requireAuth, async (req, res) => {
           created_at as createTime, updated_at as updateTime,
           payment_batch_id as paymentBatchId
         FROM reimbursements
-        WHERE id = ? AND (type = 'business' OR user_id = ?)
+        WHERE id = ? AND (type = 'business' OR user_id = ?) AND COALESCE(is_deleted, FALSE) = FALSE
       `).get(id, userId)
     } else {
       // 普通用户只能查看自己的报销单
@@ -2606,7 +2611,7 @@ router.get('/:id', requireAuth, async (req, res) => {
           created_at as createTime, updated_at as updateTime,
           payment_batch_id as paymentBatchId
         FROM reimbursements
-        WHERE id = ? AND user_id = ?
+        WHERE id = ? AND user_id = ? AND COALESCE(is_deleted, FALSE) = FALSE
       `).get(id, userId)
     }
 

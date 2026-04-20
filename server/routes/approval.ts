@@ -450,8 +450,8 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
 router.get('/by-target', requireAuth, async (req, res) => {
   try {
     const { targetId, targetType } = req.query
-    const userId = req.session.user?.id
-    const userRole = req.session.user?.role
+    const userId = req.session.user?.id || req.session.userId
+    let userRole = req.session.user?.role
 
     if (!targetId || !targetType) {
       return res.status(400).json({
@@ -460,11 +460,16 @@ router.get('/by-target', requireAuth, async (req, res) => {
       })
     }
 
-    if (!userId || !userRole) {
+    if (!userId) {
       return res.status(401).json({
         success: false,
         message: '未登录',
       })
+    }
+
+    if (!userRole) {
+      const userRecord = await db.prepare('SELECT role FROM users WHERE id = ?').get(userId) as { role: string } | undefined
+      userRole = userRecord?.role || ''
     }
 
     // 查询最新的审批实例
@@ -963,7 +968,7 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
   try {
     const { status, type, userId, reimbursementScope, startDate, endDate } = req.query
 
-    let whereClause = 'WHERE 1=1'
+    let whereClause = 'WHERE COALESCE(r.is_deleted, FALSE) = FALSE'
     const params: any[] = []
 
     // 默认只查询已付款状态（payment_uploaded, completed）

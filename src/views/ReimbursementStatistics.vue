@@ -202,6 +202,7 @@
           v-model="approvalDialogVisible"
           title="审批过程"
           width="600px"
+          top="5vh"
           :close-on-click-modal="false"
         >
           <div v-if="currentApprovalRecord" class="approval-detail">
@@ -359,6 +360,25 @@
                   <div class="timeline-content">
                     <div class="timeline-title">上传付款凭证</div>
                     <div class="timeline-desc">财务已上传付款凭证</div>
+                    <!-- 合并打款关联报销单 -->
+                    <div v-if="approvalBatchInfo && approvalBatchInfo.reimbursementCount > 1" class="approval-batch-info">
+                      <div class="approval-batch-header">
+                        <el-tag type="warning" size="small">合并打款</el-tag>
+                        <span class="approval-batch-total">本次付款合计 <strong>¥{{ approvalBatchInfo.totalAmount.toFixed(2) }}</strong>，共 {{ approvalBatchInfo.reimbursementCount }} 笔</span>
+                      </div>
+                      <div class="approval-batch-list">
+                        <div
+                          v-for="r in approvalBatchInfo.reimbursements"
+                          :key="r.id"
+                          class="approval-batch-item"
+                          :class="{ 'is-current': r.id === currentApprovalRecord?.id }"
+                        >
+                          <el-tag v-if="r.id === currentApprovalRecord?.id" type="primary" size="small" style="margin-right: 4px;">本笔</el-tag>
+                          <span class="approval-batch-title">{{ r.title }}</span>
+                          <span class="approval-batch-amount">¥{{ r.amount.toFixed(2) }}</span>
+                        </div>
+                      </div>
+                    </div>
                     <!-- 付款回单展示 -->
 	                    <div v-if="currentApprovalRecord.paymentProofPath" class="payment-proof-preview">
 	                      <div v-for="(proofUrl, idx) in currentApprovalRecord.paymentProofPath.split(',')" :key="idx" class="proof-card" @click="handlePreviewPaymentProof(proofUrl)">
@@ -607,6 +627,7 @@ const loading = ref(false)
 // 审批过程弹窗
 const approvalDialogVisible = ref(false)
 const currentApprovalRecord = ref<any>(null)
+const approvalBatchInfo = ref<{ totalAmount: number; reimbursementCount: number; reimbursements: any[] } | null>(null)
 
 // 驳回原因弹窗
 const rejectDialogVisible = ref(false)
@@ -814,6 +835,7 @@ const dateTypeShortcuts = [
 
 // 查看审批过程
 const handleViewApproval = async (row: any) => {
+  approvalBatchInfo.value = null
   try {
     const response = await fetch(`/api/reimbursement/${row.id}`, {
       credentials: 'include',
@@ -835,6 +857,40 @@ const handleViewApproval = async (row: any) => {
     // 降级：使用列表行数据
     currentApprovalRecord.value = row
     approvalDialogVisible.value = true
+  }
+
+  // 加载合并付款信息
+  const proofPath = currentApprovalRecord.value?.paymentProofPath || ''
+  const paymentBatchId = currentApprovalRecord.value?.paymentBatchId || ''
+  if (proofPath.includes('bank-receipts')) {
+    try {
+      const brRes = await fetch(`/api/bank-receipts/by-reimbursement/${row.id}`, { credentials: 'include' })
+      const brData = await brRes.json()
+      if (brData.success && brData.data) {
+        approvalBatchInfo.value = {
+          totalAmount: brData.data.totalAmount,
+          reimbursementCount: brData.data.reimbursements.length,
+          reimbursements: brData.data.reimbursements,
+        }
+      }
+    } catch {}
+  } else if (paymentBatchId) {
+    try {
+      const batchRes = await fetch(`/api/reimbursement/payment-batch/${paymentBatchId}`, { credentials: 'include' })
+      const batchData = await batchRes.json()
+      if (batchData.success && batchData.data.reimbursements.length > 1) {
+        approvalBatchInfo.value = {
+          totalAmount: batchData.data.totalAmount,
+          reimbursementCount: batchData.data.reimbursements.length,
+          reimbursements: batchData.data.reimbursements.map((r: any) => ({
+            id: r.id,
+            title: r.title,
+            amount: r.amount,
+            applicantName: r.applicant,
+          })),
+        }
+      }
+    } catch {}
   }
 }
 
@@ -1334,4 +1390,35 @@ onMounted(() => {
   height: 70vh;
   border: none;
 }
+
+.approval-batch-info {
+  margin: 10px 0 8px;
+  border: 1px solid #f0a020;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fffbf0;
+}
+.approval-batch-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #fef8e7;
+  border-bottom: 1px solid #f0a020;
+}
+.approval-batch-total { font-size: 13px; color: #666; }
+.approval-batch-total strong { color: #e6a23c; font-size: 14px; }
+.approval-batch-list { padding: 4px 0; }
+.approval-batch-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-bottom: 1px solid #f5ead0;
+}
+.approval-batch-item:last-child { border-bottom: none; }
+.approval-batch-item.is-current { background: #fff8e6; }
+.approval-batch-title { flex: 1; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval-batch-amount { color: #409eff; font-weight: 600; white-space: nowrap; }
 </style>

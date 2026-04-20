@@ -6,19 +6,7 @@
  */
 
 import fs from 'fs'
-import path from 'path'
 import { callPaddleOcr } from './ocrDaemon.js'
-
-// 动态导入 pdf-parse
-let PDFParseClass: any = null
-
-async function getPdfParse() {
-  if (!PDFParseClass) {
-    const module = await import('pdf-parse')
-    PDFParseClass = module.PDFParse
-  }
-  return PDFParseClass
-}
 
 // ==================== PaddleOCR（发票 OCR 专用） ====================
 // PaddleOCR 通过 ocrDaemon.ts 管理，无需额外初始化
@@ -28,6 +16,7 @@ async function getPdfParse() {
  */
 export interface InvoiceOcrResult {
   amount: number
+  amountFromPriceTax?: boolean // 金额是否来自"价税合计"字段（高置信度）
   date: string
   invoiceNumber?: string
   seller?: string
@@ -38,26 +27,147 @@ export interface InvoiceOcrResult {
   isValidInvoice: boolean
 }
 
+interface XmlInvoiceResult {
+  amount?: number
+  date?: string
+  invoiceNumber?: string
+  type?: string
+}
+
 /**
- * 从 PDF 提取文本（用于电子发票）
+ * 通过 pdftohtml -xml 坐标方案提取发票所有关键字段
+ * 返回 null 表示 pdftohtml 不可用或 PDF 无文字层（扫描件）
  */
-async function extractTextFromPdf(pdfPath: string): Promise<string> {
+async function extractInvoiceFromXml(pdfPath: string): Promise<XmlInvoiceResult | null> {
   try {
-    const dataBuffer = fs.readFileSync(pdfPath)
-    const PDFParseClass = await getPdfParse()
-    const parser = new PDFParseClass({ data: dataBuffer })
-    const result = await parser.getText()
+    const { execFileSync } = await import('child_process')
+    const xml = execFileSync('pdftohtml', ['-xml', '-stdout', '-nodrm', pdfPath], {
+      timeout: 15000,
+      maxBuffer: 10 * 1024 * 1024,
+    }).toString('utf-8')
 
-    console.log('📄 PDF 文本提取成功')
-    console.log('📝 提取的文本长度:', result.text.length)
-    console.log('📝 文本预览:', result.text.substring(0, 200))
+    // 解析所有 <text> 元素，提取 top/left 坐标和文本内容
+    const textNodes: { top: number; left: number; width: number; text: string }[] = []
+    const nodeRe = /<text[^>]+top="(\d+)"[^>]+left="(\d+)"[^>]+width="(\d+)"[^>]*>([\s\S]*?)<\/text>/g
+    let m: RegExpExecArray | null
+    while ((m = nodeRe.exec(xml)) !== null) {
+      const raw = m[4].replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)))
+        .trim()
+      if (raw) textNodes.push({ top: parseInt(m[1]), left: parseInt(m[2]), width: parseInt(m[3]), text: raw })
+    }
 
-    return result.text
-  } catch (error) {
-    console.error('PDF 文本提取失败:', error)
-    return ''
+    if (textNodes.length === 0) return null
+
+    const result: XmlInvoiceResult = {}
+
+    // ── 1. 提取金额（价税合计小写）──
+    const labelNode = textNodes.find(n => /[（(]\s*小\s*写\s*[）)]/.test(n.text))
+    if (labelNode) {
+      const sameLine = textNodes.filter(n => Math.abs(n.top - labelNode.top) <= 10)
+      const yenNode = sameLine.find(n => /^[¥￥]$/.test(n.text))
+      if (yenNode) {
+        const numNode = sameLine
+          .filter(n => n.left > yenNode.left && /^[\d,]+\.\d{2}$/.test(n.text))
+          .sort((a, b) => a.left - b.left)[0]
+        if (numNode) {
+          result.amount = parseFloat(numNode.text.replace(/,/g, ''))
+          console.log('💰 XML金额(¥右侧):', result.amount)
+        }
+      }
+      if (!result.amount) {
+        // 备用1：同行有 ¥35.73 或 ¥ 35.73（¥和数字之间可能有空格）
+        const mergedYenNode = sameLine.find(n => /^[¥￥]\s*([\d,]+\.\d{2})$/.test(n.text))
+        if (mergedYenNode) {
+          const m3 = mergedYenNode.text.match(/^[¥￥]\s*([\d,]+\.\d{2})$/)
+          if (m3) {
+            result.amount = parseFloat(m3[1].replace(/,/g, ''))
+            console.log('💰 XML金额(¥合并节点):', result.amount)
+          }
+        }
+      }
+      if (!result.amount) {
+        // 备用2：同行最大纯数字
+        const numNodes = sameLine.filter(n => /^[\d,]+\.\d{2}$/.test(n.text))
+        if (numNodes.length > 0) {
+          result.amount = Math.max(...numNodes.map(n => parseFloat(n.text.replace(/,/g, ''))))
+          console.log('💰 XML金额(同行最大):', result.amount)
+        }
+      }
+    }
+
+    // ── 2. 提取发票号码 ──
+    // 模板A：标签和值在同一节点，如 "发票号码:26119..."
+    const invoiceNodeA = textNodes.find(n => /发票号码[：:]\s*(\d{15,25})/.test(n.text))
+    if (invoiceNodeA) {
+      const match = invoiceNodeA.text.match(/发票号码[：:]\s*(\d{15,25})/)
+      if (match) result.invoiceNumber = match[1]
+    }
+    // 模板B：标签和值分开，找"发票号码："标签右侧的数字节点
+    if (!result.invoiceNumber) {
+      const labelInv = textNodes.find(n => /^发票号码[：:]?\s*$/.test(n.text))
+      if (labelInv) {
+        const sameLine = textNodes.filter(n => Math.abs(n.top - labelInv.top) <= 8 && n.left > labelInv.left)
+        const numNode = sameLine.sort((a, b) => a.left - b.left).find(n => /^\d{15,25}$/.test(n.text))
+        if (numNode) result.invoiceNumber = numNode.text
+      }
+    }
+    // 模板C：发票号码单独一行（20位数字）
+    if (!result.invoiceNumber) {
+      const numNode = textNodes.find(n => /^\d{20}$/.test(n.text))
+      if (numNode) result.invoiceNumber = numNode.text
+    }
+    if (result.invoiceNumber) console.log('🔢 XML发票号码:', result.invoiceNumber)
+
+    // ── 3. 提取开票日期 ──
+    // 模板A：标签和值在同一节点，如 "开票日期:2026年04月07日"
+    const dateNodeA = textNodes.find(n => /开票日期[：:]\s*(\d{4}年\d{2}月\d{2}日)/.test(n.text))
+    if (dateNodeA) {
+      const match = dateNodeA.text.match(/开票日期[：:]\s*(\d{4}年\d{2}月\d{2}日)/)
+      if (match) result.date = match[1]
+    }
+    // 模板B：标签和值分开
+    if (!result.date) {
+      const labelDate = textNodes.find(n => /^开票日期[：:]?\s*$/.test(n.text))
+      if (labelDate) {
+        const sameLine = textNodes.filter(n => Math.abs(n.top - labelDate.top) <= 8 && n.left > labelDate.left)
+        const dateNode = sameLine.sort((a, b) => a.left - b.left).find(n => /^\d{4}年\d{2}月\d{2}日$/.test(n.text))
+        if (dateNode) result.date = dateNode.text
+      }
+    }
+    // 模板C：日期单独一行
+    if (!result.date) {
+      const dateNode = textNodes.find(n => /^\d{4}年\d{2}月\d{2}日$/.test(n.text))
+      if (dateNode) result.date = dateNode.text
+    }
+    if (result.date) console.log('📅 XML开票日期:', result.date)
+
+    // ── 4. 提取报销类型（项目名称 *...*格式）──
+    // 先找通行费（高速费需特殊处理）
+    const tollNode = textNodes.find(n => /\*[^*]+\*\s*通行费/.test(n.text))
+    if (tollNode) {
+      result.type = '通行费'
+    } else {
+      const typeNode = textNodes.find(n => /\*[^*]+\*/.test(n.text))
+      if (typeNode) {
+        const m2 = typeNode.text.match(/\*([^*]+)\*/)
+        if (m2) result.type = m2[1].trim()
+      }
+    }
+    if (result.type) console.log('📋 XML报销类型:', result.type)
+
+    console.log('📐 XML提取结果:', JSON.stringify(result))
+    return (result.amount || result.invoiceNumber || result.date) ? result : null
+  } catch (e) {
+    console.log('📐 XML提取异常:', e)
+    return null
   }
 }
+
 
 /**
  * 预处理 OCR 文本：修复常见 OCR 错误
@@ -112,6 +222,8 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     (textNoSpaceForRail.includes('铁路电子客票') && textNoSpaceForRail.includes('12306'))
 
   // 1. 提取金额（价税合计）- 改进的匹配模式
+  // 核心策略：价税合计的小写金额总是与大写金额（含"圆整/圆X角"）在同一行或相邻行
+  // 优先匹配"大写金额附近的¥数字"，这是所有电子发票共同的结构
   const amountPatterns = [
     // 铁路电子客票专属：仅当确认是铁路客票时才匹配"票价"/"退票费"字段
     // 普通票用"票价"，改签差额退票用"退票费"，两者都只在铁路客票下启用
@@ -120,18 +232,25 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
       /退\s*票\s*费[：:\s]*[¥￥？?]?\s*([\d,]+\.?\d{0,2})/,
     ] : []),
 
-    // 最高优先级：匹配大写金额后面紧跟的小写金额（支持换行和制表符）
-    // 补全所有中文大写数字：零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分
-    /[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分]+[\s\t\n]*[¥￥?？]\s*([\d,]+\.\d{2})/,
+    // 高置信度1：大写金额（圆整/圆X角X分）后面紧跟 ¥ 数字（同行或制表符分隔）
+    // 如 "伍佰圆整\t¥500.00" 或 "叁佰陆拾壹圆整\t¥361.00"
+    /[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿]+圆[整零壹贰叁参肆伍陆柒捌玖拾角分]*[\s\t]*[¥￥?？]\s*([\d,]+\.\d{2})/,
 
-    // 匹配 "价税合计" 后面的大写金额和小写金额
+    // 高置信度2：¥ 数字在前，大写金额在后（部分发票是倒序结构）
+    // 如 "361.00\t(小写) ¥\t叁佰陆拾壹圆整" 需要反向匹配
+    // 这个结构：数字 + (小写) + ¥ + 大写金额
+    /([\d,]+\.\d{2})[\s\t]*[（(]\s*小\s*写\s*[）)][\s\t]*[¥￥?？][\s\t]*[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿]+圆/,
+
+    // 高置信度3：标准 "（小写）¥ 数字" 格式（金额紧跟标签）
+    /[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
+
+    // 高置信度4：价税合计区域内的小写金额（金额紧跟标签，200 字符范围）
+    /价\s*税\s*合\s*计[\s\S]{0,200}?[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
+
+    // 高置信度5：价税合计后面紧跟 ¥ 数字再跟大写金额
     /价\s*税\s*合\s*计[\s\S]{0,200}?[¥￥?？]\s*([\d,]+\.\d{2})\s*[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分]/,
 
-    // 匹配 "价税合计" 区域内的金额（支持换行和空格）
-    /价\s*税\s*合\s*计[\s\S]{0,150}?[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
-
-    // 匹配 "（小写）" 后面的金额（¥ 和数字之间可以有空格，¥ 可能被识别为 ?）
-    /[（(]\s*小\s*写\s*[）)][\s：:]*[¥￥?？]?\s*([\d,]+\.\d{2})/,
+    // --- 以下为低置信度兜底模式 ---
 
     // OCR 特殊情况："（小写)" 和金额分行，金额在下一行（无 ¥ 前缀）
     /[（(]\s*小\s*写\s*[）)]\s*\n\s*([\d,]+\.\d{2})/,
@@ -139,7 +258,7 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     // OCR 兼容：¥ 可能被识别为 "羊"、"¢"、"?" 等，匹配 "小写" 后面的金额
     /小\s*写\s*[）)]\s*[¥￥羊¢?？]?\s*([\d,]+\.\d{2})/,
 
-    // OCR 兼容：匹配大写金额字符（含 OCR 误差，如 "参" 代替 "叁"）后面的数字金额
+    // OCR 兼容：匹配大写金额字符（含 OCR 误差）后面的数字金额（不要求"圆"字）
     /[零壹贰叁参肆伍陆柒捌玖拾佰仟万亿圆整角分炳歪]+[\s\t\n]*[¥￥羊¢?？]?\s*([\d,]+\.\d{2})/,
 
     // 匹配 "合计" 后面的金额（但排除价税合计）
@@ -161,7 +280,12 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     /[¥￥]\s*([\d,]+\.\d{2})/,
   ]
 
-  for (const pattern of amountPatterns) {
+  // 高置信度模式的数量（价税合计/大写金额相关模式）
+  // 铁路客票时前 2 个是票价/退票费（高置信度），再加 5 个通用高置信度
+  const highConfidenceCount = isRailTicket ? 2 + 5 : 5
+
+  for (let i = 0; i < amountPatterns.length; i++) {
+    const pattern = amountPatterns[i]
     const match = text.match(pattern)
     if (match && match[1]) {
       // 清理 OCR 产生的空格和逗号（如 "6 6 . 0 0" → "66.00"）
@@ -169,7 +293,8 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
       const parsedAmount = parseFloat(amountStr)
       if (parsedAmount > 0) {
         result.amount = parsedAmount
-        console.log('💰 提取到金额:', result.amount, '来源:', match[0].substring(0, 80))
+        result.amountFromPriceTax = i < highConfidenceCount
+        console.log('💰 提取到金额:', result.amount, '高置信度:', result.amountFromPriceTax, '来源:', match[0].substring(0, 80))
         console.log('💰 完整匹配内容:', match[0])
         break
       }
@@ -461,8 +586,11 @@ function mergeOcrResults(primary: InvoiceOcrResult | null, secondary: InvoiceOcr
   if (!secondary) return primary
 
   const merged: InvoiceOcrResult = {
-    // 金额：取较大的有效值（避免取到 0）
-    amount: primary.amount > 0 ? primary.amount : secondary.amount,
+    // 金额：优先取高置信度（价税合计）来源，否则取较大的有效值
+    amount: (primary.amountFromPriceTax && primary.amount > 0) ? primary.amount
+          : (secondary?.amountFromPriceTax && (secondary?.amount ?? 0) > 0) ? secondary.amount
+          : (primary.amount > 0 ? primary.amount : (secondary?.amount ?? 0)),
+    amountFromPriceTax: primary.amountFromPriceTax || secondary?.amountFromPriceTax,
     // 日期：优先取有效的
     date: (primary.date && /^\d{4}-\d{2}-\d{2}$/.test(primary.date)) ? primary.date : secondary.date,
     // 发票号码：优先取较长的（更完整）
@@ -518,52 +646,57 @@ export async function recognizeInvoiceLocally(filePath: string): Promise<Invoice
       throw new Error('此不是PDF文件，请重新上传')
     }
 
-    // 第一步：尝试 pdf-parse 提取文本
-    console.log('📄 正在提取 PDF 文本...')
-    const text = await extractTextFromPdf(filePath)
+    // 第一步：用 pdftohtml XML 坐标方案提取所有关键字段（有文字层的 PDF）
+    console.log('📐 尝试 XML 坐标方案提取发票信息...')
+    const xmlResult = await extractInvoiceFromXml(filePath)
+    const xmlHasAllFields = xmlResult && xmlResult.amount && xmlResult.date && xmlResult.invoiceNumber
+    console.log('📐 xmlHasAllFields:', xmlHasAllFields, '| amount:', xmlResult?.amount, '| date:', xmlResult?.date, '| invoiceNumber:', xmlResult?.invoiceNumber)
 
-    let pdfParseResult: InvoiceOcrResult | null = null
+    let result: InvoiceOcrResult | null = null
 
-    if (text && text.trim().length > 0) {
-      pdfParseResult = parseInvoiceText(text)
-    }
+    if (xmlHasAllFields) {
+      // XML 提取完整，直接构建结果，无需 pdf-parse 或 PaddleOCR
+      console.log('✅ XML方案提取完整，跳过 pdf-parse 和图片 OCR')
+      result = {
+        amount: xmlResult!.amount!,
+        amountFromPriceTax: true,
+        date: xmlResult!.date!.replace(/(\d{4})年(\d{2})月(\d{2})日/, '$1-$2-$3'),
+        invoiceNumber: xmlResult!.invoiceNumber!,
+        type: xmlResult!.type || '',
+        seller: '',
+        buyer: '',
+        taxAmount: 0,
+        invoiceCode: '',
+        isValidInvoice: true,
+      }
+    } else {
+      // 第二步：XML 提取不完整（扫描件无文字层），回退到 PaddleOCR 图片路线
+      console.log('⚠️ XML未完整提取（可能是扫描件），回退到 PDF 转图片 + PaddleOCR (300 DPI)...')
 
-    // 第二步：如果 pdf-parse 未能提取完整关键字段，回退到图片 OCR (300 DPI)
-    // 金额是最关键字段，只要金额识别失败就必须回退
-    let imageOcrResult: InvoiceOcrResult | null = null
-    const hasKeyFields = pdfParseResult && pdfParseResult.amount > 0 && pdfParseResult.date && pdfParseResult.invoiceNumber
-    if (!hasKeyFields) {
-      console.log('⚠️ pdf-parse 未提取到完整关键字段，回退到 PDF 转图片 + PaddleOCR (300 DPI)...')
-
+      let imageOcrResult: InvoiceOcrResult | null = null
       try {
         const imageText = await extractTextFromPdfViaImage(filePath, 300)
-
         if (imageText && imageText.trim().length > 0) {
           imageOcrResult = parseInvoiceText(imageText)
         }
       } catch (imageOcrError) {
         console.error('⚠️ 图片 OCR 回退失败 (300 DPI):', imageOcrError)
       }
-    }
 
-    // 第三步：合并 pdf-parse 和 PaddleOCR 的结果，取各字段最佳值
-    let result = mergeOcrResults(pdfParseResult, imageOcrResult)
+      result = imageOcrResult
 
-    // 第四步：如果合并后仍未通过验证，尝试更高 DPI (600) 再识别一次
-    if (!result || !result.isValidInvoice) {
-      console.log('⚠️ 300 DPI 识别不完整，尝试 600 DPI 高清识别...')
-
-      try {
-        const hdImageText = await extractTextFromPdfViaImage(filePath, 600)
-
-        if (hdImageText && hdImageText.trim().length > 0) {
-          const hdResult = parseInvoiceText(hdImageText)
-
-          // 合并高清 OCR 结果
-          result = mergeOcrResults(result, hdResult)
+      // 第三步：300 DPI 不完整，尝试 600 DPI
+      if (!result || !result.isValidInvoice) {
+        console.log('⚠️ 300 DPI 识别不完整，尝试 600 DPI 高清识别...')
+        try {
+          const hdImageText = await extractTextFromPdfViaImage(filePath, 600)
+          if (hdImageText && hdImageText.trim().length > 0) {
+            const hdResult = parseInvoiceText(hdImageText)
+            result = mergeOcrResults(result, hdResult)
+          }
+        } catch (hdOcrError) {
+          console.error('⚠️ 高清图片 OCR 也失败 (600 DPI):', hdOcrError)
         }
-      } catch (hdOcrError) {
-        console.error('⚠️ 高清图片 OCR 也失败 (600 DPI):', hdOcrError)
       }
     }
 

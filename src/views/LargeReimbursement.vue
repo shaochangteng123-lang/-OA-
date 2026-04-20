@@ -174,6 +174,7 @@
           v-model="approvalDialogVisible"
           title="审批过程"
           width="600px"
+          top="5vh"
           :close-on-click-modal="false"
         >
           <div v-if="currentApprovalRecord" class="approval-detail">
