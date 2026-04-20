@@ -39,6 +39,7 @@ services:
       - PORT=8899
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/yulilog_worklog
       - TZ=Asia/Shanghai
+      - FRONTEND_URL=https://yuliseek.com
     depends_on:
       postgres:
         condition: service_healthy
