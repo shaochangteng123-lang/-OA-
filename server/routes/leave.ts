@@ -164,7 +164,7 @@ async function getGenderExcludedTypes(userId: string): Promise<string[]> {
 router.get('/types', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
-    const excludedCodes = await getGenderExcludedTypes(userId)
+    const excludedCodes = await getGenderExcludedTypes(userId!)
 
     let types
     if (excludedCodes.length > 0) {
@@ -217,7 +217,7 @@ router.get('/balances', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const year = new Date().getFullYear()
-    const excludedCodes = await getGenderExcludedTypes(userId)
+    const excludedCodes = await getGenderExcludedTypes(userId!)
 
     let types
     if (excludedCodes.length > 0) {
@@ -237,7 +237,7 @@ router.get('/balances', requireAuth, async (req, res) => {
 
     const balances = []
     for (const type of types) {
-      const balance = await ensureLeaveBalance(userId, type.code, year)
+      const balance = await ensureLeaveBalance(userId!, type.code, year)
       balances.push({
         leave_type_code: type.code,
         leave_type_name: type.name,
@@ -263,7 +263,7 @@ router.get('/balances', requireAuth, async (req, res) => {
 router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments', 5), async (req, res) => {
   const uploadedFiles = (req.files as Express.Multer.File[]) || []
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const { leaveTypeCode, startDate, startHalf, endDate, endHalf, reason } = req.body
 
     // 基础校验
@@ -591,7 +591,7 @@ router.post('/requests/:id/cancel', requireAuth, async (req, res) => {
 router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('attachments', 5), async (req, res) => {
   const uploadedFiles = (req.files as Express.Multer.File[]) || []
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const { id } = req.params
     const { startDate, startHalf, endDate, endHalf, reason } = req.body
 

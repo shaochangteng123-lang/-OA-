@@ -614,6 +614,7 @@ router.get('/:id/resignation-archive', requireAdmin, async (req, res) => {
                 approve_time: employee.updated_at || null,
                 approver_id: null,
                 approver_comment: '该员工暂无离职申请记录，当前信息根据员工状态兜底展示',
+                reject_target: null,
                 created_at: employee.updated_at,
                 updated_at: employee.updated_at,
                 employee_name: employee.name,
