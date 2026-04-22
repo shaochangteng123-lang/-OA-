@@ -1,13 +1,14 @@
 # ============================================
-# YuliLog 工作日志系统 - 生产环境 Dockerfile
+# YuliLog 工作日志系统 - 统一 Dockerfile
 # ============================================
-# 基于 Debian slim，统一使用 PaddleOCR（与开发环境一致）
+# 开发：docker compose up -d --build
+# 生产：docker compose -f docker-compose.prod.yml up -d --build
 # ============================================
 
 ARG NODE_IMAGE=node:20-slim
 
 # ==========================================
-# 阶段1：基础依赖层
+# 阶段1：基础依赖层（开发/生产共用）
 # ==========================================
 FROM ${NODE_IMAGE} AS base
 
@@ -15,15 +16,23 @@ FROM ${NODE_IMAGE} AS base
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
     sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
 
-# 安装系统依赖
+# 安装系统依赖（开发/生产完全一致，避免环境差异）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-pip python3-dev \
     build-essential \
     libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
-    poppler-utils \
+    poppler-utils poppler-data \
     fonts-noto-cjk \
     dumb-init wget curl \
+    libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# 配置 pip 镜像源
+RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
+    && pip3 config set global.trusted-host mirrors.aliyun.com
+
+# 配置 npm 镜像源
+RUN npm config set registry https://registry.npmmirror.com
 
 WORKDIR /app
 
@@ -32,14 +41,8 @@ WORKDIR /app
 # ==========================================
 FROM base AS ocr-models
 
-# 配置 pip 镜像源
-RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
-    && pip3 config set global.trusted-host mirrors.aliyun.com
-
-# 安装 PaddleOCR
 RUN pip3 install --break-system-packages paddlepaddle paddleocr
 
-# 预下载模型（避免运行时下载），存到 /opt/paddlex 方便后续复制
 RUN PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
     HOME=/opt \
@@ -55,7 +58,34 @@ PaddleOCR( \
 print('Models downloaded successfully')"
 
 # ==========================================
-# 阶段3：Node.js 依赖安装
+# 阶段3：开发模式
+# ==========================================
+FROM base AS development
+
+# 复制 PaddleOCR 和模型
+COPY --from=ocr-models /usr/local/lib /usr/local/lib
+COPY --from=ocr-models /usr/local/bin/python3* /usr/local/bin/
+COPY --from=ocr-models /opt/.paddlex /opt/.paddlex
+
+COPY package.json package-lock.json ./
+RUN npm config set fetch-retries 5 && \
+    npm config set fetch-retry-mintimeout 20000 && \
+    npm config set fetch-retry-maxtimeout 120000 && \
+    npm ci --legacy-peer-deps
+
+COPY server/scripts/paddle_ocr_worker.py ./server/scripts/
+
+ENV NODE_ENV=development \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_allocator_strategy=auto_growth \
+    HOME=/opt
+
+EXPOSE 8899 3000
+
+CMD ["npm", "run", "dev"]
+
+# ==========================================
+# 阶段4：Node.js 全量依赖（构建用）
 # ==========================================
 FROM base AS deps
 
@@ -63,7 +93,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --prefer-offline --ignore-scripts --legacy-peer-deps
 
 # ==========================================
-# 阶段4：生产 Node.js 依赖
+# 阶段5：生产 Node.js 依赖
 # ==========================================
 FROM base AS prod-deps
 
@@ -72,7 +102,7 @@ RUN npm ci --omit=dev --prefer-offline --ignore-scripts --legacy-peer-deps \
     && npm rebuild canvas
 
 # ==========================================
-# 阶段5：构建阶段
+# 阶段6：构建阶段
 # ==========================================
 FROM deps AS builder
 
@@ -84,32 +114,28 @@ COPY public ./public
 RUN npm run build && npm run build:server
 
 # ==========================================
-# 阶段6：生产运行镜像
+# 阶段7：生产运行镜像
 # ==========================================
 FROM base AS production
 
 LABEL maintainer="YuliLog Team"
 LABEL description="YuliLog 工作日志管理系统"
 
-# 从 ocr-models 阶段复制已安装的 PaddleOCR 和预下载的模型
 COPY --from=ocr-models /usr/local/lib /usr/local/lib
 COPY --from=ocr-models /usr/local/bin/python3* /usr/local/bin/
 COPY --from=ocr-models /opt/.paddlex /opt/.paddlex
 
-# 创建应用用户
 RUN addgroup --gid 1001 nodejs \
     && adduser --disabled-password --gecos "" --uid 1001 --ingroup nodejs yulilog
 
 WORKDIR /app
 
-# 从构建阶段复制产物
 COPY --from=builder --chown=yulilog:nodejs /app/dist ./dist
 COPY --from=builder --chown=yulilog:nodejs /app/package.json ./
 COPY --from=prod-deps --chown=yulilog:nodejs /app/node_modules ./node_modules
 COPY --chown=yulilog:nodejs docker-entrypoint.sh ./
 COPY --chown=yulilog:nodejs server/scripts/paddle_ocr_worker.py ./server/scripts/
 
-# 创建数据目录
 RUN chmod +x docker-entrypoint.sh \
     && mkdir -p /app/data /app/uploads/temp /app/uploads/invoices \
     && chown -R yulilog:nodejs /app \
