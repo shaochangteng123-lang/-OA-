@@ -42,6 +42,7 @@ const NODE_ENV = process.env.NODE_ENV || 'development'
 
 const isProduction = NODE_ENV === 'production'
 const isLocalhost = process.env.FRONTEND_URL?.includes('localhost') || !process.env.FRONTEND_URL
+const isHttps = process.env.FRONTEND_URL?.startsWith('https://')
 
 app.use(
   cors({
@@ -67,7 +68,7 @@ app.use(
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: isProduction && !isLocalhost,
+      secure: isHttps === true,
       httpOnly: true,
       maxAge: 1000 * 60 * 60 * 24 * 7,
       sameSite: 'lax' as const,

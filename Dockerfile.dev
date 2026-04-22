@@ -24,8 +24,23 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
     && pip3 config set global.trusted-host mirrors.aliyun.com
 
-# 安装 PaddleOCR
+# 安装 PaddleOCR 和 ccache（消除编译警告）
+RUN apt-get update && apt-get install -y ccache && rm -rf /var/lib/apt/lists/*
 RUN pip3 install --break-system-packages paddlepaddle paddleocr
+
+# 预下载 PaddleOCR 模型（避免运行时下载超时）
+RUN PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_allocator_strategy=auto_growth \
+    python3 -c "\
+from paddleocr import PaddleOCR; \
+PaddleOCR( \
+    use_textline_orientation=True, \
+    use_doc_orientation_classify=False, \
+    use_doc_unwarping=False, \
+    lang='ch', \
+    ocr_version='PP-OCRv4', \
+); \
+print('Models downloaded successfully')"
 
 # 配置 npm 镜像源
 RUN npm config set registry https://registry.npmmirror.com

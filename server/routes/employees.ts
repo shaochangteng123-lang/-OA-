@@ -515,7 +515,7 @@ router.get('/list', requireAdmin, async (req, res) => {
            AND ep.contract_end_date::date <= (CURRENT_DATE + INTERVAL '10 days')
            AND ep.employment_status != 'resigned'
            THEN 0 ELSE 1 END,
-      ep.employee_no ASC NULLS LAST,
+      REGEXP_REPLACE(COALESCE(u.employee_no, ep.employee_no), '[^0-9]', '', 'g')::int ASC NULLS LAST,
       ep.created_at DESC
       LIMIT ? OFFSET ?`
     params.push(Number(pageSize), offset)

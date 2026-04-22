@@ -7,6 +7,8 @@
 #   停止：docker compose down
 # ============================================
 
+name: yulilog-dev
+
 services:
   postgres:
     container_name: yulilog-worklog-postgres
@@ -26,6 +28,8 @@ services:
     restart: unless-stopped
     ports:
       - "5432:5432"
+    networks:
+      - dev_network
 
   yulilog-dev:
     container_name: yulilog-worklog-dev
@@ -61,6 +65,14 @@ services:
       - ./vite.config.ts:/app/vite.config.ts
       - ./index.html:/app/index.html
     restart: unless-stopped
+    networks:
+      - dev_network
 
 volumes:
   postgres_data:
+    external: true
+    name: yulilog-worklog_postgres_data
+
+networks:
+  dev_network:
+    name: yulilog_dev_network

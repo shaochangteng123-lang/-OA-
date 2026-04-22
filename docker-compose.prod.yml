@@ -7,6 +7,8 @@
 #   停止：docker compose -f docker-compose.prod.yml down
 # ============================================
 
+name: yulilog-prod
+
 services:
   postgres:
     container_name: yulilog-postgres-prod
@@ -24,6 +26,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - prod_network
 
   yulilog:
     container_name: yulilog-prod
@@ -52,6 +56,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    networks:
+      - prod_network
 
   nginx:
     container_name: yulilog-nginx
@@ -63,6 +69,14 @@ services:
     depends_on:
       - yulilog
     restart: unless-stopped
+    networks:
+      - prod_network
 
 volumes:
   postgres_data_prod:
+    external: true
+    name: yulilog-worklog_postgres_data_prod
+
+networks:
+  prod_network:
+    name: yulilog_prod_network

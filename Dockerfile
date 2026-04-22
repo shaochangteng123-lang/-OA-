@@ -1,86 +1,104 @@
 # ============================================
 # YuliLog 工作日志系统 - 生产环境 Dockerfile
 # ============================================
-# 优化的多阶段构建：最大化缓存利用，加速重复构建
+# 基于 Debian slim，统一使用 PaddleOCR（与开发环境一致）
 # ============================================
 
-ARG NODE_IMAGE=node:20-alpine
+ARG NODE_IMAGE=node:20-slim
 
 # ==========================================
-# 阶段1：基础依赖层（缓存原生编译工具）
+# 阶段1：基础依赖层
 # ==========================================
 FROM ${NODE_IMAGE} AS base
 
-# 配置 Alpine 镜像源（使用阿里云镜像）
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+# 配置 Debian 镜像源（阿里云）
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list 2>/dev/null || true
 
-# 安装 canvas 原生编译所需依赖
-RUN apk add --no-cache python3 make g++ \
-    cairo-dev pango-dev libjpeg-turbo-dev giflib-dev librsvg-dev pixman-dev
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-dev \
+    build-essential \
+    libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
+    poppler-utils \
+    fonts-noto-cjk \
+    dumb-init wget curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # ==========================================
-# 阶段2：依赖安装（利用缓存）
+# 阶段2：安装 PaddleOCR 并预下载模型
+# ==========================================
+FROM base AS ocr-models
+
+# 配置 pip 镜像源
+RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
+    && pip3 config set global.trusted-host mirrors.aliyun.com
+
+# 安装 PaddleOCR
+RUN pip3 install --break-system-packages paddlepaddle paddleocr
+
+# 预下载模型（避免运行时下载），存到 /opt/paddlex 方便后续复制
+RUN PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_allocator_strategy=auto_growth \
+    HOME=/opt \
+    python3 -c "\
+from paddleocr import PaddleOCR; \
+PaddleOCR( \
+    use_textline_orientation=True, \
+    use_doc_orientation_classify=False, \
+    use_doc_unwarping=False, \
+    lang='ch', \
+    ocr_version='PP-OCRv4', \
+); \
+print('Models downloaded successfully')"
+
+# ==========================================
+# 阶段3：Node.js 依赖安装
 # ==========================================
 FROM base AS deps
 
-# 仅复制包管理文件（变化少，利用缓存）
 COPY package.json package-lock.json ./
-
-# 安装所有依赖（构建需要 devDependencies）
 RUN npm ci --prefer-offline --ignore-scripts --legacy-peer-deps
 
 # ==========================================
-# 阶段3：生产依赖（并行构建）
+# 阶段4：生产 Node.js 依赖
 # ==========================================
 FROM base AS prod-deps
 
 COPY package.json package-lock.json ./
-
-# 仅安装生产依赖 + 重新编译原生模块
 RUN npm ci --omit=dev --prefer-offline --ignore-scripts --legacy-peer-deps \
     && npm rebuild canvas
 
 # ==========================================
-# 阶段4：构建阶段
+# 阶段5：构建阶段
 # ==========================================
 FROM deps AS builder
 
-# 复制配置文件（变化较少）
 COPY tsconfig.json tsconfig.node.json tsconfig.server.json vite.config.ts index.html ./
-
-# 复制源代码（变化频繁，放最后）
 COPY src ./src
 COPY server ./server
 COPY public ./public
 
-# 并行构建前端和后端
 RUN npm run build && npm run build:server
 
 # ==========================================
-# 阶段5：生产运行镜像（最小化）
+# 阶段6：生产运行镜像
 # ==========================================
-FROM ${NODE_IMAGE} AS production
+FROM base AS production
 
 LABEL maintainer="YuliLog Team"
 LABEL description="YuliLog 工作日志管理系统"
 
-# 配置 Alpine 镜像源（使用阿里云镜像）
-RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+# 从 ocr-models 阶段复制已安装的 PaddleOCR 和预下载的模型
+COPY --from=ocr-models /usr/local/lib /usr/local/lib
+COPY --from=ocr-models /usr/local/bin/python3* /usr/local/bin/
+COPY --from=ocr-models /opt/.paddlex /opt/.paddlex
 
-# 安装运行时依赖（含 canvas、poppler、中文字体、Python3 + OCR + Tesseract）
-RUN apk add --no-cache dumb-init wget \
-    cairo pango libjpeg-turbo giflib librsvg pixman \
-    poppler-utils poppler-data font-noto-cjk \
-    python3 py3-pip py3-setuptools \
-    tesseract-ocr tesseract-ocr-data-chi_sim tesseract-ocr-data-eng \
-    && pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
-    && pip3 config set global.trusted-host mirrors.aliyun.com \
-    && pip3 install --no-cache-dir --break-system-packages rapidocr_onnxruntime || true \
-    && rm -rf /var/cache/apk/* /root/.cache \
-    && addgroup -g 1001 -S nodejs \
-    && adduser -S yulilog -u 1001 -G nodejs
+# 创建应用用户
+RUN addgroup --gid 1001 nodejs \
+    && adduser --disabled-password --gecos "" --uid 1001 --ingroup nodejs yulilog
 
 WORKDIR /app
 
@@ -91,18 +109,20 @@ COPY --from=prod-deps --chown=yulilog:nodejs /app/node_modules ./node_modules
 COPY --chown=yulilog:nodejs docker-entrypoint.sh ./
 COPY --chown=yulilog:nodejs server/scripts/paddle_ocr_worker.py ./server/scripts/
 
-# 创建数据目录和上传目录并设置权限
+# 创建数据目录
 RUN chmod +x docker-entrypoint.sh \
-    && mkdir -p /app/data \
-    && mkdir -p /app/uploads/temp \
-    && mkdir -p /app/uploads/invoices \
-    && chown -R yulilog:nodejs /app
+    && mkdir -p /app/data /app/uploads/temp /app/uploads/invoices \
+    && chown -R yulilog:nodejs /app \
+    && chmod -R 755 /opt/.paddlex 2>/dev/null || true
 
 USER yulilog
 
 ENV NODE_ENV=production \
     PORT=8899 \
-    DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
+    DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+    FLAGS_allocator_strategy=auto_growth \
+    HOME=/opt
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8899/api/health || exit 1

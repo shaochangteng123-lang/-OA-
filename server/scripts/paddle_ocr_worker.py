@@ -51,12 +51,13 @@ def get_ocr_engine():
     # 优先使用 PaddleOCR
     try:
         from paddleocr import PaddleOCR
-        # 使用 PP-OCRv4 mobile 轻量模型，内存占用小，适合容器环境
-        # 启用文档方向分类和变形矫正，提高扫描件/副本发票的识别率
+        # PP-OCRv4 mobile 轻量模型，仅加载核心 OCR 模型（检测+识别+行方向）
+        # 不启用 doc_orientation_classify 和 doc_unwarping，它们需要额外下载大模型
+        # 且对标准 PDF 回单（非手机拍照变形文档）帮助不大
         _ocr_engine = PaddleOCR(
             use_textline_orientation=True,
-            use_doc_orientation_classify=True,
-            use_doc_unwarping=True,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
             lang="ch",
             ocr_version="PP-OCRv4",
             text_det_box_thresh=0.25,

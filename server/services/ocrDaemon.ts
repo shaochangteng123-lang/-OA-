@@ -129,9 +129,13 @@ async function startDaemon(): Promise<void> {
     daemonProcess = proc
 
     // 读取 stderr 日志（不影响 stdout 通信）
+    // 过滤 PaddleOCR 初始化时的常规信息日志，但保留错误和警告
     proc.stderr?.on('data', (data: Buffer) => {
       const msg = data.toString().trim()
-      if (msg && !msg.includes('ppocr') && !msg.includes('download')) {
+      if (!msg) return
+      const isRoutineLog = /^(DEBUG|INFO)\b/.test(msg) ||
+        (msg.includes('ppocr') && !msg.includes('Error') && !msg.includes('error') && !msg.includes('fail'))
+      if (!isRoutineLog) {
         console.error('🐍 OCR stderr:', msg)
       }
     })

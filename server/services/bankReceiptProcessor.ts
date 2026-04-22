@@ -491,7 +491,7 @@ async function matchReimbursement(
 function convertAllPagesToImages(pdfPath: string, outputDir: string, totalPages: number): Map<number, string> {
   const prefix = path.join(outputDir, 'page')
   try {
-    execSync(`pdftoppm -r 150 -jpeg "${pdfPath}" "${prefix}"`, { timeout: 120000 })
+    execSync(`pdftoppm -r 120 -jpeg "${pdfPath}" "${prefix}"`, { timeout: 120000 })
   } catch (e) {
     console.error('❌ pdftoppm 批量转换失败:', e)
     return new Map()
@@ -534,44 +534,58 @@ export async function processBankReceiptPdf(
   // 一次性转所有页为图片
   const pageImageMap = convertAllPagesToImages(pdfPath, outputDir, totalPages)
 
-  // 先用 XML 分析所有页，过滤空白页，获取分割线坐标
-  console.log(`🔍 分析页面结构，跳过空白页...`)
+  // 并行分析所有页面 XML（过滤空白页，获取分割线坐标）
+  console.log(`🔍 并行分析页面结构，跳过空白页...`)
   const pageAnalysis = new Map<number, { splitY: number | null }>()
-  for (let pageNo = 1; pageNo <= totalPages; pageNo++) {
-    const { hasContent, splitY } = analyzePageXml(pdfPath, pageNo)
-    if (hasContent) pageAnalysis.set(pageNo, { splitY })
-    else console.log(`⏭️ 第${pageNo}页为空白页，跳过`)
+  const CONCURRENCY = 4  // XML 分析并发数（CPU密集，不宜过高）
+  const pageNos = Array.from({ length: totalPages }, (_, i) => i + 1)
+  for (let i = 0; i < pageNos.length; i += CONCURRENCY) {
+    const batch = pageNos.slice(i, i + CONCURRENCY)
+    const batchResults = await Promise.all(
+      batch.map(async (pageNo) => {
+        const r = analyzePageXml(pdfPath, pageNo)
+        return { pageNo, ...r }
+      })
+    )
+    for (const { pageNo, hasContent, splitY } of batchResults) {
+      if (hasContent) pageAnalysis.set(pageNo, { splitY })
+      else console.log(`⏭️ 第${pageNo}页为空白页，跳过`)
+    }
   }
   console.log(`📋 有内容的页面：${pageAnalysis.size} 页，空白页：${totalPages - pageAnalysis.size} 页`)
 
+  // 准备所有待 OCR 的图片任务
+  const ocrTasks: Array<{ imagePath: string; position: 'full' | 'top' | 'bottom'; pageNo: number }> = []
   for (const [pageNo, { splitY }] of pageAnalysis) {
     const pageImagePath = pageImageMap.get(pageNo)
     if (!pageImagePath || !fs.existsSync(pageImagePath)) {
       console.warn(`⚠️ 第${pageNo}页无图片，跳过`)
       continue
     }
-
-    const receiptImages: Array<{ imagePath: string; position: 'full' | 'top' | 'bottom' }> = []
-
     if (splitY) {
-      // 双笔：切割
       try {
         const { top, bottom } = await splitImage(pageImagePath, splitY, 1262, outputDir, `page${pageNo}`)
-        receiptImages.push({ imagePath: top, position: 'top' })
-        receiptImages.push({ imagePath: bottom, position: 'bottom' })
+        ocrTasks.push({ imagePath: top, position: 'top', pageNo })
+        ocrTasks.push({ imagePath: bottom, position: 'bottom', pageNo })
       } catch {
-        receiptImages.push({ imagePath: pageImagePath, position: 'full' })
+        ocrTasks.push({ imagePath: pageImagePath, position: 'full', pageNo })
       }
     } else {
-      receiptImages.push({ imagePath: pageImagePath, position: 'full' })
+      ocrTasks.push({ imagePath: pageImagePath, position: 'full', pageNo })
     }
+  }
 
-    for (const { imagePath, position } of receiptImages) {
+  // 并行 OCR（常驻进程支持队列，最多同时发 3 个请求）
+  const OCR_CONCURRENCY = 3
+  console.log(`🔍 开始并行 OCR，共 ${ocrTasks.length} 张图片（并发数: ${OCR_CONCURRENCY}）...`)
+  for (let i = 0; i < ocrTasks.length; i += OCR_CONCURRENCY) {
+    const batch = ocrTasks.slice(i, i + OCR_CONCURRENCY)
+    await Promise.all(batch.map(async ({ imagePath, position, pageNo }) => {
       try {
         const ocr = await ocrReceipt(imagePath)
 
         // 跳过空页（OCR识别不到任何内容）
-        if (!ocr.rawText || ocr.rawText.trim().length < 10) continue
+        if (!ocr.rawText || ocr.rawText.trim().length < 10) return
 
         const parsed = parseRemark(ocr.remark)
         const matchedIds = await matchReimbursement(ocr, parsed)
@@ -692,7 +706,7 @@ export async function processBankReceiptPdf(
       } catch (err) {
         console.error(`❌ 处理第${pageNo}页回单失败:`, err)
       }
-    }
+    }))
   }
 
   // 更新批次统计
