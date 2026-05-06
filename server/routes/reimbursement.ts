@@ -257,12 +257,12 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 查询数据库中是否已存在该发票号码（排除已驳回和已软删除的报销单）
+    // 查询数据库中是否已存在该发票号码（排除草稿、已驳回和已软删除的报销单）
     const existing = await db.prepare(`
       SELECT ri.invoice_number, r.id as reimbursement_id, r.title, r.status, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
-      WHERE ri.invoice_number = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
+      WHERE ri.invoice_number = ? AND r.status NOT IN ('draft', 'rejected') AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `).get(invoiceNumber) as any
 
@@ -292,10 +292,11 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
  */
 router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
   try {
-    const userId = req.session.user?.id
+    const sessionUserId = req.session.user?.id
+    const userRole = req.session.user?.role
     const { excludeId } = req.query // 要排除的报销单ID（编辑模式）
 
-    if (!userId) {
+    if (!sessionUserId) {
       return res.status(401).json({
         success: false,
         message: '未登录',
@@ -303,6 +304,17 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
     }
 
     const { db } = await import('../db/index.js')
+
+    // 管理员查看他人报销单时，使用申请人的 user_id 计算月度额度
+    // 避免用管理员自己的额度数据影响申请人的报销显示
+    let userId = sessionUserId
+    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    if (excludeId && isAdmin) {
+      const record = await db.prepare('SELECT user_id FROM reimbursements WHERE id = ?').get(excludeId) as { user_id: string } | undefined
+      if (record?.user_id) {
+        userId = record.user_id
+      }
+    }
 
     // 获取当前报销月份(使用与创建报销单相同的逻辑)
     const now = new Date()
@@ -1823,10 +1835,10 @@ router.get('/list', requireAuth, async (req, res) => {
       whereClause += ' AND created_at >= ? AND created_at <= ?'
       params.push(startDateTime, endDateTime)
     } else {
-      // 如果没有指定日期范围，默认只显示当月数据
+      // 如果没有指定日期范围，默认只显示当月数据，但草稿始终显示（跨月草稿不能被过滤掉）
       const now = new Date()
       const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-      whereClause += ' AND created_at >= ?'
+      whereClause += ' AND (status = \'draft\' OR created_at >= ?)'
       params.push(firstDayOfMonth.toISOString())
     }
 
