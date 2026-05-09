@@ -80,11 +80,11 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const monthEnd = new Date(monthEndBeijing.getTime() - 8 * 60 * 60 * 1000).toISOString()
 
     // 财务区审批中心：排除转正类型（转正只在人力资源区审批中心）
-    // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有报销
+    // admin 统计基础/大额报销全流程 + 商务报销在总经理批准后（admin 为抄送人）
     const typeFilter = userRole === 'admin'
       ? `AND (
           ai.type IN ('reimbursement_basic', 'reimbursement_large')
-          OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded'))
+          OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
         )`
       : `AND ai.target_type = 'reimbursement'`
 
@@ -92,7 +92,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const reimbursementTypeFilter = userRole === 'admin'
       ? `AND (
           r.type IN ('basic', 'large')
-          OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded'))
+          OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
         )`
       : ''
 
@@ -106,14 +106,14 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       ${typeFilter}
     `).get() as { count: number }
 
-    // 2. 按报销类型统计当月数量和金额（排除草稿和驳回）
+    // 2. 按报销类型统计当月数量和金额（排除草稿和驳回，按提交时间归月）
     const typeStats = await db.prepare(`
       SELECT
         r.type,
         COUNT(*) as count,
         COALESCE(SUM(r.total_amount), 0) as amount
       FROM reimbursements r
-      WHERE r.created_at >= ? AND r.created_at <= ?
+      WHERE r.submit_time >= ? AND r.submit_time <= ?
       AND r.status NOT IN ('draft', 'rejected')
       ${reimbursementTypeFilter}
       GROUP BY r.type
@@ -608,12 +608,12 @@ router.get('/pending', requireAdmin, async (req, res) => {
     ]
     const params: unknown[] = []
 
-    // admin 只能审批基础和大额报销，但可以看到所有类型的待付款（包括商务报销）
+    // admin 可审批基础/大额报销，商务报销在总经理批准后可见（admin 为抄送人）
     if (userRole === 'admin') {
       conditions.push(`(
         ai.target_type != 'reimbursement'
         OR r.type IN ('basic', 'large')
-        OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded'))
+        OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
       )`)
     }
 
@@ -2415,18 +2415,23 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
 
       // 如果是报销单审批，同步更新报销单状态
       if (instance.target_type === 'reimbursement') {
-        // 计算总核减金额
-        const invoices = await txGet<{ total_deduction: number }>(client, `
-          SELECT COALESCE(SUM(deducted_amount), 0) as total_deduction
+        // 从发票明细重算：核减总额 + 实际应付净额（不信任存量 total_amount，防止历史数据偏差）
+        const invoiceSummary = await txGet<{ total_deduction: number; net_amount: number }>(client, `
+          SELECT
+            COALESCE(SUM(CASE WHEN COALESCE(is_deduction, 0) = 0 THEN deducted_amount ELSE 0 END), 0) AS total_deduction,
+            GREATEST(0, COALESCE(SUM(CASE WHEN COALESCE(is_deduction, 0) = 0
+              THEN amount - COALESCE(deducted_amount, 0) ELSE 0 END), 0)) AS net_amount
           FROM reimbursement_invoices
           WHERE reimbursement_id = ?
         `, instance.target_id)
 
-        const totalDeduction = invoices?.total_deduction || 0
+        const totalDeduction = invoiceSummary?.total_deduction || 0
+        const actualAmount = invoiceSummary?.net_amount || 0
 
-        // 获取报销单实际金额（total_amount 已经是扣除核减后的金额）
-        const reimbursement = await txGet<{ total_amount: number }>(client, 'SELECT total_amount FROM reimbursements WHERE id = ?', instance.target_id)
-        const actualAmount = reimbursement?.total_amount || 0
+        // 同步修正 total_amount（确保与发票明细一致）
+        await txRun(client, `
+          UPDATE reimbursements SET total_amount = ?, updated_at = ? WHERE id = ?
+        `, actualAmount, now, instance.target_id)
 
         // 实际报销金额为0时（全额核减），直接完成，无需付款流程
         if (actualAmount <= 0) {
@@ -2442,7 +2447,7 @@ router.post('/:id/approve', requireRole(['super_admin', 'admin', 'general_manage
             SET status = 'approved', approve_time = ?, approver = ?, deduction_amount = ?, updated_at = ?
             WHERE id = ?
           `, now, userName || '系统', totalDeduction, now, instance.target_id)
-          console.log('✅ 同步更新报销单状态为已通过:', instance.target_id, '核减金额:', totalDeduction)
+          console.log('✅ 同步更新报销单状态为已通过:', instance.target_id, '核减金额:', totalDeduction, '实际金额:', actualAmount)
         }
       }
     })
