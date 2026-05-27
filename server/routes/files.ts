@@ -1,9 +1,14 @@
 import express from 'express'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
+import multer from 'multer'
+import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import { validateFilePath } from '../utils/file-validation.js'
 import { db } from '../db/index.js'
+import { isAdminLike } from '../utils/worklog-auth.js'
+import { sendConvertedPdf, CONVERTIBLE_EXT } from '../utils/doc-preview.js'
 
 const router = express.Router()
 
@@ -164,6 +169,218 @@ router.get('/bank-receipts/*', requireAuth, async (req, res) => {
     res.sendFile(fullPath)
   } catch (error) {
     res.status(500).json({ success: false, message: '下载失败' })
+  }
+})
+
+// 下载项目日志附件：按附件 id 查权限后返回文件
+router.get('/worklog/:attachmentId', requireAuth, async (req, res) => {
+  try {
+    const { attachmentId } = req.params
+    const userId = req.session.userId!
+
+    const att = await db.get<{
+      file_path: string
+      mime_type: string | null
+      file_name: string
+      entry_user_id: string
+    }>(
+      `SELECT a.file_path, a.mime_type, a.file_name, e.user_id AS entry_user_id
+       FROM worklog_attachments a
+       JOIN worklog_entries e ON e.id = a.entry_id
+       WHERE a.id = ?`,
+      attachmentId,
+    )
+    if (!att) return res.status(404).json({ success: false, message: '附件不存在' })
+
+    if (!validateFilePath(att.file_path)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+
+    if (att.entry_user_id !== userId && !(await isAdminLike(userId))) {
+      return res.status(403).json({ success: false, message: '无权访问此附件' })
+    }
+
+    const fullPath = path.resolve(process.cwd(), att.file_path)
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, message: '文件不存在' })
+
+    if (att.mime_type) res.setHeader('Content-Type', att.mime_type)
+    res.sendFile(fullPath)
+  } catch (err) {
+    console.error('下载日志附件失败:', err)
+    res.status(500).json({ success: false, message: '下载失败' })
+  }
+})
+
+/**
+ * 将 Office 文档转换为 PDF 并作为响应内联返回。失败时通过 res.status(500) 返回 JSON。
+ */
+
+/**
+ * 项目日志附件在线预览：PDF 原样返回；Word/Excel/PPT 通过 libreoffice 转换为 PDF 后返回。
+ * 其他类型回退为直接下载。
+ */
+router.get('/worklog/:attachmentId/preview', requireAuth, async (req, res) => {
+  try {
+    const { attachmentId } = req.params
+    const userId = req.session.userId!
+
+    const att = await db.get<{
+      file_path: string
+      mime_type: string | null
+      file_name: string
+      entry_user_id: string
+    }>(
+      `SELECT a.file_path, a.mime_type, a.file_name, e.user_id AS entry_user_id
+       FROM worklog_attachments a
+       JOIN worklog_entries e ON e.id = a.entry_id
+       WHERE a.id = ?`,
+      attachmentId,
+    )
+    if (!att) return res.status(404).json({ success: false, message: '附件不存在' })
+    if (!validateFilePath(att.file_path)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+    if (att.entry_user_id !== userId && !(await isAdminLike(userId))) {
+      return res.status(403).json({ success: false, message: '无权访问此附件' })
+    }
+    const fullPath = path.resolve(process.cwd(), att.file_path)
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, message: '文件不存在' })
+
+    const ext = path.extname(att.file_name).toLowerCase().replace('.', '')
+
+    if (ext === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(att.file_name)}"`)
+      return res.sendFile(fullPath)
+    }
+
+    if (!CONVERTIBLE_EXT.includes(ext)) {
+      if (att.mime_type) res.setHeader('Content-Type', att.mime_type)
+      return res.sendFile(fullPath)
+    }
+
+    await sendConvertedPdf(res, fullPath, att.file_name)
+  } catch (err) {
+    console.error('预览日志附件失败:', err)
+    res.status(500).json({ success: false, message: '预览失败' })
+  }
+})
+
+/**
+ * 尚未保存的日志附件临时预览：接收单个文件，转换为 PDF 流返回。
+ * 仅在内存/临时目录中处理，不写入数据库。
+ */
+const tempPreviewUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'worklog-preview-in-'))
+      cb(null, dir)
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname) || ''
+      cb(null, `${nanoid(8)}${ext}`)
+    },
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 },
+})
+
+router.post('/worklog-preview-temp', requireAuth, tempPreviewUpload.single('file'), async (req, res) => {
+  const file = req.file
+  if (!file) return res.status(400).json({ success: false, message: '未上传文件' })
+  const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8')
+  const ext = path.extname(originalName).toLowerCase().replace('.', '')
+
+  const cleanup = () => {
+    try { fs.rmSync(path.dirname(file.path), { recursive: true, force: true }) } catch { /* ignore */ }
+  }
+
+  try {
+    if (ext === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(originalName)}"`)
+      const stream = fs.createReadStream(file.path)
+      stream.on('close', cleanup)
+      return stream.pipe(res)
+    }
+
+    if (!CONVERTIBLE_EXT.includes(ext)) {
+      cleanup()
+      return res.status(400).json({ success: false, message: '不支持在线预览的文件格式' })
+    }
+
+    res.on('close', cleanup)
+    await sendConvertedPdf(res, file.path, originalName)
+  } catch (err) {
+    cleanup()
+    console.error('临时预览失败:', err)
+    res.status(500).json({ success: false, message: '预览失败' })
+  }
+})
+
+router.get('/worklog-contract/:attachmentId', requireAuth, async (req, res) => {
+  try {
+    const { attachmentId } = req.params
+    const att = await db.get<{
+      file_path: string
+      mime_type: string | null
+      file_name: string
+    }>(
+      `SELECT file_path, mime_type, file_name FROM worklog_contract_attachments WHERE id = ?`,
+      attachmentId,
+    )
+    if (!att) return res.status(404).json({ success: false, message: '附件不存在' })
+
+    if (!validateFilePath(att.file_path)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+
+    const fullPath = path.resolve(process.cwd(), att.file_path)
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, message: '文件不存在' })
+
+    if (att.mime_type) res.setHeader('Content-Type', att.mime_type)
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(att.file_name)}"`)
+    res.sendFile(fullPath)
+  } catch (err) {
+    console.error('下载合同附件失败:', err)
+    res.status(500).json({ success: false, message: '下载失败' })
+  }
+})
+
+router.get('/worklog-contract/:attachmentId/preview', requireAuth, async (req, res) => {
+  try {
+    const { attachmentId } = req.params
+    const att = await db.get<{
+      file_path: string
+      mime_type: string | null
+      file_name: string
+    }>(
+      `SELECT file_path, mime_type, file_name FROM worklog_contract_attachments WHERE id = ?`,
+      attachmentId,
+    )
+    if (!att) return res.status(404).json({ success: false, message: '附件不存在' })
+    if (!validateFilePath(att.file_path)) {
+      return res.status(403).json({ success: false, message: '非法文件路径' })
+    }
+    const fullPath = path.resolve(process.cwd(), att.file_path)
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, message: '文件不存在' })
+
+    const ext = path.extname(att.file_name).toLowerCase().replace('.', '')
+
+    if (ext === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(att.file_name)}"`)
+      return res.sendFile(fullPath)
+    }
+
+    if (!CONVERTIBLE_EXT.includes(ext)) {
+      if (att.mime_type) res.setHeader('Content-Type', att.mime_type)
+      return res.sendFile(fullPath)
+    }
+
+    await sendConvertedPdf(res, fullPath, att.file_name)
+  } catch (err) {
+    console.error('预览合同附件失败:', err)
+    res.status(500).json({ success: false, message: '预览失败' })
   }
 })
 

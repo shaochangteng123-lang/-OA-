@@ -351,7 +351,7 @@ export async function initDatabase() {
       type TEXT NOT NULL CHECK(type IN ('basic', 'large', 'business')),
       title TEXT NOT NULL,
       total_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'payment_uploaded', 'completed', 'rejected')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paid', 'payment_uploaded', 'completed', 'rejected')),
       description TEXT,
       business_type TEXT,
       client TEXT,
@@ -362,6 +362,8 @@ export async function initDatabase() {
       approver TEXT,
       reject_reason TEXT,
       pay_time TEXT,
+      paid_time TEXT,
+      paid_by TEXT,
       payment_upload_time TEXT,
       completed_time TEXT,
       payment_proof_path TEXT,
@@ -845,6 +847,233 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_leave_approval_logs_req_id ON leave_approval_logs(leave_request_id);
   `)
 
+    // ==================== 项目日志模块相关表（v2） ====================
+
+    // 行政区字典
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_districts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 项目类型字典
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_project_types (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 办理事项字典（含标准办理天数，用于甘特图和超期预警）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_matters (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        standard_days INTEGER,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 合同付款状态字典
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_contract_statuses (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 项目主表（v2 结构化项目日志）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        client_name TEXT NOT NULL,
+        client_contact_name TEXT NOT NULL DEFAULT '',
+        client_contact_phone TEXT NOT NULL DEFAULT '',
+        district TEXT NOT NULL,
+        project_type TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL REFERENCES users(id),
+        owner_name TEXT NOT NULL,
+        owner_position TEXT,
+        start_date TEXT NOT NULL,
+        is_completed BOOLEAN NOT NULL DEFAULT FALSE,
+        completed_at TEXT,
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 日志主表（一日多条，每条绑定一个项目 + 一个办理事项）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_entries (
+        id TEXT PRIMARY KEY,
+        log_date TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES worklog_projects(id),
+        matter TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        user_name TEXT NOT NULL,
+        user_position TEXT,
+        owner_user_id TEXT NOT NULL,
+        owner_name TEXT NOT NULL,
+        contract_status TEXT,
+        contract_note TEXT,
+        work_note TEXT,
+        is_finalized BOOLEAN NOT NULL DEFAULT FALSE,
+        finalized_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `)
+
+    // 日志进展记录表（时间线追加）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_progress_notes (
+        id TEXT PRIMARY KEY,
+        entry_id TEXT NOT NULL REFERENCES worklog_entries(id) ON DELETE CASCADE,
+        content TEXT NOT NULL,
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_by_name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `)
+
+    // 日志附件表（图片 + 文档）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_attachments (
+        id TEXT PRIMARY KEY,
+        entry_id TEXT NOT NULL REFERENCES worklog_entries(id) ON DELETE CASCADE,
+        file_kind TEXT NOT NULL CHECK(file_kind IN ('image', 'screenshot', 'photo', 'document')),
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER,
+        mime_type TEXT,
+        uploaded_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL
+      )
+    `)
+
+    // 项目日志模块权限白名单（周报下载等精细权限）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_permissions (
+        id TEXT PRIMARY KEY,
+        permission_code TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        UNIQUE(permission_code, user_id)
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE INDEX IF NOT EXISTS idx_worklog_projects_owner ON worklog_projects(owner_user_id);
+      CREATE INDEX IF NOT EXISTS idx_worklog_projects_district ON worklog_projects(district);
+      CREATE INDEX IF NOT EXISTS idx_worklog_projects_completed ON worklog_projects(is_completed);
+      CREATE INDEX IF NOT EXISTS idx_worklog_entries_date ON worklog_entries(log_date);
+      CREATE INDEX IF NOT EXISTS idx_worklog_entries_project ON worklog_entries(project_id);
+      CREATE INDEX IF NOT EXISTS idx_worklog_entries_user ON worklog_entries(user_id);
+      CREATE INDEX IF NOT EXISTS idx_worklog_entries_matter ON worklog_entries(matter);
+      CREATE INDEX IF NOT EXISTS idx_worklog_attachments_entry ON worklog_attachments(entry_id);
+      CREATE INDEX IF NOT EXISTS idx_worklog_permissions_code ON worklog_permissions(permission_code);
+      CREATE INDEX IF NOT EXISTS idx_worklog_progress_entry ON worklog_progress_notes(entry_id);
+    `)
+
+    // 合同进度跟踪表
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_contract_progress (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES worklog_projects(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        amount NUMERIC,
+        note TEXT,
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_by_name TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS worklog_contract_attachments (
+        id TEXT PRIMARY KEY,
+        progress_id TEXT NOT NULL REFERENCES worklog_contract_progress(id) ON DELETE CASCADE,
+        file_kind TEXT NOT NULL CHECK(file_kind IN ('contract', 'invoice', 'receipt', 'other')),
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER,
+        mime_type TEXT,
+        uploaded_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE INDEX IF NOT EXISTS idx_worklog_contract_progress_project ON worklog_contract_progress(project_id);
+      CREATE INDEX IF NOT EXISTS idx_worklog_contract_attachments_progress ON worklog_contract_attachments(progress_id);
+    `)
+
+    // 今日日志（纯文本）
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS daily_logs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        log_date TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted')),
+        weather TEXT,
+        traffic_restriction TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(log_date, user_id)
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS daily_log_attachments (
+        id TEXT PRIMARY KEY,
+        daily_log_id TEXT NOT NULL REFERENCES daily_logs(id) ON DELETE CASCADE,
+        file_kind TEXT NOT NULL CHECK(file_kind IN ('image', 'document')),
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        file_size INTEGER,
+        mime_type TEXT,
+        uploaded_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE TABLE IF NOT EXISTS weekly_summaries (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        week_start TEXT NOT NULL,
+        week_end TEXT NOT NULL,
+        summary_content TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        UNIQUE(user_id, week_start)
+      )
+    `)
+
+    await ddlClient.query(`
+      CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date ON daily_logs(user_id, log_date);
+      CREATE INDEX IF NOT EXISTS idx_daily_log_attachments_log ON daily_log_attachments(daily_log_id);
+      CREATE INDEX IF NOT EXISTS idx_weekly_summaries_user ON weekly_summaries(user_id, week_start);
+    `)
+
     // 数据库迁移：添加 is_deduction 字段
     try {
       await ddlClient.query(`
@@ -1184,6 +1413,45 @@ export async function initDatabase() {
     console.log('ℹ️  force_change_password 字段迁移:', error.message)
   }
 
+  // 数据库迁移：reimbursements 表添加 paid_time 和 paid_by 字段，并更新 status 约束
+  try {
+    const paidTimeCheck = await db.get<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'reimbursements' AND column_name = 'paid_time'
+    `)
+    if (!paidTimeCheck) {
+      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_time TEXT`)
+      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_by TEXT`)
+      console.log('✅ 数据库迁移：reimbursements 添加 paid_time 和 paid_by 字段')
+    }
+    // 更新 status CHECK 约束以支持 paid 状态
+    await db.run(`
+      ALTER TABLE reimbursements DROP CONSTRAINT IF EXISTS reimbursements_status_check
+    `)
+    await db.run(`
+      ALTER TABLE reimbursements ADD CONSTRAINT reimbursements_status_check
+      CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paid', 'payment_uploaded', 'completed', 'rejected'))
+    `)
+    console.log('✅ 数据库迁移：reimbursements status 约束已更新（新增 paid 状态）')
+  } catch (error: any) {
+    console.log('ℹ️  reimbursements paid 字段迁移:', error.message)
+  }
+
+  // 数据库迁移：worklog_projects 表添加甲方项目负责人字段
+  try {
+    const clientContactCheck = await db.get<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'worklog_projects' AND column_name = 'client_contact_name'
+    `)
+    if (!clientContactCheck) {
+      await db.run(`ALTER TABLE worklog_projects ADD COLUMN client_contact_name TEXT NOT NULL DEFAULT ''`)
+      await db.run(`ALTER TABLE worklog_projects ADD COLUMN client_contact_phone TEXT NOT NULL DEFAULT ''`)
+      console.log('✅ 数据库迁移：worklog_projects 添加 client_contact_name 和 client_contact_phone 字段')
+    }
+  } catch (error: any) {
+    console.log('ℹ️  worklog_projects 甲方联系人字段迁移:', error.message)
+  }
+
   // 工行回单自动化处理表
   await db.run(`
     CREATE TABLE IF NOT EXISTS bank_receipt_batches (
@@ -1223,5 +1491,412 @@ export async function initDatabase() {
     )
   `)
 
+  // 数据修正迁移：修复 total_amount 与发票核减不一致的历史数据
+  // 背景：旧版代码存储的是原始发票总额，新版代码存储的是扣减核减后的净额
+  // 对于 draft/pending 状态的报销单，重新用发票明细计算正确的净额
+  try {
+    const fixResult = await db.run(`
+      UPDATE reimbursements
+      SET total_amount = subq.net_amount,
+          updated_at   = NOW()::text
+      FROM (
+        SELECT r.id,
+          GREATEST(0.00, COALESCE(
+            SUM(CASE WHEN COALESCE(ri.is_deduction, 0) = 0
+                     THEN ri.amount - COALESCE(ri.deducted_amount, 0)
+                     ELSE 0 END),
+            0.00
+          )) AS net_amount
+        FROM reimbursements r
+        LEFT JOIN reimbursement_invoices ri ON ri.reimbursement_id = r.id
+        WHERE r.status IN ('draft', 'pending')
+        GROUP BY r.id
+      ) subq
+      WHERE reimbursements.id = subq.id
+        AND ABS(reimbursements.total_amount - subq.net_amount) > 0.005
+    `)
+    if (fixResult.changes > 0) {
+      console.log(`✅ 数据修正：已修复 ${fixResult.changes} 条 total_amount 与发票核减不一致的报销单`)
+    }
+  } catch (error: any) {
+    console.log('ℹ️  total_amount 数据修正跳过:', error.message)
+  }
+
+  // 数据库迁移：worklog_attachments file_kind 约束扩展（screenshot/photo）
+  try {
+    await db.run(`
+      ALTER TABLE worklog_attachments DROP CONSTRAINT IF EXISTS worklog_attachments_file_kind_check
+    `)
+    await db.run(`
+      ALTER TABLE worklog_attachments ADD CONSTRAINT worklog_attachments_file_kind_check
+      CHECK(file_kind IN ('image', 'screenshot', 'photo', 'document'))
+    `)
+    // 将旧的 image 数据迁移为 photo（项目现场照片）
+    await db.run(`UPDATE worklog_attachments SET file_kind = 'photo' WHERE file_kind = 'image'`)
+  } catch (error: any) {
+    console.log('ℹ️  worklog_attachments file_kind 约束迁移:', error.message)
+  }
+
+  // 数据库迁移：将已有 work_note 迁移到 worklog_progress_notes
+  try {
+    const migrated = await db.get<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM worklog_progress_notes`)
+    if (migrated && migrated.cnt === 0) {
+      const rows = await db.all<{ id: string; work_note: string; user_id: string; user_name: string; created_at: string }>(
+        `SELECT id, work_note, user_id, user_name, created_at FROM worklog_entries WHERE work_note IS NOT NULL AND work_note != ''`,
+      )
+      for (const r of rows) {
+        await db.run(
+          `INSERT INTO worklog_progress_notes (id, entry_id, content, created_by, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+          `mig_${r.id}`, r.id, r.work_note, r.user_id, r.user_name, r.created_at,
+        )
+      }
+      if (rows.length > 0) console.log(`✅ 已迁移 ${rows.length} 条 work_note 到 worklog_progress_notes`)
+    }
+  } catch (error: any) {
+    console.log('ℹ️  work_note 迁移跳过:', error.message)
+  }
+
+  // 数据库迁移：worklog_attachments 新增 progress_note_id 列
+  try {
+    await db.run(`ALTER TABLE worklog_attachments ADD COLUMN IF NOT EXISTS progress_note_id TEXT REFERENCES worklog_progress_notes(id) ON DELETE SET NULL`)
+    console.log('✅ 数据库迁移：progress_note_id 字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  progress_note_id 迁移跳过:', error.message)
+    }
+  }
+
+  // 将旧附件（progress_note_id 为 NULL）关联到时间最接近的进展记录
+  try {
+    await db.run(`
+      UPDATE worklog_attachments a
+      SET progress_note_id = (
+        SELECT n.id FROM worklog_progress_notes n
+        WHERE n.entry_id = a.entry_id
+          AND n.created_at >= a.created_at
+        ORDER BY n.created_at ASC LIMIT 1
+      )
+      WHERE a.progress_note_id IS NULL
+        AND EXISTS (SELECT 1 FROM worklog_progress_notes n WHERE n.entry_id = a.entry_id AND n.created_at >= a.created_at)
+    `)
+    // 仍有未匹配的（附件时间晚于所有进展），关联到最后一条进展
+    await db.run(`
+      UPDATE worklog_attachments a
+      SET progress_note_id = (
+        SELECT n.id FROM worklog_progress_notes n
+        WHERE n.entry_id = a.entry_id
+        ORDER BY n.created_at DESC LIMIT 1
+      )
+      WHERE a.progress_note_id IS NULL
+        AND EXISTS (SELECT 1 FROM worklog_progress_notes n WHERE n.entry_id = a.entry_id)
+    `)
+  } catch (error: any) {
+    console.log('ℹ️  旧附件关联迁移跳过:', error.message)
+  }
+
+  // 数据库迁移：worklog_entries 新增 client_contact_name / client_contact_phone 快照列
+  try {
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_name TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_phone TEXT`)
+    // 回填已有日志
+    await db.run(`
+      UPDATE worklog_entries SET
+        client_contact_name = (SELECT client_contact_name FROM worklog_projects WHERE id = worklog_entries.project_id),
+        client_contact_phone = (SELECT client_contact_phone FROM worklog_projects WHERE id = worklog_entries.project_id)
+      WHERE client_contact_name IS NULL
+    `)
+    console.log('✅ 数据库迁移：worklog_entries client_contact 快照字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  client_contact 快照迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：worklog_projects 新增合同跟踪字段
+  try {
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_status TEXT`)
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_total_amount NUMERIC`)
+    console.log('✅ 数据库迁移：worklog_projects 合同跟踪字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  合同跟踪字段迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：worklog_entries 新增 next_follow_up_date 字段（预计下次跟进时间）
+  try {
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS next_follow_up_date TEXT`)
+    console.log('✅ 数据库迁移：worklog_entries next_follow_up_date 字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  next_follow_up_date 迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：worklog_projects 新增办理机构字段
+  try {
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_bureau TEXT`)
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_department TEXT`)
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`)
+    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`)
+    console.log('✅ 数据库迁移：worklog_projects 办理机构字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  办理机构字段迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：worklog_entries 新增 client_name 条目级覆盖字段
+  try {
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_name TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_bureau TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_department TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`)
+    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS project_type TEXT`)
+    console.log('✅ 数据库迁移：worklog_entries 条目级覆盖字段检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
+      console.log('ℹ️  entries 覆盖字段迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：创建 daily_log_submissions 表，支持同一天多次提交
+  try {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS daily_log_submissions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        log_date TEXT NOT NULL,
+        content TEXT NOT NULL DEFAULT '',
+        submitted_at TEXT NOT NULL
+      )
+    `)
+    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_submissions_user_date ON daily_log_submissions(user_id, log_date)`)
+    console.log('✅ 数据库迁移：daily_log_submissions 表检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists')) {
+      console.log('ℹ️  daily_log_submissions 迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：创建 daily_log_comments 表（总经理/管理员对日志的评论）
+  try {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS daily_log_comments (
+        id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL REFERENCES daily_log_submissions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    `)
+    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_comments_submission ON daily_log_comments(submission_id)`)
+    // 添加 read_at 列（标记员工是否已读评论）
+    try {
+      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN read_at TEXT DEFAULT NULL`)
+    } catch { /* 列已存在则忽略 */ }
+    // 添加 reply_to 列（回复某条评论）
+    try {
+      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN reply_to TEXT DEFAULT NULL`)
+    } catch { /* 列已存在则忽略 */ }
+    console.log('✅ 数据库迁移：daily_log_comments 表检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists')) {
+      console.log('ℹ️  daily_log_comments 迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：创建 daily_log_supplements 表（日志补充记录）
+  try {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS daily_log_supplements (
+        id TEXT PRIMARY KEY,
+        submission_id TEXT NOT NULL REFERENCES daily_log_submissions(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        seq INTEGER NOT NULL DEFAULT 1,
+        content TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(submission_id, seq)
+      )
+    `)
+    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_supplements_submission ON daily_log_supplements(submission_id)`)
+    console.log('✅ 数据库迁移：daily_log_supplements 表检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists')) {
+      console.log('ℹ️  daily_log_supplements 迁移跳过:', error.message)
+    }
+  }
+
+  // 数据库迁移：weekly_summaries 添加 locked_at 字段
+  try {
+    await db.run(`ALTER TABLE weekly_summaries ADD COLUMN locked_at TEXT DEFAULT NULL`)
+  } catch { /* 列已存在则忽略 */ }
+
+  // 数据库迁移：创建 weekly_summary_supplements 表（周报补充记录）
+  try {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS weekly_summary_supplements (
+        id TEXT PRIMARY KEY,
+        weekly_summary_id TEXT NOT NULL REFERENCES weekly_summaries(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        seq INTEGER NOT NULL DEFAULT 1,
+        content TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        UNIQUE(weekly_summary_id, seq)
+      )
+    `)
+    await db.run(`CREATE INDEX IF NOT EXISTS idx_weekly_summary_supplements ON weekly_summary_supplements(weekly_summary_id)`)
+    console.log('✅ 数据库迁移：weekly_summary_supplements 表检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists')) {
+      console.log('ℹ️  weekly_summary_supplements 迁移跳过:', error.message)
+    }
+  }
+
+  // ==================== 快捷短语表 ====================
+  try {
+    await db.run(`
+      CREATE TABLE IF NOT EXISTS daily_log_phrases (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        content TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      )
+    `)
+    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_phrases_user ON daily_log_phrases(user_id)`)
+    console.log('✅ 数据库迁移：daily_log_phrases 表检查完成')
+  } catch (error: any) {
+    if (!error.message?.includes('already exists')) {
+      console.log('ℹ️  daily_log_phrases 迁移跳过:', error.message)
+    }
+  }
+
+  // ==================== 项目日志模块字典 seed ====================
+  await seedWorklogDicts()
+  await seedWorklogPermissions()
+
   console.log('✅ PostgreSQL 数据库表初始化完成')
+}
+
+/**
+ * 初始化项目日志模块字典：首次运行时插入默认值，已存在则跳过
+ */
+async function seedWorklogDicts() {
+  const now = new Date().toISOString()
+
+  const districts = [
+    '东城区', '西城区', '朝阳区', '海淀区', '丰台区', '石景山区',
+    '门头沟区', '房山区', '通州区', '顺义区', '昌平区', '大兴区',
+    '怀柔区', '平谷区', '密云区', '延庆区',
+  ]
+  const districtCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_districts')
+  if (Number(districtCount?.count || 0) === 0) {
+    for (let i = 0; i < districts.length; i++) {
+      await db.run(
+        `INSERT INTO worklog_districts (id, name, sort_order, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, TRUE, ?, ?)`,
+        `district_${i + 1}`, districts[i], i + 1, now, now,
+      )
+    }
+    console.log(`✅ 初始化日志字典：行政区 ${districts.length} 个`)
+  }
+
+  const projectTypes = ['新建项目', '公共公益项目']
+  const ptCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_project_types')
+  if (Number(ptCount?.count || 0) === 0) {
+    for (let i = 0; i < projectTypes.length; i++) {
+      await db.run(
+        `INSERT INTO worklog_project_types (id, name, sort_order, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, TRUE, ?, ?)`,
+        `ptype_${i + 1}`, projectTypes[i], i + 1, now, now,
+      )
+    }
+    console.log(`✅ 初始化日志字典：项目类型 ${projectTypes.length} 个`)
+  }
+
+  // 办理事项 + 标准办理天数（根据工程咨询行业经验值设置，管理员可后台调整）
+  const matters: Array<[string, number]> = [
+    ['征地批复', 60],
+    ['征地结案', 30],
+    ['多规合一初审意见', 30],
+    ['多规合一协同意见函', 20],
+    ['建设项目选址意见书和用地预审', 45],
+    ['建设工程规划许可证', 30],
+    ['建筑工程施工许可证', 20],
+    ['临时用地批复', 30],
+    ['临时建设工程规划许可证', 20],
+    ['建设工程规划核验意见（变电站）', 30],
+    ['建设工程规划核验备案意见（隧道）', 30],
+    ['建设工程消防验收意见书', 30],
+    ['建设工程竣工验收备案意见', 30],
+    ['权籍调查', 45],
+    ['楼门牌证明信', 10],
+    ['划拨批复', 45],
+    ['划拨决定书', 30],
+    ['不动产权证书（土地）', 30],
+    ['不动产权证书（房产）', 30],
+  ]
+  const matterCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_matters')
+  if (Number(matterCount?.count || 0) === 0) {
+    for (let i = 0; i < matters.length; i++) {
+      const [name, days] = matters[i]
+      await db.run(
+        `INSERT INTO worklog_matters (id, name, standard_days, sort_order, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, TRUE, ?, ?)`,
+        `matter_${i + 1}`, name, days, i + 1, now, now,
+      )
+    }
+    console.log(`✅ 初始化日志字典：办理事项 ${matters.length} 项`)
+  }
+
+  const contractStatuses = [
+    '未签合同', '已签合同未付款', '已付首款', '已付进度款',
+    '已开票未收款', '已结清',
+  ]
+  const csCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_contract_statuses')
+  if (Number(csCount?.count || 0) === 0) {
+    for (let i = 0; i < contractStatuses.length; i++) {
+      await db.run(
+        `INSERT INTO worklog_contract_statuses (id, name, sort_order, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, TRUE, ?, ?)`,
+        `cstatus_${i + 1}`, contractStatuses[i], i + 1, now, now,
+      )
+    }
+    console.log(`✅ 初始化日志字典：合同付款状态 ${contractStatuses.length} 个`)
+  }
+}
+
+/**
+ * 初始化周报下载白名单：根据姓名匹配「于贵臣」「刘行」。
+ * 用户不存在时静默跳过，后续可通过后台接口手动添加
+ */
+async function seedWorklogPermissions() {
+  const now = new Date().toISOString()
+  const targetNames = ['于贵臣', '刘行']
+  const users = await db.all<{ id: string; name: string }>(
+    `SELECT id, name FROM users WHERE name = ANY($1::text[])`,
+    targetNames,
+  )
+
+  let added = 0
+  for (const u of users) {
+    const exist = await db.get(
+      `SELECT id FROM worklog_permissions WHERE permission_code = ? AND user_id = ?`,
+      'download_weekly_report', u.id,
+    )
+    if (!exist) {
+      await db.run(
+        `INSERT INTO worklog_permissions (id, permission_code, user_id, created_at)
+         VALUES (?, ?, ?, ?)`,
+        `wp_${u.id}_weekly`, 'download_weekly_report', u.id, now,
+      )
+      added++
+    }
+  }
+  if (added > 0) {
+    console.log(`✅ 初始化周报下载白名单：新增 ${added} 人（于贵臣、刘行等）`)
+  }
 }

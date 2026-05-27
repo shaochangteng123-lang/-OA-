@@ -43,6 +43,9 @@ export type Permission =
   | 'view_departments'
   | 'manage_departments'
   | 'system_settings'
+  | 'view_worklog_entries'
+  | 'manage_worklog_entries'
+  | 'manage_worklog_dicts'
 
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   super_admin: [
@@ -67,6 +70,9 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_departments',
     'manage_departments',
     'system_settings',
+    'view_worklog_entries',
+    'manage_worklog_entries',
+    'manage_worklog_dicts',
   ],
   admin: [
     'view_worklogs',
@@ -88,6 +94,9 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_blocks',
     'manage_blocks',
     'view_departments',
+    'view_worklog_entries',
+    'manage_worklog_entries',
+    'manage_worklog_dicts',
   ],
   general_manager: [
     'view_worklogs',
@@ -108,6 +117,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_blocks',
     'manage_blocks',
     'view_departments',
+    'view_worklog_entries',
+    'manage_worklog_entries',
   ],
   user: [
     'view_worklogs',
@@ -120,8 +131,10 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_presets',
     'view_calendar',
     'view_blocks',
+    'view_worklog_entries',
+    'manage_worklog_entries',
   ],
-  guest: ['view_worklogs', 'view_projects', 'view_events', 'view_presets', 'view_calendar'],
+  guest: ['view_worklogs', 'view_projects', 'view_events', 'view_presets', 'view_calendar', 'view_worklog_entries'],
 }
 
 // ==================== 项目相关 ====================
@@ -138,6 +151,8 @@ export interface Project {
   reportSpecialistPhone: string
   projectManager: string
   projectManagerPhone: string
+  clientContactName: string
+  clientContactPhone: string
   description?: string
   currentTask?: string
   userId: string
@@ -205,6 +220,146 @@ export interface WorkLog {
   userId: string
   createdAt: string
   updatedAt: string
+}
+
+// ==================== 项目日志 v2（结构化） ====================
+
+export interface WorklogDictItem {
+  id: string
+  name: string
+  standard_days?: number | null
+  sort_order: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface WorklogProject {
+  id: string
+  name: string
+  clientName: string
+  clientContactName: string
+  clientContactPhone: string
+  district: string
+  projectType: string
+  ownerUserId: string
+  ownerName: string
+  ownerPosition?: string | null
+  startDate: string
+  isCompleted: boolean
+  completedAt?: string | null
+  contractStatus?: string | null
+  contractTotalAmount?: number | null
+  agencyBureau?: string | null
+  agencyDepartment?: string | null
+  agencyContactName?: string | null
+  agencyContactPhone?: string | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  entryCount?: number
+}
+
+export interface WorklogContractProgress {
+  id: string
+  projectId: string
+  status: string
+  amount?: number | null
+  note?: string | null
+  createdBy: string
+  createdByName: string
+  createdAt: string
+  attachments?: WorklogContractAttachment[]
+}
+
+export interface WorklogContractAttachment {
+  id: string
+  progressId: string
+  fileKind: 'contract' | 'invoice' | 'receipt' | 'other'
+  fileName: string
+  filePath: string
+  fileSize?: number | null
+  mimeType?: string | null
+  uploadedBy: string
+  createdAt: string
+}
+
+export interface WorklogAttachment {
+  id: string
+  fileKind: 'image' | 'screenshot' | 'photo' | 'document'
+  fileName: string
+  filePath: string
+  fileSize?: number | null
+  mimeType?: string | null
+  uploadedBy: string
+  createdAt: string
+}
+
+export interface WorklogEntry {
+  id: string
+  logDate: string
+  projectId: string
+  projectName?: string
+  clientName?: string
+  district?: string
+  clientContactName?: string
+  clientContactPhone?: string
+  projectType?: string
+  agencyBureau?: string
+  agencyDepartment?: string
+  agencyContactName?: string
+  agencyContactPhone?: string
+  matter: string
+  userId: string
+  userName: string
+  userPosition?: string | null
+  ownerUserId: string
+  ownerName: string
+  contractStatus?: string | null
+  contractNote?: string | null
+  workNote?: string | null
+  nextFollowUpDate?: string | null
+  isFinalized: boolean
+  finalizedAt?: string | null
+  projectIsCompleted?: boolean
+  createdAt: string
+  updatedAt: string
+  attachments?: WorklogAttachment[]
+  progressNotes?: WorklogProgressNote[]
+}
+
+export interface WorklogProgressNote {
+  id: string
+  entryId: string
+  content: string
+  createdBy: string
+  createdByName: string
+  createdAt: string
+  attachments?: WorklogAttachment[]
+}
+
+export interface WorklogGanttMatter {
+  matter: string
+  firstDate: string
+  lastDate: string
+  daysElapsed: number
+  standardDays: number | null
+  isOverdue: boolean
+  isFinalized: boolean
+  totalCount: number
+}
+
+export interface WorklogRiskAlert {
+  projectId: string
+  projectName: string
+  district: string
+  ownerName: string
+  matter: string
+  firstDate: string
+  daysElapsed: number
+  standardDays: number
+  level: 'high' | 'medium'
+  message: string
 }
 
 // ==================== 部门相关 ====================

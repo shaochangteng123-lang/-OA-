@@ -31,6 +31,13 @@ import resignationRoutes from './routes/resignation.js'
 import filesRoutes from './routes/files.js'
 import leaveRoutes from './routes/leave.js'
 import bankReceiptsRoutes from './routes/bank-receipts.js'
+import worklogProjectsRoutes from './routes/worklog-projects.js'
+import worklogEntriesRoutes from './routes/worklog-entries.js'
+import worklogDictsRoutes from './routes/worklog-dicts.js'
+import worklogReportsRoutes from './routes/worklog-reports.js'
+import worklogAiRoutes from './routes/worklog-ai.js'
+import worklogPermissionsRoutes from './routes/worklog-permissions.js'
+import dailyLogsRoutes from './routes/daily-logs.js'
 import { shutdownOcrDaemon } from './services/ocrDaemon.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -98,6 +105,16 @@ app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
 app.use('/api/leave', leaveRoutes)
 app.use('/api/bank-receipts', bankReceiptsRoutes)
+app.use('/api/worklog-projects', worklogProjectsRoutes)
+app.use('/api/worklog-entries', worklogEntriesRoutes)
+app.use('/api/worklog-dicts', worklogDictsRoutes)
+app.use('/api/worklog-reports', worklogReportsRoutes)
+app.use('/api/worklog-ai', worklogAiRoutes)
+app.use('/api/worklog-permissions', worklogPermissionsRoutes)
+app.use('/api/daily-logs', dailyLogsRoutes)
+
+// 静态文件服务：uploads 目录
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
 
 app.get('/api/health', (_req, res) => {
   res.json({ success: true, message: 'Server is running', timestamp: new Date().toISOString() })
@@ -266,6 +283,10 @@ async function start() {
 
   setupReimbursementCleanup()
   setupLeaveBalanceReset()
+
+  // 日志自动归档 + 周报自动生成
+  const { setupDailyLogScheduler } = await import('./services/dailyLogScheduler.js')
+  setupDailyLogScheduler()
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server is running on port ${PORT}`)

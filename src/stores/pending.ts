@@ -25,6 +25,10 @@ export interface PendingCounts {
   myHandoverPending: number
   // 管理员: 离职待审批
   resignationPending: number
+  // 用户: 未读日志评论
+  unreadLogComments: number
+  // GM/Admin: 未读团队日志回复
+  unreadTeamLogReplies: number
 }
 
 export const usePendingStore = defineStore('pending', () => {
@@ -42,6 +46,8 @@ export const usePendingStore = defineStore('pending', () => {
     myResignationPending: 0,
     myHandoverPending: 0,
     resignationPending: 0,
+    unreadLogComments: 0,
+    unreadTeamLogReplies: 0,
   })
 
   const loading = ref(false)

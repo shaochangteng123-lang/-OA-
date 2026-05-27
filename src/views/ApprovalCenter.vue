@@ -129,6 +129,7 @@
                 >
                   <el-option label="待审批" value="pending" />
                   <el-option label="待付款" value="approved" />
+                  <el-option label="待上传回单" value="paid" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
                 </el-select>
@@ -238,10 +239,16 @@
                       驳回
                     </el-button>
                   </template>
-                  <!-- 已通过待付款状态显示付款按钮 -->
+                  <!-- 已通过待付款状态显示确认付款按钮 -->
                   <template v-else-if="row.status === 'approved' && row.reimbursementStatus === 'approved'">
-                    <el-button type="success" size="small" :icon="Money" @click="handlePaymentFromPending(row)">
-                      付款
+                    <el-button type="success" size="small" :icon="Money" @click="handleConfirmPaymentFromPending(row)">
+                      确认付款
+                    </el-button>
+                  </template>
+                  <!-- 待上传回单状态显示上传回单按钮 -->
+                  <template v-else-if="row.reimbursementStatus === 'paid'">
+                    <el-button type="primary" size="small" :icon="Upload" @click="handleUploadReceiptFromPending(row)">
+                      上传回单
                     </el-button>
                   </template>
                   <!-- 待确认收款状态 -->
@@ -298,8 +305,6 @@
                   style="width: 130px"
                 >
                   <el-option label="待付款" value="approved" />
-                  <el-option label="待确认" value="payment_uploaded" />
-                  <el-option label="已完成" value="completed" />
                 </el-select>
               </el-form-item>
               <el-form-item label="日期">
@@ -387,67 +392,35 @@
                     type="success"
                     size="small"
                     :icon="Money"
-                    @click="handlePayment(row)"
+                    @click="handleConfirmPayment(row)"
                   >
-                    付款
+                    确认付款
                   </el-button>
                 </div>
               </template>
             </el-table-column>
           </el-table>
 
-          <!-- 批量付款操作栏 -->
+          <!-- 批量确认付款操作栏 -->
           <div class="batch-action-bar" :class="{ 'has-selection': selectedUnpaidItems.length > 0 }">
             <div class="batch-info" v-if="selectedUnpaidItems.length > 0">
               <span>已选 <strong>{{ selectedUnpaidItems.length }}</strong> 笔</span>
               <span class="batch-amount">合计 <strong>¥{{ selectedUnpaidTotalAmount.toFixed(2) }}</strong></span>
-              <span v-if="!isSamePayee" class="batch-warning">
-                <el-icon><WarningFilled /></el-icon>
-                包含不同收款人，无法批量付款
-              </span>
-              <span v-else-if="!isSameType" class="batch-warning">
-                <el-icon><WarningFilled /></el-icon>
-                请选择同一报销类型进行付款
-              </span>
             </div>
             <div style="margin-left: auto; display: flex; gap: 8px;">
               <el-button
                 v-if="selectedUnpaidItems.length > 0"
                 type="success"
                 :icon="Money"
-                :disabled="!isSamePayee || !isSameType || batchPaymentLoading"
                 :loading="batchPaymentLoading"
-                @click="handleBatchPayment"
+                @click="handleBatchConfirmPayment"
               >
-                批量付款
-              </el-button>
-              <el-button type="primary" :icon="Upload" :disabled="!unpaidList.some(r => r.status === 'approved')" @click="bankReceiptUploadVisible = true">
-                上传工行回单PDF
+                批量确认付款
               </el-button>
             </div>
           </div>
 
-          <!-- 未认领回单区域 -->
-          <div v-if="unmatchedReceipts.length > 0" class="unmatched-receipts-section">
-            <div class="unmatched-header">
-              <el-icon color="#e6a23c"><WarningFilled /></el-icon>
-              <span>待认领回单（{{ unmatchedReceipts.length }} 笔）</span>
-              <el-button link type="primary" @click="loadUnmatchedReceipts">刷新</el-button>
-              <el-button link type="danger" @click="clearAllUnmatched">一键删除</el-button>
-            </div>
-            <div class="unmatched-list">
-              <div v-for="receipt in unmatchedReceipts" :key="receipt.id" class="unmatched-item">
-                <img :src="toFileUrl(receipt.image_path)" class="receipt-thumb" @click="previewReceiptImage(receipt.image_path)" @error="handleProofImageError" />
-                <div class="receipt-info">
-                  <div class="receipt-remark">{{ receipt.ocr_remark || '备注未识别' }}</div>
-                  <div class="receipt-amount" v-if="receipt.ocr_amount">¥{{ Number(receipt.ocr_amount).toFixed(2) }}</div>
-                  <div class="receipt-meta">收款人：{{ receipt.ocr_payee || '-' }}</div>
-                </div>
-                <el-button type="primary" size="small" @click="openManualMatch(receipt)">认领</el-button>
-                <el-button size="small" type="danger" plain @click="skipReceipt(receipt.id)">删除</el-button>
-              </div>
-            </div>
-          </div>
+          <!-- 未认领回单区域已移至「待上传回单」标签 -->
         </el-card>
       </el-tab-pane>
 
@@ -461,7 +434,7 @@
           <el-result
             icon="success"
             title="处理完成"
-            :sub-title="`共识别 ${bankReceiptResult.total_receipts} 笔，自动匹配 ${bankReceiptResult.matched_count} 笔，待认领 ${bankReceiptResult.unmatched_count} 笔`"
+            :sub-title="`共识别 ${bankReceiptResult.total_receipts} 笔，自动匹配 ${bankReceiptResult.matched_count} 笔，待认领 ${unmatchedReceipts.length} 笔`"
           />
         </div>
         <el-upload
@@ -505,7 +478,7 @@
             style="width: 100%"
           >
             <el-option
-              v-for="item in unpaidList.filter(r => r.status === 'approved')"
+              v-for="item in uploadReceiptList.filter(r => r.status === 'paid')"
               :key="item.id"
               :label="`${item.applicantName} - ${item.title} - ¥${Number(item.amount).toFixed(2)}`"
               :value="item.id"
@@ -523,8 +496,165 @@
         <img :src="receiptPreviewUrl" style="width: 80%; display: block; margin: 0 auto;" />
       </el-dialog>
 
-      <!-- 已付款 -->
-      <el-tab-pane label="已付款" name="paid">
+      <!-- 待上传回单 -->
+      <el-tab-pane label="待上传回单" name="upload_receipt">
+        <el-card>
+          <!-- 筛选条件 -->
+          <div class="filter-section">
+            <el-form :inline="true" :model="uploadReceiptFilterForm" class="filter-form">
+              <el-form-item label="员工">
+                <el-select
+                  v-model="uploadReceiptFilterForm.userId"
+                  placeholder="全部员工"
+                  clearable
+                  filterable
+                  style="width: 130px"
+                >
+                  <el-option
+                    v-for="emp in employeeList"
+                    :key="emp.id"
+                    :label="emp.name"
+                    :value="emp.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="类型">
+                <el-select
+                  v-model="uploadReceiptFilterForm.type"
+                  placeholder="全部"
+                  clearable
+                  style="width: 140px"
+                >
+                  <el-option value="basic" label="基础报销" />
+                  <el-option value="large" label="大额报销" />
+                  <el-option value="business" label="商务报销" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="日期">
+                <el-date-picker
+                  v-model="uploadReceiptFilterForm.dateRange"
+                  type="daterange"
+                  value-format="YYYY-MM-DD"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  range-separator="至"
+                  style="width: 260px"
+                />
+              </el-form-item>
+              <el-form-item>
+                <el-button type="primary" :icon="Search" :loading="uploadReceiptListLoading" @click="handleQueryUploadReceiptList">
+                  查询
+                </el-button>
+                <el-button @click="handleResetUploadReceiptFilter">重置</el-button>
+              </el-form-item>
+            </el-form>
+          </div>
+
+          <el-table :data="uploadReceiptList" border stripe empty-text="暂无待上传回单记录" v-loading="uploadReceiptListLoading">
+            <el-table-column label="序号" width="60" align="center">
+              <template #default="{ $index }">
+                {{ $index + 1 }}
+              </template>
+            </el-table-column>
+            <el-table-column label="申请人" min-width="120" align="center">
+              <template #default="{ row }">
+                <div class="applicant-cell">
+                  <el-avatar :src="row.applicantAvatar" :size="32">
+                    <el-icon><User /></el-icon>
+                  </el-avatar>
+                  <span>{{ row.applicantName }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="标题/金额" min-width="150" align="center">
+              <template #default="{ row }">
+                <div>{{ normalizeReimbursementTitle(row.title) }}</div>
+                <div style="color: #409eff; font-weight: 600; margin-top: 4px;">
+                  ¥{{ row.amount.toFixed(2) }}
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="报销类型" min-width="120" align="center">
+              <template #default="{ row }">
+                <span v-if="row.invoiceCategories">{{ row.invoiceCategories }}</span>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="报销范围/区域" min-width="120" align="center">
+              <template #default="{ row }">
+                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="确认付款时间" min-width="130" align="center">
+              <template #default="{ row }">
+                {{ row.paidTime ? formatDate(row.paidTime) : '-' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" min-width="220" align="center">
+              <template #default="{ row }">
+                <div class="action-buttons">
+                  <el-button
+                    type="primary"
+                    size="small"
+                    :icon="View"
+                    @click="handleViewUploadReceiptReimbursement(row)"
+                  >
+                    详情
+                  </el-button>
+                  <el-button
+                    type="info"
+                    size="small"
+                    :icon="List"
+                    @click="handleViewApprovalProcessFromUploadReceipt(row)"
+                  >
+                    审批流程
+                  </el-button>
+                  <el-button
+                    type="success"
+                    size="small"
+                    :icon="Upload"
+                    @click="handleUploadReceipt(row)"
+                  >
+                    上传回单
+                  </el-button>
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <!-- 工行回单上传操作栏 -->
+          <div style="margin-top: 12px; display: flex; justify-content: flex-end;">
+            <el-button type="primary" :icon="Upload" :disabled="uploadReceiptList.length === 0" @click="bankReceiptUploadVisible = true">
+              上传工行回单PDF
+            </el-button>
+          </div>
+
+          <!-- 未认领回单区域 -->
+          <div v-if="unmatchedReceipts.length > 0" class="unmatched-receipts-section">
+            <div class="unmatched-header">
+              <el-icon color="#e6a23c"><WarningFilled /></el-icon>
+              <span>待认领回单（{{ unmatchedReceipts.length }} 笔）</span>
+              <el-button link type="primary" @click="loadUnmatchedReceipts">刷新</el-button>
+              <el-button link type="danger" @click="clearAllUnmatched">一键删除</el-button>
+            </div>
+            <div class="unmatched-list">
+              <div v-for="receipt in unmatchedReceipts" :key="receipt.id" class="unmatched-item">
+                <img :src="toFileUrl(receipt.image_path)" class="receipt-thumb" @click="previewReceiptImage(receipt.image_path)" @error="handleProofImageError" />
+                <div class="receipt-info">
+                  <div class="receipt-remark">{{ receipt.ocr_remark || '备注未识别' }}</div>
+                  <div class="receipt-amount" v-if="receipt.ocr_amount">¥{{ Number(receipt.ocr_amount).toFixed(2) }}</div>
+                  <div class="receipt-meta">收款人：{{ receipt.ocr_payee || '-' }}</div>
+                </div>
+                <el-button type="primary" size="small" @click="openManualMatch(receipt)">认领</el-button>
+                <el-button size="small" type="danger" plain @click="skipReceipt(receipt.id)">删除</el-button>
+              </div>
+            </div>
+          </div>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- 待确认 -->
+      <el-tab-pane label="待确认" name="paid">
         <el-card>
           <!-- 筛选条件 -->
           <div class="filter-section">
@@ -756,6 +886,7 @@
                   style="width: 110px"
                 >
                   <el-option label="待付款" value="approved" />
+                  <el-option label="待上传回单" value="paid" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
                 </el-select>
@@ -1164,7 +1295,7 @@
             <!-- 2. 管理员审批 -->\n            <!-- 如果有审批记录，显示详细记录 -->
             <template v-if="approvalRecords.length > 0">
               <el-timeline-item
-                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
+                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
                 :key="record.id"
                 :timestamp="formatDate(record.actionTime)"
                 placement="top"
@@ -1176,7 +1307,7 @@
                   </div>
                   <div class="timeline-desc">
                     <el-tag :type="record.action === 'approve' ? 'success' : record.action === 'reject' ? 'danger' : 'info'" size="small" effect="dark">
-                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action }}
+                      {{ record.action === 'approve' ? '审批通过' : record.action === 'reject' ? '审批驳回' : record.action === 'resubmit' ? '再次提交' : record.action === 'payment_confirmed' ? '已确认付款' : record.action === 'upload_receipt' ? '已上传回单' : record.action }}
                     </el-tag>
                   </div>
                   <div v-if="record.action === 'reject' && record.comment" class="timeline-desc reject-reason">
@@ -1252,16 +1383,29 @@
               </div>
             </el-timeline-item>
 
-            <!-- 3. 财务付款 -->
+            <!-- 3. 确认付款 -->
             <el-timeline-item
-              v-if="!isDeductionOnly && ['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-              :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '')"
+              v-if="!isDeductionOnly && ['approved', 'paid', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+              :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.paidTime ? formatDate(currentApprovalRecord.paidTime) : '')"
               placement="top"
               :type="currentApprovalRecord.status === 'approved' ? 'warning' : 'success'"
             >
               <div class="timeline-content">
-                <div class="timeline-title">财务付款</div>
-                <div class="timeline-desc">{{ currentApprovalRecord.status === 'approved' ? '等待财务付款...' : '财务已付款' }}</div>
+                <div class="timeline-title">确认付款</div>
+                <div class="timeline-desc">{{ currentApprovalRecord.status === 'approved' ? '等待财务确认付款...' : ('财务' + (currentApprovalRecord.paidBy || '') + '已确认付款') }}</div>
+              </div>
+            </el-timeline-item>
+
+            <!-- 3.5 待上传回单 -->
+            <el-timeline-item
+              v-if="!isDeductionOnly && currentApprovalRecord.status === 'paid'"
+              timestamp="待上传回单"
+              placement="top"
+              type="warning"
+            >
+              <div class="timeline-content">
+                <div class="timeline-title">上传付款回单</div>
+                <div class="timeline-desc">等待财务上传付款回单...</div>
               </div>
             </el-timeline-item>
 
@@ -1636,17 +1780,24 @@ interface ReimbursementItem {
   type: string
   title: string
   amount: number
+  totalAmount?: number
+  deductionAmount?: number
   status: string
   applicantName: string
   applicantAvatar?: string
   approveTime?: string
   approver?: string
+  paidTime?: string
+  paidBy?: string
   payTime?: string
   paymentUploadTime?: string
   completedTime?: string
   paymentProofPath?: string
   receiptConfirmedBy?: string
   userId: string
+  invoiceCategories?: string
+  reimbursementScope?: string
+  submitTime?: string
 }
 
 interface Statistics {
@@ -1702,6 +1853,15 @@ const paidFilterForm = reactive({
   userId: '',
   type: [] as string[],
   status: '',
+  dateRange: null as [string, string] | null,
+})
+
+// 待上传回单列表和筛选表单
+const uploadReceiptList = ref<ReimbursementItem[]>([])
+const uploadReceiptListLoading = ref(false)
+const uploadReceiptFilterForm = reactive({
+  userId: '',
+  type: '',
   dateRange: null as [string, string] | null,
 })
 // 批量付款相关
@@ -1764,7 +1924,7 @@ async function pollBatchStatus(batchId: string) {
         bankReceiptProcessing.value = false
         bankReceiptResult.value = res.data.data.batch
         await loadUnmatchedReceipts()
-        await handleQueryUnpaidList()
+        await loadUploadReceiptList()
         return
       }
       if (res.data.data?.batch?.status === 'failed') {
@@ -1850,49 +2010,126 @@ const selectedUnpaidTotalAmount = computed(() => {
   return selectedUnpaidItems.value.reduce((sum, item) => sum + item.amount, 0)
 })
 
-const isSamePayee = computed(() => {
-  if (selectedUnpaidItems.value.length === 0) return false
-  const userIds = [...new Set(selectedUnpaidItems.value.map(item => item.userId))]
-  return userIds.length === 1
-})
-
-const isSameType = computed(() => {
-  if (selectedUnpaidItems.value.length === 0) return false
-  const types = [...new Set(selectedUnpaidItems.value.map(item => item.type))]
-  return types.length === 1
-})
-
 function handleUnpaidSelectionChange(selection: ReimbursementItem[]) {
   selectedUnpaidItems.value = selection
 }
 
-async function handleBatchPayment() {
-  if (!isSamePayee.value || !isSameType.value) return
-
-  const ids = selectedUnpaidItems.value.map(item => item.id)
-
-  if (ids.length === 1) {
-    // 单笔直接走原有付款流程
-    router.push(`/approval/payment/${ids[0]}?from=/approval&tab=unpaid`)
-    return
-  }
-
-  batchPaymentLoading.value = true
+// 批量确认付款
+async function handleBatchConfirmPayment() {
+  if (selectedUnpaidItems.value.length === 0) return
   try {
-    const res = await api.post('/api/reimbursement/payment-batch/create', {
-      reimbursementIds: ids,
+    await ElMessageBox.confirm(`确认将选中的 ${selectedUnpaidItems.value.length} 笔报销单标记为已付款？`, '确认付款', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'info',
     })
-    if (res.data.success) {
-      const batchId = res.data.data.batchId
-      router.push(`/approval/batch-payment/${batchId}?from=/approval&tab=unpaid`)
-    } else {
-      ElMessage.error(res.data.message || '创建付款批次失败')
-    }
-  } catch (error: any) {
-    ElMessage.error(error.response?.data?.message || '创建付款批次失败')
+    batchPaymentLoading.value = true
+    const ids = selectedUnpaidItems.value.map(item => item.id)
+    const results = await Promise.allSettled(
+      ids.map(id => api.post(`/api/reimbursement/${id}/confirm-payment`))
+    )
+    const successCount = results.filter(r => r.status === 'fulfilled' && (r.value as any).data.success).length
+    const failCount = ids.length - successCount
+    if (successCount > 0) ElMessage.success(`已确认付款 ${successCount} 笔`)
+    if (failCount > 0) ElMessage.warning(`${failCount} 笔操作失败`)
+    loadStatistics()
+    loadUnpaidList()
+    loadUploadReceiptList()
+  } catch (err: any) {
+    if (err !== 'cancel') ElMessage.error('操作失败')
   } finally {
     batchPaymentLoading.value = false
   }
+}
+
+// 确认付款（单笔，从待付款列表）
+async function handleConfirmPayment(item: ReimbursementItem) {
+  try {
+    await ElMessageBox.confirm('确认已完成付款？', '确认付款', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'info',
+    })
+    const res = await api.post(`/api/reimbursement/${item.id}/confirm-payment`)
+    if (res.data.success) {
+      ElMessage.success('已确认付款，请上传银行回单')
+      loadStatistics()
+      loadUnpaidList()
+      loadUploadReceiptList()
+    } else {
+      ElMessage.error(res.data.message || '操作失败')
+    }
+  } catch (err: any) {
+    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+  }
+}
+
+// 确认付款（从待办列表）
+async function handleConfirmPaymentFromPending(item: ApprovalItem) {
+  try {
+    await ElMessageBox.confirm('确认已完成付款？', '确认付款', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      type: 'info',
+    })
+    const res = await api.post(`/api/reimbursement/${item.targetId}/confirm-payment`)
+    if (res.data.success) {
+      ElMessage.success('已确认付款，请上传银行回单')
+      loadStatistics()
+      handleTabChange(activeTab.value)
+    } else {
+      ElMessage.error(res.data.message || '操作失败')
+    }
+  } catch (err: any) {
+    if (err !== 'cancel') ElMessage.error(err.response?.data?.message || '操作失败')
+  }
+}
+
+// 从待办列表进入上传回单页面
+function handleUploadReceiptFromPending(item: ApprovalItem) {
+  router.push(`/approval/payment/${item.targetId}?from=/approval&tab=pending`)
+}
+
+// 进入上传回单页面（从待上传回单列表）
+function handleUploadReceipt(item: ReimbursementItem) {
+  router.push(`/approval/payment/${item.id}?from=/approval&tab=upload_receipt`)
+}
+
+// 查看待上传回单报销单详情
+function handleViewUploadReceiptReimbursement(item: ReimbursementItem) {
+  const typeMap: Record<string, string> = {
+    basic: '/basic-reimbursement',
+    large: '/large-reimbursement',
+    business: '/business-reimbursement',
+  }
+  const routePath = typeMap[item.type]
+  if (routePath) {
+    router.push(`${routePath}/${item.id}?mode=view&from=/approval&tab=upload_receipt`)
+  }
+}
+
+// 查看审批流程（从待上传回单列表）
+async function handleViewApprovalProcessFromUploadReceipt(row: ReimbursementItem) {
+  currentApprovalRecord.value = {
+    id: row.id,
+    targetId: row.id,
+    type: row.type,
+    title: row.title,
+    amount: row.amount,
+    totalAmount: row.totalAmount,
+    deductionAmount: row.deductionAmount,
+    status: row.status,
+    applicantName: row.applicantName,
+    submitTime: row.submitTime,
+    approveTime: row.approveTime,
+    reimbursementStatus: row.status,
+    reimbursementInfo: null,
+    invoiceCategories: row.invoiceCategories,
+    reimbursementScope: row.reimbursementScope,
+    targetType: 'reimbursement',
+  } as any
+  approvalProcessDialogVisible.value = true
+  await loadApprovalRecords(row.id)
 }
 const statistics = ref<Statistics>({
   pendingCount: 0,
@@ -2138,6 +2375,8 @@ interface ApprovalProcessRecord {
   approveTime?: string
   approver?: string
   rejectReason?: string
+  paidTime?: string
+  paidBy?: string
   payTime?: string
   paymentUploadTime?: string
   completedTime?: string
@@ -2154,7 +2393,7 @@ interface ApprovalRecordItem {
   approverId: string
   approverName: string
   approverAvatar: string | null
-  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'resubmit'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'payment_confirmed' | 'upload_receipt' | 'resubmit'
   comment: string | null
   actionTime: string
 }
@@ -2645,6 +2884,41 @@ function handleResetPaidFilter() {
   loadPaidList()
 }
 
+// 加载待上传回单列表
+async function loadUploadReceiptList() {
+  uploadReceiptListLoading.value = true
+  try {
+    const params: Record<string, string> = { status: 'paid' }
+    if (uploadReceiptFilterForm.userId) params.userId = uploadReceiptFilterForm.userId
+    if (uploadReceiptFilterForm.type) params.type = uploadReceiptFilterForm.type
+    if (uploadReceiptFilterForm.dateRange) {
+      params.startDate = uploadReceiptFilterForm.dateRange[0]
+      params.endDate = uploadReceiptFilterForm.dateRange[1]
+    }
+    const res = await api.get('/api/approval/approved-unpaid', { params })
+    if (res.data.success) {
+      uploadReceiptList.value = res.data.data
+    }
+  } catch {
+    console.error('加载待上传回单列表失败')
+  } finally {
+    uploadReceiptListLoading.value = false
+  }
+}
+
+// 待上传回单查询
+function handleQueryUploadReceiptList() {
+  loadUploadReceiptList()
+}
+
+// 待上传回单重置
+function handleResetUploadReceiptFilter() {
+  uploadReceiptFilterForm.userId = ''
+  uploadReceiptFilterForm.type = ''
+  uploadReceiptFilterForm.dateRange = null
+  loadUploadReceiptList()
+}
+
 // 切换tab
 function switchTab(tab: string) {
   activeTab.value = tab  // 这会触发 computed setter，自动更新 URL
@@ -2653,6 +2927,9 @@ function switchTab(tab: string) {
     loadPendingList()
   } else if (tab === 'unpaid') {
     loadUnpaidList()
+  } else if (tab === 'upload_receipt') {
+    loadUploadReceiptList()
+    loadUnmatchedReceipts()
   } else if (tab === 'paid') {
     loadPaidList()
   }
@@ -2664,6 +2941,9 @@ function handleTabChange(tab: string | number) {
     loadPendingList()
   } else if (tab === 'unpaid') {
     loadUnpaidList()
+  } else if (tab === 'upload_receipt') {
+    loadUploadReceiptList()
+    loadUnmatchedReceipts()
   } else if (tab === 'paid') {
     loadPaidList()
   } else if (tab === 'all') {
@@ -2823,16 +3103,6 @@ function handleViewUnpaidReimbursement(item: ReimbursementItem) {
   }
 }
 
-// 进入付款页面（从未付款列表）
-function handlePayment(item: ReimbursementItem) {
-  router.push(`/approval/payment/${item.id}?from=/approval&tab=unpaid`)
-}
-
-// 从待办列表进入付款页面
-function handlePaymentFromPending(item: ApprovalItem) {
-  router.push(`/approval/payment/${item.targetId}?from=/approval&tab=pending`)
-}
-
 // 查看已付款报销单详情
 function handleViewPaidReimbursement(item: ReimbursementItem) {
   const typeMap: Record<string, string> = {
@@ -2937,6 +3207,12 @@ async function loadApprovalRecords(reimbursementId: string) {
         if (res.data.data.payTime) {
           currentApprovalRecord.value.payTime = res.data.data.payTime
         }
+        if (res.data.data.paidTime) {
+          currentApprovalRecord.value.paidTime = res.data.data.paidTime
+        }
+        if (res.data.data.paidBy) {
+          currentApprovalRecord.value.paidBy = res.data.data.paidBy
+        }
         if (res.data.data.paymentUploadTime) {
           currentApprovalRecord.value.paymentUploadTime = res.data.data.paymentUploadTime
         }
@@ -3030,6 +3306,7 @@ function getAllStatusType(status: string): 'primary' | 'success' | 'warning' | '
     draft: 'info',
     pending: 'warning',
     approved: 'primary',
+    paid: 'warning',
     rejected: 'danger',
     payment_uploaded: 'success',
     completed: 'success',
@@ -3041,6 +3318,7 @@ function getAllStatusType(status: string): 'primary' | 'success' | 'warning' | '
 function getPendingStatusLabel(row: ApprovalItem): string {
   if (row.reimbursementStatus === 'completed') return '已完成'
   if (row.reimbursementStatus === 'payment_uploaded') return '待确认'
+  if (row.reimbursementStatus === 'paid') return '待上传回单'
   if (row.status === 'approved' || row.reimbursementStatus === 'approved') return '待付款'
   if (row.status === 'pending') return '待审批'
   return '待审批'
@@ -3050,6 +3328,7 @@ function getPendingStatusLabel(row: ApprovalItem): string {
 function getPendingStatusTagType(row: ApprovalItem): 'success' | 'info' | 'warning' | 'danger' {
   if (row.reimbursementStatus === 'completed') return 'success'
   if (row.reimbursementStatus === 'payment_uploaded') return 'info'
+  if (row.reimbursementStatus === 'paid') return 'warning'
   if (row.status === 'approved' || row.reimbursementStatus === 'approved') return 'info'
   if (row.status === 'pending') return 'warning'
   return 'info'
@@ -3058,6 +3337,7 @@ function getPendingStatusTagType(row: ApprovalItem): 'success' | 'info' | 'warni
 // 获取待办列表中的状态自定义颜色
 function getPendingStatusColor(row: ApprovalItem): string {
   if (row.reimbursementStatus === 'payment_uploaded') return '#17a2b8'
+  if (row.reimbursementStatus === 'paid') return '#e6a23c'
   if (row.status === 'approved' || row.reimbursementStatus === 'approved') return '#409eff'
   return ''
 }
@@ -3068,6 +3348,7 @@ function getStatusLabel(status: string): string {
     draft: '草稿',
     pending: '待审批',
     approved: '待付款',
+    paid: '待上传回单',
     rejected: '已驳回',
     payment_uploaded: '待确认',
     completed: '已完成',

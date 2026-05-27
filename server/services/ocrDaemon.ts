@@ -227,10 +227,10 @@ export async function callPaddleOcr(filePath: string): Promise<string> {
       const idx = requestQueue.findIndex(r => r.timer === timer)
       if (idx !== -1) requestQueue.splice(idx, 1)
       // 超时说明常驻进程可能卡住了，重启它
-      console.warn('⚠️ PaddleOCR 识别超时（90秒），重启常驻进程')
+      console.warn('⚠️ PaddleOCR 识别超时（180秒），重启常驻进程')
       cleanup()
-      reject(new Error('PaddleOCR 识别超时（90秒）'))
-    }, 90000)
+      reject(new Error('PaddleOCR 识别超时（180秒）'))
+    }, 180000)
 
     requestQueue.push({ resolve, reject, timer })
 

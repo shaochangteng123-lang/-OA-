@@ -1,6 +1,8 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { VueQueryPlugin } from '@tanstack/vue-query'
+import dayjs from 'dayjs'
+import 'dayjs/locale/zh-cn'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
@@ -15,6 +17,9 @@ import './styles/sidebar-theme.css'
 import { initHolidays } from './utils/holidays.js'
 
 const app = createApp(App)
+
+// 设置 dayjs 全局使用中文 locale（weekStart: 1 即周一为每周起始日）
+dayjs.locale('zh-cn')
 
 // 初始化节假日数据
 initHolidays().catch(console.error)
@@ -38,8 +43,6 @@ app.use(VueQueryPlugin, {
     },
   },
 })
-app.use(ElementPlus, {
-  locale: zhCn,
-})
+app.use(ElementPlus, { locale: zhCn })
 
 app.mount('#app')

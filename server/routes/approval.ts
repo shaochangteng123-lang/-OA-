@@ -84,7 +84,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const typeFilter = userRole === 'admin'
       ? `AND (
           ai.type IN ('reimbursement_basic', 'reimbursement_large')
-          OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
+          OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
         )`
       : `AND ai.target_type = 'reimbursement'`
 
@@ -92,7 +92,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     const reimbursementTypeFilter = userRole === 'admin'
       ? `AND (
           r.type IN ('basic', 'large')
-          OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
+          OR (r.type = 'business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
         )`
       : ''
 
@@ -180,7 +180,7 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
     const params: any[] = []
 
     // 默认只查 approved，如果传了 status 则按传入的查（限制允许的状态值）
-    const allowedStatuses = ['approved', 'payment_uploaded', 'completed']
+    const allowedStatuses = ['approved', 'paid', 'payment_uploaded', 'completed']
     if (status) {
       if (!allowedStatuses.includes(status)) {
         return res.status(400).json({
@@ -237,6 +237,8 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
         applicantName: r.applicant_name,
         applicantAvatar: r.applicant_avatar,
         approveTime: formatDateTime(r.approve_time),
+        paidTime: formatDateTime(r.paid_time),
+        paidBy: r.paid_by,
         payTime: formatDateTime(r.pay_time),
         paymentUploadTime: formatDateTime(r.payment_upload_time),
         paymentProofPath: r.payment_proof_path,
@@ -530,9 +532,9 @@ router.get('/by-target', requireAuth, async (req, res) => {
 
     // 获取报销单最新状态（用于前端实时展示）
     const reimbursement = await db.prepare(`
-      SELECT status, description, payment_proof_path, pay_time, payment_upload_time, completed_time, receipt_confirmed_by, payment_batch_id
+      SELECT status, description, payment_proof_path, pay_time, paid_time, paid_by, payment_upload_time, completed_time, receipt_confirmed_by, payment_batch_id
       FROM reimbursements WHERE id = ?
-    `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null; payment_batch_id: string | null } | undefined
+    `).get(targetId) as { status: string; description: string | null; payment_proof_path: string | null; pay_time: string | null; paid_time: string | null; paid_by: string | null; payment_upload_time: string | null; completed_time: string | null; receipt_confirmed_by: string | null; payment_batch_id: string | null } | undefined
 
     // 查询管理员和总经理的名字（用于审批流程显示）
     const adminUser = await db.prepare(`
@@ -566,6 +568,8 @@ router.get('/by-target', requireAuth, async (req, res) => {
         paymentProofPath: reimbursement?.payment_proof_path,
         paymentBatchId: reimbursement?.payment_batch_id,
         payTime: reimbursement?.pay_time ? formatDateTime(reimbursement.pay_time) : null,
+        paidTime: reimbursement?.paid_time ? formatDateTime(reimbursement.paid_time) : null,
+        paidBy: reimbursement?.paid_by || null,
         paymentUploadTime: reimbursement?.payment_upload_time ? formatDateTime(reimbursement.payment_upload_time) : null,
         completedTime: reimbursement?.completed_time ? formatDateTime(reimbursement.completed_time) : null,
         receiptConfirmedBy: reimbursement?.receipt_confirmed_by,
@@ -613,7 +617,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
       conditions.push(`(
         ai.target_type != 'reimbursement'
         OR r.type IN ('basic', 'large')
-        OR (r.type = 'business' AND r.status IN ('approved', 'payment_uploaded', 'completed'))
+        OR (r.type = 'business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
       )`)
     }
 
@@ -636,6 +640,8 @@ router.get('/pending', requireAdmin, async (req, res) => {
         conditions.push(`ai.status = 'pending'`)
       } else if (status === 'approved') {
         conditions.push(`ai.status = 'approved' AND r.status = 'approved'`)
+      } else if (status === 'paid') {
+        conditions.push(`r.status = 'paid'`)
       } else if (status === 'payment_uploaded') {
         conditions.push(`r.status = 'payment_uploaded'`)
       }
@@ -2235,6 +2241,24 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'rejected'
       `).get() as { count: number }
       data.probationRejected = probationRejected.count
+    }
+
+    // 所有用户: 未读日志评论数
+    const unreadComments = await db.prepare(`
+      SELECT COUNT(*) as count FROM daily_log_comments c
+      INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+      WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+    `).get(userId, userId) as { count: number }
+    data.unreadLogComments = unreadComments.count
+
+    // GM/Admin: 未读团队日志回复数（别人回复了自己的评论）
+    if (user.role === 'general_manager' || user.role === 'admin' || user.role === 'super_admin') {
+      const unreadReplies = await db.prepare(`
+        SELECT COUNT(*) as count FROM daily_log_comments c
+        INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
+        WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+      `).get(userId, userId) as { count: number }
+      data.unreadTeamLogReplies = unreadReplies.count
     }
 
     res.json({ success: true, data })

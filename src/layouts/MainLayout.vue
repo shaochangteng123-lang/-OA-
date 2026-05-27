@@ -102,11 +102,12 @@
               tooltip-content="今日日志"
             />
             <SidebarMenuItem
-              path="/history"
-              label="历史日志"
-              :icon="Document"
+              v-if="isGeneralManager || isAdmin"
+              path="/team-logs"
+              label="团队日志"
+              :icon="Notebook"
               :collapsed="sidebarCollapsed"
-              tooltip-content="历史日志"
+              tooltip-content="团队日志"
             />
           </SidebarGroup>
 
@@ -380,7 +381,6 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { api } from '@/utils/api'
 import {
   Calendar,
-  Document,
   FolderOpened,
   Collection,
   Grid,

@@ -102,7 +102,8 @@ function handlePrint() {
   invoices.value.forEach((inv, index) => {
     let imgSrc = ''
     if (isImage(inv.filePath)) {
-      imgSrc = toFileUrl(inv.filePath)
+      // 新窗口是 about:blank，必须用绝对 URL
+      imgSrc = window.location.origin + toFileUrl(inv.filePath)
     } else {
       const canvas = pdfMainCanvases[index]
       if (canvas) {
@@ -151,7 +152,12 @@ function goBack() {
 // 渲染 PDF 到 canvas
 async function renderPdf(filePath: string, mainCanvas: HTMLCanvasElement | null, thumbCanvas: HTMLCanvasElement | null) {
   try {
-    const loadingTask = pdfjsLib.getDocument(filePath)
+    const loadingTask = pdfjsLib.getDocument({
+      url: filePath,
+      cMapUrl: '/cmaps/',
+      cMapPacked: true,
+      standardFontDataUrl: '/standard_fonts/',
+    })
     const pdf = await loadingTask.promise
     const page = await pdf.getPage(1)
 

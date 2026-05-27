@@ -2,10 +2,19 @@
   <div class="history-container">
     <div class="page-header">
       <div class="header-left">
-        <h1 class="page-title">历史日志</h1>
-        <p class="page-subtitle">查看和管理历史工作日志</p>
+        <h1 class="page-title">历史日志（归档）</h1>
+        <p class="page-subtitle">此处为旧版富文本日志归档，仅供查阅。新版结构化项目日志请前往「项目日志」</p>
       </div>
     </div>
+
+    <el-alert
+      type="info"
+      :closable="false"
+      show-icon
+      title="已迁移至结构化项目日志"
+      description="自 2026 年 5 月起，工作日志改为按项目维度录入，可生成甘特图和 Word 报告。本页面保留旧版日志的查阅入口。"
+      style="margin-bottom: 12px"
+    />
 
     <el-card class="filter-card" shadow="never">
       <el-form :inline="true">

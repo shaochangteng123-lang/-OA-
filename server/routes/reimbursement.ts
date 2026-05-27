@@ -1320,18 +1320,13 @@ router.get('/records', requireAuth, async (req, res) => {
 
     const { db } = await import('../db/index.js')
 
-    // 构建查询条件（报销统计显示所有历史数据，包括已删除的，但排除草稿状态）
-    let whereClause = 'WHERE user_id = ? AND status != ?'
-    const params: any[] = [userId, 'draft']
+    // 构建查询条件（报销统计，包括已删除的，默认只显示已完成）
+    let whereClause = 'WHERE user_id = ? AND status = ?'
+    const params: any[] = [userId, (status as string) || 'completed']
 
     if (type) {
       whereClause += ' AND type = ?'
       params.push(type)
-    }
-
-    if (status) {
-      whereClause += ' AND status = ?'
-      params.push(status)
     }
 
     if (startDate) {
@@ -1835,10 +1830,10 @@ router.get('/list', requireAuth, async (req, res) => {
       whereClause += ' AND created_at >= ? AND created_at <= ?'
       params.push(startDateTime, endDateTime)
     } else {
-      // 如果没有指定日期范围，默认只显示当月数据，但草稿始终显示（跨月草稿不能被过滤掉）
+      // 默认显示当月创建的数据，以及所有历史未完成的记录（未完成的跨月数据始终可见）
       const now = new Date()
       const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
-      whereClause += ' AND (status = \'draft\' OR created_at >= ?)'
+      whereClause += " AND (created_at >= ? OR status NOT IN ('completed', 'withdrawn'))"
       params.push(firstDayOfMonth.toISOString())
     }
 
@@ -2269,6 +2264,60 @@ router.post('/:id/verify-proof', requireAdmin, uploadPaymentProof.single('paymen
 
 /**
  * 提交已验证的付款回单（支持多张回单）
+/**
+ * 管理员确认付款（待付款 → 待上传回单）
+ * POST /api/reimbursement/:id/confirm-payment
+ */
+router.post('/:id/confirm-payment', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params
+    const currentUserId = req.session.userId!
+    const currentUserName = req.session.user?.name
+
+    const { db } = await import('../db/index.js')
+
+    const reimbursement = await db.prepare('SELECT * FROM reimbursements WHERE id = ?').get(id) as any
+    if (!reimbursement) {
+      return res.status(404).json({ success: false, message: '报销单不存在' })
+    }
+
+    if (reimbursement.status !== 'approved') {
+      return res.status(400).json({ success: false, message: '只有待付款状态的报销单才能确认付款' })
+    }
+
+    const now = new Date().toISOString()
+
+    const approvalInstance = await db.prepare(`
+      SELECT id FROM approval_instances
+      WHERE target_id = ? AND target_type = 'reimbursement'
+      ORDER BY created_at DESC LIMIT 1
+    `).get(id) as { id: string } | undefined
+
+    await db.transaction(async (client) => {
+      await txRun(client, `
+        UPDATE reimbursements
+        SET status = 'paid', paid_time = ?, paid_by = ?, updated_at = ?
+        WHERE id = ?
+      `, now, currentUserName || currentUserId, now, id)
+
+      if (approvalInstance) {
+        const { nanoid } = await import('nanoid')
+        const recordId = nanoid()
+        await txRun(client, `
+          INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, recordId, approvalInstance.id, 98, currentUserId, 'payment_confirmed', '管理员已确认付款', now)
+      }
+    })
+
+    res.json({ success: true, message: '已确认付款，请上传银行回单' })
+  } catch (error) {
+    console.error('❌ 确认付款失败:', error)
+    res.status(500).json({ success: false, message: '操作失败' })
+  }
+})
+
+/**
  * POST /api/reimbursement/:id/complete-with-proof
  */
 router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
@@ -2291,8 +2340,8 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       return res.status(404).json({ success: false, message: '报销单不存在' })
     }
 
-    if (reimbursement.status !== 'approved') {
-      return res.status(400).json({ success: false, message: '只有已审批通过的报销单才能付款' })
+    if (reimbursement.status !== 'paid') {
+      return res.status(400).json({ success: false, message: '只有已确认付款的报销单才能上传回单' })
     }
 
     // 使用服务端缓存的金额，防止客户端篡改，严格校验目标和验证人
@@ -2565,7 +2614,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           description, business_type as businessType, client,
           user_id as userId, applicant_name as applicant,
           submit_time as submitTime, approve_time as approveTime,
-          approver, pay_time as payTime, payment_proof_path as paymentProofPath,
+          approver, pay_time as payTime, paid_time as paidTime, paid_by as paidBy,
+          payment_proof_path as paymentProofPath,
           payment_upload_time as paymentUploadTime, completed_time as completedTime,
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
@@ -2589,7 +2639,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           description, business_type as businessType, client,
           user_id as userId, applicant_name as applicant,
           submit_time as submitTime, approve_time as approveTime,
-          approver, pay_time as payTime, payment_proof_path as paymentProofPath,
+          approver, pay_time as payTime, paid_time as paidTime, paid_by as paidBy,
+          payment_proof_path as paymentProofPath,
           payment_upload_time as paymentUploadTime, completed_time as completedTime,
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
@@ -2613,7 +2664,8 @@ router.get('/:id', requireAuth, async (req, res) => {
           description, business_type as businessType, client,
           user_id as userId, applicant_name as applicant,
           submit_time as submitTime, approve_time as approveTime,
-          approver, pay_time as payTime, payment_proof_path as paymentProofPath,
+          approver, pay_time as payTime, paid_time as paidTime, paid_by as paidBy,
+          payment_proof_path as paymentProofPath,
           payment_upload_time as paymentUploadTime, completed_time as completedTime,
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
@@ -2685,6 +2737,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       ...reimbursement,
       submitTime: formatDateTime((reimbursement as any).submitTime),
       approveTime: formatDateTime((reimbursement as any).approveTime),
+      paidTime: formatDateTime((reimbursement as any).paidTime),
       payTime: formatDateTime((reimbursement as any).payTime),
       paymentUploadTime: formatDateTime((reimbursement as any).paymentUploadTime),
       completedTime: formatDateTime((reimbursement as any).completedTime),

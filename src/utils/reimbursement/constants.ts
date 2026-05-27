@@ -50,6 +50,9 @@ export const REIMBURSEMENT_STATUS = {
   DRAFT: 'draft',
   PENDING: 'pending',
   APPROVED: 'approved',
+  PAID: 'paid',
+  PAYMENT_UPLOADED: 'payment_uploaded',
+  COMPLETED: 'completed',
   REJECTED: 'rejected',
 } as const
 
@@ -57,7 +60,10 @@ export const REIMBURSEMENT_STATUS = {
 export const STATUS_TEXT_MAP: Record<string, string> = {
   draft: '待提交',
   pending: '待审批',
-  approved: '已通过',
+  approved: '待付款',
+  paid: '待上传回单',
+  payment_uploaded: '待确认',
+  completed: '已完成',
   rejected: '已驳回',
 }
 
@@ -65,7 +71,10 @@ export const STATUS_TEXT_MAP: Record<string, string> = {
 export const STATUS_TYPE_MAP: Record<string, string> = {
   draft: 'info',
   pending: 'warning',
-  approved: 'success',
+  approved: 'primary',
+  paid: 'warning',
+  payment_uploaded: 'info',
+  completed: 'success',
   rejected: 'danger',
 }
 

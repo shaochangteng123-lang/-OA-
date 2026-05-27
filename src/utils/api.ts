@@ -30,11 +30,11 @@ api.interceptors.response.use(
       // 对于检查会话的 401 错误，静默处理
       const isCheckSessionRequest =
         error.config?.url === '/api/auth/user' && error.config?.method === 'get'
+      const isSilent401 = isCheckSessionRequest || error.config?.url?.includes('/worklog-ai/complete')
 
       switch (error.response.status) {
         case 401:
-          // 如果是检查会话请求，不显示错误提示和重定向
-          if (!isCheckSessionRequest) {
+          if (!isSilent401) {
             ElMessage.error('未登录或登录已过期，请重新登录')
             // 避免在已经在登录页时重复重定向
             if (window.location.pathname !== '/login') {
@@ -61,7 +61,8 @@ api.interceptors.response.use(
       const silentUrls = [
         '/api/approval/pending-counts',
         '/api/auth/user',
-        '/api/reimbursement/upload-deduction-invoice'
+        '/api/reimbursement/upload-deduction-invoice',
+        '/api/worklog-ai/complete'
       ]
       const requestUrl = error.config?.url || ''
       if (!silentUrls.some(url => requestUrl.includes(url))) {

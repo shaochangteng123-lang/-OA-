@@ -108,14 +108,15 @@ function extractPayer(text: string, textNoSpace: string): string {
   }
 
   // 2. 银行回单表格格式：第一个"户名"后面的内容为付款方
-  const tableMatch = text.match(/户\s*"?\s*名\s*\|?\s*([^|户\n]+)/i)
+  // 兼容OCR将"户名"识别为"户：\n名"的情况（工行回单常见）
+  const tableMatch = text.match(/户\s*[：:"]?\s*名\s*\|?\s*([^|户\n]+)/i)
   if (tableMatch?.[1]?.trim()) {
     const name = tableMatch[1].replace(/[|"]/g, '').trim()
     if (name.length >= 2) return name
   }
 
   // 3. 从去空格文本中匹配
-  const noSpaceMatch = textNoSpace.match(/户名[|]?([^|户账\n]{2,20})/)
+  const noSpaceMatch = textNoSpace.match(/户[：:]?名[|]?([^|户账]{2,20})/)
   if (noSpaceMatch?.[1]) return noSpaceMatch[1]
 
   return ''
@@ -139,7 +140,8 @@ function extractPayee(text: string, textNoSpace: string): string {
   }
 
   // 2. 银行回单表格格式：第二个"户名"后面的内容为收款方
-  const allNameMatches = [...text.matchAll(/户\s*"?\s*名\s*\|?\s*([^|户\n]*)/gi)]
+  // 兼容OCR将"户名"识别为"户：\n名"的情况（工行回单常见）
+  const allNameMatches = [...text.matchAll(/户\s*[：:"]?\s*名\s*\|?\s*([^|户\n]*)/gi)]
   if (allNameMatches.length >= 2) {
     const name = allNameMatches[1][1].replace(/[|"]/g, '').trim()
     if (name.length >= 2 && name !== '付款' && name !== '收款') return name
@@ -164,8 +166,8 @@ function extractPayee(text: string, textNoSpace: string): string {
     }
   }
 
-  // 4. 从去空格文本中匹配第二个户名
-  const noSpaceMatches = [...textNoSpace.matchAll(/户名[|]?([^|户账]{2,20})/g)]
+  // 4. 从去空格文本中匹配第二个户名（兼容"户：名"格式）
+  const noSpaceMatches = [...textNoSpace.matchAll(/户[：:]?名[|]?([^|户账]{2,20})/g)]
   if (noSpaceMatches.length >= 2 && noSpaceMatches[1][1]) {
     const name = noSpaceMatches[1][1]
     if (name !== '付款' && name !== '收款') return name

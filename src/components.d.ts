@@ -7,6 +7,7 @@ export {}
 
 declare module 'vue' {
   export interface GlobalComponents {
+    AiCompletionPopup: typeof import('./components/worklog/AiCompletionPopup.vue')['default']
     BubbleMenu: typeof import('./components/worklog/BubbleMenu.vue')['default']
     ColorLabelPanel: typeof import('./components/calendar/ColorLabelPanel.vue')['default']
     CustomHeadingView: typeof import('./components/worklog/CustomHeadingView.vue')['default']
@@ -36,6 +37,8 @@ declare module 'vue' {
     ElForm: typeof import('element-plus/es')['ElForm']
     ElFormItem: typeof import('element-plus/es')['ElFormItem']
     ElIcon: typeof import('element-plus/es')['ElIcon']
+    ElImage: typeof import('element-plus/es')['ElImage']
+    ElImageViewer: typeof import('element-plus/es')['ElImageViewer']
     ElInput: typeof import('element-plus/es')['ElInput']
     ElInputNumber: typeof import('element-plus/es')['ElInputNumber']
     ElOption: typeof import('element-plus/es')['ElOption']
@@ -94,6 +97,13 @@ declare module 'vue' {
     TypeSelector: typeof import('./components/reimbursement/TypeSelector.vue')['default']
     WeekHeader: typeof import('./components/calendar/WeekHeader.vue')['default']
     WeekView: typeof import('./components/calendar/WeekView.vue')['default']
+    WorklogAiDrawer: typeof import('./components/worklog-v2/WorklogAiDrawer.vue')['default']
+    WorklogAttachments: typeof import('./components/worklog-v2/WorklogAttachments.vue')['default']
+    WorklogContractDialog: typeof import('./components/worklog-v2/WorklogContractDialog.vue')['default']
+    WorklogEntryCard: typeof import('./components/worklog-v2/WorklogEntryCard.vue')['default']
+    WorklogEntryForm: typeof import('./components/worklog-v2/WorklogEntryForm.vue')['default']
+    WorklogFollowUpReminder: typeof import('./components/WorklogFollowUpReminder.vue')['default']
+    WorklogGanttChart: typeof import('./components/worklog-v2/WorklogGanttChart.vue')['default']
   }
   export interface ComponentCustomProperties {
     vLoading: typeof import('element-plus/es')['ElLoadingDirective']

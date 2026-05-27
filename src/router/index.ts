@@ -29,7 +29,7 @@ const routes: RouteRecordRaw[] = [
       {
         path: '',
         name: 'Home',
-        component: () => import('@/views/Home.vue'),
+        component: () => import('@/views/DailyLog.vue'),
         meta: { title: '今日日志' },
       },
       {
@@ -37,6 +37,30 @@ const routes: RouteRecordRaw[] = [
         name: 'History',
         component: () => import('@/views/History.vue'),
         meta: { title: '历史日志' },
+      },
+      {
+        path: '/worklog-projects',
+        name: 'WorklogProjectList',
+        component: () => import('@/views/WorklogProjectList.vue'),
+        meta: { title: '项目动态' },
+      },
+      {
+        path: '/worklog-reports',
+        name: 'WorklogReports',
+        component: () => import('@/views/WorklogReports.vue'),
+        meta: { title: '日志中心', requiresRole: ['super_admin', 'admin', 'general_manager'] },
+      },
+      {
+        path: '/worklog-dicts',
+        name: 'WorklogDictManager',
+        component: () => import('@/views/WorklogDictManager.vue'),
+        meta: { title: '日志管理', requiresRole: ['super_admin', 'admin', 'general_manager'] },
+      },
+      {
+        path: '/team-logs',
+        name: 'TeamDailyLogs',
+        component: () => import('@/views/TeamDailyLogs.vue'),
+        meta: { title: '团队日志', requiresRole: ['super_admin', 'admin', 'general_manager'] },
       },
       {
         path: '/basic-reimbursement',

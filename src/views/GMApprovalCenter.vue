@@ -312,6 +312,7 @@
                   style="width: 130px"
                 >
                   <el-option label="待付款" value="approved" />
+                  <el-option label="待上传回单" value="paid" />
                   <el-option label="待确认" value="payment_uploaded" />
                   <el-option label="已完成" value="completed" />
                 </el-select>
@@ -514,7 +515,7 @@
             <!-- 2. 审批记录（如果有，显示详细的历史操作记录） -->
             <template v-if="approvalRecords.length > 0">
               <el-timeline-item
-                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded')"
+                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
                 :key="record.id"
                 :timestamp="formatDate(record.actionTime)"
                 placement="top"
@@ -591,19 +592,32 @@
               </div>
             </el-timeline-item>
 
-              <!-- 3. 财务付款：approved及之后的状态才显示 -->
+              <!-- 3. 确认付款 -->
               <el-timeline-item
-                v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                :timestamp="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? (currentApprovalRecord.payTime ? formatDate(currentApprovalRecord.payTime) : '') : '待处理'"
+                v-if="['approved', 'paid', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.paidTime ? formatDate(currentApprovalRecord.paidTime) : '')"
                 placement="top"
-                :type="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) ? 'success' : 'info'"
+                :type="currentApprovalRecord.status === 'approved' ? 'warning' : 'success'"
               >
                 <div class="timeline-content">
-                  <div class="timeline-title" :class="{ 'timeline-pending': !['payment_uploaded', 'completed'].includes(currentApprovalRecord.status) }">财务付款</div>
+                  <div class="timeline-title">确认付款</div>
                   <div class="timeline-desc">
-                    <template v-if="['payment_uploaded', 'completed'].includes(currentApprovalRecord.status)">财务已付款</template>
-                    <template v-else>等待财务付款...</template>
+                    <template v-if="currentApprovalRecord.status === 'approved'">等待财务确认付款...</template>
+                    <template v-else>{{ (currentApprovalRecord.paidBy || '财务') + ' 已确认付款' }}</template>
                   </div>
+                </div>
+              </el-timeline-item>
+
+              <!-- 3.5 待上传回单 -->
+              <el-timeline-item
+                v-if="currentApprovalRecord.status === 'paid'"
+                timestamp="待上传回单"
+                placement="top"
+                type="warning"
+              >
+                <div class="timeline-content">
+                  <div class="timeline-title">上传付款回单</div>
+                  <div class="timeline-desc">等待财务上传付款回单...</div>
                 </div>
               </el-timeline-item>
 
@@ -867,6 +881,8 @@ interface ApprovalProcessRecord {
   approveTime?: string
   approver?: string
   rejectReason?: string
+  paidTime?: string
+  paidBy?: string
   payTime?: string
   paymentUploadTime?: string
   completedTime?: string
@@ -883,7 +899,7 @@ interface ApprovalRecordItem {
   approverId: string
   approverName: string
   approverAvatar: string | null
-  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'resubmit'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'payment_confirmed' | 'upload_receipt' | 'resubmit'
   comment: string | null
   actionTime: string
 }
@@ -1455,6 +1471,12 @@ async function loadApprovalRecords(reimbursementId: string) {
         if (res.data.data.payTime) {
           currentApprovalRecord.value.payTime = res.data.data.payTime
         }
+        if (res.data.data.paidTime) {
+          currentApprovalRecord.value.paidTime = res.data.data.paidTime
+        }
+        if (res.data.data.paidBy) {
+          currentApprovalRecord.value.paidBy = res.data.data.paidBy
+        }
         if (res.data.data.paymentUploadTime) {
           currentApprovalRecord.value.paymentUploadTime = res.data.data.paymentUploadTime
         }
@@ -1646,6 +1668,7 @@ function getStatusLabel(status: string) {
     draft: '草稿',
     pending: '待审批',
     approved: '待付款',
+    paid: '待上传回单',
     payment_uploaded: '待确认',
     completed: '已完成',
     rejected: '已驳回',

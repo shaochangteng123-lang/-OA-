@@ -439,7 +439,7 @@ async function matchReimbursement(
     FROM reimbursements r
     JOIN users u ON r.user_id = u.id
     LEFT JOIN employee_profiles ep ON ep.user_id = r.user_id
-    WHERE r.status = 'approved' AND r.is_deleted = false
+    WHERE r.status = 'paid' AND r.is_deleted = false
   `
   const params: any[] = []
 
@@ -576,7 +576,7 @@ export async function processBankReceiptPdf(
   }
 
   // 并行 OCR（常驻进程支持队列，最多同时发 3 个请求）
-  const OCR_CONCURRENCY = 3
+  const OCR_CONCURRENCY = 1
   console.log(`🔍 开始并行 OCR，共 ${ocrTasks.length} 张图片（并发数: ${OCR_CONCURRENCY}）...`)
   for (let i = 0; i < ocrTasks.length; i += OCR_CONCURRENCY) {
     const batch = ocrTasks.slice(i, i + OCR_CONCURRENCY)

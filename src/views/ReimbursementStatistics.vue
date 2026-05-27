@@ -85,6 +85,7 @@
                 <el-option label="待审批" value="pending" />
                 <el-option label="已驳回" value="rejected" />
                 <el-option label="待付款" value="approved" />
+                <el-option label="待上传回单" value="paid" />
                 <el-option label="待确认" value="payment_uploaded" />
                 <el-option label="已完成" value="completed" />
               </el-select>
@@ -249,7 +250,7 @@
                 <!-- 2. 审批历史记录 -->
                 <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
                   <el-timeline-item
-                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => r.action !== 'payment_uploaded')"
+                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
                     :key="record.id"
                     :timestamp="record.actionTime"
                     placement="top"
@@ -337,16 +338,29 @@
                   </div>
                 </el-timeline-item>
 
-                <!-- 3. 财务付款 -->
+                <!-- 3. 确认付款 -->
                 <el-timeline-item
-                  v-if="!isDeductionOnly && ['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
-                  :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.payTime || '')"
+                  v-if="!isDeductionOnly && ['approved', 'paid', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
+                  :timestamp="currentApprovalRecord.status === 'approved' ? '待付款' : (currentApprovalRecord.paidTime || currentApprovalRecord.payTime || '')"
                   placement="top"
                   :type="currentApprovalRecord.status === 'approved' ? 'warning' : 'success'"
                 >
                   <div class="timeline-content">
-                    <div class="timeline-title">财务付款</div>
-                    <div class="timeline-desc">{{ currentApprovalRecord.status === 'approved' ? '等待财务付款...' : '财务已付款' }}</div>
+                    <div class="timeline-title">确认付款</div>
+                    <div class="timeline-desc">{{ currentApprovalRecord.status === 'approved' ? '等待财务确认付款...' : ('财务' + (currentApprovalRecord.paidBy || '') + '已确认付款') }}</div>
+                  </div>
+                </el-timeline-item>
+
+                <!-- 3.5 上传回单（待上传回单状态时显示下一步提示） -->
+                <el-timeline-item
+                  v-if="!isDeductionOnly && currentApprovalRecord.status === 'paid'"
+                  timestamp="待上传回单"
+                  placement="top"
+                  type="warning"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">上传付款回单</div>
+                    <div class="timeline-desc">等待财务上传付款回单...</div>
                   </div>
                 </el-timeline-item>
 
@@ -560,7 +574,7 @@ const statistics = reactive({
 // 筛选表单
 const filterForm = reactive({
   type: '',
-  status: '',
+  status: 'completed',
   // 日期查询类型：年 / 月 / 日
   dateQueryType: 'day' as 'year' | 'month' | 'day',
   // 按日的日期范围
@@ -784,7 +798,7 @@ const handleSearch = () => {
 // 重置
 const handleReset = () => {
   filterForm.type = ''
-  filterForm.status = ''
+  filterForm.status = 'completed'
   filterForm.dateQueryType = 'day'
   filterForm.dateRange = null
   filterForm.yearRange = null
@@ -1041,6 +1055,7 @@ const getStatusText = (status: string) => {
     draft: '草稿',
     pending: '待审批',
     approved: '待付款',
+    paid: '待上传回单',
     rejected: '已驳回',
     payment_uploaded: '待确认',
     completed: '已完成',

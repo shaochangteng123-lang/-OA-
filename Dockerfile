@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
     poppler-utils poppler-data \
     fonts-noto-cjk \
+    libreoffice-core libreoffice-writer libreoffice-calc libreoffice-impress \
     dumb-init wget curl \
     libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -41,7 +42,7 @@ WORKDIR /app
 # ==========================================
 FROM base AS ocr-models
 
-RUN pip3 install --break-system-packages paddlepaddle paddleocr
+RUN pip3 install --break-system-packages paddlepaddle paddleocr openpyxl
 
 RUN PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
