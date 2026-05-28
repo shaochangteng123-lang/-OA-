@@ -395,12 +395,12 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     const fileHash = crypto.createHash('sha256').update(fileBuffer).digest('hex')
     console.log('🔑 文件哈希:', fileHash)
 
-    // 检查普通发票表
+    // 检查普通发票表（排除核减发票记录）
     const existingInvoice = await db.prepare(`
       SELECT ri.file_hash, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
-      WHERE ri.file_hash = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
+      WHERE ri.file_hash = ? AND COALESCE(ri.is_deduction, 0) = 0 AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
 
@@ -409,7 +409,25 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingInvoice.applicant_name} 已上传此发票，请勿重复上传`,
+        message: `${existingInvoice.applicant_name} 已在发票上传中上传此发票，请勿重复上传`,
+      })
+    }
+
+    // 检查普通发票表中的核减发票记录
+    const existingDeductionInInvoices = await db.prepare(`
+      SELECT ri.file_hash, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.file_hash = ? AND COALESCE(ri.is_deduction, 0) = 1 AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingDeductionInInvoices) {
+      // 清理临时文件
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingDeductionInInvoices.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
       })
     }
 
@@ -427,7 +445,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingDeduction.applicant_name} 已在核减上传中上传此发票，请勿重复上传`,
+        message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
       })
     }
 
@@ -601,7 +619,7 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingDeduction.applicant_name} 已在核减上传中上传此发票，请勿重复上传`,
+        message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
       })
     }
 
@@ -755,13 +773,13 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
       })
     }
 
-    // 检查普通发票表（交叉查重）
-    // 包括草稿状态，防止重复使用发票
+    // 检查普通发票表（交叉查重，排除核减发票记录）
     const existingInvoice = await db.prepare(`
       SELECT ri.file_hash, r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE ri.file_hash = ?
+        AND COALESCE(ri.is_deduction, 0) = 0
         AND r.status != 'rejected'
         AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
@@ -772,6 +790,26 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
       return res.status(400).json({
         success: false,
         message: `${existingInvoice.applicant_name} 已在发票上传中上传此发票，请勿重复上传`,
+      })
+    }
+
+    // 检查普通发票表中的核减发票记录
+    const existingDeductionInInvoices = await db.prepare(`
+      SELECT ri.file_hash, r.applicant_name
+      FROM reimbursement_invoices ri
+      JOIN reimbursements r ON ri.reimbursement_id = r.id
+      WHERE ri.file_hash = ?
+        AND COALESCE(ri.is_deduction, 0) = 1
+        AND r.status != 'rejected'
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
+      LIMIT 1
+    `).get(fileHash) as { file_hash: string; applicant_name: string } | undefined
+
+    if (existingDeductionInInvoices) {
+      try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
+      return res.status(400).json({
+        success: false,
+        message: `${existingDeductionInInvoices.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
       })
     }
 
