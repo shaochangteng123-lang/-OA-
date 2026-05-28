@@ -232,6 +232,7 @@ async function onFileChange(file: any): Promise<void> {
       const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === fileHash)
       if (duplicateInDeduction) {
         showUploadError('此核减发票已上传，请勿重复上传')
+        uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
         fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
         return
       }
@@ -240,6 +241,7 @@ async function onFileChange(file: any): Promise<void> {
       const duplicateInInvoice = props.existingInvoices?.find((inv: any) => inv.fileHash === fileHash)
       if (duplicateInInvoice) {
         showUploadError('此发票已在发票上传中上传，请勿重复上传')
+        uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
         fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
         return
       }

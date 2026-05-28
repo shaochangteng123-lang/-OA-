@@ -63,6 +63,8 @@ export function useInvoice() {
   const receiptAbortMap = new Map<string | number, AbortController>()
   // 正在识别中的发票上传请求：fileUid → AbortController
   const invoiceAbortMap = new Map<string | number, AbortController>()
+  // 正在处理中的发票号码集合（用于并发上传时的查重）
+  const pendingInvoiceNumbers = new Set<string>()
 
   // 计算总金额（所有发票金额的总和，不考虑核减）
   const totalAmount = computed(() => {
@@ -140,6 +142,9 @@ export function useInvoice() {
       duration: 0, // 持续显示，直到识别完成
     })
 
+    // 追踪当前处理的发票号码，用于异常时清理 pendingInvoiceNumbers
+    let currentInvoiceNumber = ''
+
     try {
 
       const uploadFormData = new FormData()
@@ -173,13 +178,20 @@ export function useInvoice() {
           return
         }
 
-        // 校验重复（本地）
-        const duplicateResult = validateInvoiceDuplicate(invoiceNumber, invoiceNumbers.value)
+        // 校验重复（本地已有 + 并发处理中的发票号码）
+        const allKnownNumbers = [...invoiceNumbers.value, ...pendingInvoiceNumbers]
+        const duplicateResult = validateInvoiceDuplicate(invoiceNumber, allKnownNumbers)
         if (!duplicateResult.valid) {
           loadingMessage.close()
           showUploadError(duplicateResult.message)
           removeFromFileList(file.uid, fileListParam)
           return
+        }
+
+        // 标记为正在处理，防止并发上传的相同发票通过查重
+        if (invoiceNumber) {
+          pendingInvoiceNumbers.add(invoiceNumber)
+          currentInvoiceNumber = invoiceNumber
         }
 
         // 校验重复（数据库全局查重）
@@ -196,6 +208,7 @@ export function useInvoice() {
             if (dupData.success && dupData.data?.duplicate) {
               loadingMessage.close()
               showUploadError(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
+              pendingInvoiceNumbers.delete(invoiceNumber)
               removeFromFileList(file.uid, fileListParam)
               return
             }
@@ -210,6 +223,7 @@ export function useInvoice() {
         if (!dateResult.valid) {
           loadingMessage.close()
           showUploadError(dateResult.message)
+          pendingInvoiceNumbers.delete(invoiceNumber)
           removeFromFileList(file.uid, fileListParam)
           return
         }
@@ -224,6 +238,9 @@ export function useInvoice() {
           fileHash: result.data.fileHash || '',
           fileUid: file.uid,
         })
+
+        // 已加入 invoiceList，从 pending 集合中移除
+        pendingInvoiceNumbers.delete(invoiceNumber)
 
         loadingMessage.close()
         ElMessage.success(`${file.name} 识别成功！`)
@@ -248,6 +265,10 @@ export function useInvoice() {
     } finally {
       // 清理 AbortController
       invoiceAbortMap.delete(file.uid)
+      // 确保 pending 集合被清理（正常流程中已在具体分支清理，此处兜底）
+      if (currentInvoiceNumber) {
+        pendingInvoiceNumbers.delete(currentInvoiceNumber)
+      }
     }
   }
 
