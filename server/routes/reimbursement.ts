@@ -751,7 +751,7 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
       try { fs.unlinkSync(tempFilePath) } catch (e) { /* 忽略 */ }
       return res.status(400).json({
         success: false,
-        message: `${existingDeduction.applicant_name} 已上传此核减发票，请勿重复上传`,
+        message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
       })
     }
 
