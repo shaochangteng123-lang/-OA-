@@ -77,12 +77,12 @@ export const usePendingStore = defineStore('pending', () => {
     await fetchPendingCounts()
   }
 
-  // 启动轮询（每10秒自动刷新，更快响应）
+  // 启动轮询（每3秒自动刷新）
   function startPolling() {
     stopPolling()
     pollingTimer = window.setInterval(() => {
       fetchPendingCounts()
-    }, 10000) // 10秒
+    }, 3000) // 3秒
   }
 
   // 停止轮询

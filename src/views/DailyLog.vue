@@ -1,5 +1,9 @@
 <template>
   <div class="daily-log-page">
+    <!-- 未读评论提示条 -->
+    <div v-if="showUnreadHint" class="comment-hint-bar" @click="goToUnreadComment">
+      有 {{ unreadCommentCount }} 条新评论，点击查看
+    </div>
     <!-- 左栏：今日日志编辑 -->
     <div class="left-panel">
       <!-- 状态标签 -->
@@ -193,6 +197,48 @@
             <span class="supplement-list-time">{{ formatSupplementTime(sup.createdAt) }}</span>
           </div>
           <div class="supplement-list-content rich-content" v-html="sup.content"></div>
+        </div>
+      </div>
+
+      <!-- 评论区（查看历史日志时，有评论才显示） -->
+      <div class="comment-section" v-if="viewingHistory && editingSubmission && editingSubmission.comments && editingSubmission.comments.length > 0">
+        <div class="comment-list">
+          <div v-for="c in editingSubmission.comments" :key="c.id" :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
+            <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
+            <template v-if="c.replyToUserName">
+              <span class="comment-reply-label">回复</span>
+              <span :class="['comment-reply-target', c.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ c.replyToUserName }}</span>
+            </template>
+            <span class="comment-text">{{ c.content }}</span>
+            <span class="comment-time">{{ formatCommentTime(c.createdAt) }}</span>
+            <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setCommentReply(c)">回复</span>
+          </div>
+        </div>
+        <div class="comment-input" v-if="commentReplyTarget">
+          <div class="comment-input-wrap">
+            <div class="reply-hint">
+              回复 @{{ commentReplyTarget.userName }}
+              <span class="reply-cancel" @click="cancelCommentReply()">×</span>
+            </div>
+            <el-input
+              v-model="commentInput"
+              type="textarea"
+              :rows="3"
+              :placeholder="`回复 @${commentReplyTarget.userName}...`"
+              resize="none"
+              @keyup.ctrl.enter="submitComment()"
+            />
+            <div class="comment-input-bottom">
+              <span class="char-count">{{ commentInput.length }} 字</span>
+              <el-button
+                size="small"
+                type="primary"
+                :loading="commentLoading"
+                :disabled="!commentInput.trim()"
+                @click="submitComment()"
+              >回复</el-button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -414,6 +460,9 @@
             @click="handleCalendarDateClick(day)"
           >
             <span class="calendar-day-num">{{ day.dayNum }}</span>
+            <span v-if="day.tag" class="calendar-tag" :class="day.tag === '休' ? 'tag-rest' : 'tag-work'">{{ day.tag }}</span>
+            <span v-if="day.hasUnreadComment" class="calendar-comment-dot unread"></span>
+            <span v-else-if="day.hasComment" class="calendar-comment-dot"></span>
             <span v-if="day.hasLog" class="calendar-dot"></span>
           </div>
         </div>
@@ -477,6 +526,8 @@ import { ChineseOrderedList } from '@/extensions/ChineseOrderedList'
 import { AiCompletion } from '@/extensions/AiCompletion'
 import AiCompletionPopup from '@/components/worklog/AiCompletionPopup.vue'
 import { api } from '@/utils/api'
+import { useAuthStore } from '@/stores/auth'
+import { usePendingStore } from '@/stores/pending'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Sunny,
@@ -550,6 +601,21 @@ const submitting = ref(false)
 const autoSaveTime = ref('')
 const autoSaveTimer = ref<number | null>(null)
 
+const authStore = useAuthStore()
+const pendingStore = usePendingStore()
+
+const commentInput = ref('')
+const commentLoading = ref(false)
+const commentReplyTarget = ref<{ id: string; userName: string } | null>(null)
+const canInitiateComment = computed(() => {
+  const role = authStore.user?.role
+  return role && ['super_admin', 'general_manager'].includes(role)
+})
+
+const showUnreadHint = ref(false)
+const unreadCommentCount = ref(0)
+const isNavigatingToUnread = ref(false)
+
 // 快捷短语
 interface Phrase { id: string; content: string; sort_order: number; created_at: string }
 const phrases = ref<Phrase[]>([])
@@ -578,12 +644,18 @@ interface CalendarDay {
   dateStr: string
   dayNum: number
   hasLog: boolean
+  hasComment: boolean
+  hasUnreadComment: boolean
   isToday: boolean
   isCurrentMonth: boolean
+  tag: '休' | '班' | null
 }
 
 const calendarBaseDate = ref(new Date())
 const calendarLogDates = ref<Set<string>>(new Set())
+const calendarCommentDates = ref<Set<string>>(new Set())
+const calendarUnreadCommentDates = ref<Set<string>>(new Set())
+const calendarHolidayMap = ref<Map<string, { name: string; type: string }>>(new Map())
 const calendarSelectedDate = ref('')
 const calendarPreviewGroup = ref<HistoryGroup | null>(null)
 const calendarPreviewLoading = ref(false)
@@ -592,6 +664,14 @@ const calendarPreviewLoading = ref(false)
 const searchKeyword = ref('')
 const searching = ref(false)
 const searchMode = ref(false)
+
+function getCalendarDayTag(dateStr: string, dayOfWeek: number): '休' | '班' | null {
+  const h = calendarHolidayMap.value.get(dateStr)
+  if (h?.type === 'holiday') return '休'
+  if (h?.type === 'workday') return '班'
+  if (dayOfWeek === 0 || dayOfWeek === 6) return '休'
+  return null
+}
 
 const calendarDays = computed<CalendarDay[]>(() => {
   const base = calendarBaseDate.value
@@ -616,8 +696,11 @@ const calendarDays = computed<CalendarDay[]>(() => {
       dateStr,
       dayNum: d.getDate(),
       hasLog: calendarLogDates.value.has(dateStr),
+      hasComment: calendarCommentDates.value.has(dateStr),
+      hasUnreadComment: calendarUnreadCommentDates.value.has(dateStr),
       isToday: dateStr === todayStr,
       isCurrentMonth: d.getMonth() === base.getMonth(),
+      tag: getCalendarDayTag(dateStr, d.getDay()),
     })
   }
   return days
@@ -707,10 +790,28 @@ async function loadCalendarDates() {
     })
     if (data.success) {
       calendarLogDates.value = new Set(data.data.dates)
+      calendarCommentDates.value = new Set(data.data.commentDates || [])
+      calendarUnreadCommentDates.value = new Set(data.data.unreadCommentDates || [])
     }
   } catch {
     // 静默
   }
+}
+
+async function loadCalendarHolidays() {
+  const days = calendarDays.value
+  if (days.length === 0) return
+  const year = days[0].dateStr.slice(0, 4)
+  try {
+    const { data } = await api.get('/api/holidays', { params: { year } })
+    if (data.success) {
+      const map = new Map<string, { name: string; type: string }>()
+      for (const h of data.data) {
+        map.set(h.date, { name: h.name, type: h.type })
+      }
+      calendarHolidayMap.value = map
+    }
+  } catch { /* ignore */ }
 }
 
 async function handleCalendarDateClick(day: CalendarDay) {
@@ -1565,6 +1666,107 @@ function openEditSubmission(sub: HistorySubmission, group: HistoryGroup) {
   if (group.logId) logId.value = group.logId
   setEditorContent(sub.content || '')
   editor.value?.setEditable(false)
+  commentInput.value = ''
+  commentReplyTarget.value = null
+  markCommentsRead(sub)
+}
+
+function setCommentReply(comment: HistoryComment) {
+  commentReplyTarget.value = { id: comment.id, userName: comment.userName }
+}
+
+function cancelCommentReply() {
+  commentReplyTarget.value = null
+}
+
+async function markCommentsRead(sub: HistorySubmission) {
+  const hasUnread = sub.comments?.some(c => c.isUnread)
+  if (!hasUnread) return
+  try {
+    await api.post('/api/daily-logs/comments/mark-read', { submissionIds: [sub.id] })
+    showUnreadHint.value = false
+    loadCalendarDates()
+    setTimeout(() => pendingStore.fetchPendingCounts(), 500)
+    setTimeout(() => {
+      for (const c of sub.comments) {
+        c.isUnread = false
+      }
+    }, 3000)
+  } catch { /* ignore */ }
+}
+
+async function submitComment() {
+  if (!editingSubmission.value) return
+  const content = commentInput.value.trim()
+  if (!content) return
+
+  commentLoading.value = true
+  try {
+    const replyTo = commentReplyTarget.value?.id || undefined
+    const { data } = await api.post(`/api/daily-logs/comments/${editingSubmission.value.id}/reply`, { content, replyTo })
+    if (data.success) {
+      if (!editingSubmission.value.comments) editingSubmission.value.comments = []
+      editingSubmission.value.comments.push(data.data)
+      commentInput.value = ''
+      commentReplyTarget.value = null
+    }
+  } catch {
+    ElMessage.error('评论失败')
+  } finally {
+    commentLoading.value = false
+  }
+}
+
+function formatCommentTime(iso: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+async function checkUnreadComments() {
+  try {
+    const { data } = await api.get('/api/daily-logs/comments/unread-date')
+    if (data.success && data.data.count > 0) {
+      unreadCommentCount.value = data.data.count
+      showUnreadHint.value = true
+    }
+  } catch { /* ignore */ }
+}
+
+async function goToUnreadComment() {
+  showUnreadHint.value = false
+  isNavigatingToUnread.value = true
+  try {
+    const { data } = await api.get('/api/daily-logs/comments/unread-date')
+    if (data.success && data.data.date) {
+      calendarSelectedDate.value = data.data.date
+      calendarPreviewLoading.value = true
+      const res = await api.get('/api/daily-logs/history', {
+        params: { page: 1, pageSize: 1, startDate: data.data.date, endDate: data.data.date },
+      })
+      if (res.data.success && res.data.data.groups.length > 0) {
+        const group = res.data.data.groups[0] as HistoryGroup
+        calendarPreviewGroup.value = group
+        const sub = group.submissions[0]
+        if (sub) openEditSubmission(sub, group)
+      }
+      calendarPreviewLoading.value = false
+      await nextTick()
+      const unreadEl = document.querySelector('.comment-item-unread')
+      if (unreadEl) {
+        unreadEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    }
+    // 标记已读后刷新 pendingStore，确保后续未读能及时触发提示
+    setTimeout(() => {
+      pendingStore.fetchPendingCounts()
+      isNavigatingToUnread.value = false
+    }, 500)
+  } catch {
+    isNavigatingToUnread.value = false
+    ElMessage.error('加载未读评论失败')
+  }
 }
 
 function enableEditMode() {
@@ -1683,7 +1885,19 @@ onMounted(async () => {
   loadDayInfo()
   loadWeeklySummary()
   loadPhrases()
-  await loadCalendarDates()
+  loadCalendarDates()
+  loadCalendarHolidays()
+  checkUnreadComments()
+})
+
+watch(() => pendingStore.counts.unreadLogComments, (newVal) => {
+  if (newVal > 0 && !isNavigatingToUnread.value) {
+    unreadCommentCount.value = newVal
+    showUnreadHint.value = true
+    loadCalendarDates()
+  } else if (newVal === 0) {
+    loadCalendarDates()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -1692,6 +1906,29 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.comment-hint-bar {
+  width: 100%;
+  padding: 12px 16px;
+  background: #ecf5ff;
+  border: 1px solid #b3d8ff;
+  border-radius: 4px;
+  color: #409eff;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+  animation: flash-hint 0.6s ease-in-out 3;
+}
+
+.comment-hint-bar:hover {
+  background: #d9ecff;
+}
+
+@keyframes flash-hint {
+  0%, 100% { background: #ecf5ff; }
+  50% { background: #409eff; color: #fff; }
+}
+
 .daily-log-page {
   display: flex;
   flex-wrap: wrap;
@@ -2555,6 +2792,60 @@ onBeforeUnmount(() => {
   margin-top: 3px;
 }
 
+.calendar-comment-dot {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 10px;
+  height: 10px;
+  z-index: 2;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23909399'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.calendar-cell.is-selected .calendar-comment-dot {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23909399'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.calendar-cell.is-selected.is-today .calendar-comment-dot {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23909399'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.calendar-cell.is-selected .calendar-comment-dot.unread,
+.calendar-cell.is-selected.is-today .calendar-comment-dot.unread {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23f56c6c'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.calendar-comment-dot.unread {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23f56c6c'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+  animation: comment-pulse 1.5s ease-in-out 3;
+}
+
+@keyframes comment-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+}
+
+.calendar-tag {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 8px;
+  line-height: 1;
+  transform: scale(0.9);
+}
+
+.calendar-tag.tag-rest {
+  color: #f56c6c;
+}
+
+.calendar-tag.tag-work {
+  color: #e6a23c;
+}
+
+.calendar-cell.is-today .calendar-tag {
+  color: rgba(255, 255, 255, 0.8);
+}
+
 /* 日志预览 */
 .calendar-preview {
   background: #fafbfc;
@@ -3073,5 +3364,125 @@ onBeforeUnmount(() => {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid #ebeef5;
+}
+
+/* 评论区 */
+.comment-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed #ebeef5;
+}
+
+.comment-list {
+  margin-bottom: 8px;
+}
+
+.comment-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.comment-item-unread {
+  background: #fdf6ec;
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin: 0 -6px;
+}
+
+.comment-author {
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.comment-author.is-other {
+  color: #409eff;
+}
+
+.comment-author.is-self {
+  color: #67c23a;
+}
+
+.comment-reply-label {
+  color: #909399;
+  font-size: 12px;
+  margin: 0 2px;
+}
+
+.comment-reply-target {
+  font-size: 12px;
+  font-weight: 500;
+  margin-right: 4px;
+}
+
+.comment-reply-target.is-other {
+  color: #409eff;
+}
+
+.comment-reply-target.is-self {
+  color: #67c23a;
+}
+
+.comment-text {
+  color: #606266;
+}
+
+.comment-time {
+  color: #c0c4cc;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.comment-reply-btn {
+  color: #909399;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.comment-reply-btn:hover {
+  color: #409eff;
+}
+
+.reply-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #409eff;
+  padding: 4px 0;
+}
+
+.reply-cancel {
+  cursor: pointer;
+  color: #c0c4cc;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.reply-cancel:hover {
+  color: #f56c6c;
+}
+
+.comment-input {
+  margin-top: 4px;
+}
+
+.comment-input-wrap {
+  width: 100%;
+}
+
+.comment-input-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+}
+
+.char-count {
+  font-size: 11px;
+  color: #c0c4cc;
 }
 </style>

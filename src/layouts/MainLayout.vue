@@ -86,6 +86,7 @@
             :sidebar-collapsed="sidebarCollapsed"
             group-key="office"
             v-model:expanded="groupStates.office.expanded"
+            :has-badge="officeGroupHasBadge"
           >
             <SidebarMenuItem
               path="/calendar"
@@ -100,14 +101,18 @@
               :icon="Notebook"
               :collapsed="sidebarCollapsed"
               tooltip-content="今日日志"
+              :badge="unreadLogCommentsBadge"
+              badge-type="danger"
             />
             <SidebarMenuItem
-              v-if="isGeneralManager || isAdmin"
+              v-if="isGeneralManager || isSuperAdmin"
               path="/team-logs"
               label="团队日志"
               :icon="Notebook"
               :collapsed="sidebarCollapsed"
               tooltip-content="团队日志"
+              :badge="unreadTeamLogRepliesBadge"
+              badge-type="danger"
             />
           </SidebarGroup>
 
@@ -488,9 +493,23 @@ const pendingApprovalCount = computed(() => pendingStore.counts.approvalPending)
 const gmPendingApprovalCount = computed(() => pendingStore.counts.gmApprovalPending)
 const gmProbationPendingCount = computed(() => pendingStore.counts.probationPending)
 
+const unreadLogCommentsBadge = computed(() => {
+  const count = pendingStore.counts.unreadLogComments
+  return count > 0 ? count : undefined
+})
+const unreadTeamLogRepliesBadge = computed(() => {
+  const count = pendingStore.counts.unreadTeamLogReplies
+  return count > 0 ? count : undefined
+})
+
 // 是否是管理员
 const isAdmin = computed(() => {
   return authStore.user?.role === 'super_admin' || authStore.user?.role === 'admin'
+})
+
+// 是否是系统管理员
+const isSuperAdmin = computed(() => {
+  return authStore.user?.role === 'super_admin'
 })
 
 // 是否是总经理
@@ -499,6 +518,11 @@ const isGeneralManager = computed(() => {
 })
 
 // 计算各分组是否有待办事项
+const officeGroupHasBadge = computed(() => {
+  const counts = pendingStore.counts
+  return counts.unreadLogComments > 0 || counts.unreadTeamLogReplies > 0
+})
+
 const financeGroupHasBadge = computed(() => {
   const counts = pendingStore.counts
   // 用户的报销待确认

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import path from 'path'
 import fs from 'fs'
+import archiver from 'archiver'
 import { nanoid } from 'nanoid'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdminOrGM } from '../middleware/auth.js'
@@ -508,7 +509,29 @@ router.get('/calendar-dates', requireAuth, async (req, res) => {
        ORDER BY log_date`,
       userId, startDate, endDate,
     )
-    res.json({ success: true, data: { dates: rows.map(r => r.log_date) } })
+    // 有评论的日期
+    const commentDates = await db.all<{ log_date: string }>(
+      `SELECT DISTINCT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.user_id = ? AND s.log_date >= ? AND s.log_date <= ?`,
+      userId, startDate, endDate,
+    )
+    // 有未读评论的日期
+    const unreadDates = await db.all<{ log_date: string }>(
+      `SELECT DISTINCT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       AND s.log_date >= ? AND s.log_date <= ?`,
+      userId, userId, startDate, endDate,
+    )
+    res.json({
+      success: true,
+      data: {
+        dates: rows.map(r => r.log_date),
+        commentDates: commentDates.map(r => r.log_date),
+        unreadCommentDates: unreadDates.map(r => r.log_date),
+      },
+    })
   } catch (err) {
     console.error('获取日历日期失败:', err)
     res.status(500).json({ success: false, message: '获取日历日期失败' })
@@ -696,6 +719,30 @@ router.get('/history', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('获取历史日志失败:', err)
     res.status(500).json({ success: false, message: '获取历史日志失败' })
+  }
+})
+
+// 获取有未读评论的最早日期
+router.get('/comments/unread-date', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const countRow = await db.get<{ count: number }>(
+      `SELECT COUNT(*) as count FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL`,
+      userId, userId,
+    )
+    const row = await db.get<{ log_date: string }>(
+      `SELECT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       ORDER BY s.log_date DESC LIMIT 1`,
+      userId, userId,
+    )
+    res.json({ success: true, data: { date: row?.log_date || null, count: countRow?.count || 0 } })
+  } catch (err) {
+    console.error('获取未读评论日期失败:', err)
+    res.status(500).json({ success: false, message: '获取未读评论日期失败' })
   }
 })
 
@@ -1291,55 +1338,174 @@ router.get('/weekly-summary/download', requireAuth, async (req, res) => {
       userGroups.get(sub.user_id)!.submissions.push(sub)
     }
 
-    // HTML 转 Word 段落（保留有序列表、段落结构）
+    // HTML 转 Word 段落（保留嵌套列表层级、缩进、加粗、斜体、下划线）
     const htmlToDocxParagraphs = (html: string): any[] => {
       const paragraphs: any[] = []
       if (!html) return paragraphs
 
-      // 解析有序列表 <ol><li><p>...</p></li></ol>
-      const olRegex = /<ol[^>]*>([\s\S]*?)<\/ol>/gi
-      let remaining = html
-      let olMatch
+      // 去掉日期标题行（已在外层输出）
+      html = html.replace(/<p[^>]*class="log-date"[^>]*>[\s\S]*?<\/p>/gi, '')
 
-      while ((olMatch = olRegex.exec(html)) !== null) {
-        const before = html.slice(remaining === html ? 0 : html.indexOf(remaining), olMatch.index)
-        if (before.trim()) {
-          paragraphs.push(...parseParagraphs(before))
-        }
-        const liRegex = /<li[^>]*>([\s\S]*?)<\/li>/gi
-        let liMatch
-        let liIndex = 1
-        while ((liMatch = liRegex.exec(olMatch[1])) !== null) {
-          const liContent = liMatch[1].replace(/<\/?p[^>]*>/gi, '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim()
-          if (liContent) {
-            paragraphs.push(new Paragraph({
-              children: [new TextRun({ text: `${liIndex}. ${liContent}` })],
-              indent: { left: 360 },
-            }))
-            liIndex++
-          }
-        }
-        remaining = html.slice(olMatch.index + olMatch[0].length)
+      const CN_NUMBERS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+        '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十']
+      const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩',
+        '⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱', '⑲', '⑳']
+
+      function buildLabel(depth: number, index: number, listType: string): string {
+        if (listType === 'ul') return '• '
+        const n = index + 1
+        if (depth === 1) return (CN_NUMBERS[index] ?? n) + '、'
+        if (depth === 2) return n + '. '
+        if (depth === 3) return '（' + n + '）'
+        if (depth === 4) return (CIRCLED[index] ?? n + ')') + ' '
+        return '— '
       }
 
-      if (remaining.trim() && remaining !== html) {
-        paragraphs.push(...parseParagraphs(remaining))
-      } else if (remaining === html) {
-        paragraphs.push(...parseParagraphs(html))
+      // 递归处理列表，支持嵌套
+      function processList(listHtml: string, listType: string, depth: number) {
+        // 手动解析顶层 <li> 项（不贪婪匹配，处理嵌套）
+        const items = parseListItems(listHtml)
+        items.forEach((liContent, idx) => {
+          // 提取 li 中的直接文本（在子列表之前的内容）
+          const subListMatch = liContent.match(/<(ol|ul)[^>]*>[\s\S]*$/i)
+          const textPart = subListMatch ? liContent.slice(0, subListMatch.index) : liContent
+          const textClean = textPart.replace(/<\/?p[^>]*>/gi, '')
+          const runs = parseInlineRuns(textClean)
+
+          if (runs.length > 0) {
+            const prefix = buildLabel(depth, idx, listType)
+            runs.unshift(new TextRun({ text: prefix }))
+            const indent = depth * 360
+            paragraphs.push(new Paragraph({ children: runs, indent: { left: indent } }))
+          }
+
+          // 处理子列表
+          if (subListMatch) {
+            const remaining = liContent.slice(subListMatch.index!)
+            const subListRegex = /<(ol|ul)[^>]*>([\s\S]*?)<\/\1>/gi
+            let subMatch
+            while ((subMatch = subListRegex.exec(remaining)) !== null) {
+              processList(subMatch[2], subMatch[1], depth + 1)
+            }
+          }
+        })
+      }
+
+      // 解析顶层 li 元素（处理嵌套标签）
+      function parseListItems(html: string): string[] {
+        const items: string[] = []
+        const liOpenRegex = /<li[^>]*>/gi
+        let liMatch
+        while ((liMatch = liOpenRegex.exec(html)) !== null) {
+          const startIdx = liMatch.index + liMatch[0].length
+          // 找到对应的闭合 </li>，考虑嵌套
+          let depth = 1
+          let i = startIdx
+          while (i < html.length && depth > 0) {
+            if (html.slice(i).match(/^<li[^>]*>/i)) {
+              depth++
+              const m = html.slice(i).match(/^<li[^>]*>/i)!
+              i += m[0].length
+            } else if (html.slice(i, i + 5).toLowerCase() === '</li>') {
+              depth--
+              if (depth === 0) break
+              i += 5
+            } else {
+              i++
+            }
+          }
+          items.push(html.slice(startIdx, i))
+        }
+        return items
+      }
+
+      // 分割顶层块：找顶层 ol/ul（支持嵌套）
+      const topBlocks: { type: string; content: string; start: number; end: number }[] = []
+      const topListRegex = /<(ol|ul)[^>]*>/gi
+      let tlMatch
+      while ((tlMatch = topListRegex.exec(html)) !== null) {
+        const tag = tlMatch[1].toLowerCase()
+        const openEnd = tlMatch.index + tlMatch[0].length
+        // 找对应闭合标签
+        let nestDepth = 1
+        let i = openEnd
+        while (i < html.length && nestDepth > 0) {
+          const openNext = html.slice(i).match(new RegExp(`^<${tag}[^>]*>`, 'i'))
+          const closeNext = html.slice(i).match(new RegExp(`^</${tag}>`, 'i'))
+          if (openNext) { nestDepth++; i += openNext[0].length }
+          else if (closeNext) { nestDepth--; i += closeNext[0].length }
+          else { i++ }
+        }
+        topBlocks.push({ type: tag, content: html.slice(openEnd, i - `</${tag}>`.length), start: tlMatch.index, end: i })
+      }
+
+      // 按顺序处理：列表前的文本 → 列表 → 列表后的文本
+      let pos = 0
+      for (const block of topBlocks) {
+        // 列表前的普通文本
+        if (block.start > pos) {
+          const textBetween = html.slice(pos, block.start).trim()
+          if (textBetween) {
+            const pParts = textBetween.split(/<\/?p[^>]*>/gi).filter(s => s.trim())
+            for (const part of pParts) {
+              const runs = parseInlineRuns(part)
+              if (runs.length > 0) {
+                paragraphs.push(new Paragraph({ children: runs }))
+              }
+            }
+          }
+        }
+        // 处理列表
+        processList(block.content, block.type, 1)
+        pos = block.end
+      }
+      // 剩余文本
+      if (pos < html.length) {
+        const rest = html.slice(pos).trim()
+        if (rest) {
+          const pParts = rest.split(/<\/?p[^>]*>/gi).filter(s => s.trim())
+          for (const part of pParts) {
+            const runs = parseInlineRuns(part)
+            if (runs.length > 0) {
+              paragraphs.push(new Paragraph({ children: runs }))
+            }
+          }
+        }
       }
 
       return paragraphs
 
-      function parseParagraphs(h: string): any[] {
-        const result: any[] = []
-        const pParts = h.split(/<\/?p[^>]*>/gi).filter(s => s.trim())
-        for (const part of pParts) {
-          const text = part.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim()
-          if (text) {
-            result.push(new Paragraph({ children: [new TextRun({ text })] }))
+      function parseInlineRuns(html: string): any[] {
+        const runs: any[] = []
+        const inlineRegex = /<(strong|b|em|i|u)>([\s\S]*?)<\/\1>/gi
+        let lastIndex = 0
+        let inlineMatch
+        while ((inlineMatch = inlineRegex.exec(html)) !== null) {
+          if (inlineMatch.index > lastIndex) {
+            const text = stripTags(html.slice(lastIndex, inlineMatch.index))
+            if (text) runs.push(new TextRun({ text }))
           }
+          const tag = inlineMatch[1].toLowerCase()
+          const text = stripTags(inlineMatch[2])
+          if (text) {
+            runs.push(new TextRun({
+              text,
+              bold: tag === 'strong' || tag === 'b',
+              italics: tag === 'em' || tag === 'i',
+              underline: tag === 'u' ? {} : undefined,
+            }))
+          }
+          lastIndex = inlineMatch.index + inlineMatch[0].length
         }
-        return result
+        if (lastIndex < html.length) {
+          const text = stripTags(html.slice(lastIndex))
+          if (text) runs.push(new TextRun({ text }))
+        }
+        return runs
+      }
+
+      function stripTags(s: string): string {
+        return s.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim()
       }
     }
 
@@ -1425,10 +1591,57 @@ router.get('/weekly-summary/download', requireAuth, async (req, res) => {
     })
     const buffer = await Packer.toBuffer(doc)
 
-    const filename = encodeURIComponent(`${isTeam ? '团队' : '个人'}工作周报_${weekStart}_${weekEnd}.docx`)
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-    res.send(buffer)
+    // 计算 ISO 周数
+    const startD = new Date(weekStart + 'T00:00:00')
+    const d = new Date(Date.UTC(startD.getFullYear(), startD.getMonth(), startD.getDate()))
+    d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7))
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+    const weekNum = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+
+    const startMonth = startD.getMonth() + 1
+    const startDay = startD.getDate()
+    const endD = new Date(weekEnd + 'T00:00:00')
+    const endMonth = endD.getMonth() + 1
+    const endDay = endD.getDate()
+    const folderName = `${startD.getFullYear()}-${weekNum}周周报（${startMonth}月${startDay}日—${endMonth}月${endDay}日）`
+
+    // 按用户+日期分组附件并编号
+    const chineseNums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+      '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十']
+    const attByUserDate = new Map<string, any[]>()
+    for (const att of attachments) {
+      const key = `${att.user_id}||${att.log_date}`
+      if (!attByUserDate.has(key)) attByUserDate.set(key, [])
+      attByUserDate.get(key)!.push(att)
+    }
+
+    // 生成 ZIP
+    const archive = archiver('zip', { zlib: { level: 9 } })
+    const zipFilename = encodeURIComponent(`${folderName}.zip`)
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFilename}"`)
+    archive.pipe(res)
+
+    // 添加 Word 文件（直接放在 ZIP 根目录）
+    archive.append(buffer, { name: `${folderName}.docx` })
+
+    // 添加附件文件（直接放在 ZIP 根目录）
+    for (const [key, atts] of attByUserDate) {
+      const [uid, date] = key.split('||')
+      const userName = userGroups.get(uid)?.name || '未知'
+      for (let i = 0; i < atts.length; i++) {
+        const att = atts[i]
+        const filePath = path.join(process.cwd(), att.file_path)
+        if (fs.existsSync(filePath)) {
+          const ext = path.extname(att.file_name || '')
+          const numLabel = chineseNums[i] || String(i + 1)
+          const attName = `${userName}-${date}日附件${numLabel}${ext}`
+          archive.file(filePath, { name: `${attName}` })
+        }
+      }
+    }
+
+    await archive.finalize()
   } catch (err: any) {
     console.error('导出周报失败:', err)
     res.status(500).json({ success: false, message: '导出周报失败' })
@@ -1580,6 +1793,23 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
       monthDays.push({ date: ds, submitted: daySubmitted.size, total: working ? allUsers.length : 0, label })
     }
 
+    // 查询整月有评论的日期和有未读回复的日期（管理员视角：别人回复了自己的评论）
+    const currentUserId = req.session.userId!
+    const commentDateRows = await db.all<{ log_date: string }>(
+      `SELECT DISTINCT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.log_date >= ? AND s.log_date <= ?`,
+      monthStart, monthEnd,
+    )
+    const unreadReplyDateRows = await db.all<{ log_date: string }>(
+      `SELECT DISTINCT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       AND s.log_date >= ? AND s.log_date <= ?`,
+      currentUserId, currentUserId, monthStart, monthEnd,
+    )
+
     // 指定日期的提交详情
     const submissions = await db.all<any>(
       `SELECT s.id, s.user_id, s.content, s.submitted_at, u.name as user_name, u.position as user_position
@@ -1600,6 +1830,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
     // 获取评论数
     const submissionIds = submissions.map((s: any) => s.id)
     let commentCounts: Record<string, number> = {}
+    let unreadReplySubmissions: Set<string> = new Set()
     if (submissionIds.length > 0) {
       const placeholders = submissionIds.map(() => '?').join(',')
       const counts = await db.all<{ submission_id: string; cnt: number }>(
@@ -1608,6 +1839,16 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
         ...submissionIds,
       )
       for (const c of counts) commentCounts[c.submission_id] = c.cnt
+
+      // 查询哪些 submission 有未读回复（别人回复了当前用户的评论）
+      const unreadRows = await db.all<{ submission_id: string }>(
+        `SELECT DISTINCT c.submission_id FROM daily_log_comments c
+         INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
+         WHERE c.submission_id IN (${placeholders})
+         AND parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL`,
+        ...submissionIds, currentUserId, currentUserId,
+      )
+      for (const r of unreadRows) unreadReplySubmissions.add(r.submission_id)
     }
 
     // 获取当日提交用户的附件
@@ -1673,6 +1914,8 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
         monthStart,
         monthEnd,
         monthDays,
+        commentDates: commentDateRows.map(r => r.log_date),
+        unreadReplyDates: unreadReplyDateRows.map(r => r.log_date),
         submissions: submissions.map((s: any) => ({
           id: s.id,
           userId: s.user_id,
@@ -1681,6 +1924,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
           content: s.content,
           submittedAt: s.submitted_at,
           commentCount: commentCounts[s.id] || 0,
+          hasUnreadReply: unreadReplySubmissions.has(s.id),
           attachments: attachmentsByUser[s.user_id] || [],
           supplements: supplementsBySubmission[s.id] || [],
         })),
@@ -1691,6 +1935,25 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
   } catch (err: any) {
     console.error('获取团队日志失败:', err)
     res.status(500).json({ success: false, message: '获取团队日志失败' })
+  }
+})
+
+// 获取有未读回复的最近日期（管理员/总经理用）
+router.get('/team/comments/unread-date', requireAdminOrGM, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const row = await db.get<{ log_date: string }>(
+      `SELECT s.log_date FROM daily_log_comments c
+       INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       ORDER BY c.created_at DESC LIMIT 1`,
+      userId, userId,
+    )
+    res.json({ success: true, data: { date: row?.log_date || null } })
+  } catch (err) {
+    console.error('获取未读回复日期失败:', err)
+    res.status(500).json({ success: false, message: '获取未读回复日期失败' })
   }
 })
 

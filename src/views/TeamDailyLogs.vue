@@ -27,6 +27,11 @@
                 class="date-cell-dot"
                 :class="getDateSubmitStatus(cell.date) === 'full' ? 'dot-full' : 'dot-partial'"
               ></span>
+              <span
+                v-if="getDateCommentStatus(cell.date)"
+                class="date-cell-comment"
+                :class="{ unread: getDateCommentStatus(cell.date) === 'unread' }"
+              ></span>
             </div>
           </template>
         </el-date-picker>
@@ -48,6 +53,8 @@
         >
           <div class="day-label">{{ formatWeekday(day.date) }}</div>
           <div class="day-date">{{ day.date.slice(5) }}</div>
+          <span v-if="day.hasUnreadReply" class="day-comment-dot unread"></span>
+          <span v-else-if="day.hasComment" class="day-comment-dot"></span>
           <template v-if="day.total > 0">
             <div class="day-progress">
               <div class="progress-bar" :style="{ width: (day.submitted / day.total * 100) + '%' }"></div>
@@ -79,6 +86,9 @@
             <div class="user-info">
               <span class="user-name">{{ sub.userName }}</span>
               <span v-if="sub.userPosition" class="user-position">{{ sub.userPosition }}</span>
+              <span v-if="sub.commentCount > 0" class="user-comment-icon" :class="{ 'has-unread': sub.hasUnreadReply }">
+                <span class="comment-count">{{ sub.commentCount }}</span>
+              </span>
             </div>
             <div class="header-right">
               <span class="submit-time">{{ formatTime(sub.submittedAt) }}</span>
@@ -237,7 +247,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { api } from '@/utils/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
@@ -268,6 +278,7 @@ interface Submission {
   content: string
   submittedAt: string
   commentCount: number
+  hasUnreadReply: boolean
   comments?: Comment[]
   attachments: Attachment[]
   supplements: Supplement[]
@@ -296,11 +307,14 @@ const authStore = useAuthStore()
 const pendingStore = usePendingStore()
 const showReplyHint = ref(false)
 const unreadReplyCount = ref(0)
+const isNavigatingToUnread = ref(false)
 const expandedCards = ref<Set<string>>(new Set())
 const today = new Date().toISOString().slice(0, 10)
 const selectedDate = ref(today)
 const loading = ref(false)
 const monthDays = ref<MonthDay[]>([])
+const commentDates = ref<string[]>([])
+const unreadReplyDates = ref<string[]>([])
 const submissions = ref<Submission[]>([])
 const notSubmitted = ref<{ id: string; name: string; position: string | null }[]>([])
 const totalUsers = ref(0)
@@ -319,10 +333,62 @@ function cancelReply(submissionId: string) {
 
 async function scrollToUnreadReply() {
   showReplyHint.value = false
-  await nextTick()
-  const unreadEl = document.querySelector('.comment-item-unread')
-  if (unreadEl) {
-    unreadEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  isNavigatingToUnread.value = true
+  try {
+    const { data } = await api.get('/api/daily-logs/team/comments/unread-date')
+    if (data.success && data.data.date) {
+      const targetDate = data.data.date
+      if (selectedDate.value !== targetDate) {
+        selectedDate.value = targetDate
+      }
+      // 重新加载数据并等待评论加载完成
+      loading.value = true
+      const month = selectedDate.value.slice(0, 7)
+      const res = await api.get('/api/daily-logs/team', {
+        params: { date: selectedDate.value, month },
+      })
+      if (res.data.success) {
+        monthDays.value = res.data.data.monthDays
+        commentDates.value = res.data.data.commentDates || []
+        unreadReplyDates.value = res.data.data.unreadReplyDates || []
+        submissions.value = res.data.data.submissions
+        notSubmitted.value = res.data.data.notSubmitted
+        totalUsers.value = res.data.data.totalUsers
+        expandedCards.value = new Set()
+
+        // 等待所有有评论的 submission 加载评论
+        const commentPromises = submissions.value
+          .filter(s => s.commentCount > 0)
+          .map(sub => {
+            sub.comments = []
+            return loadComments(sub)
+          })
+        await Promise.all(commentPromises)
+
+        // 展开包含未读评论的卡片
+        for (const sub of submissions.value) {
+          if (sub.comments?.some(c => c.isUnread)) {
+            expandedCards.value.add(sub.id)
+          }
+        }
+        expandedCards.value = new Set(expandedCards.value)
+      }
+      loading.value = false
+
+      await nextTick()
+      const unreadEl = document.querySelector('.comment-item-unread')
+      if (unreadEl) {
+        unreadEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+      // 标记已读后刷新 pendingStore，确保后续未读能及时触发提示
+      setTimeout(() => {
+        pendingStore.fetchPendingCounts()
+        isNavigatingToUnread.value = false
+      }, 500)
+    }
+  } catch {
+    isNavigatingToUnread.value = false
+    ElMessage.error('定位未读回复失败')
   }
 }
 
@@ -354,13 +420,20 @@ const currentMonday = computed(() => {
 // 从 monthDays 中提取当前周的 7 天数据
 const weekDays = computed(() => {
   const monday = new Date(currentMonday.value)
-  const days: { date: string; submitted: number; total: number; label: string | null }[] = []
+  const days: { date: string; submitted: number; total: number; label: string | null; hasComment: boolean; hasUnreadReply: boolean }[] = []
   for (let i = 0; i < 7; i++) {
     const d = new Date(monday)
     d.setDate(monday.getDate() + i)
     const ds = d.toISOString().slice(0, 10)
     const found = monthDays.value.find(md => md.date === ds)
-    days.push({ date: ds, submitted: found?.submitted || 0, total: found?.total || 0, label: found?.label || null })
+    days.push({
+      date: ds,
+      submitted: found?.submitted || 0,
+      total: found?.total || 0,
+      label: found?.label || null,
+      hasComment: commentDates.value.includes(ds),
+      hasUnreadReply: unreadReplyDates.value.includes(ds),
+    })
   }
   return days
 })
@@ -374,6 +447,16 @@ onMounted(() => {
     unreadReplyCount.value = count
     showReplyHint.value = true
   }
+})
+
+// 实时监听未读回复变化，无延迟显示提示条
+watch(() => pendingStore.counts.unreadTeamLogReplies, (newCount) => {
+  if (newCount > 0 && !isNavigatingToUnread.value) {
+    unreadReplyCount.value = newCount
+    showReplyHint.value = true
+  }
+  // 刷新周概览的未读标识（不重置展开状态）
+  refreshUnreadDates()
 })
 
 async function loadHolidays() {
@@ -416,6 +499,16 @@ function getDateSubmitStatus(date: Date): 'full' | 'partial' | null {
   return found.submitted >= found.total ? 'full' : 'partial'
 }
 
+function getDateCommentStatus(date: Date): 'unread' | 'has' | null {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const dateStr = `${year}-${month}-${day}`
+  if (unreadReplyDates.value.includes(dateStr)) return 'unread'
+  if (commentDates.value.includes(dateStr)) return 'has'
+  return null
+}
+
 async function loadTeamData() {
   loading.value = true
   try {
@@ -425,6 +518,8 @@ async function loadTeamData() {
     })
     if (data.success) {
       monthDays.value = data.data.monthDays
+      commentDates.value = data.data.commentDates || []
+      unreadReplyDates.value = data.data.unreadReplyDates || []
       submissions.value = data.data.submissions
       notSubmitted.value = data.data.notSubmitted
       totalUsers.value = data.data.totalUsers
@@ -449,6 +544,22 @@ async function loadComments(sub: Submission) {
     const { data } = await api.get(`/api/daily-logs/team/comments/${sub.id}`)
     if (data.success) {
       sub.comments = data.data
+      // GET 接口会自动标记已读，刷新未读标识
+      if (data.data.some((c: any) => c.isUnread)) {
+        refreshUnreadDates()
+      }
+    }
+  } catch { /* ignore */ }
+}
+
+async function refreshUnreadDates() {
+  try {
+    const month = selectedDate.value.slice(0, 7)
+    const { data } = await api.get('/api/daily-logs/team', {
+      params: { date: selectedDate.value, month },
+    })
+    if (data.success) {
+      unreadReplyDates.value = data.data.unreadReplyDates || []
     }
   } catch { /* ignore */ }
 }
@@ -605,6 +716,7 @@ function formatTime(iso: string): string {
   cursor: pointer;
   transition: all 0.15s;
   border: 2px solid transparent;
+  position: relative;
 }
 
 .week-day-item:hover {
@@ -668,6 +780,27 @@ function formatTime(iso: string): string {
   line-height: 1.2;
 }
 
+.day-comment-dot {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  display: block;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23c0c4cc'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+  z-index: 1;
+}
+
+.day-comment-dot.unread {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23f56c6c'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+  animation: comment-pulse 1.5s ease-in-out 3;
+}
+
+@keyframes comment-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+}
+
 .main-content {
   display: flex;
   gap: 20px;
@@ -725,10 +858,11 @@ function formatTime(iso: string): string {
   transition: transform 0.2s;
   color: #c0c4cc;
   font-size: 14px;
+  transform: rotate(180deg);
 }
 
 .expand-icon.expanded {
-  transform: rotate(180deg);
+  transform: rotate(0deg);
 }
 
 .user-info {
@@ -749,6 +883,35 @@ function formatTime(iso: string): string {
   background: #f4f4f5;
   padding: 2px 6px;
   border-radius: 4px;
+}
+
+.user-comment-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f0f9eb;
+  font-size: 11px;
+  color: #67c23a;
+}
+
+.user-comment-icon::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2367c23a'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.user-comment-icon.has-unread {
+  background: #fef0f0;
+  color: #f56c6c;
+}
+
+.user-comment-icon.has-unread::before {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23f56c6c'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+  animation: comment-pulse 1.5s ease-in-out 3;
 }
 
 .submit-time {
@@ -1177,5 +1340,19 @@ function formatTime(iso: string): string {
 
 .dot-partial {
   background: #f56c6c;
+}
+
+.date-cell-comment {
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 10px;
+  height: 10px;
+  display: block;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23c0c4cc'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
+}
+
+.date-cell-comment.unread {
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23f56c6c'%3E%3Cpath d='M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h14l4 4V4c0-1.1-.9-2-2-2z'/%3E%3C/svg%3E") no-repeat center/contain;
 }
 </style>
