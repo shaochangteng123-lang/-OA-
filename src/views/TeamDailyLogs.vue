@@ -158,6 +158,7 @@
                 <span class="comment-text">{{ c.content }}</span>
                 <span class="comment-time">{{ formatTime(c.createdAt) }}</span>
                 <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setReplyTo(sub.id, c)">回复</span>
+                <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(sub.id, c.id)">撤回</span>
               </div>
             </div>
             <div class="comment-input">
@@ -247,11 +248,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { api } from '@/utils/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Download } from '@element-plus/icons-vue'
 
 interface Attachment {
@@ -323,6 +324,10 @@ const commentLoading = reactive<Record<string, boolean>>({})
 const replyTargets = reactive<Record<string, { id: string; userName: string } | null>>({})
 const showExportDialog = ref(false)
 const exportDateRange = ref<string[]>([])
+function canWithdraw(createdAt: string): boolean {
+  return Date.now() - new Date(createdAt).getTime() < 5 * 60 * 1000
+}
+
 function setReplyTo(submissionId: string, comment: Comment) {
   replyTargets[submissionId] = { id: comment.id, userName: comment.userName }
 }
@@ -438,6 +443,8 @@ const weekDays = computed(() => {
   return days
 })
 
+let commentPollTimer: number | null = null
+
 onMounted(() => {
   loadHolidays()
   loadTeamData()
@@ -447,6 +454,21 @@ onMounted(() => {
     unreadReplyCount.value = count
     showReplyHint.value = true
   }
+  // 轮询刷新评论列表（撤回后接收方即时感知）
+  commentPollTimer = window.setInterval(() => {
+    for (const sub of submissions.value) {
+      if (sub.comments && sub.comments.length > 0) {
+        loadComments(sub)
+      }
+    }
+  }, 5000)
+})
+
+onBeforeUnmount(() => {
+  if (commentPollTimer) {
+    clearInterval(commentPollTimer)
+    commentPollTimer = null
+  }
 })
 
 // 实时监听未读回复变化，无延迟显示提示条
@@ -454,6 +476,9 @@ watch(() => pendingStore.counts.unreadTeamLogReplies, (newCount) => {
   if (newCount > 0 && !isNavigatingToUnread.value) {
     unreadReplyCount.value = newCount
     showReplyHint.value = true
+  } else if (newCount === 0) {
+    showReplyHint.value = false
+    unreadReplyCount.value = 0
   }
   // 刷新周概览的未读标识（不重置展开状态）
   refreshUnreadDates()
@@ -614,6 +639,26 @@ async function submitComment(submissionId: string) {
     ElMessage.error('评论失败')
   } finally {
     commentLoading[submissionId] = false
+  }
+}
+
+async function withdrawComment(submissionId: string, commentId: string) {
+  try {
+    await ElMessageBox.confirm('确定撤回这条评论吗？', '撤回确认', { type: 'warning', confirmButtonText: '撤回', cancelButtonText: '取消' })
+  } catch { return }
+  try {
+    const { data } = await api.post(`/api/daily-logs/comments/${commentId}/withdraw`)
+    if (data.success) {
+      const sub = submissions.value.find(s => s.id === submissionId)
+      if (sub && sub.comments) {
+        sub.comments = sub.comments.filter(c => c.id !== commentId)
+      }
+      ElMessage.success('已撤回')
+      pendingStore.refreshPendingCounts()
+      refreshUnreadDates()
+    }
+  } catch {
+    ElMessage.error('撤回失败')
   }
 }
 
@@ -1039,6 +1084,17 @@ function formatTime(iso: string): string {
 
 .comment-reply-btn:hover {
   color: #409eff;
+}
+
+.comment-withdraw-btn {
+  color: #909399;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.comment-withdraw-btn:hover {
+  color: #f56c6c;
 }
 
 .reply-hint {

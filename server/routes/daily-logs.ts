@@ -513,14 +513,14 @@ router.get('/calendar-dates', requireAuth, async (req, res) => {
     const commentDates = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE s.user_id = ? AND s.log_date >= ? AND s.log_date <= ?`,
+       WHERE s.user_id = ? AND s.log_date >= ? AND s.log_date <= ? AND c.withdrawn_at IS NULL`,
       userId, startDate, endDate,
     )
     // 有未读评论的日期
     const unreadDates = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
        AND s.log_date >= ? AND s.log_date <= ?`,
       userId, userId, startDate, endDate,
     )
@@ -611,7 +611,7 @@ router.get('/history', requireAuth, async (req, res) => {
          INNER JOIN users u ON c.user_id = u.id
          LEFT JOIN daily_log_comments rc ON rc.id = c.reply_to
          LEFT JOIN users ru ON ru.id = rc.user_id
-         WHERE c.submission_id IN (${subPlaceholders})
+         WHERE c.submission_id IN (${subPlaceholders}) AND c.withdrawn_at IS NULL
          ORDER BY c.created_at ASC`,
         ...allSubIds,
       )
@@ -729,13 +729,13 @@ router.get('/comments/unread-date', requireAuth, async (req, res) => {
     const countRow = await db.get<{ count: number }>(
       `SELECT COUNT(*) as count FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL`,
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL`,
       userId, userId,
     )
     const row = await db.get<{ log_date: string }>(
       `SELECT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
        ORDER BY s.log_date DESC LIMIT 1`,
       userId, userId,
     )
@@ -830,6 +830,34 @@ router.post('/comments/:submissionId/reply', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('回复评论失败:', err)
     res.status(500).json({ success: false, message: '回复评论失败' })
+  }
+})
+
+router.post('/comments/:commentId/withdraw', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const { commentId } = req.params
+
+    const comment = await db.get<{ user_id: string; created_at: string }>(
+      `SELECT user_id, created_at FROM daily_log_comments WHERE id = ? AND withdrawn_at IS NULL`, commentId,
+    )
+    if (!comment) {
+      return res.status(404).json({ success: false, message: '评论不存在' })
+    }
+    if (comment.user_id !== userId) {
+      return res.status(403).json({ success: false, message: '只能撤回自己的评论' })
+    }
+    if (Date.now() - new Date(comment.created_at).getTime() > 5 * 60 * 1000) {
+      return res.status(403).json({ success: false, message: '超过5分钟无法撤回' })
+    }
+
+    const now = new Date().toISOString()
+    await db.run(`UPDATE daily_log_comments SET withdrawn_at = ? WHERE id = ?`, now, commentId)
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error('撤回评论失败:', err)
+    res.status(500).json({ success: false, message: '撤回评论失败' })
   }
 })
 
@@ -1798,14 +1826,14 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
     const commentDateRows = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE s.log_date >= ? AND s.log_date <= ?`,
+       WHERE s.log_date >= ? AND s.log_date <= ? AND c.withdrawn_at IS NULL`,
       monthStart, monthEnd,
     )
     const unreadReplyDateRows = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
        AND s.log_date >= ? AND s.log_date <= ?`,
       currentUserId, currentUserId, monthStart, monthEnd,
     )
@@ -1835,7 +1863,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
       const placeholders = submissionIds.map(() => '?').join(',')
       const counts = await db.all<{ submission_id: string; cnt: number }>(
         `SELECT submission_id, COUNT(*)::int as cnt FROM daily_log_comments
-         WHERE submission_id IN (${placeholders}) GROUP BY submission_id`,
+         WHERE submission_id IN (${placeholders}) AND withdrawn_at IS NULL GROUP BY submission_id`,
         ...submissionIds,
       )
       for (const c of counts) commentCounts[c.submission_id] = c.cnt
@@ -1845,7 +1873,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
         `SELECT DISTINCT c.submission_id FROM daily_log_comments c
          INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
          WHERE c.submission_id IN (${placeholders})
-         AND parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL`,
+         AND parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL`,
         ...submissionIds, currentUserId, currentUserId,
       )
       for (const r of unreadRows) unreadReplySubmissions.add(r.submission_id)
@@ -1946,7 +1974,7 @@ router.get('/team/comments/unread-date', requireAdminOrGM, async (req, res) => {
       `SELECT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+       WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
        ORDER BY c.created_at DESC LIMIT 1`,
       userId, userId,
     )
@@ -1968,7 +1996,7 @@ router.get('/team/comments/:submissionId', requireAuth, async (req, res) => {
        JOIN users u ON u.id = c.user_id
        LEFT JOIN daily_log_comments rc ON rc.id = c.reply_to
        LEFT JOIN users ru ON ru.id = rc.user_id
-       WHERE c.submission_id = ?
+       WHERE c.submission_id = ? AND c.withdrawn_at IS NULL
        ORDER BY c.created_at ASC`,
       submissionId,
     )

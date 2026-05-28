@@ -1700,6 +1700,10 @@ export async function initDatabase() {
     try {
       await db.run(`ALTER TABLE daily_log_comments ADD COLUMN reply_to TEXT DEFAULT NULL`)
     } catch { /* 列已存在则忽略 */ }
+    // 添加 withdrawn_at 列（撤回评论）
+    try {
+      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN withdrawn_at TEXT DEFAULT NULL`)
+    } catch { /* 列已存在则忽略 */ }
     console.log('✅ 数据库迁移：daily_log_comments 表检查完成')
   } catch (error: any) {
     if (!error.message?.includes('already exists')) {

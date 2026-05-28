@@ -2247,7 +2247,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     const unreadComments = await db.prepare(`
       SELECT COUNT(*) as count FROM daily_log_comments c
       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
-      WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+      WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
     `).get(userId, userId) as { count: number }
     data.unreadLogComments = unreadComments.count
 
@@ -2256,7 +2256,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       const unreadReplies = await db.prepare(`
         SELECT COUNT(*) as count FROM daily_log_comments c
         INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
-        WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL
+        WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
       `).get(userId, userId) as { count: number }
       data.unreadTeamLogReplies = unreadReplies.count
     }

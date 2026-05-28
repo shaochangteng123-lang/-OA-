@@ -212,6 +212,7 @@
             <span class="comment-text">{{ c.content }}</span>
             <span class="comment-time">{{ formatCommentTime(c.createdAt) }}</span>
             <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setCommentReply(c)">回复</span>
+            <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(c.id)">撤回</span>
           </div>
         </div>
         <div class="comment-input" v-if="commentReplyTarget">
@@ -1671,6 +1672,10 @@ function openEditSubmission(sub: HistorySubmission, group: HistoryGroup) {
   markCommentsRead(sub)
 }
 
+function canWithdraw(createdAt: string): boolean {
+  return Date.now() - new Date(createdAt).getTime() < 5 * 60 * 1000
+}
+
 function setCommentReply(comment: HistoryComment) {
   commentReplyTarget.value = { id: comment.id, userName: comment.userName }
 }
@@ -1714,6 +1719,23 @@ async function submitComment() {
     ElMessage.error('评论失败')
   } finally {
     commentLoading.value = false
+  }
+}
+
+async function withdrawComment(commentId: string) {
+  try {
+    await ElMessageBox.confirm('确定撤回这条评论吗？', '撤回确认', { type: 'warning', confirmButtonText: '撤回', cancelButtonText: '取消' })
+  } catch { return }
+  try {
+    const { data } = await api.post(`/api/daily-logs/comments/${commentId}/withdraw`)
+    if (data.success && editingSubmission.value) {
+      editingSubmission.value.comments = editingSubmission.value.comments.filter(c => c.id !== commentId)
+      ElMessage.success('已撤回')
+      pendingStore.refreshPendingCounts()
+      loadCalendarDates()
+    }
+  } catch {
+    ElMessage.error('撤回失败')
   }
 }
 
@@ -1880,6 +1902,8 @@ async function handleSaveEditSubmission() {
   }
 }
 
+let commentPollTimer: number | null = null
+
 onMounted(async () => {
   loadTodayLog()
   loadDayInfo()
@@ -1888,6 +1912,17 @@ onMounted(async () => {
   loadCalendarDates()
   loadCalendarHolidays()
   checkUnreadComments()
+  // 轮询刷新评论列表（撤回后接收方即时感知）
+  commentPollTimer = window.setInterval(async () => {
+    if (viewingHistory.value && editingSubmission.value && editingSubmission.value.comments && editingSubmission.value.comments.length > 0) {
+      try {
+        const { data } = await api.get(`/api/daily-logs/team/comments/${editingSubmission.value.id}`)
+        if (data.success && editingSubmission.value) {
+          editingSubmission.value.comments = data.data
+        }
+      } catch { /* ignore */ }
+    }
+  }, 5000)
 })
 
 watch(() => pendingStore.counts.unreadLogComments, (newVal) => {
@@ -1896,12 +1931,18 @@ watch(() => pendingStore.counts.unreadLogComments, (newVal) => {
     showUnreadHint.value = true
     loadCalendarDates()
   } else if (newVal === 0) {
+    showUnreadHint.value = false
+    unreadCommentCount.value = 0
     loadCalendarDates()
   }
 })
 
 onBeforeUnmount(() => {
   editor.value?.destroy()
+  if (commentPollTimer) {
+    clearInterval(commentPollTimer)
+    commentPollTimer = null
+  }
 })
 </script>
 
@@ -3444,6 +3485,17 @@ onBeforeUnmount(() => {
 
 .comment-reply-btn:hover {
   color: #409eff;
+}
+
+.comment-withdraw-btn {
+  color: #909399;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.comment-withdraw-btn:hover {
+  color: #f56c6c;
 }
 
 .reply-hint {
