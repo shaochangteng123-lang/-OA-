@@ -3,6 +3,65 @@ import { db } from '../db/index.js'
 import { chat, isLLMConfigured } from './llm.js'
 
 /**
+ * 获取指定日期所在周的最后一个工作日（周一到周日为一周）
+ * 考虑节假日和调休
+ */
+async function getLastWorkdayOfWeekFor(refDate: Date): Promise<string> {
+  // 计算本周一和周日
+  const day = refDate.getDay()
+  const diffToMonday = day === 0 ? -6 : 1 - day
+  const monday = new Date(refDate.getFullYear(), refDate.getMonth(), refDate.getDate() + diffToMonday)
+  const sunday = new Date(monday.getTime() + 6 * 24 * 60 * 60 * 1000)
+
+  const mondayStr = monday.toISOString().slice(0, 10)
+  const sundayStr = sunday.toISOString().slice(0, 10)
+
+  // 查询本周的假期和调休数据
+  const holidays = await db.all<{ date: string; type: string }>(
+    'SELECT date, type FROM holidays WHERE date >= ? AND date <= ?',
+    mondayStr, sundayStr
+  )
+  const holidayMap = new Map<string, string>()
+  for (const row of holidays) {
+    holidayMap.set(row.date, row.type)
+  }
+
+  // 从周日往前找最后一个工作日
+  let lastWorkday = ''
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(monday.getTime() + i * 24 * 60 * 60 * 1000)
+    const dateStr = d.toISOString().slice(0, 10)
+    const dayOfWeek = d.getDay()
+    const holidayType = holidayMap.get(dateStr)
+
+    if (holidayType === 'workday') {
+      // 调休上班日
+      lastWorkday = dateStr
+      break
+    } else if (holidayType === 'holiday') {
+      // 法定假日，跳过
+      continue
+    } else if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+      // 普通工作日（周一到周五）
+      lastWorkday = dateStr
+      break
+    }
+  }
+
+  // 兜底：如果整周都是假期，用周五
+  if (!lastWorkday) {
+    const friday = new Date(monday.getTime() + 4 * 24 * 60 * 60 * 1000)
+    lastWorkday = friday.toISOString().slice(0, 10)
+  }
+
+  return lastWorkday
+}
+
+async function getLastWorkdayOfWeek(): Promise<string> {
+  return getLastWorkdayOfWeekFor(new Date())
+}
+
+/**
  * 每日 23:59 自动归档：将当天非空草稿转为正式日志
  */
 async function archiveDailyLogs() {
@@ -59,7 +118,7 @@ async function archiveDailyLogs() {
 }
 
 /**
- * 每周日 23:59 自动生成周报并锁定本周日志
+ * 每周最后工作日 20:00 自动生成周报（不锁定日志，周末补写的日志纳入下周周报）
  */
 async function generateWeeklySummaries() {
   const now = new Date()
@@ -75,6 +134,20 @@ async function generateWeeklySummaries() {
   const weekStart = monday.toISOString().slice(0, 10)
   const weekEnd = sunday.toISOString().slice(0, 10)
 
+  // 同时查找上周未被纳入周报的日志（周报生成后周末补写的）
+  const lastMonday = new Date(monday)
+  lastMonday.setDate(monday.getDate() - 7)
+  const lastSunday = new Date(monday)
+  lastSunday.setDate(monday.getDate() - 1)
+  const lastWeekStart = lastMonday.toISOString().slice(0, 10)
+  const lastWeekEnd = lastSunday.toISOString().slice(0, 10)
+
+  // 获取上周周报的生成时间
+  const lastWeekSummary = await db.get<{ generated_at: string }>(
+    `SELECT generated_at FROM weekly_summaries WHERE week_start = ? LIMIT 1`,
+    lastWeekStart,
+  )
+
   try {
     // 查找本周有提交记录的所有用户
     const users = await db.all<{ user_id: string }>(
@@ -82,13 +155,26 @@ async function generateWeeklySummaries() {
       weekStart, weekEnd,
     )
 
-    if (users.length === 0) {
+    // 如果上周有周报，查找上周周报生成后补写的用户
+    let lateUsers: { user_id: string }[] = []
+    if (lastWeekSummary) {
+      lateUsers = await db.all<{ user_id: string }>(
+        `SELECT DISTINCT user_id FROM daily_log_submissions
+         WHERE log_date >= ? AND log_date <= ? AND submitted_at > ?`,
+        lastWeekStart, lastWeekEnd, lastWeekSummary.generated_at,
+      )
+    }
+
+    // 合并用户列表
+    const allUserIds = new Set([...users.map(u => u.user_id), ...lateUsers.map(u => u.user_id)])
+
+    if (allUserIds.size === 0) {
       console.log(`📋 周报自动生成：第 ${weekStart} 周无日志提交`)
       return
     }
 
     let generated = 0
-    for (const { user_id } of users) {
+    for (const user_id of allUserIds) {
       // 获取本周所有日志
       const logs = await db.all<any>(
         `SELECT id, log_date, content FROM daily_log_submissions
@@ -97,10 +183,22 @@ async function generateWeeklySummaries() {
         user_id, weekStart, weekEnd,
       )
 
-      if (logs.length === 0) continue
+      // 获取上周周报生成后补写的日志
+      let lateLogs: any[] = []
+      if (lastWeekSummary) {
+        lateLogs = await db.all<any>(
+          `SELECT id, log_date, content FROM daily_log_submissions
+           WHERE user_id = ? AND log_date >= ? AND log_date <= ? AND submitted_at > ?
+           ORDER BY log_date ASC`,
+          user_id, lastWeekStart, lastWeekEnd, lastWeekSummary.generated_at,
+        )
+      }
+
+      const allLogs = [...lateLogs, ...logs]
+      if (allLogs.length === 0) continue
 
       // 获取补充记录
-      const logIds = logs.map((l: any) => l.id)
+      const logIds = allLogs.map((l: any) => l.id)
       const placeholders = logIds.map(() => '?').join(',')
       const supplements = await db.all<any>(
         `SELECT submission_id, seq, content FROM daily_log_supplements
@@ -116,7 +214,7 @@ async function generateWeeklySummaries() {
       let summaryContent: string
 
       if (isLLMConfigured()) {
-        const logsText = logs.map((l: any) => {
+        const logsText = allLogs.map((l: any) => {
           let text = `【${l.log_date}】\n${l.content}`
           const sups = supplementMap.get(l.id)
           if (sups && sups.length > 0) {
@@ -154,7 +252,7 @@ ${logsText}`
         }).join('\n')
       } else {
         // LLM 不可用，拼接原文
-        summaryContent = logs.map((l: any) => {
+        summaryContent = allLogs.map((l: any) => {
           let text = `【${l.log_date}】\n${l.content}`
           const sups = supplementMap.get(l.id)
           if (sups && sups.length > 0) text += '\n' + sups.map((c, i) => `[补充${i + 1}] ${c}`).join('\n')
@@ -170,21 +268,21 @@ ${logsText}`
 
       if (existing) {
         await db.run(
-          `UPDATE weekly_summaries SET summary_content = ?, generated_at = ?, locked_at = ? WHERE id = ?`,
-          summaryContent, nowStr, nowStr, existing.id,
+          `UPDATE weekly_summaries SET summary_content = ?, generated_at = ? WHERE id = ?`,
+          summaryContent, nowStr, existing.id,
         )
       } else {
         const id = nanoid()
         await db.run(
-          `INSERT INTO weekly_summaries (id, user_id, week_start, week_end, summary_content, generated_at, locked_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          id, user_id, weekStart, weekEnd, summaryContent, nowStr, nowStr,
+          `INSERT INTO weekly_summaries (id, user_id, week_start, week_end, summary_content, generated_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          id, user_id, weekStart, weekEnd, summaryContent, nowStr,
         )
       }
       generated++
     }
 
-    console.log(`✅ 周报自动生成：${weekStart} ~ ${weekEnd}，为 ${generated} 位用户生成周报并锁定`)
+    console.log(`✅ 周报自动生成：${weekStart} ~ ${weekEnd}，为 ${generated} 位用户生成周报`)
   } catch (err) {
     console.error('❌ 周报自动生成失败:', err)
   }
@@ -208,24 +306,30 @@ export function setupDailyLogScheduler() {
     }, delay)
   }
 
-  // 每周日 23:59 自动生成周报
+  // 每周工作的最后一天 20:00 自动生成周报
   const scheduleWeekly = () => {
-    const now = new Date()
-    const dayOfWeek = now.getDay()
-    // 计算到下一个周日 23:59 的延迟
-    const daysUntilSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek
-    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysUntilSunday, 23, 59, 0)
-    let delay = target.getTime() - now.getTime()
-    if (delay < 0) delay += 7 * 24 * 60 * 60 * 1000
-    setTimeout(() => {
-      void generateWeeklySummaries()
-      setInterval(() => {
+    const scheduleNext = async () => {
+      const lastWorkday = await getLastWorkdayOfWeek()
+      const now = new Date()
+      const target = new Date(lastWorkday + 'T20:00:00')
+      let delay = target.getTime() - now.getTime()
+      if (delay < 0) {
+        // 本周已过，计算下周
+        const nextWeekDay = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
+        const nextLastWorkday = await getLastWorkdayOfWeekFor(nextWeekDay)
+        const nextTarget = new Date(nextLastWorkday + 'T20:00:00')
+        delay = nextTarget.getTime() - now.getTime()
+      }
+      setTimeout(() => {
         void generateWeeklySummaries()
-      }, 7 * 24 * 60 * 60 * 1000)
-    }, delay)
+        // 生成后安排下一次
+        void scheduleNext()
+      }, delay)
+    }
+    void scheduleNext()
   }
 
   scheduleArchive()
   scheduleWeekly()
-  console.log('✅ 日志定时任务已启动（每日 23:59 自动归档，每周日 23:59 自动生成周报）')
+  console.log('✅ 日志定时任务已启动（每日 23:59 自动归档，每周最后工作日 20:00 自动生成周报）')
 }

@@ -145,7 +145,21 @@ async function getWeatherInfo(): Promise<{ text: string; temp: string; icon: str
       let zhDesc = WEATHER_ZH[engDesc]
       if (!zhDesc) {
         const key = Object.keys(WEATHER_ZH).find(k => engDesc.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(engDesc.toLowerCase()))
-        zhDesc = key ? WEATHER_ZH[key] : engDesc || '未知'
+        if (key) {
+          zhDesc = WEATHER_ZH[key]
+        } else if (engDesc.toLowerCase().includes('thunder')) {
+          zhDesc = '雷阵雨'
+        } else if (engDesc.toLowerCase().includes('rain') || engDesc.toLowerCase().includes('drizzle')) {
+          zhDesc = '有雨'
+        } else if (engDesc.toLowerCase().includes('snow')) {
+          zhDesc = '有雪'
+        } else if (engDesc.toLowerCase().includes('cloud') || engDesc.toLowerCase().includes('overcast')) {
+          zhDesc = '多云'
+        } else if (engDesc.toLowerCase().includes('sun') || engDesc.toLowerCase().includes('clear')) {
+          zhDesc = '晴'
+        } else {
+          zhDesc = '未知'
+        }
       }
       const data = {
         text: zhDesc,
@@ -189,6 +203,8 @@ const WEATHER_ZH: Record<string, string> = {
   'Blowing snow': '吹雪',
   'Blizzard': '暴风雪',
   'Thundery outbreaks possible': '可能有雷暴',
+  'Thundery outbreaks in nearby': '附近有雷暴',
+  'Thundery outbreaks nearby': '附近有雷暴',
   'Light rain': '小雨',
   'Moderate rain': '中雨',
   'Heavy rain': '大雨',
@@ -605,7 +621,8 @@ router.get('/history', requireAuth, async (req, res) => {
     if (allSubIds.length > 0) {
       const subPlaceholders = allSubIds.map(() => '?').join(',')
       const comments = await db.all<any>(
-        `SELECT c.id, c.submission_id, c.user_id, c.content, c.created_at, c.read_at, c.reply_to, u.name as user_name,
+        `SELECT c.id, c.submission_id, c.user_id, c.content, c.created_at, c.read_at, c.reply_to,
+                c.due_date, c.completed_at, u.name as user_name,
                 rc.user_id as reply_to_user_id, ru.name as reply_to_user_name
          FROM daily_log_comments c
          INNER JOIN users u ON c.user_id = u.id
@@ -628,6 +645,8 @@ router.get('/history', requireAuth, async (req, res) => {
           replyToUserId: c.reply_to_user_id || null,
           replyToUserName: c.reply_to_user_name || null,
           isUnread: c.read_at === null && c.user_id !== userId,
+          dueDate: c.due_date || null,
+          completedAt: c.completed_at || null,
         })
       }
       for (const subs of groupMap.values()) {
@@ -743,6 +762,152 @@ router.get('/comments/unread-date', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('获取未读评论日期失败:', err)
     res.status(500).json({ success: false, message: '获取未读评论日期失败' })
+  }
+})
+
+// 检查是否有未回复的总经理评论
+router.get('/comments/unreplied-gm', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    // 总经理和超管自身不受强制回复限制
+    const currentUser = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
+    if (currentUser && ['general_manager', 'super_admin'].includes(currentUser.role)) {
+      return res.json({ success: true, data: null })
+    }
+    const gmUsers = await db.all<{ id: string }>(
+      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin')`
+    )
+    if (gmUsers.length === 0) return res.json({ success: true, data: null })
+    const placeholders = gmUsers.map(() => '?').join(',')
+    const gmIds = gmUsers.map(u => u.id)
+    const row = await db.get<{ log_date: string; submission_id: string; comment_id: string }>(
+      `SELECT s.log_date, c.submission_id, c.id as comment_id
+       FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
+       WHERE s.user_id = ? AND c.user_id IN (${placeholders}) AND c.withdrawn_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM daily_log_comments r
+           WHERE r.reply_to = c.id AND r.user_id = ? AND r.withdrawn_at IS NULL
+         )
+       ORDER BY c.created_at ASC LIMIT 1`,
+      userId, ...gmIds, userId
+    )
+    res.json({ success: true, data: row ? { date: row.log_date, submissionId: row.submission_id, commentId: row.comment_id } : null })
+  } catch (err) {
+    console.error('检查未回复总经理评论失败:', err)
+    res.status(500).json({ success: false, message: '检查失败' })
+  }
+})
+
+// 获取员工待完成的评论任务（有 due_date 且未完成的总经理评论）
+router.get('/comments/pending-tasks', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    // 只有最高层级（general_manager/super_admin）不需要此提醒，admin 仍可被分配任务
+    const currentUser = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
+    if (currentUser && ['general_manager', 'super_admin'].includes(currentUser.role)) {
+      return res.json({ success: true, data: [] })
+    }
+    // 评论来源：所有有权限发起评论的角色（admin/general_manager/super_admin）
+    const managerUsers = await db.all<{ id: string }>(
+      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin', 'admin') AND id != ?`,
+      userId,
+    )
+    if (managerUsers.length === 0) return res.json({ success: true, data: [] })
+    const managerPlaceholders = managerUsers.map(() => '?').join(',')
+    const managerIds = managerUsers.map(u => u.id)
+    const tasks = await db.all<{
+      id: string; content: string; due_date: string; created_at: string;
+      submission_id: string; log_date: string; user_name: string;
+    }>(
+      `SELECT c.id, c.content, c.due_date, c.created_at, c.submission_id,
+              s.log_date, u.name as user_name
+       FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON s.id = c.submission_id
+       INNER JOIN users u ON u.id = c.user_id
+       WHERE s.user_id = ?
+         AND c.user_id IN (${managerPlaceholders})
+         AND c.due_date IS NOT NULL
+         AND c.completed_at IS NULL
+         AND c.withdrawn_at IS NULL
+       ORDER BY c.due_date ASC, c.created_at ASC`,
+      userId, ...managerIds,
+    )
+    const today = new Date().toISOString().slice(0, 10)
+    res.json({
+      success: true,
+      data: tasks.map(t => ({
+        commentId: t.id,
+        submissionId: t.submission_id,
+        logDate: t.log_date,
+        gmName: t.user_name,
+        content: t.content,
+        dueDate: t.due_date,
+        isOverdue: t.due_date < today,
+        createdAt: t.created_at,
+      })),
+    })
+  } catch (err) {
+    console.error('[pending-tasks] 获取待完成任务失败:', err)
+    res.status(500).json({ success: false, message: '获取失败' })
+  }
+})
+
+// 员工标记评论任务为已完成，并自动回复"已完成"
+router.post('/comments/:commentId/complete', requireAuth, async (req, res) => {
+  try {
+    const { commentId } = req.params
+    const userId = req.session.userId!
+
+    // 验证该评论属于当前员工的日志
+    const comment = await db.get<{
+      id: string; submission_id: string; due_date: string | null; completed_at: string | null; user_id: string;
+    }>(
+      `SELECT c.id, c.submission_id, c.due_date, c.completed_at, c.user_id
+       FROM daily_log_comments c
+       INNER JOIN daily_log_submissions s ON s.id = c.submission_id
+       WHERE c.id = ? AND s.user_id = ?`,
+      commentId, userId,
+    )
+    if (!comment) {
+      return res.status(404).json({ success: false, message: '任务不存在' })
+    }
+    if (!comment.due_date) {
+      return res.status(400).json({ success: false, message: '该评论未设置完成期限' })
+    }
+    if (comment.completed_at) {
+      return res.status(400).json({ success: false, message: '任务已完成' })
+    }
+
+    const now = new Date().toISOString()
+    // 标记该评论为已完成
+    await db.run(`UPDATE daily_log_comments SET completed_at = ? WHERE id = ?`, now, commentId)
+
+    // 自动以员工身份回复"已完成"
+    const replyId = nanoid()
+    await db.run(
+      `INSERT INTO daily_log_comments (id, submission_id, user_id, content, created_at, reply_to) VALUES (?, ?, ?, ?, ?, ?)`,
+      replyId, comment.submission_id, userId, '已完成', now, commentId,
+    )
+    const userName = (await db.get<{ name: string }>(`SELECT name FROM users WHERE id = ?`, userId))?.name || ''
+    const gmName = (await db.get<{ name: string }>(`SELECT name FROM users WHERE id = ?`, comment.user_id))?.name || ''
+
+    res.json({
+      success: true,
+      data: {
+        replyId,
+        replyContent: '已完成',
+        replyCreatedAt: now,
+        userId,
+        userName,
+        replyTo: commentId,
+        replyToUserId: comment.user_id,
+        replyToUserName: gmName,
+      },
+    })
+  } catch (err) {
+    console.error('标记完成失败:', err)
+    res.status(500).json({ success: false, message: '标记完成失败' })
   }
 })
 
@@ -991,10 +1156,10 @@ router.get('/weekly-summary', requireAuth, async (req, res) => {
     const dayOfWeek = now.getDay() || 7
     const monday = new Date(now)
     monday.setDate(now.getDate() - dayOfWeek + 1)
-    const start = weekStart || monday.toISOString().slice(0, 10)
+    const start = weekStart || `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`
     const endDate = new Date(monday)
     endDate.setDate(monday.getDate() + 6)
-    const end = endDate.toISOString().slice(0, 10)
+    const end = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`
 
     // 查找已有摘要
     const summary = await db.get<any>(
@@ -1287,12 +1452,13 @@ ${logsText}`
  */
 router.get('/weekly-summary/download', requireAuth, async (req, res) => {
   try {
-    const { weekStart, weekEnd, scope } = req.query as { weekStart?: string; weekEnd?: string; scope?: string }
+    const { weekStart, weekEnd, scope, format } = req.query as { weekStart?: string; weekEnd?: string; scope?: string; format?: string }
     if (!weekStart || !weekEnd) {
       return res.status(400).json({ success: false, message: '请提供 weekStart 和 weekEnd' })
     }
 
     const isTeam = scope === 'team'
+    const isDocxOnly = format === 'docx'
     const userId = req.session.userId!
 
     const { Document, Packer, Paragraph, HeadingLevel, TextRun, AlignmentType, ImageRun } = await import('docx')
@@ -1577,37 +1743,41 @@ router.get('/weekly-summary/download', requireAuth, async (req, res) => {
           }
         }
 
-        // 当天该用户的图片附件内嵌
-        const dayImages = attachments.filter(a => a.user_id === uid && a.log_date === sub.log_date && a.file_kind === 'image')
-        for (const img of dayImages) {
-          const imgPath = path.join(process.cwd(), img.file_path)
-          if (fs.existsSync(imgPath)) {
-            try {
-              const imgData = fs.readFileSync(imgPath)
-              const ext = (img.file_name || '').split('.').pop()?.toLowerCase()
-              children.push(new Paragraph({
-                children: [new ImageRun({
-                  data: imgData,
-                  transformation: { width: 400, height: 300 },
-                  type: ext === 'png' ? 'png' : ext === 'gif' ? 'gif' : 'jpg',
-                })],
-              }))
-            } catch {}
+        // 当天该用户的图片附件内嵌（仅非纯文本模式）
+        if (!isDocxOnly) {
+          const dayImages = attachments.filter(a => a.user_id === uid && a.log_date === sub.log_date && a.file_kind === 'image')
+          for (const img of dayImages) {
+            const imgPath = path.join(process.cwd(), img.file_path)
+            if (fs.existsSync(imgPath)) {
+              try {
+                const imgData = fs.readFileSync(imgPath)
+                const ext = (img.file_name || '').split('.').pop()?.toLowerCase()
+                children.push(new Paragraph({
+                  children: [new ImageRun({
+                    data: imgData,
+                    transformation: { width: 400, height: 300 },
+                    type: ext === 'png' ? 'png' : ext === 'gif' ? 'gif' : 'jpg',
+                  })],
+                }))
+              } catch {}
+            }
           }
         }
       }
 
-      // 该用户的非图片附件
-      const userDocAtts = attachments.filter(a => a.user_id === uid && a.file_kind !== 'image')
-      if (userDocAtts.length > 0) {
-        children.push(new Paragraph({
-          children: [new TextRun({ text: '附件：', bold: true })],
-        }))
-        for (const att of userDocAtts) {
+      // 该用户的非图片附件（仅非纯文本模式）
+      if (!isDocxOnly) {
+        const userDocAtts = attachments.filter(a => a.user_id === uid && a.file_kind !== 'image')
+        if (userDocAtts.length > 0) {
           children.push(new Paragraph({
-            bullet: { level: 0 },
-            children: [new TextRun({ text: `${att.log_date} - ${att.file_name}` })],
+            children: [new TextRun({ text: '附件：', bold: true })],
           }))
+          for (const att of userDocAtts) {
+            children.push(new Paragraph({
+              bullet: { level: 0 },
+              children: [new TextRun({ text: `${att.log_date} - ${att.file_name}` })],
+            }))
+          }
         }
       }
 
@@ -1641,6 +1811,15 @@ router.get('/weekly-summary/download', requireAuth, async (req, res) => {
       const key = `${att.user_id}||${att.log_date}`
       if (!attByUserDate.has(key)) attByUserDate.set(key, [])
       attByUserDate.get(key)!.push(att)
+    }
+
+    // 纯 Word 格式：直接返回 docx 文件
+    if (isDocxOnly) {
+      const docxFilename = encodeURIComponent(`${folderName}.docx`)
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+      res.setHeader('Content-Disposition', `attachment; filename="${docxFilename}"`)
+      res.send(buffer)
+      return
     }
 
     // 生成 ZIP
@@ -1761,6 +1940,148 @@ router.get('/weekly-summary/:id/supplements', requireAuth, async (req, res) => {
 })
 
 // ==================== 团队日志（总经理/管理员） ====================
+
+router.get('/team/weekly-summary', requireAdminOrGM, async (req, res) => {
+  try {
+    const { weekStart, weekEnd } = req.query as { weekStart?: string; weekEnd?: string }
+    const now = new Date()
+    const day = now.getDay() || 7
+    const monday = new Date(now)
+    monday.setDate(now.getDate() - day + 1)
+    const start = weekStart || `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`
+    let end: string
+    if (weekEnd) {
+      end = weekEnd
+    } else {
+      const sunday = new Date(monday)
+      sunday.setDate(monday.getDate() + 6)
+      end = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`
+    }
+
+    const summaries = await db.all<any>(
+      `SELECT ws.*, u.name AS user_name, u.position AS user_position
+       FROM weekly_summaries ws
+       JOIN users u ON u.id = ws.user_id
+       WHERE ws.week_start = ? AND ws.week_end = ?
+       ORDER BY u.name ASC`,
+      start, end,
+    )
+
+    const userIds = summaries.map((s: any) => s.user_id)
+    let supplementsBySummary: Record<string, any[]> = {}
+    if (summaries.length > 0) {
+      const placeholders = summaries.map(() => '?').join(',')
+      const supplements = await db.all<any>(
+        `SELECT id, weekly_summary_id, seq, content, created_at
+         FROM weekly_summary_supplements
+         WHERE weekly_summary_id IN (${placeholders})
+         ORDER BY seq ASC`,
+        ...summaries.map((s: any) => s.id),
+      )
+      for (const sup of supplements) {
+        if (!supplementsBySummary[sup.weekly_summary_id]) supplementsBySummary[sup.weekly_summary_id] = []
+        supplementsBySummary[sup.weekly_summary_id].push({
+          id: sup.id,
+          seq: sup.seq,
+          content: sup.content,
+          createdAt: sup.created_at,
+        })
+      }
+    }
+
+    let attachmentsByUser: Record<string, any[]> = {}
+    if (userIds.length > 0) {
+      const userPlaceholders = userIds.map(() => '?').join(',')
+      const logs = await db.all<{ id: string; user_id: string; log_date: string }>(
+        `SELECT id, user_id, log_date FROM daily_logs
+         WHERE log_date >= ? AND log_date <= ? AND user_id IN (${userPlaceholders})`,
+        start, end, ...userIds,
+      )
+      if (logs.length > 0) {
+        const logMeta = new Map(logs.map(l => [l.id, { userId: l.user_id, logDate: l.log_date }]))
+        const logIds = logs.map(l => l.id)
+        const logPlaceholders = logIds.map(() => '?').join(',')
+        const attachments = await db.all<any>(
+          `SELECT id, daily_log_id, file_kind, file_name, file_path, file_size, mime_type, created_at
+           FROM daily_log_attachments
+           WHERE daily_log_id IN (${logPlaceholders})
+           ORDER BY created_at ASC`,
+          ...logIds,
+        )
+        for (const att of attachments) {
+          const meta = logMeta.get(att.daily_log_id)
+          if (!meta) continue
+          if (!attachmentsByUser[meta.userId]) attachmentsByUser[meta.userId] = []
+          attachmentsByUser[meta.userId].push({
+            id: att.id,
+            logDate: meta.logDate,
+            fileKind: att.file_kind,
+            fileName: att.file_name,
+            filePath: att.file_path,
+            fileSize: att.file_size,
+            mimeType: att.mime_type,
+            createdAt: att.created_at,
+          })
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        weekStart: start,
+        weekEnd: end,
+        reports: summaries.map((s: any) => ({
+          id: s.id,
+          userId: s.user_id,
+          userName: s.user_name,
+          userPosition: s.user_position,
+          content: s.summary_content,
+          generatedAt: s.generated_at,
+          lockedAt: s.locked_at || null,
+          supplements: supplementsBySummary[s.id] || [],
+          attachments: attachmentsByUser[s.user_id] || [],
+        })),
+      },
+    })
+  } catch (err) {
+    console.error('获取团队周报失败:', err)
+    res.status(500).json({ success: false, message: '获取团队周报失败' })
+  }
+})
+
+router.get('/team/attachments/:attachmentId/preview', requireAdminOrGM, async (req, res) => {
+  try {
+    const { attachmentId } = req.params
+    const attachment = await db.get<any>(
+      `SELECT * FROM daily_log_attachments WHERE id = ?`,
+      attachmentId,
+    )
+    if (!attachment) return res.status(404).json({ success: false, message: '附件不存在' })
+
+    const fullPath = path.resolve(process.cwd(), attachment.file_path)
+    if (!fs.existsSync(fullPath)) return res.status(404).json({ success: false, message: '文件不存在' })
+
+    const ext = path.extname(attachment.file_name).toLowerCase().replace('.', '')
+    if (attachment.file_kind === 'image') {
+      if (attachment.mime_type) res.setHeader('Content-Type', attachment.mime_type)
+      return res.sendFile(fullPath)
+    }
+    if (ext === 'pdf') {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(attachment.file_name)}"`)
+      return res.sendFile(fullPath)
+    }
+    if (CONVERTIBLE_EXT.includes(ext)) {
+      return await sendConvertedPdf(res, fullPath, attachment.file_name)
+    }
+
+    res.status(400).json({ success: false, message: '不支持预览的文件格式' })
+  } catch (err) {
+    console.error('团队附件预览失败:', err)
+    res.status(500).json({ success: false, message: '预览失败' })
+  }
+})
 
 router.get('/team', requireAdminOrGM, async (req, res) => {
   try {
@@ -1988,9 +2309,11 @@ router.get('/team/comments/unread-date', requireAdminOrGM, async (req, res) => {
 router.get('/team/comments/:submissionId', requireAuth, async (req, res) => {
   try {
     const { submissionId } = req.params
+    const { markRead } = req.query
     const currentUserId = req.session.userId!
     const comments = await db.all<any>(
-      `SELECT c.id, c.content, c.created_at, c.read_at, c.user_id, c.reply_to, u.name as user_name,
+      `SELECT c.id, c.content, c.created_at, c.read_at, c.user_id, c.reply_to,
+              c.due_date, c.completed_at, u.name as user_name,
               rc.user_id as reply_to_user_id, ru.name as reply_to_user_name
        FROM daily_log_comments c
        JOIN users u ON u.id = c.user_id
@@ -2012,16 +2335,20 @@ router.get('/team/comments/:submissionId', requireAuth, async (req, res) => {
         replyToUserId: c.reply_to_user_id || null,
         replyToUserName: c.reply_to_user_name || null,
         isUnread: c.read_at === null && c.user_id !== currentUserId,
+        dueDate: c.due_date || null,
+        completedAt: c.completed_at || null,
       })),
     })
 
-    // 自动标记回复自己的评论为已读
-    await db.run(
-      `UPDATE daily_log_comments SET read_at = ?
-       WHERE submission_id = ? AND read_at IS NULL AND user_id != ?
-       AND reply_to IN (SELECT id FROM daily_log_comments WHERE user_id = ?)`,
-      new Date().toISOString(), submissionId, currentUserId, currentUserId,
-    )
+    // 仅主动查看时（markRead=true）才标记已读，轮询刷新不标记
+    if (markRead === 'true') {
+      await db.run(
+        `UPDATE daily_log_comments SET read_at = ?
+         WHERE submission_id = ? AND read_at IS NULL AND user_id != ?
+         AND reply_to IN (SELECT id FROM daily_log_comments WHERE user_id = ?)`,
+        new Date().toISOString(), submissionId, currentUserId, currentUserId,
+      )
+    }
   } catch (err: any) {
     console.error('获取评论失败:', err)
     res.status(500).json({ success: false, message: '获取评论失败' })
@@ -2031,18 +2358,32 @@ router.get('/team/comments/:submissionId', requireAuth, async (req, res) => {
 router.post('/team/comments/:submissionId', requireAdminOrGM, async (req, res) => {
   try {
     const { submissionId } = req.params
-    const { content, replyTo } = req.body as { content?: string; replyTo?: string }
+    const { content, replyTo, dueDate } = req.body as { content?: string; replyTo?: string; dueDate?: string }
     const userId = req.session.userId!
 
     if (!content || !content.trim()) {
       return res.status(400).json({ success: false, message: '评论内容不能为空' })
     }
 
+    // 校验 dueDate 格式（YYYY-MM-DD）
+    if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+      return res.status(400).json({ success: false, message: '完成期限格式错误' })
+    }
+
+    // 总经理不能评论自己的日志
+    const currentUser = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
+    if (currentUser?.role === 'general_manager') {
+      const submission = await db.get<{ user_id: string }>(`SELECT user_id FROM daily_log_submissions WHERE id = ?`, submissionId)
+      if (submission?.user_id === userId) {
+        return res.status(403).json({ success: false, message: '总经理不能评论自己的日志' })
+      }
+    }
+
     const id = nanoid()
     const now = new Date().toISOString()
     await db.run(
-      `INSERT INTO daily_log_comments (id, submission_id, user_id, content, created_at, reply_to) VALUES (?, ?, ?, ?, ?, ?)`,
-      id, submissionId, userId, content.trim(), now, replyTo || null,
+      `INSERT INTO daily_log_comments (id, submission_id, user_id, content, created_at, reply_to, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      id, submissionId, userId, content.trim(), now, replyTo || null, dueDate || null,
     )
 
     const userName = (await db.get<{ name: string }>(`SELECT name FROM users WHERE id = ?`, userId))?.name || ''
@@ -2062,7 +2403,11 @@ router.post('/team/comments/:submissionId', requireAdminOrGM, async (req, res) =
 
     res.json({
       success: true,
-      data: { id, content: content.trim(), createdAt: now, userId, userName, replyTo: replyTo || null, replyToUserId, replyToUserName, isUnread: false },
+      data: {
+        id, content: content.trim(), createdAt: now, userId, userName,
+        replyTo: replyTo || null, replyToUserId, replyToUserName,
+        isUnread: false, dueDate: dueDate || null, completedAt: null,
+      },
     })
   } catch (err: any) {
     console.error('添加评论失败:', err)

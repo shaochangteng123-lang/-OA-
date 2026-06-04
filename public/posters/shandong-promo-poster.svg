@@ -1,0 +1,218 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2000" viewBox="0 0 1600 2000" role="img" aria-labelledby="title desc">
+  <title id="title">好客山东 齐鲁风华</title>
+  <desc id="desc">山东十六城文旅宣传海报，包含济南、青岛、淄博、枣庄、东营、烟台、潍坊、济宁、泰安、威海、日照、临沂、德州、聊城、滨州、菏泽的城市特色元素。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f7efe1"/>
+      <stop offset="0.42" stop-color="#dbe8dc"/>
+      <stop offset="1" stop-color="#c4d9e8"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f9bb2"/>
+      <stop offset="1" stop-color="#0e5f7a"/>
+    </linearGradient>
+    <linearGradient id="mountain" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2f7d5f"/>
+      <stop offset="1" stop-color="#8bb16a"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#b77b25"/>
+      <stop offset="0.5" stop-color="#f0cc76"/>
+      <stop offset="1" stop-color="#a8661c"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#284a4d" flood-opacity="0.18"/>
+    </filter>
+    <pattern id="wave" width="80" height="34" patternUnits="userSpaceOnUse">
+      <path d="M0 18 C16 2 28 2 44 18 S72 34 88 18" fill="none" stroke="#ffffff" stroke-width="4" opacity="0.25"/>
+    </pattern>
+    <style>
+      .serif { font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; }
+      .sans { font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+      .city { font: 700 34px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #223b3c; }
+      .tag { font: 500 21px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #63716c; }
+      .line { stroke: #c79a42; stroke-width: 3; stroke-linecap: round; opacity: 0.55; }
+      .pin { fill: #fff9eb; stroke: #d3a347; stroke-width: 4; filter: url(#softShadow); }
+      .icon { fill: none; stroke: #9b2f24; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-fill { fill: #d84f39; stroke: #9b2f24; stroke-width: 5; stroke-linejoin: round; }
+      .small { font: 600 20px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #a8661c; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="2000" fill="url(#bg)"/>
+  <path d="M0 1450 C230 1320 358 1500 555 1398 C760 1292 909 1185 1135 1290 C1352 1391 1452 1281 1600 1164 L1600 2000 L0 2000 Z" fill="#e9c86a" opacity="0.23"/>
+  <path d="M0 1582 C245 1465 433 1635 676 1506 C920 1377 1096 1470 1260 1550 C1416 1625 1518 1534 1600 1480 L1600 2000 L0 2000 Z" fill="#0f6f87" opacity="0.1"/>
+  <circle cx="1280" cy="360" r="160" fill="#f1c76c" opacity="0.22"/>
+  <circle cx="1268" cy="348" r="106" fill="none" stroke="#dcae55" stroke-width="5" opacity="0.45"/>
+
+  <g transform="translate(0 78)">
+    <text x="800" y="150" text-anchor="middle" class="serif" font-size="120" font-weight="900" fill="url(#gold)" letter-spacing="0">好客山东</text>
+    <text x="800" y="252" text-anchor="middle" class="serif" font-size="78" font-weight="800" fill="#173f48" letter-spacing="0">齐鲁风华</text>
+    <path d="M478 296 H1122" stroke="url(#gold)" stroke-width="6" stroke-linecap="round"/>
+    <text x="800" y="350" text-anchor="middle" class="sans" font-size="34" font-weight="500" fill="#4d6d70">山海相拥，古今同辉</text>
+  </g>
+
+  <g transform="translate(325 440)" filter="url(#softShadow)">
+    <path d="M375 58 C488 54 532 102 611 116 C727 137 810 193 848 270 C893 360 810 432 701 442 C599 451 571 515 475 522 C372 530 325 475 245 468 C138 459 70 403 76 315 C82 225 162 184 218 123 C259 79 304 62 375 58 Z" fill="#fff8e7" stroke="#c99a3e" stroke-width="7"/>
+    <path d="M116 336 C235 287 341 314 430 247 C520 179 642 174 812 284" fill="none" stroke="#2d8e9f" stroke-width="28" stroke-linecap="round" opacity="0.55"/>
+    <path d="M110 338 C230 292 336 316 425 252 C514 188 638 183 810 290" fill="none" stroke="url(#wave)" stroke-width="34" opacity="0.8"/>
+    <path d="M320 438 L407 284 L476 438 Z" fill="url(#mountain)" opacity="0.92"/>
+    <path d="M410 438 L515 246 L624 438 Z" fill="#2f7d5f" opacity="0.88"/>
+    <path d="M480 438 L587 316 L714 438 Z" fill="#8bb16a" opacity="0.88"/>
+    <circle cx="578" cy="276" r="48" fill="#e0523a"/>
+    <path d="M552 306 C590 288 618 286 652 306" fill="none" stroke="#f7efe1" stroke-width="8" stroke-linecap="round"/>
+    <path d="M742 132 C812 182 852 232 855 300 C790 254 755 205 742 132 Z" fill="url(#sea)" opacity="0.95"/>
+    <path d="M154 262 C198 258 229 241 248 204 C267 242 298 258 344 262 C304 279 272 300 248 340 C223 300 194 279 154 262 Z" fill="#d74c37" opacity="0.85"/>
+    <text x="475" y="586" text-anchor="middle" class="serif" font-size="43" font-weight="800" fill="#173f48">一省山海，千年齐鲁</text>
+  </g>
+
+  <g>
+    <path class="line" d="M516 642 L350 548"/>
+    <path class="line" d="M645 598 L610 442"/>
+    <path class="line" d="M860 598 L1012 498"/>
+    <path class="line" d="M1020 700 L1250 650"/>
+    <path class="line" d="M1040 834 L1332 850"/>
+    <path class="line" d="M958 1000 L1235 1096"/>
+    <path class="line" d="M812 1078 L928 1250"/>
+    <path class="line" d="M646 1080 L575 1252"/>
+    <path class="line" d="M520 982 L332 1095"/>
+    <path class="line" d="M468 836 L220 858"/>
+    <path class="line" d="M485 720 L285 692"/>
+  </g>
+
+  <g transform="translate(184 454)">
+    <rect class="pin" x="0" y="0" width="286" height="124" rx="28"/>
+    <path class="icon" d="M48 78 C62 50 86 50 100 78 C116 50 140 50 154 78"/>
+    <circle cx="101" cy="47" r="14" fill="#2f9bb2"/>
+    <text x="184" y="49" text-anchor="middle" class="city">济南</text>
+    <text x="184" y="84" text-anchor="middle" class="tag">趵突泉 大明湖</text>
+  </g>
+
+  <g transform="translate(482 324)">
+    <rect class="pin" x="0" y="0" width="258" height="124" rx="28"/>
+    <path class="icon" d="M45 76 H136 M58 76 C64 42 118 42 124 76 M91 42 V28"/>
+    <path d="M48 94 C70 82 91 82 112 94 C134 106 154 106 176 94" fill="none" stroke="#2f9bb2" stroke-width="6" stroke-linecap="round"/>
+    <text x="196" y="49" text-anchor="middle" class="city">青岛</text>
+    <text x="196" y="84" text-anchor="middle" class="tag">栈桥 海岸</text>
+  </g>
+
+  <g transform="translate(922 390)">
+    <rect class="pin" x="0" y="0" width="296" height="124" rx="28"/>
+    <path class="icon" d="M56 82 C70 44 118 44 132 82 Z M72 52 V32 M108 52 V32"/>
+    <path d="M56 92 H137" stroke="#2f9bb2" stroke-width="6" stroke-linecap="round"/>
+    <text x="214" y="49" text-anchor="middle" class="city">淄博</text>
+    <text x="214" y="84" text-anchor="middle" class="tag">陶瓷 烟火</text>
+  </g>
+
+  <g transform="translate(1180 588)">
+    <rect class="pin" x="0" y="0" width="282" height="124" rx="28"/>
+    <path class="icon" d="M46 85 H154 M58 85 V48 H142 V85 M72 48 V34 H128 V48 M84 85 V63 H116 V85"/>
+    <text x="210" y="49" text-anchor="middle" class="city">枣庄</text>
+    <text x="210" y="84" text-anchor="middle" class="tag">台儿庄古城</text>
+  </g>
+
+  <g transform="translate(1260 788)">
+    <rect class="pin" x="0" y="0" width="276" height="124" rx="28"/>
+    <path class="icon" d="M42 76 C72 50 95 50 124 76 S176 102 206 76"/>
+    <path d="M68 46 C98 30 130 31 164 52" fill="none" stroke="#2f9bb2" stroke-width="7" stroke-linecap="round"/>
+    <text x="210" y="49" text-anchor="middle" class="city">东营</text>
+    <text x="210" y="84" text-anchor="middle" class="tag">黄河入海</text>
+  </g>
+
+  <g transform="translate(1132 1032)">
+    <rect class="pin" x="0" y="0" width="306" height="124" rx="28"/>
+    <path class="icon" d="M62 86 H154 M76 86 V44 H140 V86 M88 44 L108 26 L128 44"/>
+    <circle cx="168" cy="44" r="13" class="icon-fill"/>
+    <text x="230" y="49" text-anchor="middle" class="city">烟台</text>
+    <text x="230" y="84" text-anchor="middle" class="tag">蓬莱阁 葡萄酒</text>
+  </g>
+
+  <g transform="translate(776 1224)">
+    <rect class="pin" x="0" y="0" width="302" height="124" rx="28"/>
+    <path class="icon" d="M100 29 L152 78 L100 106 L48 78 Z M100 29 V106 M48 78 H152"/>
+    <path d="M100 106 C118 128 143 131 162 116" fill="none" stroke="#2f9bb2" stroke-width="5" stroke-linecap="round"/>
+    <text x="226" y="49" text-anchor="middle" class="city">潍坊</text>
+    <text x="226" y="84" text-anchor="middle" class="tag">风筝之都</text>
+  </g>
+
+  <g transform="translate(434 1222)">
+    <rect class="pin" x="0" y="0" width="286" height="124" rx="28"/>
+    <path class="icon" d="M48 90 H150 M62 90 V45 H136 V90 M74 45 C86 24 112 24 124 45"/>
+    <path d="M80 68 H118" stroke="#2f9bb2" stroke-width="6" stroke-linecap="round"/>
+    <text x="210" y="49" text-anchor="middle" class="city">济宁</text>
+    <text x="210" y="84" text-anchor="middle" class="tag">孔孟之乡</text>
+  </g>
+
+  <g transform="translate(126 1040)">
+    <rect class="pin" x="0" y="0" width="284" height="124" rx="28"/>
+    <path class="icon-fill" d="M42 88 L90 36 L128 88 Z"/>
+    <path class="icon-fill" d="M94 88 L142 48 L184 88 Z" fill="#2f7d5f"/>
+    <circle cx="146" cy="38" r="16" fill="#e0523a"/>
+    <text x="220" y="49" text-anchor="middle" class="city">泰安</text>
+    <text x="220" y="84" text-anchor="middle" class="tag">泰山日出</text>
+  </g>
+
+  <g transform="translate(64 794)">
+    <rect class="pin" x="0" y="0" width="292" height="124" rx="28"/>
+    <path class="icon" d="M54 84 C76 54 106 48 136 68 C158 82 174 86 194 78"/>
+    <circle cx="104" cy="48" r="20" fill="#2f9bb2"/>
+    <path d="M55 98 C86 88 116 88 146 98" fill="none" stroke="#2f9bb2" stroke-width="6" stroke-linecap="round"/>
+    <text x="222" y="49" text-anchor="middle" class="city">威海</text>
+    <text x="222" y="84" text-anchor="middle" class="tag">刘公岛 海湾</text>
+  </g>
+
+  <g transform="translate(118 644)">
+    <rect class="pin" x="0" y="0" width="286" height="124" rx="28"/>
+    <circle cx="88" cy="50" r="24" fill="#e0523a"/>
+    <path d="M42 86 C68 70 92 70 118 86 S168 102 196 84" fill="none" stroke="#2f9bb2" stroke-width="7" stroke-linecap="round"/>
+    <text x="216" y="49" text-anchor="middle" class="city">日照</text>
+    <text x="216" y="84" text-anchor="middle" class="tag">海滨日出</text>
+  </g>
+
+  <g transform="translate(248 1376)">
+    <rect class="pin" x="0" y="0" width="296" height="124" rx="28"/>
+    <path class="icon-fill" d="M44 88 L98 42 L146 88 Z" fill="#2f7d5f"/>
+    <path class="icon-fill" d="M108 88 L154 58 L196 88 Z" fill="#8bb16a"/>
+    <path d="M74 68 C98 78 120 78 142 66" fill="none" stroke="#fff8e7" stroke-width="6" stroke-linecap="round"/>
+    <text x="226" y="49" text-anchor="middle" class="city">临沂</text>
+    <text x="226" y="84" text-anchor="middle" class="tag">沂蒙山水</text>
+  </g>
+
+  <g transform="translate(606 1420)">
+    <rect class="pin" x="0" y="0" width="288" height="124" rx="28"/>
+    <circle cx="88" cy="66" r="34" fill="none" stroke="#d84f39" stroke-width="7"/>
+    <path d="M88 30 V102 M52 66 H124 M64 42 L112 90 M112 42 L64 90" stroke="#d84f39" stroke-width="5" stroke-linecap="round"/>
+    <text x="214" y="49" text-anchor="middle" class="city">德州</text>
+    <text x="214" y="84" text-anchor="middle" class="tag">绿色能源 美食</text>
+  </g>
+
+  <g transform="translate(930 1392)">
+    <rect class="pin" x="0" y="0" width="286" height="124" rx="28"/>
+    <path class="icon" d="M52 86 H166 M70 86 V42 H148 V86 M84 42 V28 H134 V42"/>
+    <path d="M50 100 C78 88 104 88 132 100" fill="none" stroke="#2f9bb2" stroke-width="6" stroke-linecap="round"/>
+    <text x="214" y="49" text-anchor="middle" class="city">聊城</text>
+    <text x="214" y="84" text-anchor="middle" class="tag">东昌湖 光岳楼</text>
+  </g>
+
+  <g transform="translate(1158 1256)">
+    <rect class="pin" x="0" y="0" width="294" height="124" rx="28"/>
+    <path class="icon" d="M48 82 C78 54 104 54 132 82 S182 110 210 82"/>
+    <path d="M92 44 L128 28 L164 44" fill="none" stroke="#d84f39" stroke-width="7" stroke-linecap="round"/>
+    <text x="222" y="49" text-anchor="middle" class="city">滨州</text>
+    <text x="222" y="84" text-anchor="middle" class="tag">黄河 孙子文化</text>
+  </g>
+
+  <g transform="translate(1244 458)">
+    <rect class="pin" x="0" y="0" width="286" height="124" rx="28"/>
+    <path d="M94 36 C110 12 138 26 128 54 C158 50 166 82 136 90 C140 118 104 122 96 94 C72 116 44 90 66 70 C38 52 60 20 88 50 C88 45 90 40 94 36 Z" fill="#d84f39" stroke="#9b2f24" stroke-width="5"/>
+    <circle cx="104" cy="72" r="12" fill="#f0cc76"/>
+    <text x="214" y="49" text-anchor="middle" class="city">菏泽</text>
+    <text x="214" y="84" text-anchor="middle" class="tag">牡丹之都</text>
+  </g>
+
+  <g transform="translate(300 1648)">
+    <path d="M0 0 H1000" stroke="url(#gold)" stroke-width="5" stroke-linecap="round"/>
+    <text x="500" y="78" text-anchor="middle" class="serif" font-size="47" font-weight="800" fill="#173f48">一省山海，千年齐鲁；十六城烟火，共赴山东之约。</text>
+    <text x="500" y="138" text-anchor="middle" class="sans" font-size="25" font-weight="500" fill="#5f6f70">济南 · 青岛 · 淄博 · 枣庄 · 东营 · 烟台 · 潍坊 · 济宁 · 泰安 · 威海 · 日照 · 临沂 · 德州 · 聊城 · 滨州 · 菏泽</text>
+  </g>
+</svg>

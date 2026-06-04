@@ -4,6 +4,9 @@
     <div v-if="showUnreadHint" class="comment-hint-bar" @click="goToUnreadComment">
       有 {{ unreadCommentCount }} 条新评论，点击查看
     </div>
+    <div v-if="showUnrepliedGMHint" class="comment-hint-bar unreplied-gm" @click="goToUnrepliedGMComment">
+      你在 {{ unrepliedGMDate }} 有一条总经理评论未回复，请先回复后再编辑日志
+    </div>
     <!-- 左栏：今日日志编辑 -->
     <div class="left-panel">
       <!-- 状态标签 -->
@@ -46,8 +49,65 @@
         <div class="supplement-original-body rich-content" v-html="weeklySupplementOriginalContent" />
       </div>
 
+      <!-- 待办清单（今日日志编辑时，显示到期的管理员任务） -->
+      <div
+        v-if="!viewingHistory && !viewingWeeklyReport && pendingTasks.length > 0"
+        class="todo-checklist"
+      >
+        <div class="todo-checklist-header">
+          <span class="todo-checklist-title">📋 待办事项</span>
+          <span class="todo-checklist-count">{{ pendingTasks.length }} 项待完成</span>
+        </div>
+        <div
+          v-for="task in pendingTasks"
+          :key="task.commentId"
+          :class="['todo-item', { 'todo-item-overdue': task.isOverdue }]"
+        >
+          <div class="todo-item-left">
+            <span class="todo-item-checkbox">☐</span>
+            <div class="todo-item-body">
+              <span class="todo-item-content">{{ task.content }}</span>
+              <div class="todo-item-meta">
+                <span class="todo-item-from">来自 {{ task.gmName }}</span>
+                <span class="todo-item-source">（{{ task.logDate }} 日志评论）</span>
+                <span :class="['todo-item-due', { overdue: task.isOverdue }]">
+                  {{ task.isOverdue ? '⚠️ 已逾期' : '⏰' }} 期限 {{ task.dueDate }}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div class="todo-item-actions">
+            <el-button
+              size="small"
+              text
+              :disabled="showUnrepliedGMHint"
+              @click="insertTaskRef(task)"
+              class="todo-item-ref-btn"
+              title="引用到日志"
+            >📝 引用</el-button>
+            <el-button
+              size="small"
+              type="success"
+              plain
+              :loading="completingTaskId === task.commentId"
+              :disabled="showUnrepliedGMHint"
+              @click="completeTask(task)"
+              class="todo-item-done-btn"
+            >✔ 已完成</el-button>
+          </div>
+        </div>
+      </div>
+
       <!-- 富文本编辑区 -->
       <div class="editor-area" :class="{ 'editor-viewing': viewingHistory, 'editor-editing-history': editingSubmission && !viewingHistory, 'editor-weekly-supplement': weeklySupplementMode }">
+        <!-- 未回复评论锁定遮罩 -->
+        <div v-if="showUnrepliedGMHint && !viewingHistory" class="editor-lock-mask" @click="goToUnrepliedGMComment">
+          <div class="lock-message">
+            <i class="el-icon-lock"></i>
+            <p>你在 {{ unrepliedGMDate }} 有一条总经理评论未回复</p>
+            <p class="lock-hint">点击前往回复后可继续编辑日志</p>
+          </div>
+        </div>
         <!-- 工具栏 -->
         <div class="editor-toolbar" v-if="editor && (!viewingHistory || weeklySupplementMode)">
           <div class="toolbar-group">
@@ -203,17 +263,36 @@
       <!-- 评论区（查看历史日志时，有评论才显示） -->
       <div class="comment-section" v-if="viewingHistory && editingSubmission && editingSubmission.comments && editingSubmission.comments.length > 0">
         <div class="comment-list">
-          <div v-for="c in editingSubmission.comments" :key="c.id" :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
-            <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
-            <template v-if="c.replyToUserName">
+          <template v-for="c in getTopComments(editingSubmission.comments)" :key="c.id">
+            <div :data-comment-id="c.id" :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
+              <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
+              <span class="comment-text">{{ c.content }}</span>
+              <!-- 完成期限标签 -->
+              <span v-if="c.dueDate"
+                :class="['comment-due-tag', !c.completedAt && c.dueDate < new Date().toISOString().slice(0,10) ? 'overdue' : '']"
+              >⏰ {{ c.dueDate }} 前完成</span>
+              <span v-if="c.completedAt" class="comment-done-tag">✅ 已完成</span>
+              <span class="comment-time">{{ formatCommentTime(c.createdAt) }}</span>
+              <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setCommentReply(c)">回复</span>
+              <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(c.id)">撤回</span>
+            </div>
+            <!-- 该条评论的回复 -->
+            <div v-for="r in getReplies(editingSubmission.comments, c.id)" :key="r.id"
+              :data-comment-id="r.id"
+              :class="['comment-item', 'comment-item-reply', { 'comment-item-unread': r.isUnread }]">
+              <span :class="['comment-author', r.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ r.userName }}</span>
               <span class="comment-reply-label">回复</span>
-              <span :class="['comment-reply-target', c.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ c.replyToUserName }}</span>
-            </template>
-            <span class="comment-text">{{ c.content }}</span>
-            <span class="comment-time">{{ formatCommentTime(c.createdAt) }}</span>
-            <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setCommentReply(c)">回复</span>
-            <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(c.id)">撤回</span>
-          </div>
+              <span :class="['comment-reply-target', r.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ r.replyToUserName }}</span>
+              <span class="comment-text">{{ r.content }}</span>
+              <span v-if="r.dueDate"
+                :class="['comment-due-tag', !r.completedAt && r.dueDate < new Date().toISOString().slice(0,10) ? 'overdue' : '']"
+              >⏰ {{ r.dueDate }} 前完成</span>
+              <span v-if="r.completedAt" class="comment-done-tag">✅ 已完成</span>
+              <span class="comment-time">{{ formatCommentTime(r.createdAt) }}</span>
+              <span v-if="r.userId !== authStore.user?.id" class="comment-reply-btn" @click="setCommentReply(r)">回复</span>
+              <span v-if="r.userId === authStore.user?.id && canWithdraw(r.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(r.id)">撤回</span>
+            </div>
+          </template>
         </div>
         <div class="comment-input" v-if="commentReplyTarget">
           <div class="comment-input-wrap">
@@ -329,7 +408,6 @@
       </el-upload>
       <div v-else-if="!logId && !viewingHistory" class="upload-disabled-hint">暂存日志后可上传附件</div>
 
-      <!-- 操作按钮 -->
       <div class="action-bar" :class="{ 'action-bar-viewing': viewingHistory, 'action-bar-editing': editingSubmission && !viewingHistory }">
         <div class="action-left">
           <el-button v-if="viewingHistory" @click="cancelEdit" class="btn-back-today">
@@ -370,7 +448,7 @@
             <el-button v-else-if="editingSubmission" type="warning" size="large" @click="handleSaveEditSubmission" :loading="submitting" class="btn-save-edit">
               保存修改
             </el-button>
-            <el-button v-else type="primary" size="large" @click="handleSave" :loading="saving" class="btn-save-today">保存</el-button>
+            <el-button v-else type="primary" size="large" @click="handleSave" :loading="saving" :disabled="showUnrepliedGMHint" class="btn-save-today">保存</el-button>
           </template>
         </div>
       </div>
@@ -563,6 +641,8 @@ interface HistoryComment {
   replyToUserId: string | null
   replyToUserName: string | null
   isUnread: boolean
+  dueDate: string | null
+  completedAt: string | null
 }
 
 interface HistorySubmission {
@@ -616,6 +696,25 @@ const canInitiateComment = computed(() => {
 const showUnreadHint = ref(false)
 const unreadCommentCount = ref(0)
 const isNavigatingToUnread = ref(false)
+const showUnrepliedGMHint = ref(false)
+const unrepliedGMDate = ref('')
+const unrepliedGMSubmissionId = ref('')
+const unrepliedGMCommentId = ref('')
+
+// 待完成任务（总经理设置了期限的评论）
+interface PendingTask {
+  commentId: string
+  submissionId: string
+  logDate: string
+  gmName: string
+  content: string
+  dueDate: string
+  isOverdue: boolean
+  createdAt: string
+}
+const pendingTasks = ref<PendingTask[]>([])
+const completingTaskId = ref<string | null>(null)
+const pendingTasksPollCount = ref(0)
 
 // 快捷短语
 interface Phrase { id: string; content: string; sort_order: number; created_at: string }
@@ -1576,9 +1675,19 @@ function splitReportByDate(report: WeeklySummary): { html: string; date: string;
   return sections
 }
 
-function handleDownloadReportById(report: WeeklySummary) {
-  const url = `/api/daily-logs/weekly-summary/download?weekStart=${report.weekStart}&weekEnd=${report.weekEnd}`
-  window.open(url, '_blank')
+async function handleDownloadReportById(report: WeeklySummary) {
+  try {
+    await ElMessageBox.confirm('请选择导出格式', '导出周报', {
+      distinguishCancelAndClose: true,
+      confirmButtonText: '纯文本 Word',
+      cancelButtonText: 'Word + 附件',
+    })
+    window.open(`/api/daily-logs/weekly-summary/download?weekStart=${report.weekStart}&weekEnd=${report.weekEnd}&format=docx`, '_blank')
+  } catch (action) {
+    if (action === 'cancel') {
+      window.open(`/api/daily-logs/weekly-summary/download?weekStart=${report.weekStart}&weekEnd=${report.weekEnd}`, '_blank')
+    }
+  }
 }
 
 function startWeeklySupplement(report: WeeklySummary) {
@@ -1676,6 +1785,13 @@ function canWithdraw(createdAt: string): boolean {
   return Date.now() - new Date(createdAt).getTime() < 5 * 60 * 1000
 }
 
+function getTopComments(comments: HistoryComment[]) {
+  return comments.filter(c => !c.replyTo)
+}
+function getReplies(comments: HistoryComment[], parentId: string) {
+  return comments.filter(c => c.replyTo === parentId)
+}
+
 function setCommentReply(comment: HistoryComment) {
   commentReplyTarget.value = { id: comment.id, userName: comment.userName }
 }
@@ -1714,6 +1830,7 @@ async function submitComment() {
       editingSubmission.value.comments.push(data.data)
       commentInput.value = ''
       commentReplyTarget.value = null
+      checkUnrepliedGMComments()
     }
   } catch {
     ElMessage.error('评论失败')
@@ -1756,6 +1873,78 @@ async function checkUnreadComments() {
   } catch { /* ignore */ }
 }
 
+async function checkUnrepliedGMComments() {
+  try {
+    const { data } = await api.get('/api/daily-logs/comments/unreplied-gm')
+    if (data.success && data.data) {
+      unrepliedGMDate.value = data.data.date
+      unrepliedGMSubmissionId.value = data.data.submissionId
+      unrepliedGMCommentId.value = data.data.commentId
+      showUnrepliedGMHint.value = true
+    } else {
+      showUnrepliedGMHint.value = false
+    }
+  } catch { /* 网络异常不锁定 */ }
+}
+
+// 获取待完成任务列表
+async function checkPendingTasks() {
+  try {
+    const { data } = await api.get('/api/daily-logs/comments/pending-tasks')
+    if (data.success) {
+      pendingTasks.value = data.data
+    }
+  } catch (err: any) {
+    console.warn('[pending-tasks] 获取失败:', err?.response?.status, err?.response?.data)
+  }
+}
+
+// 点击待办项插入引用到编辑器
+function insertTaskRef(task: PendingTask) {
+  if (!editor.value) return
+  const doc = editor.value.getHTML()
+  const hasSeparator = doc.includes('待办回应')
+  const content = hasSeparator
+    ? `<blockquote><p>关于「${task.content}」（${task.logDate} 评论，期限 ${task.dueDate}）：</p><p></p></blockquote>`
+    : `<hr><h3>待办回应</h3><blockquote><p>关于「${task.content}」（${task.logDate} 评论，期限 ${task.dueDate}）：</p><p></p></blockquote>`
+  editor.value.chain().focus('end').insertContent(content).run()
+}
+
+// 员工一键标记任务完成
+async function completeTask(task: PendingTask) {
+  completingTaskId.value = task.commentId
+  try {
+    const { data } = await api.post(`/api/daily-logs/comments/${task.commentId}/complete`)
+    if (data.success) {
+      // 从待办列表移除
+      pendingTasks.value = pendingTasks.value.filter(t => t.commentId !== task.commentId)
+      ElMessage.success('已标记完成，并自动回复总经理')
+      // 如果当前正查看该日志，刷新评论列表
+      if (editingSubmission.value && editingSubmission.value.id === task.submissionId) {
+        const reply = data.data
+        if (!editingSubmission.value.comments) editingSubmission.value.comments = []
+        editingSubmission.value.comments.push({
+          id: reply.replyId,
+          userId: reply.userId,
+          userName: reply.userName,
+          content: reply.replyContent,
+          createdAt: reply.replyCreatedAt,
+          replyTo: reply.replyTo,
+          replyToUserId: reply.replyToUserId,
+          replyToUserName: reply.replyToUserName,
+          isUnread: false,
+          dueDate: null,
+          completedAt: null,
+        })
+      }
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '操作失败')
+  } finally {
+    completingTaskId.value = null
+  }
+}
+
 async function goToUnreadComment() {
   showUnreadHint.value = false
   isNavigatingToUnread.value = true
@@ -1789,6 +1978,42 @@ async function goToUnreadComment() {
     isNavigatingToUnread.value = false
     ElMessage.error('加载未读评论失败')
   }
+}
+
+async function goToUnrepliedGMComment() {
+  showUnrepliedGMHint.value = false
+  const date = unrepliedGMDate.value
+  const subId = unrepliedGMSubmissionId.value
+  const commentId = unrepliedGMCommentId.value
+  if (!date || !subId) return
+  try {
+    calendarSelectedDate.value = date
+    calendarPreviewLoading.value = true
+    const res = await api.get('/api/daily-logs/history', {
+      params: { page: 1, pageSize: 1, startDate: date, endDate: date },
+    })
+    if (res.data.success && res.data.data.groups.length > 0) {
+      const group = res.data.data.groups[0] as HistoryGroup
+      const sub = group.submissions.find((s: any) => s.id === subId) || group.submissions[0]
+      if (sub) {
+        openEditSubmission(sub, group)
+        // 加载评论数据
+        const commentRes = await api.get(`/api/daily-logs/team/comments/${sub.id}`)
+        if (commentRes.data.success) {
+          sub.comments = commentRes.data.data
+          editingSubmission.value!.comments = commentRes.data.data
+        }
+        await nextTick()
+        const el = document.querySelector(`[data-comment-id="${commentId}"]`)
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+          el.classList.add('comment-highlight')
+          setTimeout(() => (el as HTMLElement).classList.remove('comment-highlight'), 3000)
+        }
+      }
+    }
+    calendarPreviewLoading.value = false
+  } catch { ElMessage.error('跳转失败') }
 }
 
 function enableEditMode() {
@@ -1836,6 +2061,7 @@ function cancelEdit() {
   savedLogId.value = ''
   editor.value?.setEditable(true)
   loadTodayLog()
+  checkUnrepliedGMComments()
 }
 
 async function openWeeklyReportInEditor(report: WeeklySummary) {
@@ -1905,6 +2131,7 @@ async function handleSaveEditSubmission() {
 let commentPollTimer: number | null = null
 
 onMounted(async () => {
+  await checkUnrepliedGMComments()
   loadTodayLog()
   loadDayInfo()
   loadWeeklySummary()
@@ -1912,7 +2139,8 @@ onMounted(async () => {
   loadCalendarDates()
   loadCalendarHolidays()
   checkUnreadComments()
-  // 轮询刷新评论列表（撤回后接收方即时感知）
+  checkPendingTasks()
+  // 轮询刷新评论列表（撤回后接收方即时感知）+ 待完成任务更新
   commentPollTimer = window.setInterval(async () => {
     if (viewingHistory.value && editingSubmission.value && editingSubmission.value.comments && editingSubmission.value.comments.length > 0) {
       try {
@@ -1921,6 +2149,12 @@ onMounted(async () => {
           editingSubmission.value.comments = data.data
         }
       } catch { /* ignore */ }
+    }
+    // 每隔 30 秒刷新一次待完成任务（30000ms / 5000ms = 每 6 次轮询执行一次）
+    pendingTasksPollCount.value++
+    if (pendingTasksPollCount.value >= 6) {
+      pendingTasksPollCount.value = 0
+      checkPendingTasks()
     }
   }, 5000)
 })
@@ -1968,6 +2202,160 @@ onBeforeUnmount(() => {
 @keyframes flash-hint {
   0%, 100% { background: #ecf5ff; }
   50% { background: #409eff; color: #fff; }
+}
+
+.comment-hint-bar.unreplied-gm {
+  background: #fef0f0;
+  border-color: #fbc4c4;
+  color: #f56c6c;
+  animation: flash-hint-red 0.6s ease-in-out 3;
+}
+.comment-hint-bar.unreplied-gm:hover { background: #fde2e2; }
+
+@keyframes flash-hint-red {
+  0%, 100% { background: #fef0f0; color: #f56c6c; }
+  50% { background: #f56c6c; color: #fff; }
+}
+
+/* 待完成任务提示条 */
+/* ===== 编辑区内嵌待办清单 ===== */
+.todo-checklist {
+  margin: 0 0 12px;
+  border: 1px solid #e6dfc9;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fffdf7;
+}
+
+.todo-checklist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: #fdf6ec;
+  border-bottom: 1px solid #e6dfc9;
+}
+
+.todo-checklist-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #b07d2a;
+}
+
+.todo-checklist-count {
+  font-size: 12px;
+  color: #c0a060;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0e8d0;
+  transition: background 0.15s;
+}
+
+.todo-item:last-child {
+  border-bottom: none;
+}
+
+.todo-item:hover {
+  background: #fffbf0;
+}
+
+.todo-item-overdue {
+  background: #fff8f8;
+}
+
+.todo-item-overdue:hover {
+  background: #fff0f0;
+}
+
+.todo-item-left {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.todo-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.todo-item-ref-btn {
+  color: #909399;
+  font-size: 12px;
+}
+
+.todo-item-ref-btn:hover {
+  color: #409eff;
+}
+
+.todo-item-checkbox {
+  font-size: 16px;
+  color: #c0a060;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.todo-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.todo-item-content {
+  font-size: 14px;
+  color: #303133;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.todo-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.todo-item-from {
+  font-size: 12px;
+  color: #409eff;
+  font-weight: 500;
+}
+
+.todo-item-source {
+  font-size: 12px;
+  color: #909399;
+}
+
+.todo-item-due {
+  font-size: 12px;
+  color: #e6a23c;
+}
+
+.todo-item-due.overdue {
+  color: #f56c6c;
+  font-weight: 500;
+}
+
+.todo-item-done-btn {
+  flex-shrink: 0;
+}
+
+.comment-highlight {
+  outline: 2px solid #f56c6c !important;
+  animation: highlight-flash 0.5s ease-in-out 3;
+}
+@keyframes highlight-flash {
+  0%, 100% { background: inherit; }
+  50% { background: #fef0f0; }
 }
 
 .daily-log-page {
@@ -2079,7 +2467,28 @@ onBeforeUnmount(() => {
   overflow: hidden;
   transition: border-color 0.3s, box-shadow 0.3s, background 0.3s;
   background: #fafbfc;
+  position: relative;
 }
+
+.editor-lock-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.85);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 10px;
+}
+.lock-message {
+  text-align: center;
+  color: #f56c6c;
+  font-size: 14px;
+  font-weight: 500;
+}
+.lock-message p { margin: 4px 0; }
+.lock-hint { color: #999; font-size: 12px; font-weight: 400; }
 
 .editor-area:focus-within {
   border-color: #4f46e5;
@@ -2341,6 +2750,23 @@ onBeforeUnmount(() => {
 :deep(.ProseMirror em) {
   font-style: italic !important;
   color: #555;
+}
+
+/* 引用块（待办回应） */
+:deep(.ProseMirror blockquote) {
+  margin: 12px 0;
+  padding: 10px 16px;
+  border-left: 3px solid #e6a23c;
+  background: #fffdf5;
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+  color: #555;
+}
+
+:deep(.ProseMirror hr) {
+  border: none;
+  border-top: 1px dashed #dcdfe6;
+  margin: 20px 0 12px;
 }
 
 /* 字数统计 */
@@ -3426,6 +3852,12 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
+.comment-item-reply {
+  margin-left: 20px;
+  padding-left: 10px;
+  border-left: 2px solid #e8e8e8;
+}
+
 .comment-item-unread {
   background: #fdf6ec;
   border-radius: 4px;
@@ -3496,6 +3928,37 @@ onBeforeUnmount(() => {
 
 .comment-withdraw-btn:hover {
   color: #f56c6c;
+}
+
+/* 完成期限标签（员工视角评论列表） */
+.comment-due-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: #e6a23c;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 3px;
+  padding: 0 5px;
+  flex-shrink: 0;
+}
+
+.comment-due-tag.overdue {
+  color: #f56c6c;
+  background: #fef0f0;
+  border-color: #fbc4c4;
+}
+
+.comment-done-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: #67c23a;
+  background: #f0f9eb;
+  border: 1px solid #c2e7b0;
+  border-radius: 3px;
+  padding: 0 5px;
+  flex-shrink: 0;
 }
 
 .reply-hint {

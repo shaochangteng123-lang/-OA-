@@ -21,14 +21,20 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     children: [
       {
+        path: '',
+        name: 'Home',
+        component: () => import('@/views/DailyLog.vue'),
+        meta: { title: '今日日志' },
+      },
+      {
         path: '/calendar',
         name: 'Calendar',
         component: () => import('@/views/Calendar.vue'),
         meta: { title: '日历' },
       },
       {
-        path: '',
-        name: 'Home',
+        path: '/daily-log',
+        name: 'DailyLog',
         component: () => import('@/views/DailyLog.vue'),
         meta: { title: '今日日志' },
       },
@@ -61,6 +67,12 @@ const routes: RouteRecordRaw[] = [
         name: 'TeamDailyLogs',
         component: () => import('@/views/TeamDailyLogs.vue'),
         meta: { title: '团队日志', requiresRole: ['super_admin', 'admin', 'general_manager'] },
+      },
+      {
+        path: '/team-weekly-report',
+        name: 'TeamWeeklyReport',
+        component: () => import('@/views/TeamWeeklyReport.vue'),
+        meta: { title: '团队周报', requiresRole: ['super_admin', 'admin', 'general_manager'] },
       },
       {
         path: '/basic-reimbursement',

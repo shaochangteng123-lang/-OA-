@@ -1704,6 +1704,14 @@ export async function initDatabase() {
     try {
       await db.run(`ALTER TABLE daily_log_comments ADD COLUMN withdrawn_at TEXT DEFAULT NULL`)
     } catch { /* 列已存在则忽略 */ }
+    // 添加 due_date 列（总经理设置的完成期限）
+    try {
+      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN due_date TEXT DEFAULT NULL`)
+    } catch { /* 列已存在则忽略 */ }
+    // 添加 completed_at 列（员工标记完成时间）
+    try {
+      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN completed_at TEXT DEFAULT NULL`)
+    } catch { /* 列已存在则忽略 */ }
     console.log('✅ 数据库迁移：daily_log_comments 表检查完成')
   } catch (error: any) {
     if (!error.message?.includes('already exists')) {

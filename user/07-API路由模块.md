@@ -75,6 +75,15 @@ GET    /api/drafts/:date          // 获取草稿
 POST   /api/drafts/:date          // 保存草稿
 ```
 
+### 今日日志与团队日志路由 (`/api/daily-logs`)
+```typescript
+GET    /api/daily-logs/team                                // 获取指定日期团队日志
+GET    /api/daily-logs/team/weekly-summary                 // 在线查看指定周团队周报
+GET    /api/daily-logs/team/attachments/:attachmentId/preview // 在线预览团队日志附件
+GET    /api/daily-logs/weekly-summaries                    // 获取个人周报列表
+GET    /api/daily-logs/weekly-summary/download             // 导出个人/团队周报
+```
+
 ### 项目路由 (`/api/projects`)
 ```typescript
 GET    /api/projects              // 获取项目列表
@@ -521,3 +530,6 @@ app.use(helmet())
 - 2026-04-12: 转正管理全员显示优化
   - GET /api/probation/list：全部查询（无 status 参数）和 status=pending 时，通过 UNION ALL 查询包含未提交转正申请的实习期员工（虚拟记录 id 以 `virtual_` 开头）
   - GET /api/probation/statistics：pending 和 total 计数包含未申请转正的实习期员工数量
+- 2026-06-02: 团队周报新增在线查看接口
+  - GET /api/daily-logs/team/weekly-summary：返回指定周团队周报、补充和附件
+  - GET /api/daily-logs/team/attachments/:attachmentId/preview：管理员/总经理在线预览团队日志附件

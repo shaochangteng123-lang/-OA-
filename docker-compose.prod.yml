@@ -44,6 +44,7 @@ services:
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/yulilog_worklog
       - TZ=Asia/Shanghai
       - FRONTEND_URL=http://yuliseek.com
+      - VITE_ENABLE_WORKLOG=
     depends_on:
       postgres:
         condition: service_healthy

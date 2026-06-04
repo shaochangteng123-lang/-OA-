@@ -166,6 +166,7 @@ export const AiCompletion = Extension.create({
               if (debounceTimer) clearTimeout(debounceTimer)
 
               debounceTimer = setTimeout(() => {
+                if (!view.editable) return
                 const text = getCurrentParagraphText(view)
                 if (text.length < 2) return
                 fetchCompletions(text, view)

@@ -284,6 +284,9 @@ async function start() {
   setupReimbursementCleanup()
   setupLeaveBalanceReset()
 
+  const { setupHolidayAutoUpdater } = await import('./services/holidayUpdater.js')
+  setupHolidayAutoUpdater()
+
   // 日志自动归档 + 周报自动生成
   const { setupDailyLogScheduler } = await import('./services/dailyLogScheduler.js')
   setupDailyLogScheduler()

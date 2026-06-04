@@ -8,14 +8,19 @@
     <div class="week-overview">
       <div class="week-header">
         <el-date-picker
+          :key="datePickerKey"
           v-model="selectedDate"
           type="date"
           format="YYYY年MM月DD日"
           value-format="YYYY-MM-DD"
           :clearable="false"
+          :teleported="false"
           size="small"
           style="width: 170px"
+          popper-class="team-date-picker-popper"
           @change="onDatePickerChange"
+          @panel-change="onPanelChange"
+          @visible-change="onPickerVisibleChange"
         >
           <template #default="cell">
             <div class="date-cell">
@@ -36,7 +41,7 @@
           </template>
         </el-date-picker>
         <el-button size="small" @click="goToday">今天</el-button>
-        <el-button size="small" :icon="Download" @click="openExportDialog">导出周报</el-button>
+        <el-button size="small" :icon="Document" @click="$router.push('/team-weekly-report')">团队周报</el-button>
       </div>
 
       <div class="week-days">
@@ -133,9 +138,9 @@
                 <a
                   v-for="att in getDocs(sub.attachments)"
                   :key="att.id"
-                  :href="`/${att.filePath}`"
-                  target="_blank"
+                  href="javascript:void(0)"
                   class="attach-doc-card"
+                  @click="handleDocPreview(att)"
                 >
                   <div class="doc-icon" :class="getExtClass(att.fileName)">
                     <span>{{ getFileExt(att.fileName) }}</span>
@@ -149,19 +154,33 @@
           <!-- 评论区 -->
           <div class="comment-section">
             <div v-if="sub.comments && sub.comments.length > 0" class="comment-list">
-              <div v-for="c in sub.comments" :key="c.id" :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
-                <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
-                <template v-if="c.replyToUserName">
+              <template v-for="c in getTopComments(sub.comments)" :key="c.id">
+                <div :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
+                  <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
+                  <span class="comment-text">{{ c.content }}</span>
+                  <!-- 完成期限标签 -->
+                  <span v-if="c.dueDate"
+                    :class="['comment-due-tag', !c.completedAt && c.dueDate < new Date().toISOString().slice(0,10) ? 'overdue' : '']"
+                  >⏰ {{ c.dueDate }} 前完成</span>
+                  <span v-if="c.completedAt" class="comment-done-tag">✅ 已完成</span>
+                  <span class="comment-time">{{ formatTime(c.createdAt) }}</span>
+                  <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setReplyTo(sub.id, c)">回复</span>
+                  <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(sub.id, c.id)">撤回</span>
+                </div>
+                <!-- 该条评论的回复 -->
+                <div v-for="r in getReplies(sub.comments, c.id)" :key="r.id"
+                  :class="['comment-item', 'comment-item-reply', { 'comment-item-unread': r.isUnread }]">
+                  <span :class="['comment-author', r.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ r.userName }}</span>
                   <span class="comment-reply-label">回复</span>
-                  <span :class="['comment-reply-target', c.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ c.replyToUserName }}</span>
-                </template>
-                <span class="comment-text">{{ c.content }}</span>
-                <span class="comment-time">{{ formatTime(c.createdAt) }}</span>
-                <span v-if="c.userId !== authStore.user?.id" class="comment-reply-btn" @click="setReplyTo(sub.id, c)">回复</span>
-                <span v-if="c.userId === authStore.user?.id && canWithdraw(c.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(sub.id, c.id)">撤回</span>
-              </div>
+                  <span :class="['comment-reply-target', r.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ r.replyToUserName }}</span>
+                  <span class="comment-text">{{ r.content }}</span>
+                  <span class="comment-time">{{ formatTime(r.createdAt) }}</span>
+                  <span v-if="r.userId !== authStore.user?.id" class="comment-reply-btn" @click="setReplyTo(sub.id, r)">回复</span>
+                  <span v-if="r.userId === authStore.user?.id && canWithdraw(r.createdAt)" class="comment-withdraw-btn" @click="withdrawComment(sub.id, r.id)">撤回</span>
+                </div>
+              </template>
             </div>
-            <div class="comment-input">
+            <div class="comment-input" v-if="!(authStore.user?.role === 'general_manager' && sub.userId === authStore.user?.id)">
               <div class="comment-input-wrap">
                 <div v-if="replyTargets[sub.id]" class="reply-hint">
                   回复 @{{ replyTargets[sub.id]!.userName }}
@@ -175,6 +194,34 @@
                   resize="none"
                   @keyup.ctrl.enter="submitComment(sub.id)"
                 />
+                <!-- 完成期限设置（仅发起新评论时显示，回复时隐藏） -->
+                <div v-if="!replyTargets[sub.id]" class="due-date-row">
+                  <span class="due-date-toggle" @click="showDueDatePicker[sub.id] = !showDueDatePicker[sub.id]">
+                    {{ showDueDatePicker[sub.id] ? '▾' : '▸' }} 设置完成期限（可选）
+                  </span>
+                  <template v-if="showDueDatePicker[sub.id]">
+                    <el-date-picker
+                      v-model="dueDates[sub.id]"
+                      type="date"
+                      value-format="YYYY-MM-DD"
+                      placeholder="选择期限日期"
+                      size="small"
+                      :teleported="false"
+                      popper-class="due-date-picker-popper"
+                      style="width: 160px; margin-left: 8px;"
+                      @panel-change="onDueDatePanelChange"
+                    >
+                      <template #default="cell">
+                        <div class="date-cell">
+                          <span class="date-cell-text">{{ cell.date.getDate() }}</span>
+                          <span v-if="getDateTag(cell.date) === '休'" class="date-cell-tag tag-rest">休</span>
+                          <span v-else-if="getDateTag(cell.date) === '班'" class="date-cell-tag tag-work">班</span>
+                        </div>
+                      </template>
+                    </el-date-picker>
+                    <span v-if="dueDates[sub.id]" class="due-date-clear" @click="dueDates[sub.id] = ''">× 清除</span>
+                  </template>
+                </div>
                 <div class="comment-input-bottom">
                   <span class="char-count">{{ (commentInputs[sub.id] || '').length }} 字</span>
                   <el-button
@@ -225,25 +272,6 @@
       </div>
     </div>
 
-    <!-- 导出周报对话框 -->
-    <el-dialog v-model="showExportDialog" title="导出团队周报" width="400px">
-      <div style="margin-bottom: 16px;">
-        <span style="margin-right: 12px;">选择时间范围：</span>
-        <el-date-picker
-          v-model="exportDateRange"
-          type="daterange"
-          range-separator="至"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          value-format="YYYY-MM-DD"
-          style="width: 260px"
-        />
-      </div>
-      <template #footer>
-        <el-button @click="showExportDialog = false">取消</el-button>
-        <el-button type="primary" :disabled="!exportDateRange || exportDateRange.length < 2" @click="handleDownloadTeamReport">导出</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -253,7 +281,7 @@ import { api } from '@/utils/api'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown, Download } from '@element-plus/icons-vue'
+import { ArrowDown, Document } from '@element-plus/icons-vue'
 
 interface Attachment {
   id: string
@@ -262,6 +290,7 @@ interface Attachment {
   filePath: string
   fileSize: number
   mimeType: string
+  logDate?: string
 }
 
 interface Supplement {
@@ -295,6 +324,8 @@ interface Comment {
   replyToUserId: string | null
   replyToUserName: string | null
   isUnread: boolean
+  dueDate: string | null
+  completedAt: string | null
 }
 
 interface MonthDay {
@@ -306,6 +337,7 @@ interface MonthDay {
 
 const authStore = useAuthStore()
 const pendingStore = usePendingStore()
+const datePickerKey = ref(0)
 const showReplyHint = ref(false)
 const unreadReplyCount = ref(0)
 const isNavigatingToUnread = ref(false)
@@ -322,10 +354,20 @@ const totalUsers = ref(0)
 const commentInputs = reactive<Record<string, string>>({})
 const commentLoading = reactive<Record<string, boolean>>({})
 const replyTargets = reactive<Record<string, { id: string; userName: string } | null>>({})
-const showExportDialog = ref(false)
-const exportDateRange = ref<string[]>([])
+// 完成期限（仅发起新评论时可设置，key 为 submissionId）
+const dueDates = reactive<Record<string, string>>({})
+// 是否展开期限设置面板
+const showDueDatePicker = reactive<Record<string, boolean>>({})
+
 function canWithdraw(createdAt: string): boolean {
   return Date.now() - new Date(createdAt).getTime() < 5 * 60 * 1000
+}
+
+function getTopComments(comments: Comment[]) {
+  return comments.filter(c => !c.replyTo)
+}
+function getReplies(comments: Comment[], parentId: string) {
+  return comments.filter(c => c.replyTo === parentId)
 }
 
 function setReplyTo(submissionId: string, comment: Comment) {
@@ -366,7 +408,7 @@ async function scrollToUnreadReply() {
           .filter(s => s.commentCount > 0)
           .map(sub => {
             sub.comments = []
-            return loadComments(sub)
+            return loadComments(sub, true)
           })
         await Promise.all(commentPromises)
 
@@ -402,6 +444,9 @@ function toggleCard(subId: string) {
     expandedCards.value.delete(subId)
   } else {
     expandedCards.value.add(subId)
+    // 展开时标记已读
+    const sub = submissions.value.find(s => s.id === subId)
+    if (sub && sub.commentCount > 0) loadComments(sub, true)
   }
   expandedCards.value = new Set(expandedCards.value)
 }
@@ -487,13 +532,21 @@ watch(() => pendingStore.counts.unreadTeamLogReplies, (newCount) => {
 async function loadHolidays() {
   try {
     const year = selectedDate.value.slice(0, 4)
+    await loadHolidaysByYear(year)
+  } catch { /* ignore */ }
+}
+
+// 按年加载假日数据，已加载过则跳过（支持多年合并）
+const loadedHolidayYears = new Set<string>()
+async function loadHolidaysByYear(year: string) {
+  if (loadedHolidayYears.has(year)) return
+  try {
     const { data } = await api.get('/api/holidays', { params: { year } })
     if (data.success) {
-      const map = new Map<string, { name: string; type: string }>()
       for (const h of data.data) {
-        map.set(h.date, { name: h.name, type: h.type })
+        holidayMap.value.set(h.date, { name: h.name, type: h.type })
       }
-      holidayMap.value = map
+      loadedHolidayYears.add(year)
     }
   } catch { /* ignore */ }
 }
@@ -564,13 +617,14 @@ async function loadTeamData() {
   }
 }
 
-async function loadComments(sub: Submission) {
+async function loadComments(sub: Submission, markRead = false) {
   try {
-    const { data } = await api.get(`/api/daily-logs/team/comments/${sub.id}`)
+    const { data } = await api.get(`/api/daily-logs/team/comments/${sub.id}`, {
+      params: markRead ? { markRead: 'true' } : {},
+    })
     if (data.success) {
       sub.comments = data.data
-      // GET 接口会自动标记已读，刷新未读标识
-      if (data.data.some((c: any) => c.isUnread)) {
+      if (markRead && data.data.some((c: any) => c.isUnread)) {
         refreshUnreadDates()
       }
     }
@@ -598,34 +652,46 @@ function onDatePickerChange() {
   loadTeamData()
 }
 
+function onPickerVisibleChange(visible: boolean) {
+  if (!visible) datePickerKey.value++
+}
+
+async function onPanelChange(date: Date) {
+  const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+  try {
+    const { data } = await api.get('/api/daily-logs/team', {
+      params: { date: selectedDate.value, month },
+    })
+    if (data.success) {
+      monthDays.value = data.data.monthDays
+      commentDates.value = data.data.commentDates || []
+      unreadReplyDates.value = data.data.unreadReplyDates || []
+    }
+  } catch { /* ignore */ }
+}
+
+// 期限选择器面板切换：按需加载对应年份假日数据
+async function onDueDatePanelChange(date: Date) {
+  await loadHolidaysByYear(String(date.getFullYear()))
+}
+
 function goToday() {
   selectedDate.value = today
   loadTeamData()
-}
-
-function openExportDialog() {
-  const monday = currentMonday.value
-  const sunday = new Date(monday)
-  sunday.setDate(new Date(monday).getDate() + 6)
-  exportDateRange.value = [monday, sunday.toISOString().slice(0, 10)]
-  showExportDialog.value = true
-}
-
-function handleDownloadTeamReport() {
-  if (!exportDateRange.value || exportDateRange.value.length < 2) return
-  const [start, end] = exportDateRange.value
-  window.open(`/api/daily-logs/weekly-summary/download?weekStart=${start}&weekEnd=${end}&scope=team`, '_blank')
-  showExportDialog.value = false
 }
 
 async function submitComment(submissionId: string) {
   const content = commentInputs[submissionId]?.trim()
   if (!content) return
 
+  // 只有发起新评论（非回复）时才允许附带完成期限
+  const isReply = !!replyTargets[submissionId]
+  const dueDate = !isReply ? (dueDates[submissionId] || undefined) : undefined
+
   commentLoading[submissionId] = true
   try {
     const replyTo = replyTargets[submissionId]?.id || undefined
-    const { data } = await api.post(`/api/daily-logs/team/comments/${submissionId}`, { content, replyTo })
+    const { data } = await api.post(`/api/daily-logs/team/comments/${submissionId}`, { content, replyTo, dueDate })
     if (data.success) {
       const sub = submissions.value.find(s => s.id === submissionId)
       if (sub) {
@@ -634,9 +700,11 @@ async function submitComment(submissionId: string) {
       }
       commentInputs[submissionId] = ''
       replyTargets[submissionId] = null
+      dueDates[submissionId] = ''
+      showDueDatePicker[submissionId] = false
     }
-  } catch {
-    ElMessage.error('评论失败')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.message || '评论失败')
   } finally {
     commentLoading[submissionId] = false
   }
@@ -679,6 +747,10 @@ function getDocs(attachments: Attachment[]): Attachment[] {
 function getFileExt(fileName: string): string {
   const ext = fileName.split('.').pop()?.toUpperCase() || ''
   return ext
+}
+
+function handleDocPreview(att: { id: string }) {
+  window.open(`/api/daily-logs/team/attachments/${att.id}/preview`, '_blank')
 }
 
 function getExtClass(fileName: string): string {
@@ -1025,6 +1097,12 @@ function formatTime(iso: string): string {
   font-size: 13px;
 }
 
+.comment-item-reply {
+  margin-left: 20px;
+  padding-left: 10px;
+  border-left: 2px solid #e8e8e8;
+}
+
 .comment-item-unread {
   background: #fdf6ec;
   border-radius: 4px;
@@ -1094,6 +1172,68 @@ function formatTime(iso: string): string {
 }
 
 .comment-withdraw-btn:hover {
+  color: #f56c6c;
+}
+
+/* 完成期限标签 */
+.comment-due-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: #e6a23c;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 3px;
+  padding: 0 5px;
+  flex-shrink: 0;
+}
+
+.comment-due-tag.overdue {
+  color: #f56c6c;
+  background: #fef0f0;
+  border-color: #fbc4c4;
+}
+
+.comment-done-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: #67c23a;
+  background: #f0f9eb;
+  border: 1px solid #c2e7b0;
+  border-radius: 3px;
+  padding: 0 5px;
+  flex-shrink: 0;
+}
+
+/* 完成期限设置行 */
+.due-date-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0 2px;
+  flex-wrap: wrap;
+}
+
+.due-date-toggle {
+  font-size: 12px;
+  color: #909399;
+  cursor: pointer;
+  user-select: none;
+}
+
+.due-date-toggle:hover {
+  color: #409eff;
+}
+
+.due-date-clear {
+  font-size: 12px;
+  color: #c0c4cc;
+  cursor: pointer;
+  margin-left: 4px;
+}
+
+.due-date-clear:hover {
   color: #f56c6c;
 }
 
@@ -1230,14 +1370,65 @@ function formatTime(iso: string): string {
   color: #909399;
 }
 
-:deep(.rich-content p) {
+.rich-content :deep(p) {
   margin: 0 0 4px;
 }
 
-:deep(.rich-content ol),
-:deep(.rich-content ul) {
-  padding-left: 20px;
+.rich-content :deep(ol),
+.rich-content :deep(ul) {
+  padding-left: 0;
   margin: 4px 0;
+}
+
+.rich-content :deep(ol) {
+  list-style: none;
+  counter-reset: cn-list;
+}
+
+.rich-content :deep(ol > li) {
+  counter-increment: cn-list;
+  padding-left: 2.4em;
+  position: relative;
+  line-height: 1.8;
+  margin-bottom: 4px;
+}
+
+.rich-content :deep(ol > li::before) {
+  content: counter(cn-list, cjk-ideographic) "、";
+  position: absolute;
+  left: 0;
+  white-space: nowrap;
+  color: #333;
+}
+
+.rich-content :deep(ol ol) {
+  counter-reset: cn-list-2;
+  list-style: none;
+}
+
+.rich-content :deep(ol ol > li) {
+  counter-increment: cn-list-2;
+}
+
+.rich-content :deep(ol ol > li::before) {
+  content: counter(cn-list-2) ".";
+}
+
+.rich-content :deep(ol ol ol) {
+  counter-reset: cn-list-3;
+  list-style: none;
+}
+
+.rich-content :deep(ol ol ol > li) {
+  counter-increment: cn-list-3;
+}
+
+.rich-content :deep(ol ol ol > li::before) {
+  content: "（" counter(cn-list-3) "）";
+}
+
+.rich-content :deep(ul) {
+  padding-left: 20px;
 }
 
 .log-attachments {
@@ -1287,6 +1478,14 @@ function formatTime(iso: string): string {
   align-items: center;
   text-decoration: none;
   width: 72px;
+}
+
+.attach-doc-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
 }
 
 .doc-icon {

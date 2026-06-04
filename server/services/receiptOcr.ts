@@ -158,7 +158,9 @@ function parseReceiptText(text: string, result: ReceiptOcrResult): void {
   if (result.amount === 0) {
     const lines = cleanText.split('\n').map(l => l.trim()).filter(l => l)
     // 零钱/余额关键词，这些行的金额不是支付金额
-    const walletKeywords = /零\s*钱|余\s*额|钱\s*包|找\s*零|充\s*值/
+    // 注意："充值"不能放在这里，因为商户名中经常出现"充值"（如"中石化...充值"），
+    // 会误跳过紧接其后的实际支付金额行
+    const walletKeywords = /零\s*钱|余\s*额|钱\s*包|找\s*零/
 
     const skipLines = new Set<number>()
     for (let i = 0; i < lines.length; i++) {
@@ -204,6 +206,11 @@ function parseReceiptText(text: string, result: ReceiptOcrResult): void {
         const decStr = m[2].includes('.') ? m[2].split('.')[1] : ''
         if (intPart <= 23 && decStr.length === 2 && parseInt(decStr) <= 59) {
           console.log(`⏭️ 跳过疑似时间的数值: ${m[2]} (行 ${i})`)
+          continue
+        }
+        // 排除状态栏数字（电池电量、信号强度等）：前3行中无符号的纯整数（1-100）
+        if (i <= 2 && !m[2].includes('.') && amount <= 100) {
+          console.log(`⏭️ 跳过疑似状态栏数字: ${m[2]} (行 ${i})`)
           continue
         }
       }

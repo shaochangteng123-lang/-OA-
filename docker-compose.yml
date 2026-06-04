@@ -48,6 +48,7 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
       - TZ=Asia/Shanghai
       - VITE_ALLOWED_HOSTS=all
+      - VITE_ENABLE_WORKLOG=true
     depends_on:
       postgres:
         condition: service_healthy

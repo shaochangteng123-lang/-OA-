@@ -690,6 +690,12 @@ router.get('/pending', requireAdmin, async (req, res) => {
           WHEN r.status = 'completed' THEN 4
           ELSE 5
         END,
+        CASE r.type
+          WHEN 'basic' THEN 1
+          WHEN 'large' THEN 2
+          WHEN 'business' THEN 3
+          ELSE 4
+        END,
         ai.submit_time ASC
     `).all(...params) as Array<ApprovalInstance & { applicant_name: string; applicant_avatar: string | null; reimbursement_title: string | null; reimbursement_amount: number | null; reimbursement_deduction: number | null; reimbursement_status: string | null; reimbursement_user_id: string | null; reimbursement_type: string | null; reimbursement_scope: string | null; invoice_categories: string | null }>
 
@@ -2119,7 +2125,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       const typeFilter = user.role === 'admin'
         ? `AND (
             ai.type IN ('reimbursement_basic', 'reimbursement_large')
-            OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'payment_uploaded'))
+            OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'paid', 'payment_uploaded'))
           )`
         : `AND ai.target_type = 'reimbursement'`
       const approvalPending = await db.prepare(`

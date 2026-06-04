@@ -1,56 +1,64 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
-export default defineConfig({
-  plugins: [
-    vue(),
-    AutoImport({
-      resolvers: [ElementPlusResolver()],
-      imports: ['vue', 'vue-router', 'pinia'],
-      dts: 'src/auto-imports.d.ts',
-    }),
-    Components({
-      resolvers: [ElementPlusResolver()],
-      dts: 'src/components.d.ts',
-    }),
-  ],
-  resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src'),
-      '@server': resolve(__dirname, 'server'),
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const enableWorklog = env.VITE_ENABLE_WORKLOG === 'true' || process.env.VITE_ENABLE_WORKLOG === 'true'
+
+  return {
+    plugins: [
+      vue(),
+      AutoImport({
+        resolvers: [ElementPlusResolver()],
+        imports: ['vue', 'vue-router', 'pinia'],
+        dts: 'src/auto-imports.d.ts',
+      }),
+      Components({
+        resolvers: [ElementPlusResolver()],
+        dts: 'src/components.d.ts',
+      }),
+    ],
+    define: {
+      __ENABLE_WORKLOG__: JSON.stringify(enableWorklog),
     },
-  },
-  base: '/',
-  cacheDir: '.vite-cache',
-  server: {
-    host: '0.0.0.0',
-    port: 8899,
-    strictPort: true,
-    allowedHosts: 'all',
-    hmr: {
-      clientPort: 8899,
-    },
-    watch: {
-      ignored: ['**/CLAUDE.md', '**/node_modules/**', '**/dist/**'],
-      usePolling: true,
-    },
-    proxy: {
-      '/api': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-        cookieDomainRewrite: 'localhost',
-        secure: false,
-        ws: true,
-      },
-      '/uploads': {
-        target: 'http://127.0.0.1:3000',
-        changeOrigin: true,
-        secure: false,
+    resolve: {
+      alias: {
+        '@': resolve(__dirname, 'src'),
+        '@server': resolve(__dirname, 'server'),
       },
     },
-  },
+    base: '/',
+    cacheDir: '.vite-cache',
+    server: {
+      host: '0.0.0.0',
+      port: 8899,
+      strictPort: true,
+      allowedHosts: 'all',
+      hmr: {
+        clientPort: 8899,
+      },
+      watch: {
+        ignored: ['**/CLAUDE.md', '**/node_modules/**', '**/dist/**'],
+        usePolling: true,
+      },
+      proxy: {
+        '/api': {
+          target: 'http://127.0.0.1:3000',
+          changeOrigin: true,
+          cookieDomainRewrite: 'localhost',
+          secure: false,
+          ws: true,
+        },
+        '/uploads': {
+          target: 'http://127.0.0.1:3000',
+          changeOrigin: true,
+          secure: false,
+        },
+      },
+    },
+  }
 })
