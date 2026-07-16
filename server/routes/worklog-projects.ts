@@ -6,19 +6,14 @@ import { nanoid } from 'nanoid'
 import { db } from '../db/index.js'
 import { requireAuth } from '../middleware/auth.js'
 import { isAdminLike } from '../utils/worklog-auth.js'
+import { ensureDatedUploadDirectory } from '../utils/upload-date.js'
 
 const router = Router()
-
-// 合同附件上传 multer 配置
-const contractUploadsDir = path.resolve(process.cwd(), 'uploads/contract')
-if (!fs.existsSync(contractUploadsDir)) {
-  fs.mkdirSync(contractUploadsDir, { recursive: true })
-}
 
 const uploadContractAttachment = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
-      cb(null, contractUploadsDir)
+      cb(null, ensureDatedUploadDirectory('contract'))
     },
     filename: (_req, file, cb) => {
       const ext = path.extname(file.originalname)

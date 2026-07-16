@@ -354,7 +354,7 @@ async function loadDicts() {
 
 async function loadUsers() {
   try {
-    const resp = await api.get('/api/users')
+    const resp = await api.get('/api/users/directory')
     if (resp.data.success) {
       users.value = (resp.data.data || []).map((u: any) => ({
         id: u.id, name: u.name, position: u.position, role: u.role,

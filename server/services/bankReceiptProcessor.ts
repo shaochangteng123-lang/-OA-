@@ -187,8 +187,8 @@ function extractPayeeAccount(text: string): string {
 
 function extractPayee(text: string): string {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
-  // 找第二个"户名"后面的内容
-  const allMatches = [...text.matchAll(/户\s*名\s*[|｜]?\s*([^\n|]{2,20})/g)]
+  // 找第二个"户名"后面的内容（兼容OCR在"户"和"名"之间插入干扰字的情况，如"户中名"）
+  const allMatches = [...text.matchAll(/户\s*[一-鿿]?\s*名\s*[|｜]?\s*([^\n|]{2,20})/g)]
   if (allMatches.length >= 2) {
     const name = allMatches[1][1].replace(/[|"]/g, '').trim()
     if (name.length >= 2) return name

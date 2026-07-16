@@ -13,6 +13,7 @@ export interface User {
   status: 'active' | 'inactive'
   department?: string
   position?: string
+  employeeNo?: string | null
   lastLoginAt?: string
   createdAt?: string
   updatedAt?: string

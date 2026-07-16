@@ -54,7 +54,7 @@ services:
         condition: service_healthy
     volumes:
       # 数据持久化
-      - ./uploads:/app/uploads
+      - ./uploads/development:/app/uploads
       - ./debug:/app/debug
       # 源代码挂载（热重载）
       - ./src:/app/src

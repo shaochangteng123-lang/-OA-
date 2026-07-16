@@ -239,16 +239,17 @@ export interface EmployeeProfile {
 
 // 员工档案文件类型
 export type EmployeeDocumentType =
-  | 'invitation'       // 邀请函
-  | 'application'      // 入职申请表
-  | 'contract'         // 劳动合同
+  | 'invitation'       // 入职邀请函
+  | 'application'      // 新员工入职申请表
+  | 'contract'         // 劳动合同书
   | 'nda'              // 保密协议
   | 'declaration'      // 个人声明
-  | 'asset_handover'   // 固定资产交接单
+  | 'asset_handover'   // 2025年度公司电脑管理办法
   | 'id_card'          // 身份证复印件
   | 'health_report'    // 入职体检报告
   | 'diploma'          // 学历证书复印件
   | 'bank_card'        // 工资卡复印件
+  | 'other'            // 其他员工提供资料
 
 // 员工档案文件
 export interface EmployeeDocument {
@@ -261,6 +262,9 @@ export interface EmployeeDocument {
   mime_type: string | null
   uploaded_by: string
   uploaded_by_name: string | null
+  contract_start_date: string | null
+  contract_end_date: string | null
+  contract_recognized_at: string | null
   created_at: string
 }
 

@@ -38,6 +38,8 @@ API 路由模块是后端的核心，负责处理所有 HTTP 请求，提供 RES
 - [server/routes/reimbursement.ts](../server/routes/reimbursement.ts) - 报销管理相关路由
 - [server/routes/probation.ts](../server/routes/probation.ts) - 转正管理相关路由
 - [server/routes/resignation.ts](../server/routes/resignation.ts) - 离职管理相关路由
+- [server/routes/leave.ts](../server/routes/leave.ts) - 请假管理相关路由
+- [server/routes/payroll.ts](../server/routes/payroll.ts) - 人力成本工资表相关路由
 
 ### 主入口
 - [server/index.ts](../server/index.ts) - Express 应用入口
@@ -82,6 +84,8 @@ GET    /api/daily-logs/team/weekly-summary                 // 在线查看指定
 GET    /api/daily-logs/team/attachments/:attachmentId/preview // 在线预览团队日志附件
 GET    /api/daily-logs/weekly-summaries                    // 获取个人周报列表
 GET    /api/daily-logs/weekly-summary/download             // 导出个人/团队周报
+GET    /api/files/invoices/*                               // 读取支持年/月/日多级路径的发票或收据
+GET    /api/files/payment-proofs/*                         // 读取支持年/月/日多级路径的付款回单
 ```
 
 ### 项目路由 (`/api/projects`)
@@ -96,12 +100,20 @@ PUT    /api/projects/:id/status   // 更新项目状态
 
 ### 用户路由 (`/api/users`)
 ```typescript
-GET    /api/users                 // 获取用户列表
-GET    /api/users/:id             // 获取用户详情
-PUT    /api/users/:id             // 更新用户信息
-PUT    /api/users/:id/role        // 更新用户角色
-PUT    /api/users/:id/status      // 启用/禁用用户
+GET    /api/users                              // 管理员获取完整用户列表
+GET    /api/users/directory                    // 已登录用户获取精简同事目录
+GET    /api/users/activities                   // 获取本人活动；管理员可查看指定用户
+POST   /api/users                              // 管理员更新用户信息、员工编号、角色和状态
+POST   /api/users/create                       // 管理员创建用户并填写员工编号
+DELETE /api/users/:id                          // 管理员删除非超级管理员用户
+POST   /api/users/:id/reset-password           // 管理员重置非超级管理员用户密码
 ```
+
+**用户数据权限规则：**
+- 完整列表包含联系方式与收款信息，仅管理员、超级管理员可访问
+- 精简目录只返回编号、姓名、头像、部门、职位和角色，供普通业务选择器使用
+- 普通管理员不能修改超级管理员账号，也不能授予超级管理员角色
+- 后端每次从数据库校验实时角色，不能以菜单是否可见作为接口授权依据
 
 ### 员工路由 (`/api/employees`)
 ```typescript
@@ -112,9 +124,16 @@ PUT    /api/employees/:id                           // 更新员工信息
 DELETE /api/employees/:id                           // 删除员工信息
 GET    /api/employees/:id/documents                 // 获取员工人事档案文件
 POST   /api/employees/:id/documents                 // 上传员工人事档案文件
+POST   /api/employees/:id/documents/auto-classify   // 自动识别类型并上传员工人事档案文件
+DELETE /api/employees/:id/documents                 // 一键删除员工全部人事档案文件
 DELETE /api/employees/:id/documents/:docId          // 删除员工人事档案文件
 GET    /api/employees/:id/documents/:docId/download // 下载/预览员工人事档案文件
 GET    /api/employees/:id/resignation-archive       // 获取员工离职档案（离职类型、离职附件、工作交接单）
+GET    /api/employees/onboarding/templates                          // 获取入职模板列表
+POST   /api/employees/onboarding/templates                          // 管理员上传入职模板
+DELETE /api/employees/onboarding/templates/:templateId              // 管理员删除入职模板
+GET    /api/employees/onboarding/templates/:templateId/original     // 管理员预览未写编号的原模板
+GET    /api/employees/onboarding/templates/:templateId/download     // 员工预览或下载个性化模板
 ```
 
 ### 离职路由 (`/api/resignation`)
@@ -133,14 +152,115 @@ DELETE /api/resignation/my-request/documents/:docId       // 删除已上传的�
 POST   /api/resignation/my-request/submit                 // 提交离职申请
 POST   /api/resignation/my-request/confirm                // 离职人确认交接完成
 GET    /api/resignation/handover-task                     // 获取待我处理的交接任务
+GET    /api/resignation/handover-task/completed           // 获取我已完成的交接任务
 POST   /api/resignation/:id/handover-upload               // 交接人上传交接单
+POST   /api/resignation/:id/handover-sign                 // 交接人签署交接单
 POST   /api/resignation/:id/handover-confirm              // 交接人确认交接完成
+GET    /api/resignation/:id/document-history              // 有权限的流程参与人查看材料历史版本
+GET    /api/resignation/:id/audit-logs                    // 有权限的流程参与人查看操作日志
 GET    /api/resignation/management                        // 管理员获取离职申请列表
 GET    /api/resignation/management/:id                    // 管理员获取离职详情
 POST   /api/resignation/management/:id/approve            // 管理员审批通过离职申请
 POST   /api/resignation/management/:id/reject             // 管理员驳回离职申请
 GET    /api/resignation/requests/:id/documents/:docId/download // 下载离职附件
 ```
+
+**离职状态与一致性规则：**
+- 员工材料仅能在草稿或被驳回状态修改，交接材料仅能在对应待处理或被驳回状态修改
+- 双方确认完成后才允许管理员通过或驳回；已通过申请不能再次驳回
+- 审批状态、员工在职状态和审计日志在同一事务中写入，任一步失败会整体回滚
+- 上传材料时会锁定离职申请并重新校验状态，避免审批与上传并发造成已归档材料被覆盖
+- 管理员查看历史、日志和附件时按数据库中的实时角色校验权限
+
+### 人力成本路由 (`/api/payroll`)
+```typescript
+GET   /api/payroll?month=YYYY-MM             // 管理员获取或初始化指定月份工资表
+PATCH /api/payroll/:month/:employeeId        // 管理员修改本月工资、缴费基数或应纳个税
+```
+
+**人力成本接口规则：**
+- 两个接口均使用管理员权限中间件，只允许管理员、超级管理员访问
+- 超级管理员可以管理工资表，但其系统维护账号本身不生成工资记录，也不参与明细和合计
+- 金额字段由前端以字符串提交，后端限制为非负数、整数最多 12 位、小数最多 8 位
+- 数据库 `NUMERIC`（精确数值）字段读取时转为字符串，避免 JavaScript（脚本语言）浮点数导致精度丢失
+- 工资表只保存三项基础金额和手工修改标记，其余单位、个人、代扣、实发明细由后端统一精确计算
+- 当前及未来月份的非手工字段可随工资基线更新；历史月份一旦生成即作为快照，不在读取时自动重算
+
+### 正式入职邀请函上传 (`/api/employees/:id/documents`)
+- `document_type=invitation` 时只识别 PDF（便携式文档格式）第一页
+- 成功识别月度税前工资后更新员工工资档案，并同步当前及未来已生成月份的自动工资
+- 新上传的正式邀请函作为最新工资依据，会覆盖当前及未来月份原有的本月工资手工值并解除该字段的手工标记；缴费基数和应纳个税的手工值保持不变
+- 识别失败不阻止入职邀请函归档，也不会覆盖员工已有工资基线；响应返回失败原因供管理员手工处理
+
+### 劳动合同归档 (`/api/employees/:id/documents`)
+- `document_type=contract` 时识别劳动合同起止日期；扫描件兼容日期下划线、空格和常见数字误识别
+- 每次上传都新增一条合同档案，不覆盖旧合同；响应返回 `contractRecognition` 和当前有效的 `currentContractEndDate`
+- 合同结束日期最晚的档案作为当前合同，其余档案保留为历史合同；员工列表合同到期时间同步取当前合同结束日期
+- 删除当前合同时自动回退到剩余合同中结束日期最晚的一份；没有可识别合同后将员工合同到期时间清空
+- 员工本人保存档案和管理员编辑基础信息都不能覆盖合同到期时间
+
+### 人事档案一键删除 (`/api/employees/:id/documents`)
+- 仅管理员可调用，一次删除指定员工的全部 `employee_documents` 档案记录
+- 档案删除和员工合同到期时间清空在同一数据库事务中完成；存在劳动合同时，同步重算当前及未来月份的自动工资，保留手工金额和历史月份快照
+- 入职邀请函形成的工资基线不会随档案文件一起删除，来源文件字段由外键自动置空；已经生成的工资记录也不会删除
+- 数据库事务提交后再清理存储文件；个别存储文件清理失败时接口仍返回已删除的档案数量和清理失败数量，便于后续排查
+
+### 人事档案自动识别上传 (`/api/employees/:id/documents/auto-classify`)
+- 仅管理员可调用，沿用单文件 10MB（兆字节）上限；前端多选后按文件逐个请求，避免扫描件并发识别超时
+- 单个 PDF（便携式文档格式）可包含多类材料；接口逐页读取文字层或执行 OCR（文字识别），以每类首页标题作为页段边界
+- 文档类型顺序不固定，但同一类型的页面必须连续；未出现的类型不会生成档案记录
+- 识别后的每个类型会拆成独立 PDF（便携式文档格式）并分别写入 `employee_documents`
+- 离职证明、职业资格材料及其他带独立资料标题的页段会分别拆分并写入 `document_type=other`，原资料名称保留用于展示；完全无法匹配固定十类的有效 PDF（便携式文档格式）也会整份归入“其他”
+- 响应通过 `otherSegments` 返回已归入“其他”的材料名称和页码，并暂时保留同内容的 `unsupportedSegments` 兼容旧前端
+- 响应通过 `missingTypes` 返回本次文件未识别到的固定十类档案；“其他”是可选收纳类型，不属于缺失项
+- 多类档案记录在同一个数据库事务中写入；任一拆分或写入失败时整批回滚并清理拆分文件
+- 空 PDF（便携式文档格式）、超过页数限制或无效文件仍会拒绝，不产生档案记录
+- 拆分出入职邀请函后继续执行工资识别和本月工资同步，自动上传不会绕开原有工资业务逻辑
+
+### 入职模板员工编号
+- `POST /api/users/create` 要求管理员提交唯一的 `employeeNo`；`POST /api/users` 修改编号时同步更新对应 `employee_profiles.employee_no`
+- 入职邀请函上传时校验每一页右上角“编号”，劳动合同书校验第 1 页右上角黑色编号及后续每一页左上角蓝色“合同编号”，新员工入职申请表校验第 1 页右上角“员工编号”
+- 员工调用模板 `download` 接口时，后端读取 `users.employee_no` 并实时写入全部目标页；原始模板文件不会被修改
+- 管理员预览模板使用 `original` 接口，因此不会写入管理员自己的编号
+- 员工及管理员通过人事档案下载接口预览正式资料时，接口直接返回管理员上传的档案，不覆盖文件内编号，也不修改展示文件名
+- 员工编号修改后无需重新上传模板，下一次模板预览或下载自动使用新编号；已经归档的历史资料保持原样
+- 动态编号文件返回 `Cache-Control（缓存控制）: no-store`，防止浏览器继续展示改号前的缓存副本
+
+### 请假路由 (`/api/leave`)
+```typescript
+GET    /api/leave/types                         // 获取可用假期类型
+GET    /api/leave/balances                      // 获取本人当年假期余额
+POST   /api/leave/calculate-days                // 预计算请假天数
+POST   /api/leave/requests                      // 提交请假申请
+GET    /api/leave/requests                      // 获取本人请假申请列表
+GET    /api/leave/requests/:id                  // 获取请假申请详情
+POST   /api/leave/requests/:id/cancel           // 取消请假申请
+POST   /api/leave/requests/:id/resubmit         // 驳回后重新提交
+GET    /api/leave/pending                       // 获取待我审批的请假申请
+POST   /api/leave/requests/:id/approve          // 审批通过
+POST   /api/leave/requests/:id/reject           // 审批驳回
+GET    /api/leave/admin/types                   // 管理员获取假期类型
+POST   /api/leave/admin/types                   // 管理员新增假期类型
+PUT    /api/leave/admin/types/:code             // 管理员修改假期类型
+DELETE /api/leave/admin/types/:code             // 管理员删除假期类型
+GET    /api/leave/admin/requests                // 管理员获取请假申请列表
+GET    /api/leave/admin/balances                // 管理员获取余额总览
+PUT    /api/leave/admin/balances/:targetUserId/:typeCode/:year // 管理员手动调整余额
+GET    /api/leave/admin/export                  // 管理员导出请假记录
+```
+
+**假期类型更新规则：**
+- `PUT /api/leave/admin/types/:code` 会在 `transaction（事务）` 中锁定当前配置后保存，避免并发修改造成配置与余额不同步
+- 默认天数发生变化且该类型需要余额检查时，会同步当年仍等于旧默认天数的余额记录
+- 已由管理员手动调整为其他数值的个人余额不自动覆盖，且不会把总额降到已使用与审批中天数之下
+- 假期默认天数和个人总天数只接受 0 至 999.5 的半天倍数
+
+**请假提交与余额规则：**
+- 日期与上午、下午时段由后端校验，结束时间不得早于开始时间，单次区间最长 366 个自然日
+- 跨年申请按实际工作日拆分到各自然年，并把年度分配快照保存在申请记录中
+- 提交和重新提交会在事务中锁定年度余额后预占审批中天数，防止两个并发申请同时透支
+- 审批、驳回和撤销按提交时的余额规则及年度快照结算，不受之后假期类型配置变化影响
+- 申请编号在事务级锁保护下生成，避免并发生成重复编号
 
 
 **数据显示规则：**
@@ -533,3 +653,21 @@ app.use(helmet())
 - 2026-06-02: 团队周报新增在线查看接口
   - GET /api/daily-logs/team/weekly-summary：返回指定周团队周报、补充和附件
   - GET /api/daily-logs/team/attachments/:attachmentId/preview：管理员/总经理在线预览团队日志附件
+- 2026-07-15: 文件读取路由支持业务类别下的年/月/日多级路径，上传接口统一返回包含实际上传日期的完整相对路径
+- 2026-07-15: `PUT /api/leave/admin/types/:code` 新增当年余额同步逻辑，默认天数变化时仅同步仍处于旧默认值的余额记录，并返回 `syncedBalanceCount`
+- 2026-07-15: 用户接口按完整管理数据与精简同事目录拆分，完整列表和修改操作仅管理员、超级管理员可用，并限制活动记录越权查询
+- 2026-07-15: 请假申请增加跨年余额拆分、提交时规则快照、事务锁预占、并发编号保护及管理员余额下调边界校验
+- 2026-07-15: 离职审批、员工状态和审计日志改为事务写入，限制各状态的材料修改与重复审批，并按数据库实时角色校验敏感读取
+- 2026-07-15: 统一待办角标口径，普通管理员不再显示无权审批的转正待办，员工离职待办排除已经进入管理员终审的状态
+- 2026-07-15: 转正提交、审批实例、审批记录与员工状态改为事务内锁定处理，阻止重复提交以及通过、拒绝并发造成的状态冲突
+- 2026-07-16: 新增管理员专用 `/api/payroll` 月度工资表查询与修改接口，并在正式邀请函上传接口中接入第一页工资识别和本月工资同步
+- 2026-07-16: 人力成本接口统一排除超级管理员系统账号，防止其进入工资明细和汇总金额
+- 2026-07-16: 新增员工人事档案自动识别上传接口，支持文件名与第一页内容分类，不确定文件拒绝归档并清理临时文件
+- 2026-07-16: 人事档案自动上传升级为合并文件逐页识别、任意顺序分段拆分和多类型事务归档，并隔离十类之外材料
+- 2026-07-16: 修复横向学历证书因标题文字顺序错乱而漏判的问题，并向前端返回、提示合并文件缺失类型
+- 2026-07-16: 修复邀请函薪资未覆盖旧手工工资的问题，新增劳动合同期限识别、合同历史归档及员工合同到期时间同步
+- 2026-07-16: 人事档案新增“其他”类型，固定十类之外的额外页段及整份未知资料改为自动归档，不再丢弃
+- 2026-07-16: 新增员工人事档案一键删除接口，事务清空全部档案和合同到期时间，并保留工资基线及历史工资记录
+- 2026-07-16: 用户创建和编辑接口改为接收管理员填写的唯一员工编号；三类入职模板下载接口按当前编号动态写入第一页，并增加管理员原模板预览接口
+- 2026-07-16: 入职邀请函编号扩展至两页、劳动合同编号扩展至全部页面并保留黑色/蓝色版式
+- 2026-07-16: 人事档案列表和下载接口改为保留管理员上传时的内容、编号及文件名，动态编号仅用于员工下载入职模板

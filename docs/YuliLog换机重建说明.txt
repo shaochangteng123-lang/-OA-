@@ -1,0 +1,133 @@
+YuliLog 换机重建说明
+====================
+
+一、这份备份包含什么
+
+请把整个“YuliLog换机备份”目录复制到新电脑，不要只复制其中一个数据库文件。
+
+1. 01-历史基准备份-20260714
+   这是 2026-07-14 生成并校验的固定历史底稿，仅在最新自动备份损坏时使用。
+
+2. 02-自动更新备份
+   这是换机恢复时的首选数据源：
+   - latest/production.dump：最新生产数据库
+   - latest/development.dump：最新开发数据库
+   - latest/uploads/production/：最新生产上传文件
+   - latest/uploads/development/：最新开发上传文件
+   - latest/uploads/unassigned/：旧共享目录中无法根据数据库判断归属的历史文件，不挂载到应用
+   - latest/uploads/上传目录分离状态.txt：文件归属迁移数量和原有缺失引用记录
+   - latest/uploads/上传日期分类状态.txt：上传日期目录迁移规则和数量
+   - latest/project/：最新项目代码、环境配置和构建文件
+   - latest/SHA256SUMS：数据库备份校验值
+   - history/年/月/日/database/：每小时数据库历史快照
+   - history/年/月/日/project/：每日项目历史快照
+   - history/年/月/日/full/：每周完整恢复包
+   - logs/年/月/日.log：按执行日期保存的自动备份运行记录
+
+容器镜像不再单独备份。新电脑需要联网，由 Dockerfile（容器构建文件）、docker-compose.yml、docker-compose.prod.yml、package.json 和 package-lock.json 重新构建生产与开发环境，包括 OCR（文字识别）依赖和模型。
+
+二、交给 Claude（开发助手）或 Codex（开发助手）的话
+
+在新电脑安装并启动 Docker Desktop（容器桌面工具），复制完整备份目录后，把下面这段话发给开发助手：
+
+“这是 YuliLog 从旧服务器复制来的完整换机备份。请先完整阅读备份根目录的《换机说明.txt》，再阅读项目中的 AGENTS.md、Dockerfile、docker-compose.yml 和 docker-compose.prod.yml。请不要修改或覆盖原始备份，也不要混用不同时间点的生产与开发数据库。
+
+优先使用 02-自动更新备份/latest；如果它校验失败，再从 02-自动更新备份/history/年/月/日/full 中查找最新且校验通过的完整恢复包；只有前两者都不可用时才使用 01-历史基准备份-20260714。
+
+请在新电脑上完成以下工作：校验数据库备份；恢复最新项目代码和环境配置；将生产上传文件恢复到 uploads/production，将开发上传文件恢复到 uploads/development，将未归属历史文件恢复到 uploads/unassigned；创建相互独立的生产与开发 PostgreSQL（关系型数据库）数据卷；分别恢复 production.dump 和 development.dump；根据现有 Dockerfile（容器构建文件）和依赖清单联网重新构建生产与开发容器及 OCR（文字识别）依赖；启动全部服务；检查数据库记录、生产与开发上传文件数量、目录挂载、OCR（文字识别）、登录、生产页面、开发页面和容器健康状态。整个过程中不得清空原始备份，不得把开发数据库或开发上传文件恢复到生产环境，也不得擅自升级依赖版本。完成后请明确报告每项校验结果。”
+
+三、开发助手应执行的恢复顺序
+
+下面的路径以备份位于新电脑桌面为例，开发助手应根据实际位置调整：
+
+1. 校验最新数据库备份
+
+```bash
+BACKUP_ROOT="$HOME/Desktop/YuliLog换机备份"
+cd "$BACKUP_ROOT/02-自动更新备份/latest"
+shasum -a 256 -c SHA256SUMS
+```
+
+2. 将最新项目和上传文件恢复到工作目录
+
+```bash
+PROJECT_DIR="$HOME/Desktop/yulilog-worklog"
+mkdir -p "$PROJECT_DIR"
+rsync -a "$BACKUP_ROOT/02-自动更新备份/latest/project/" "$PROJECT_DIR/"
+mkdir -p \
+  "$PROJECT_DIR/uploads/production" \
+  "$PROJECT_DIR/uploads/development" \
+  "$PROJECT_DIR/uploads/unassigned"
+rsync -a "$BACKUP_ROOT/02-自动更新备份/latest/uploads/production/" "$PROJECT_DIR/uploads/production/"
+rsync -a "$BACKUP_ROOT/02-自动更新备份/latest/uploads/development/" "$PROJECT_DIR/uploads/development/"
+rsync -a "$BACKUP_ROOT/02-自动更新备份/latest/uploads/unassigned/" "$PROJECT_DIR/uploads/unassigned/"
+cp "$BACKUP_ROOT/02-自动更新备份/latest/uploads/上传目录分离状态.txt" "$PROJECT_DIR/uploads/"
+cp "$BACKUP_ROOT/02-自动更新备份/latest/uploads/上传日期分类状态.txt" "$PROJECT_DIR/uploads/"
+cd "$PROJECT_DIR"
+```
+
+3. 确认 Docker Desktop（容器桌面工具）已启动并创建独立数据卷
+
+```bash
+docker info
+docker volume create yulilog-worklog_postgres_data_prod
+docker volume create yulilog-worklog_postgres_data
+```
+
+4. 只启动两个数据库容器
+
+```bash
+docker compose -f docker-compose.prod.yml up -d postgres
+docker compose up -d postgres
+```
+
+5. 将生产与开发数据库分别恢复到对应容器
+
+```bash
+docker exec -i yulilog-postgres-prod pg_restore \
+  -U postgres -d yulilog_worklog \
+  --clean --if-exists --no-owner --no-privileges --exit-on-error \
+  < "$BACKUP_ROOT/02-自动更新备份/latest/production.dump"
+
+docker exec -i yulilog-worklog-postgres pg_restore \
+  -U postgres -d yulilog_worklog \
+  --clean --if-exists --no-owner --no-privileges --exit-on-error \
+  < "$BACKUP_ROOT/02-自动更新备份/latest/development.dump"
+```
+
+6. 联网构建并启动生产与开发环境
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose up -d --build
+```
+
+首次构建会下载基础镜像、系统包、Node.js（服务端运行环境）依赖、Python（编程语言）依赖及 OCR（文字识别）模型，所需时间取决于网络速度。不同处理器架构的新电脑会自动下载并构建适合本机架构的依赖。
+
+7. 检查恢复结果
+
+```bash
+docker compose -f docker-compose.prod.yml ps
+docker compose ps
+docker exec yulilog-postgres-prod pg_isready -U postgres -d yulilog_worklog
+docker exec yulilog-worklog-postgres pg_isready -U postgres -d yulilog_worklog
+find uploads -type f | wc -l
+find uploads/production -type f | wc -l
+find uploads/development -type f | wc -l
+find uploads/unassigned -type f | wc -l
+```
+
+开发助手还应确认生产容器只挂载 `uploads/production`，开发容器只挂载 `uploads/development`，再检查生产与开发数据库中的主要表记录数量，并实际验证登录、附件访问及 OCR（文字识别）功能。只有这些检查全部通过，才能确认换机完成。
+
+四、重要说明
+
+- 这种方案不保存当前容器镜像，因此备份体积更小，但新电脑首次恢复必须联网。
+- 项目依赖清单会随每小时自动备份保存在 latest/project 中；以后代码或依赖变化时，新电脑会依据对应时间点的项目文件重新构建。
+- package-lock.json 会锁定 Node.js（服务端运行环境）软件包版本，但基础镜像和部分 Python（编程语言）依赖仍可能因上游更新而产生细微差异。因此该方案保证按备份中的构建规则恢复功能环境，不保证生成与旧电脑逐字节完全相同的容器镜像。
+- 每小时自动备份都会覆盖更新备份根目录中的这一份说明，并在文档末尾写入更新时间和当前构建文件校验值。构建文件或依赖清单变化后，下一次成功备份会自动更新为对应的最新说明，不单独保留说明的历史版本。
+- 生产和开发上传目录已经物理分离。`uploads/unassigned` 只保留旧共享目录中没有数据库引用的历史文件，不会挂载到生产或开发容器。
+- 各环境内部按“业务类别/年/月/日”保存文件，日期以系统实际收到文件的上传时间为准，不使用发票开票日期或付款日期。例如一月份发票在三月份上传时，应进入三月份目录。
+- 工作日志正文保存在数据库中，继续使用日志业务日期查询；日志附件使用实际上传日期目录。这两个日期可能不同，属于正常情况。
+- `01-历史基准备份-20260714` 生成时上传目录尚未分离。如必须使用该历史底稿，应先由开发助手结合生产与开发数据库重新划分上传文件，不能直接把旧共享目录同时作为两个环境的运行目录。
+- 原始备份应始终保留一份，不要直接在备份目录内开发或运行服务。
+- 仅保存在旧电脑内置硬盘上的备份无法防止硬盘整体损坏，应将整个“YuliLog换机备份”目录定期复制到移动硬盘。

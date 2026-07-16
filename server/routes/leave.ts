@@ -2,29 +2,249 @@ import { Router } from 'express'
 import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
+import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import { nanoid } from 'nanoid'
-import { calculateLeaveDays, calculateAnnualLeaveDays } from '../services/leaveCalculator.js'
+import {
+  calculateLeaveDays,
+  calculateLeaveDaysByYear,
+  calculateAnnualLeaveDays,
+  isValidLeaveDate,
+  type LeaveHalf,
+  type LeaveYearAllocation,
+} from '../services/leaveCalculator.js'
+import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
 
-// ==================== 文件上传配置 ====================
+const MAX_LEAVE_RANGE_DAYS = 366
+const MAX_LEAVE_BALANCE_DAYS = 999.5
 
-const leaveAttachmentsDir = path.join(process.cwd(), 'uploads', 'leave-attachments')
-
-if (!fs.existsSync(leaveAttachmentsDir)) {
-  fs.mkdirSync(leaveAttachmentsDir, { recursive: true })
+class LeaveOperationError extends Error {
+  constructor(message: string, public readonly statusCode = 400) {
+    super(message)
+    this.name = 'LeaveOperationError'
+  }
 }
+
+interface BalanceRequestData {
+  user_id: string
+  leave_type_code: string
+  total_days: number
+  start_date: string
+  start_half: LeaveHalf
+  end_date: string
+  end_half: LeaveHalf
+  balance_allocations_json: string | null
+  balance_reserved: boolean
+}
+
+function parseLeaveBalanceDays(value: unknown): number | null {
+  const days = typeof value === 'number' ? value : Number(value)
+  if (
+    !Number.isFinite(days) ||
+    days < 0 ||
+    days > MAX_LEAVE_BALANCE_DAYS ||
+    !Number.isInteger(days * 2)
+  ) {
+    return null
+  }
+  return days
+}
+
+function validateLeavePeriod(
+  startDate: unknown,
+  startHalf: unknown,
+  endDate: unknown,
+  endHalf: unknown
+): string | null {
+  if (
+    typeof startDate !== 'string' ||
+    typeof endDate !== 'string' ||
+    !isValidLeaveDate(startDate) ||
+    !isValidLeaveDate(endDate)
+  ) {
+    return '请填写有效的请假日期'
+  }
+
+  if (!['morning', 'afternoon'].includes(String(startHalf)) || !['morning', 'afternoon'].includes(String(endHalf))) {
+    return '请选择有效的请假时段'
+  }
+
+  if (startDate > endDate) return '结束日期不能早于开始日期'
+  if (startDate === endDate && startHalf === 'afternoon' && endHalf === 'morning') {
+    return '结束时间不能早于开始时间'
+  }
+
+  const startTime = Date.parse(`${startDate}T00:00:00Z`)
+  const endTime = Date.parse(`${endDate}T00:00:00Z`)
+  const calendarDays = Math.floor((endTime - startTime) / 86400000) + 1
+  if (calendarDays > MAX_LEAVE_RANGE_DAYS) return `单次请假区间不能超过 ${MAX_LEAVE_RANGE_DAYS} 天`
+
+  return null
+}
+
+function removeUploadedFiles(files: Express.Multer.File[]) {
+  for (const file of files) {
+    try {
+      if (fs.existsSync(file.path)) fs.unlinkSync(file.path)
+    } catch {}
+  }
+}
+
+async function getStoredBalanceAllocations(request: BalanceRequestData): Promise<LeaveYearAllocation[]> {
+  if (request.balance_allocations_json) {
+    try {
+      const parsed = JSON.parse(request.balance_allocations_json) as LeaveYearAllocation[]
+      const isValid = Array.isArray(parsed) && parsed.length > 0 && parsed.every((item) => (
+        Number.isInteger(item.year) && Number.isFinite(item.days) && item.days > 0
+      ))
+      const allocatedDays = isValid ? parsed.reduce((sum, item) => sum + item.days, 0) : 0
+      if (isValid && Math.abs(allocatedDays - request.total_days) < 0.001) {
+        return [...parsed].sort((a, b) => a.year - b.year)
+      }
+    } catch {}
+  }
+
+  return await calculateLeaveDaysByYear(
+    request.start_date,
+    request.start_half,
+    request.end_date,
+    request.end_half
+  )
+}
+
+async function ensureLeaveBalanceForUpdate(
+  client: PoolClient,
+  userId: string,
+  leaveTypeCode: string,
+  year: number
+): Promise<{ total_days: number; used_days: number; pending_days: number }> {
+  const existing = await client.query<{
+    total_days: number
+    used_days: number
+    pending_days: number
+  }>(
+    `SELECT total_days, used_days, pending_days
+     FROM leave_balances
+     WHERE user_id = $1 AND leave_type_code = $2 AND year = $3
+     FOR UPDATE`,
+    [userId, leaveTypeCode, year]
+  )
+  if (existing.rows[0]) return existing.rows[0]
+
+  let totalDays = 0
+  if (leaveTypeCode === 'annual') {
+    const profileResult = await client.query<{ hire_date: string | null }>(
+      `SELECT hire_date FROM employee_profiles WHERE user_id = $1 AND status = 'submitted'`,
+      [userId]
+    )
+    if (profileResult.rows[0]?.hire_date) {
+      totalDays = calculateAnnualLeaveDays(profileResult.rows[0].hire_date, year)
+    }
+  } else {
+    const configResult = await client.query<{ default_days: number }>(
+      `SELECT default_days FROM leave_type_configs WHERE code = $1`,
+      [leaveTypeCode]
+    )
+    totalDays = Number(configResult.rows[0]?.default_days ?? 0)
+  }
+
+  const now = new Date().toISOString()
+  await client.query(
+    `INSERT INTO leave_balances (
+       id, user_id, leave_type_code, year, total_days, used_days, pending_days, created_at, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,0,0,$6,$7)
+     ON CONFLICT (user_id, leave_type_code, year) DO NOTHING`,
+    [nanoid(), userId, leaveTypeCode, year, totalDays, now, now]
+  )
+
+  const locked = await client.query<{
+    total_days: number
+    used_days: number
+    pending_days: number
+  }>(
+    `SELECT total_days, used_days, pending_days
+     FROM leave_balances
+     WHERE user_id = $1 AND leave_type_code = $2 AND year = $3
+     FOR UPDATE`,
+    [userId, leaveTypeCode, year]
+  )
+
+  if (!locked.rows[0]) throw new LeaveOperationError('假期余额初始化失败', 500)
+  return locked.rows[0]
+}
+
+async function reserveLeaveBalances(
+  client: PoolClient,
+  userId: string,
+  leaveTypeCode: string,
+  leaveTypeName: string,
+  allocations: LeaveYearAllocation[],
+  now: string
+) {
+  for (const allocation of allocations) {
+    const balance = await ensureLeaveBalanceForUpdate(client, userId, leaveTypeCode, allocation.year)
+    const available = balance.total_days - balance.used_days - balance.pending_days
+    if (available < allocation.days) {
+      throw new LeaveOperationError(
+        `${allocation.year} 年${leaveTypeName}余额不足，可用 ${available} 天，申请 ${allocation.days} 天`
+      )
+    }
+  }
+
+  for (const allocation of allocations) {
+    await client.query(
+      `UPDATE leave_balances
+       SET pending_days = pending_days + $1, updated_at = $2
+       WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
+      [allocation.days, now, userId, leaveTypeCode, allocation.year]
+    )
+  }
+}
+
+async function settleLeaveBalances(
+  client: PoolClient,
+  request: BalanceRequestData,
+  allocations: LeaveYearAllocation[],
+  action: 'approve' | 'release',
+  now: string
+) {
+  if (!request.balance_reserved) return
+
+  for (const allocation of allocations) {
+    const result = action === 'approve'
+      ? await client.query(
+          `UPDATE leave_balances
+           SET pending_days = pending_days - $1,
+               used_days = used_days + $1,
+               updated_at = $2
+           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5
+             AND pending_days >= $1`,
+          [allocation.days, now, request.user_id, request.leave_type_code, allocation.year]
+        )
+      : await client.query(
+          `UPDATE leave_balances
+           SET pending_days = pending_days - $1, updated_at = $2
+           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5
+             AND pending_days >= $1`,
+          [allocation.days, now, request.user_id, request.leave_type_code, allocation.year]
+        )
+
+    if ((result.rowCount ?? 0) !== 1) {
+      throw new LeaveOperationError(`${allocation.year} 年假期余额记录不一致，请联系管理员`, 409)
+    }
+  }
+}
+
+// ==================== 文件上传配置 ====================
 
 const uploadLeaveAttachment = multer({
   storage: multer.diskStorage({
     destination: (req, _file, cb) => {
       const requestId = req.params.id || 'temp'
-      const destDir = path.join(leaveAttachmentsDir, requestId)
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true })
-      }
+      const destDir = ensureDatedUploadDirectory('leave-attachments', new Date(), requestId)
       cb(null, destDir)
     },
     filename: (_req, file, cb) => {
@@ -82,13 +302,16 @@ async function findApprover(applicantUserId: string, applicantDepartment: string
 /**
  * 生成请假申请编号：LR-YYYY-NNNNN
  */
-async function generateRequestNo(): Promise<string> {
+async function generateRequestNo(client: PoolClient): Promise<string> {
   const year = new Date().getFullYear()
-  const lastReq = await db.prepare(`
-    SELECT request_no FROM leave_requests
-    WHERE request_no LIKE ?
-    ORDER BY request_no DESC LIMIT 1
-  `).get<{ request_no: string }>(`LR-${year}-%`)
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`leave-request-${year}`])
+  const lastRequestResult = await client.query<{ request_no: string }>(
+    `SELECT request_no FROM leave_requests
+     WHERE request_no LIKE $1
+     ORDER BY request_no DESC LIMIT 1`,
+    [`LR-${year}-%`]
+  )
+  const lastReq = lastRequestResult.rows[0]
 
   let seq = 1
   if (lastReq?.request_no) {
@@ -134,9 +357,16 @@ async function ensureLeaveBalance(userId: string, leaveTypeCode: string, year: n
   await db.prepare(`
     INSERT INTO leave_balances (id, user_id, leave_type_code, year, total_days, used_days, pending_days, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+    ON CONFLICT (user_id, leave_type_code, year) DO NOTHING
   `).run(id, userId, leaveTypeCode, year, totalDays, now, now)
 
-  return { total_days: totalDays, used_days: 0, pending_days: 0 }
+  const initialized = await db.prepare(`
+    SELECT total_days, used_days, pending_days
+    FROM leave_balances
+    WHERE user_id = ? AND leave_type_code = ? AND year = ?
+  `).get<{ total_days: number; used_days: number; pending_days: number }>(userId, leaveTypeCode, year)
+
+  return initialized || { total_days: totalDays, used_days: 0, pending_days: 0 }
 }
 
 // ==================== 工具函数：根据性别获取需排除的假期类型 ====================
@@ -196,13 +426,8 @@ router.post('/calculate-days', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '参数不完整' })
     }
 
-    if (startDate > endDate) {
-      return res.status(400).json({ success: false, message: '结束日期不能早于开始日期' })
-    }
-
-    if (startDate === endDate && startHalf === 'afternoon' && endHalf === 'morning') {
-      return res.status(400).json({ success: false, message: '结束时间不能早于开始时间' })
-    }
+    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    if (periodError) return res.status(400).json({ success: false, message: periodError })
 
     const days = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
     res.json({ success: true, data: { days } })
@@ -269,20 +494,15 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
     // 基础校验
     const NO_REASON_TYPES = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
     const requiresReason = !NO_REASON_TYPES.includes(leaveTypeCode)
-    if (!leaveTypeCode || !startDate || !startHalf || !endDate || !endHalf || (requiresReason && !reason)) {
-      // 清理已上传文件
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+    if (!leaveTypeCode || !startDate || !startHalf || !endDate || !endHalf || (requiresReason && !String(reason || '').trim())) {
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '请填写所有必填字段' })
     }
 
-    if (startDate > endDate) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
-      return res.status(400).json({ success: false, message: '结束日期不能早于开始日期' })
-    }
-
-    if (startDate === endDate && startHalf === 'afternoon' && endHalf === 'morning') {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
-      return res.status(400).json({ success: false, message: '结束时间不能早于开始时间' })
+    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    if (periodError) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: periodError })
     }
 
     // 获取假期类型配置
@@ -291,14 +511,14 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
     `).get<{ id: string; code: string; name: string; requires_attachment: boolean; requires_balance_check: boolean }>(leaveTypeCode)
 
     if (!typeConfig) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '假期类型不存在' })
     }
 
     // 性别与假期类型匹配校验：产假仅限女性，陪产假仅限男性
     const excludedCodes = await getGenderExcludedTypes(userId)
     if (excludedCodes.includes(leaveTypeCode)) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       const tipMap: Record<string, string> = {
         maternity: '产假仅适用于女性员工',
         paternity: '陪产假仅适用于男性员工',
@@ -308,15 +528,17 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
 
     // 病假必须上传附件
     if (typeConfig.requires_attachment && uploadedFiles.length === 0) {
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: `${typeConfig.name}需要上传证明文件（病历或假条）` })
     }
 
     // 服务端计算请假天数
     const totalDays = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
     if (totalDays <= 0) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '请假时长不能为0（所选时间段全为休息日）' })
     }
+    const allocations = await calculateLeaveDaysByYear(startDate, startHalf, endDate, endHalf)
 
     // 获取申请人信息
     const userInfo = await db.prepare(`
@@ -324,76 +546,60 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
     `).get<{ name: string; department: string | null }>(userId)
 
     if (!userInfo) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '用户信息不存在' })
-    }
-
-    // 检查余额（需要校验余额的类型）
-    const year = new Date().getFullYear()
-    if (typeConfig.requires_balance_check) {
-      const balance = await ensureLeaveBalance(userId, leaveTypeCode, year)
-      const available = balance.total_days - balance.used_days - balance.pending_days
-      if (available < totalDays) {
-        for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
-        return res.status(400).json({
-          success: false,
-          message: `${typeConfig.name}余额不足，可用 ${available} 天，申请 ${totalDays} 天`
-        })
-      }
     }
 
     // 查找审批人
     const approver = await findApprover(userId, userInfo.department)
     if (!approver) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '未找到审批人，请联系管理员' })
     }
 
     const requestId = nanoid()
-    const requestNo = await generateRequestNo()
+    let requestNo = ''
     const now = new Date().toISOString()
 
     // 使用事务保证原子性
     await db.transaction(async (client) => {
+      requestNo = await generateRequestNo(client)
+      if (typeConfig.requires_balance_check) {
+        await reserveLeaveBalances(client, userId, leaveTypeCode, typeConfig.name, allocations, now)
+      }
+
       // 插入申请记录
       await client.query(
         `INSERT INTO leave_requests (
           id, request_no, user_id, applicant_name, applicant_department,
           leave_type_code, leave_type_name, start_date, start_half, end_date, end_half,
-          total_days, reason, status, approver_id, approver_name,
+          total_days, balance_allocations_json, balance_reserved, reason, status, approver_id, approver_name,
           submitted_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16,$17,$18)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18,$19,$20)`,
         [
           requestId, requestNo, userId, userInfo.name, userInfo.department,
           leaveTypeCode, typeConfig.name, startDate, startHalf, endDate, endHalf,
-          totalDays, reason, approver.id, approver.name,
+          totalDays, JSON.stringify(allocations), typeConfig.requires_balance_check, String(reason || '').trim(), approver.id, approver.name,
           now, now, now
         ]
       )
 
       // 插入附件记录（需要先移动文件到正式目录）
       for (const file of uploadedFiles) {
-        const newDir = path.join(leaveAttachmentsDir, requestId)
-        if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true })
+        const uploadedAt = fs.statSync(file.path).mtime
+        const newDir = ensureDatedUploadDirectory('leave-attachments', uploadedAt, requestId)
         const newPath = path.join(newDir, path.basename(file.path))
-        if (file.path !== newPath) fs.renameSync(file.path, newPath)
+        if (file.path !== newPath) {
+          fs.renameSync(file.path, newPath)
+          file.path = newPath
+        }
 
-        const relativePath = `/uploads/leave-attachments/${requestId}/${path.basename(newPath)}`
+        const relativePath = toStoredUploadPath(newPath, true)
         const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8')
         await client.query(
           `INSERT INTO leave_attachments (id, leave_request_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [nanoid(), requestId, originalName, relativePath, file.size, file.mimetype, userId, now]
-        )
-      }
-
-      // 更新余额：pending_days += totalDays（需要校验余额的类型）
-      if (typeConfig.requires_balance_check) {
-        await ensureLeaveBalance(userId, leaveTypeCode, year) // 确保余额记录存在
-        await client.query(
-          `UPDATE leave_balances SET pending_days = pending_days + $1, updated_at = $2
-           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
-          [totalDays, now, userId, leaveTypeCode, year]
         )
       }
 
@@ -408,9 +614,9 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
     res.json({ success: true, message: '请假申请已提交，等待审批', data: { id: requestId, requestNo } })
   } catch (error) {
     console.error('提交请假申请失败:', error)
-    // 清理上传文件
-    for (const f of uploadedFiles) {
-      try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path) } catch {}
+    removeUploadedFiles(uploadedFiles)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
     }
     res.status(500).json({ success: false, message: '提交请假申请失败' })
   }
@@ -539,39 +745,35 @@ router.get('/attachments/:attachmentId/download', requireAuth, async (req, res) 
 // 撤销申请（仅 pending 状态）
 router.post('/requests/:id/cancel', requireAuth, async (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const { id } = req.params
 
-    const request = await db.prepare(`
-      SELECT * FROM leave_requests WHERE id = ? AND user_id = ?
-    `).get<{ status: string; leave_type_code: string; total_days: number }>(id, userId)
-
-    if (!request) {
-      return res.status(404).json({ success: false, message: '申请不存在' })
-    }
-    if (request.status !== 'pending') {
-      return res.status(400).json({ success: false, message: '只能撤销审批中的申请' })
-    }
-
     const now = new Date().toISOString()
-    const year = new Date().getFullYear()
     const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
 
     await db.transaction(async (client) => {
+      const requestResult = await client.query<BalanceRequestData & { status: string }>(
+        `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status
+         FROM leave_requests lr
+         WHERE lr.id = $1 AND lr.user_id = $2
+         FOR UPDATE OF lr`,
+        [id, userId]
+      )
+      const request = requestResult.rows[0]
+      if (!request) throw new LeaveOperationError('申请不存在', 404)
+      if (request.status !== 'pending') throw new LeaveOperationError('只能撤销审批中的申请', 409)
+
+      const allocations = await getStoredBalanceAllocations(request)
+
       await client.query(
-        `UPDATE leave_requests SET status = 'cancelled', cancelled_at = $1, updated_at = $2 WHERE id = $3`,
+        `UPDATE leave_requests
+         SET status = 'cancelled', cancelled_at = $1, updated_at = $2
+         WHERE id = $3 AND status = 'pending'`,
         [now, now, id]
       )
 
-      // 释放 pending_days
-      const typeConfig = await db.prepare(`SELECT requires_balance_check FROM leave_type_configs WHERE code = ?`).get<{ requires_balance_check: boolean }>(request.leave_type_code)
-      if (typeConfig?.requires_balance_check) {
-        await client.query(
-          `UPDATE leave_balances SET pending_days = GREATEST(0, pending_days - $1), updated_at = $2
-           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
-          [request.total_days, now, userId, request.leave_type_code, year]
-        )
-      }
+      await settleLeaveBalances(client, request, allocations, 'release', now)
 
       await client.query(
         `INSERT INTO leave_approval_logs (id, leave_request_id, operator_id, operator_name, action, comment, created_at)
@@ -583,6 +785,9 @@ router.post('/requests/:id/cancel', requireAuth, async (req, res) => {
     res.json({ success: true, message: '申请已撤销' })
   } catch (error) {
     console.error('撤销申请失败:', error)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '撤销申请失败' })
   }
 })
@@ -603,12 +808,18 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
     }>(id, userId)
 
     if (!originalRequest) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(404).json({ success: false, message: '申请不存在' })
     }
     if (originalRequest.status !== 'rejected') {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '只有被驳回的申请才可重新提交' })
+    }
+
+    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    if (periodError) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: periodError })
     }
 
     const leaveTypeCode = req.body.leaveTypeCode || originalRequest.leave_type_code
@@ -617,14 +828,20 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
     `).get<{ name: string; requires_attachment: boolean; requires_balance_check: boolean }>(leaveTypeCode)
 
     if (!typeConfig) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '假期类型不存在' })
+    }
+
+    const noReasonTypes = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
+    if (!noReasonTypes.includes(leaveTypeCode) && !String(reason || '').trim()) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: '请填写请假事由' })
     }
 
     // 性别与假期类型匹配校验
     const excludedCodesResubmit = await getGenderExcludedTypes(userId)
     if (excludedCodesResubmit.includes(leaveTypeCode)) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       const tipMap: Record<string, string> = {
         maternity: '产假仅适用于女性员工',
         paternity: '陪产假仅适用于男性员工',
@@ -638,71 +855,58 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
 
     const totalDays = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
     if (totalDays <= 0) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '请假时长不能为0' })
     }
+    const allocations = await calculateLeaveDaysByYear(startDate, startHalf, endDate, endHalf)
 
     const userInfo = await db.prepare(`SELECT name, department FROM users WHERE id = ?`).get<{ name: string; department: string | null }>(userId)
     const approver = await findApprover(userId, userInfo?.department || null)
 
     if (!approver) {
-      for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
+      removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '未找到审批人，请联系管理员' })
     }
 
-    const year = new Date().getFullYear()
-    if (typeConfig.requires_balance_check) {
-      const balance = await ensureLeaveBalance(userId, leaveTypeCode, year)
-      const available = balance.total_days - balance.used_days - balance.pending_days
-      if (available < totalDays) {
-        for (const f of uploadedFiles) fs.existsSync(f.path) && fs.unlinkSync(f.path)
-        return res.status(400).json({
-          success: false,
-          message: `${typeConfig.name}余额不足，可用 ${available} 天，申请 ${totalDays} 天`
-        })
-      }
-    }
-
     const newRequestId = nanoid()
-    const newRequestNo = await generateRequestNo()
+    let newRequestNo = ''
     const now = new Date().toISOString()
 
     await db.transaction(async (client) => {
+      newRequestNo = await generateRequestNo(client)
+      if (typeConfig.requires_balance_check) {
+        await reserveLeaveBalances(client, userId, leaveTypeCode, typeConfig.name, allocations, now)
+      }
+
       await client.query(
         `INSERT INTO leave_requests (
           id, request_no, user_id, applicant_name, applicant_department,
           leave_type_code, leave_type_name, start_date, start_half, end_date, end_half,
-          total_days, reason, status, approver_id, approver_name,
+          total_days, balance_allocations_json, balance_reserved, reason, status, approver_id, approver_name,
           submitted_at, version, original_id, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16,$17,$18,$19,$20)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18,$19,$20,$21,$22)`,
         [
           newRequestId, newRequestNo, userId, userInfo?.name || '', userInfo?.department || null,
           leaveTypeCode, typeConfig.name, startDate, startHalf, endDate, endHalf,
-          totalDays, reason, approver.id, approver.name,
+          totalDays, JSON.stringify(allocations), typeConfig.requires_balance_check, String(reason || '').trim(), approver.id, approver.name,
           now, originalRequest.version + 1, id, now, now
         ]
       )
 
       for (const file of uploadedFiles) {
-        const newDir = path.join(leaveAttachmentsDir, newRequestId)
-        if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true })
+        const uploadedAt = fs.statSync(file.path).mtime
+        const newDir = ensureDatedUploadDirectory('leave-attachments', uploadedAt, newRequestId)
         const newPath = path.join(newDir, path.basename(file.path))
-        if (file.path !== newPath) fs.renameSync(file.path, newPath)
-        const relativePath = `/uploads/leave-attachments/${newRequestId}/${path.basename(newPath)}`
+        if (file.path !== newPath) {
+          fs.renameSync(file.path, newPath)
+          file.path = newPath
+        }
+        const relativePath = toStoredUploadPath(newPath, true)
         const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8')
         await client.query(
           `INSERT INTO leave_attachments (id, leave_request_id, file_name, file_path, file_size, mime_type, uploaded_by, created_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [nanoid(), newRequestId, originalName, relativePath, file.size, file.mimetype, userId, now]
-        )
-      }
-
-      if (typeConfig.requires_balance_check) {
-        await ensureLeaveBalance(userId, leaveTypeCode, year)
-        await client.query(
-          `UPDATE leave_balances SET pending_days = pending_days + $1, updated_at = $2
-           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
-          [totalDays, now, userId, leaveTypeCode, year]
         )
       }
 
@@ -716,8 +920,9 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
     res.json({ success: true, message: '已重新提交申请', data: { id: newRequestId, requestNo: newRequestNo } })
   } catch (error) {
     console.error('重新提交申请失败:', error)
-    for (const f of uploadedFiles) {
-      try { if (fs.existsSync(f.path)) fs.unlinkSync(f.path) } catch {}
+    removeUploadedFiles(uploadedFiles)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
     }
     res.status(500).json({ success: false, message: '重新提交申请失败' })
   }
@@ -746,40 +951,36 @@ router.get('/pending', requireAuth, async (req, res) => {
 // 审批通过
 router.post('/requests/:id/approve', requireAuth, async (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const { id } = req.params
     const { comment } = req.body
 
-    const request = await db.prepare(`
-      SELECT * FROM leave_requests WHERE id = ? AND approver_id = ? AND status = 'pending'
-    `).get<{ user_id: string; leave_type_code: string; total_days: number }>(id, userId)
-
-    if (!request) {
-      return res.status(404).json({ success: false, message: '申请不存在或无权操作' })
-    }
-
     const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
     const now = new Date().toISOString()
-    const year = new Date(now).getFullYear()
 
     await db.transaction(async (client) => {
+      const requestResult = await client.query<BalanceRequestData & { status: string }>(
+        `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status
+         FROM leave_requests lr
+         WHERE lr.id = $1 AND lr.approver_id = $2
+         FOR UPDATE OF lr`,
+        [id, userId]
+      )
+      const request = requestResult.rows[0]
+      if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
+      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
+
+      const allocations = await getStoredBalanceAllocations(request)
+
+      await settleLeaveBalances(client, request, allocations, 'approve', now)
+
       await client.query(
-        `UPDATE leave_requests SET status = 'approved', approved_at = $1, updated_at = $2 WHERE id = $3`,
+        `UPDATE leave_requests
+         SET status = 'approved', approved_at = $1, updated_at = $2
+         WHERE id = $3 AND status = 'pending'`,
         [now, now, id]
       )
-
-      // 余额操作：pending_days - totalDays；used_days + totalDays
-      const typeConfig = await db.prepare(`SELECT requires_balance_check FROM leave_type_configs WHERE code = ?`).get<{ requires_balance_check: boolean }>(request.leave_type_code)
-      if (typeConfig?.requires_balance_check) {
-        await client.query(
-          `UPDATE leave_balances
-           SET pending_days = GREATEST(0, pending_days - $1),
-               used_days = used_days + $2,
-               updated_at = $3
-           WHERE user_id = $4 AND leave_type_code = $5 AND year = $6`,
-          [request.total_days, request.total_days, now, request.user_id, request.leave_type_code, year]
-        )
-      }
 
       await client.query(
         `INSERT INTO leave_approval_logs (id, leave_request_id, operator_id, operator_name, action, comment, created_at)
@@ -791,6 +992,9 @@ router.post('/requests/:id/approve', requireAuth, async (req, res) => {
     res.json({ success: true, message: '已审批通过' })
   } catch (error) {
     console.error('审批通过失败:', error)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '审批操作失败' })
   }
 })
@@ -798,7 +1002,7 @@ router.post('/requests/:id/approve', requireAuth, async (req, res) => {
 // 驳回
 router.post('/requests/:id/reject', requireAuth, async (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const { id } = req.params
     const { rejectReason } = req.body
 
@@ -806,34 +1010,32 @@ router.post('/requests/:id/reject', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, message: '驳回时必须填写驳回理由' })
     }
 
-    const request = await db.prepare(`
-      SELECT * FROM leave_requests WHERE id = ? AND approver_id = ? AND status = 'pending'
-    `).get<{ user_id: string; leave_type_code: string; total_days: number }>(id, userId)
-
-    if (!request) {
-      return res.status(404).json({ success: false, message: '申请不存在或无权操作' })
-    }
-
     const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
     const now = new Date().toISOString()
-    const year = new Date(now).getFullYear()
 
     await db.transaction(async (client) => {
+      const requestResult = await client.query<BalanceRequestData & { status: string }>(
+        `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status
+         FROM leave_requests lr
+         WHERE lr.id = $1 AND lr.approver_id = $2
+         FOR UPDATE OF lr`,
+        [id, userId]
+      )
+      const request = requestResult.rows[0]
+      if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
+      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
+
+      const allocations = await getStoredBalanceAllocations(request)
+
+      await settleLeaveBalances(client, request, allocations, 'release', now)
+
       await client.query(
-        `UPDATE leave_requests SET status = 'rejected', reject_reason = $1, rejected_at = $2, updated_at = $3 WHERE id = $4`,
+        `UPDATE leave_requests
+         SET status = 'rejected', reject_reason = $1, rejected_at = $2, updated_at = $3
+         WHERE id = $4 AND status = 'pending'`,
         [rejectReason.trim(), now, now, id]
       )
-
-      // 释放 pending_days
-      const typeConfig = await db.prepare(`SELECT requires_balance_check FROM leave_type_configs WHERE code = ?`).get<{ requires_balance_check: boolean }>(request.leave_type_code)
-      if (typeConfig?.requires_balance_check) {
-        await client.query(
-          `UPDATE leave_balances
-           SET pending_days = GREATEST(0, pending_days - $1), updated_at = $2
-           WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
-          [request.total_days, now, request.user_id, request.leave_type_code, year]
-        )
-      }
 
       await client.query(
         `INSERT INTO leave_approval_logs (id, leave_request_id, operator_id, operator_name, action, comment, created_at)
@@ -845,6 +1047,9 @@ router.post('/requests/:id/reject', requireAuth, async (req, res) => {
     res.json({ success: true, message: '已驳回申请' })
   } catch (error) {
     console.error('驳回申请失败:', error)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '驳回操作失败' })
   }
 })
@@ -871,6 +1076,10 @@ router.post('/admin/types', requireAdmin, async (req, res) => {
     if (!name?.trim()) {
       return res.status(400).json({ success: false, message: '假期名称不能为空' })
     }
+    const defaultDays = parseLeaveBalanceDays(default_days ?? 0)
+    if (defaultDays === null) {
+      return res.status(400).json({ success: false, message: `默认天数必须是 0 到 ${MAX_LEAVE_BALANCE_DAYS} 之间的半天倍数` })
+    }
 
     const code = `custom_${nanoid(8)}`
     const id = nanoid()
@@ -881,7 +1090,7 @@ router.post('/admin/types', requireAdmin, async (req, res) => {
     await db.prepare(`
       INSERT INTO leave_type_configs (id, code, name, requires_attachment, requires_balance_check, default_days, description, sort_order, is_active, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, ?)
-    `).run(id, code, name.trim(), requires_attachment ? true : false, requires_balance_check !== false, Number(default_days ?? 0), description?.trim() || null, sortOrder, now)
+    `).run(id, code, name.trim(), requires_attachment ? true : false, requires_balance_check !== false, defaultDays, description?.trim() || null, sortOrder, now)
 
     res.json({ success: true, message: '假期类型已添加' })
   } catch (error) {
@@ -898,21 +1107,55 @@ router.put('/admin/types/:code', requireAdmin, async (req, res) => {
     if (!name?.trim()) {
       return res.status(400).json({ success: false, message: '假期名称不能为空' })
     }
-
-    const existing = await db.prepare(`SELECT id FROM leave_type_configs WHERE code = ? AND is_active = true`).get(code)
-    if (!existing) {
-      return res.status(404).json({ success: false, message: '假期类型不存在' })
+    const nextDefaultDays = parseLeaveBalanceDays(default_days ?? 0)
+    if (nextDefaultDays === null) {
+      return res.status(400).json({ success: false, message: `默认天数必须是 0 到 ${MAX_LEAVE_BALANCE_DAYS} 之间的半天倍数` })
     }
 
-    await db.prepare(`
-      UPDATE leave_type_configs
-      SET name = ?, default_days = ?, requires_balance_check = ?, requires_attachment = ?, description = ?
-      WHERE code = ?
-    `).run(name.trim(), Number(default_days ?? 0), requires_balance_check !== false, requires_attachment ? true : false, description?.trim() || null, code)
+    const nextRequiresBalanceCheck = requires_balance_check !== false
+    const nextRequiresAttachment = requires_attachment ? true : false
+    const nextDescription = description?.trim() || null
+    const now = new Date().toISOString()
+    const currentYear = new Date().getFullYear()
+    let syncedBalanceCount = 0
 
-    res.json({ success: true, message: '假期类型已更新' })
+    await db.transaction(async (client) => {
+      const existingResult = await client.query<{ default_days: number | null }>(
+        `SELECT default_days
+         FROM leave_type_configs
+         WHERE code = $1 AND is_active = true
+         FOR UPDATE`,
+        [code]
+      )
+      const existing = existingResult.rows[0]
+      if (!existing) throw new LeaveOperationError('假期类型不存在', 404)
+      const previousDefaultDays = Number(existing.default_days ?? 0)
+
+      await client.query(`
+        UPDATE leave_type_configs
+        SET name = $1, default_days = $2, requires_balance_check = $3, requires_attachment = $4, description = $5
+        WHERE code = $6
+      `, [name.trim(), nextDefaultDays, nextRequiresBalanceCheck, nextRequiresAttachment, nextDescription, code])
+
+      if (nextRequiresBalanceCheck && previousDefaultDays !== nextDefaultDays) {
+        const syncResult = await client.query(`
+          UPDATE leave_balances
+          SET total_days = $1, updated_at = $2
+          WHERE leave_type_code = $3
+            AND year = $4
+            AND total_days = $5
+            AND used_days + pending_days <= $1
+        `, [nextDefaultDays, now, code, currentYear, previousDefaultDays])
+        syncedBalanceCount = syncResult.rowCount ?? 0
+      }
+    })
+
+    res.json({ success: true, message: '假期类型已更新', data: { syncedBalanceCount } })
   } catch (error) {
     console.error('修改假期类型失败:', error)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '修改假期类型失败' })
   }
 })
@@ -1027,31 +1270,71 @@ router.put('/admin/balances/:targetUserId/:typeCode/:year', requireAdmin, async 
   try {
     const { targetUserId, typeCode, year } = req.params
     const { totalDays } = req.body
+    const parsedYear = Number(year)
+    const nextTotalDays = parseLeaveBalanceDays(totalDays)
 
-    if (typeof totalDays !== 'number' || totalDays < 0) {
-      return res.status(400).json({ success: false, message: '总天数必须为非负数' })
+    if (nextTotalDays === null) {
+      return res.status(400).json({ success: false, message: `总天数必须是 0 到 ${MAX_LEAVE_BALANCE_DAYS} 之间的半天倍数` })
+    }
+    if (!Number.isInteger(parsedYear) || parsedYear < 2000 || parsedYear > 2100) {
+      return res.status(400).json({ success: false, message: '年份无效' })
     }
 
     const now = new Date().toISOString()
-    const existing = await db.prepare(`
-      SELECT id FROM leave_balances WHERE user_id = ? AND leave_type_code = ? AND year = ?
-    `).get(targetUserId, typeCode, Number(year))
+    await db.transaction(async (client) => {
+      const targetResult = await client.query(
+        `SELECT
+           EXISTS(SELECT 1 FROM users WHERE id = $1) AS user_exists,
+           EXISTS(SELECT 1 FROM leave_type_configs WHERE code = $2 AND is_active = true) AS type_exists`,
+        [targetUserId, typeCode]
+      )
+      const target = targetResult.rows[0] as { user_exists: boolean; type_exists: boolean }
+      if (!target.user_exists) throw new LeaveOperationError('用户不存在', 404)
+      if (!target.type_exists) throw new LeaveOperationError('假期类型不存在或已停用', 404)
 
-    if (existing) {
-      await db.prepare(`
-        UPDATE leave_balances SET total_days = ?, updated_at = ?
-        WHERE user_id = ? AND leave_type_code = ? AND year = ?
-      `).run(totalDays, now, targetUserId, typeCode, Number(year))
-    } else {
-      await db.prepare(`
-        INSERT INTO leave_balances (id, user_id, leave_type_code, year, total_days, used_days, pending_days, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
-      `).run(nanoid(), targetUserId, typeCode, Number(year), totalDays, now, now)
-    }
+      await client.query(
+        `INSERT INTO leave_balances (
+           id, user_id, leave_type_code, year, total_days, used_days, pending_days, created_at, updated_at
+         ) VALUES ($1,$2,$3,$4,$5,0,0,$6,$7)
+         ON CONFLICT (user_id, leave_type_code, year) DO NOTHING`,
+        [nanoid(), targetUserId, typeCode, parsedYear, nextTotalDays, now, now]
+      )
+
+      const balanceResult = await client.query<{
+        used_days: number
+        pending_days: number
+      }>(
+        `SELECT used_days, pending_days
+         FROM leave_balances
+         WHERE user_id = $1 AND leave_type_code = $2 AND year = $3
+         FOR UPDATE`,
+        [targetUserId, typeCode, parsedYear]
+      )
+      const balance = balanceResult.rows[0]
+      if (!balance) throw new LeaveOperationError('假期余额初始化失败', 500)
+
+      const committedDays = Number(balance.used_days) + Number(balance.pending_days)
+      if (nextTotalDays < committedDays) {
+        throw new LeaveOperationError(
+          `总天数不能低于已使用与审批中天数之和 ${committedDays} 天`,
+          409
+        )
+      }
+
+      await client.query(
+        `UPDATE leave_balances
+         SET total_days = $1, updated_at = $2
+         WHERE user_id = $3 AND leave_type_code = $4 AND year = $5`,
+        [nextTotalDays, now, targetUserId, typeCode, parsedYear]
+      )
+    })
 
     res.json({ success: true, message: '余额已调整' })
   } catch (error) {
     console.error('调整余额失败:', error)
+    if (error instanceof LeaveOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '调整余额失败' })
   }
 })

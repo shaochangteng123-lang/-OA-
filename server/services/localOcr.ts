@@ -41,7 +41,8 @@ interface XmlInvoiceResult {
 async function extractInvoiceFromXml(pdfPath: string): Promise<XmlInvoiceResult | null> {
   try {
     const { execFileSync } = await import('child_process')
-    const xml = execFileSync('pdftohtml', ['-xml', '-stdout', '-nodrm', pdfPath], {
+    // 这里只读取文字坐标；忽略内嵌图片，避免 pdftohtml 在上传临时目录旁生成残留图片。
+    const xml = execFileSync('pdftohtml', ['-xml', '-stdout', '-nodrm', '-i', pdfPath], {
       timeout: 15000,
       maxBuffer: 10 * 1024 * 1024,
     }).toString('utf-8')

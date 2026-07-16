@@ -114,8 +114,13 @@
     <!-- 创建用户对话框 -->
     <el-dialog v-model="createDialogVisible" title="创建用户" width="500px" :close-on-click-modal="false">
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="100px">
-        <el-form-item label="员工编号">
-          <el-input :value="nextEmployeeNo" disabled placeholder="自动生成" />
+        <el-form-item label="员工编号" prop="employeeNo">
+          <el-input
+            v-model="createForm.employeeNo"
+            maxlength="13"
+            placeholder="例如 YULI-CS027"
+            @blur="createForm.employeeNo = normalizeEmployeeNoInput(createForm.employeeNo)"
+          />
         </el-form-item>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="createForm.username" placeholder="使用员工姓名，即为显示名称" />
@@ -141,7 +146,6 @@
         </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="createForm.role" style="width: 100%">
-            <el-option label="超级管理员" value="super_admin" />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
@@ -165,8 +169,13 @@
     <!-- 编辑用户对话框 -->
     <el-dialog v-model="editDialogVisible" title="编辑用户" width="500px" :close-on-click-modal="false">
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-width="100px">
-        <el-form-item label="员工编号">
-          <el-input :value="editEmployeeNo" disabled placeholder="-" />
+        <el-form-item label="员工编号" prop="employeeNo">
+          <el-input
+            v-model="editForm.employeeNo"
+            maxlength="13"
+            placeholder="例如 YULI-CS027"
+            @blur="editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)"
+          />
         </el-form-item>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="editForm.username" placeholder="仅字母、数字、下划线" />
@@ -192,7 +201,7 @@
         </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="editForm.role" style="width: 100%">
-            <el-option label="超级管理员" value="super_admin" />
+            <el-option v-if="authStore.user?.role === 'super_admin'" label="超级管理员" value="super_admin" />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
             <el-option label="普通用户" value="user" />
@@ -362,9 +371,8 @@ const paginatedUsers = computed(() => {
 const createDialogVisible = ref(false)
 const createFormRef = ref<FormInstance>()
 const createLoading = ref(false)
-const nextEmployeeNo = ref('')
-const editEmployeeNo = ref('')
 const createForm = reactive({
+  employeeNo: '',
   username: '',
   password: '',
   email: '',
@@ -374,6 +382,19 @@ const createForm = reactive({
   position: '',
   employmentStatus: 'probation',
 })
+
+const normalizeEmployeeNoInput = (value: string) => value.trim().toUpperCase().replace(/\s+/g, '')
+
+const validateEmployeeNo = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  const normalizedValue = normalizeEmployeeNoInput(value || '')
+  if (!normalizedValue) {
+    callback(new Error('请输入员工编号'))
+  } else if (!/^YULI-CS\d{3,6}$/.test(normalizedValue)) {
+    callback(new Error('格式应为 YULI-CS 加 3 至 6 位数字'))
+  } else {
+    callback()
+  }
+}
 
 // 手机号验证器
 const validateMobile = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
@@ -400,6 +421,9 @@ const validateChineseName = (_rule: unknown, value: string, callback: (error?: E
 }
 
 const createRules: FormRules = {
+  employeeNo: [
+    { required: true, validator: validateEmployeeNo, trigger: 'blur' },
+  ],
   username: [
     { required: true, validator: validateChineseName, trigger: 'blur' },
   ],
@@ -434,6 +458,7 @@ const editFormRef = ref<FormInstance>()
 const editLoading = ref(false)
 const editForm = reactive({
   id: '',
+  employeeNo: '',
   username: '',
   name: '',
   password: '',
@@ -473,6 +498,9 @@ const validateEditBankAccount = (_rule: unknown, value: string, callback: (error
 }
 
 const editRules: FormRules = {
+  employeeNo: [
+    { required: true, validator: validateEmployeeNo, trigger: 'blur' },
+  ],
   username: [
     { required: true, validator: validateChineseName, trigger: 'blur' },
   ],
@@ -631,7 +659,8 @@ watch(() => editForm.department, () => {
 })
 
 // 显示创建对话框
-async function showCreateDialog() {
+function showCreateDialog() {
+  createForm.employeeNo = ''
   createForm.username = ''
   createForm.password = ''
   createForm.email = ''
@@ -641,15 +670,6 @@ async function showCreateDialog() {
   createForm.position = ''
   createForm.employmentStatus = 'probation'
   createDialogVisible.value = true
-  // 获取下一个员工编号
-  try {
-    const res = await api.get('/api/users/next-employee-no')
-    if (res.data.success) {
-      nextEmployeeNo.value = res.data.data.employeeNo
-    }
-  } catch {
-    nextEmployeeNo.value = ''
-  }
 }
 
 // 创建用户
@@ -664,6 +684,7 @@ async function handleCreateUser() {
 
   try {
     createLoading.value = true
+    createForm.employeeNo = normalizeEmployeeNoInput(createForm.employeeNo)
     const res = await api.post('/api/users/create', createForm)
     if (res.data.success) {
       ElMessage.success('用户创建成功')
@@ -681,6 +702,7 @@ async function handleCreateUser() {
 function editUser(user: UserType) {
   isEditFormPopulating.value = true
   editForm.id = user.id
+  editForm.employeeNo = user.employeeNo || ''
   editForm.username = user.username || ''
   editForm.name = user.name
   editForm.password = ''
@@ -695,7 +717,6 @@ function editUser(user: UserType) {
   editForm.bankName = (user as any).bankName || ''
   editForm.bankAccountNumber = (user as any).bankAccountNumber || ''
   editForm.employmentStatus = (user as any).employmentStatus || 'probation'
-  editEmployeeNo.value = (user as any).employeeNo || '-'
   editDialogVisible.value = true
   nextTick(() => {
     isEditFormPopulating.value = false
@@ -714,8 +735,10 @@ async function handleEditUser() {
 
   try {
     editLoading.value = true
+    editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)
     const res = await api.post('/api/users', {
       id: editForm.id,
+      employeeNo: editForm.employeeNo,
       username: editForm.username,
       name: editForm.name,
       password: editForm.password || undefined,

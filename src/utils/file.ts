@@ -18,11 +18,12 @@ export function toFileUrl(filePath: string): string {
 
   const match = filePath.match(/(?:\/?)uploads\/invoices\/(.+)/)
   if (match) {
-    const filename = match[1]
+    const relativeFilePath = match[1]
+    const filename = relativeFilePath.split('/').pop() || ''
     if (filename.startsWith('payment-proof-') || filename.startsWith('payment-proof-batch-')) {
-      return `/api/files/payment-proofs/${filename}`
+      return `/api/files/payment-proofs/${relativeFilePath}`
     }
-    return `/api/files/invoices/${filename}`
+    return `/api/files/invoices/${relativeFilePath}`
   }
 
   if (filePath.startsWith('/')) return filePath

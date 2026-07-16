@@ -30,6 +30,7 @@ import probationRoutes from './routes/probation.js'
 import resignationRoutes from './routes/resignation.js'
 import filesRoutes from './routes/files.js'
 import leaveRoutes from './routes/leave.js'
+import payrollRoutes from './routes/payroll.js'
 import bankReceiptsRoutes from './routes/bank-receipts.js'
 import worklogProjectsRoutes from './routes/worklog-projects.js'
 import worklogEntriesRoutes from './routes/worklog-entries.js'
@@ -104,6 +105,7 @@ app.use('/api/probation', probationRoutes)
 app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
 app.use('/api/leave', leaveRoutes)
+app.use('/api/payroll', payrollRoutes)
 app.use('/api/bank-receipts', bankReceiptsRoutes)
 app.use('/api/worklog-projects', worklogProjectsRoutes)
 app.use('/api/worklog-entries', worklogEntriesRoutes)

@@ -13,9 +13,9 @@ import { sendConvertedPdf, CONVERTIBLE_EXT } from '../utils/doc-preview.js'
 const router = express.Router()
 
 // 下载发票文件
-router.get('/invoices/:filename', requireAuth, async (req, res) => {
+router.get('/invoices/*', requireAuth, async (req, res) => {
   try {
-    const { filename } = req.params
+    const filename = (req.params as any)[0]
     const userId = req.session.userId!
 
     // 构造文件路径
@@ -79,9 +79,9 @@ router.get('/invoices/:filename', requireAuth, async (req, res) => {
 })
 
 // 下载付款回单
-router.get('/payment-proofs/:filename', requireAuth, async (req, res) => {
+router.get('/payment-proofs/*', requireAuth, async (req, res) => {
   try {
-    const { filename } = req.params
+    const filename = (req.params as any)[0]
     const userId = req.session.userId!
 
     const filePath = `uploads/invoices/${filename}`

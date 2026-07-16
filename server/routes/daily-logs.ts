@@ -8,6 +8,7 @@ import { db } from '../db/index.js'
 import { requireAuth, requireAdminOrGM } from '../middleware/auth.js'
 import { chat, isLLMConfigured } from '../services/llm.js'
 import { sendConvertedPdf, CONVERTIBLE_EXT } from '../utils/doc-preview.js'
+import { ensureDatedUploadDirectory } from '../utils/upload-date.js'
 
 const router = Router()
 
@@ -53,18 +54,10 @@ export async function getEditPermission(logDate: string, userId: string): Promis
   return 'supplement'
 }
 
-const dailyLogUploadsDir = path.resolve(process.cwd(), 'uploads/daily-logs')
-if (!fs.existsSync(dailyLogUploadsDir)) {
-  fs.mkdirSync(dailyLogUploadsDir, { recursive: true })
-}
-
 const uploadAttachment = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => {
-      const dateDir = new Date().toISOString().slice(0, 10)
-      const destDir = path.join(dailyLogUploadsDir, dateDir)
-      if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
-      cb(null, destDir)
+      cb(null, ensureDatedUploadDirectory('daily-logs'))
     },
     filename: (_req, file, cb) => {
       const ext = path.extname(file.originalname)
@@ -780,11 +773,15 @@ router.get('/comments/unreplied-gm', requireAuth, async (req, res) => {
     if (gmUsers.length === 0) return res.json({ success: true, data: null })
     const placeholders = gmUsers.map(() => '?').join(',')
     const gmIds = gmUsers.map(u => u.id)
+    // 确认性短回复，不需要员工再回复
+    const dismissWords = ['好', '好的', '嗯', '嗯嗯', 'ok', 'OK', 'Ok', '收到', '了解', '知道了', '明白', '行', '可以', '没问题', '👌', '👍']
+    const dismissPattern = dismissWords.map(w => `'${w}'`).join(',')
     const row = await db.get<{ log_date: string; submission_id: string; comment_id: string }>(
       `SELECT s.log_date, c.submission_id, c.id as comment_id
        FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
        WHERE s.user_id = ? AND c.user_id IN (${placeholders}) AND c.withdrawn_at IS NULL
+         AND TRIM(c.content) NOT IN (${dismissPattern})
          AND NOT EXISTS (
            SELECT 1 FROM daily_log_comments r
            WHERE r.reply_to = c.id AND r.user_id = ? AND r.withdrawn_at IS NULL

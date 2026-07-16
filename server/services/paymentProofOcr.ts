@@ -141,7 +141,8 @@ function extractPayee(text: string, textNoSpace: string): string {
 
   // 2. 银行回单表格格式：第二个"户名"后面的内容为收款方
   // 兼容OCR将"户名"识别为"户：\n名"的情况（工行回单常见）
-  const allNameMatches = [...text.matchAll(/户\s*[：:"]?\s*名\s*\|?\s*([^|户\n]*)/gi)]
+  // 兼容工行印章噪声导致"户名"被识别为"户\n中名"的情况（印章压在表格右侧）
+  const allNameMatches = [...text.matchAll(/户\s*[：:"]?\s*[一-鿿]?\s*名\s*\|?\s*([^|户\n]*)/gi)]
   if (allNameMatches.length >= 2) {
     const name = allNameMatches[1][1].replace(/[|"]/g, '').trim()
     if (name.length >= 2 && name !== '付款' && name !== '收款') return name
@@ -326,6 +327,41 @@ function extractProofNo(text: string, textNoSpace: string): string {
 }
 
 /**
+ * 在收款账号附近的行中查找收款人姓名
+ * 账号和户名在回单中必然相邻，此方法作为最终兜底，
+ * 适用于OCR将双栏表格合并导致"户名"标签丢失的情况
+ */
+function extractPayeeNameNearAccount(text: string, payeeAccount: string): string {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean)
+  const excludeWords = [
+    '公司', '集团', '银行', '回单', '付款', '收款', '户名', '账号',
+    '金额', '开户', '支行', '摘要', '用途', '业务', '产品', '种类',
+    '汇划', '时间', '流水', '营业', '电子', '网上', '补打', '其他',
+    '款项', '发报', '人民币', '记账', '交易', '柜员', '网点', '重要',
+    '提示', '如果', '请到', '本回', '验证',
+  ]
+  const namePattern = /^[一-鿿]{2,4}$/
+
+  // 找到含有收款账号的行号（账号可能带空格，做去空格比较）
+  const accountNoSpace = payeeAccount.replace(/\s+/g, '')
+  const accountLineIdx = lines.findIndex(l => l.replace(/\s+/g, '').includes(accountNoSpace))
+  if (accountLineIdx === -1) return ''
+
+  // 在账号行前后各8行内查找人名（工行回单中名字和账号之间可能隔较多行）
+  const start = Math.max(0, accountLineIdx - 8)
+  const end = Math.min(lines.length - 1, accountLineIdx + 3)
+  for (let i = start; i <= end; i++) {
+    if (i === accountLineIdx) continue
+    const line = lines[i]
+    if (namePattern.test(line) && !excludeWords.some(w => line.includes(w))) {
+      console.log(`✅ 在收款账号附近第${i - accountLineIdx}行找到收款人姓名"${line}"`)
+      return line
+    }
+  }
+  return ''
+}
+
+/**
  * 解析付款回单文本，提取所有字段
  */
 function parsePaymentProofText(text: string, result: PaymentProofOcrResult): void {
@@ -336,6 +372,11 @@ function parsePaymentProofText(text: string, result: PaymentProofOcrResult): voi
   result.payeeAccount = extractPayeeAccount(text)
   result.amount = extractAmount(text, textNoSpace)
   result.proofNo = extractProofNo(text, textNoSpace)
+
+  // 如果前面步骤都未找到收款人姓名，但账号已识别，在账号附近行里二次查找
+  if (!result.payee && result.payeeAccount) {
+    result.payee = extractPayeeNameNearAccount(text, result.payeeAccount)
+  }
 
   console.log('📋 解析结果:', {
     payer: result.payer || '未识别',

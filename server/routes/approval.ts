@@ -2138,11 +2138,15 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       `).get() as { count: number }
       data.approvalPending = approvalPending.count
 
-      // Admin: 转正待审批（status='submitted'）
-      const probationPending = await db.prepare(`
-        SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'submitted'
-      `).get() as { count: number }
-      data.probationPending = probationPending.count
+      // 只有超级管理员具备转正审批权限，普通管理员不显示不可处理的待办
+      if (user.role === 'super_admin') {
+        const probationPending = await db.prepare(`
+          SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'submitted'
+        `).get() as { count: number }
+        data.probationPending = probationPending.count
+      } else {
+        data.probationPending = 0
+      }
     }
 
     // General Manager: 商务报销待审批 + 转正待审批
@@ -2203,7 +2207,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     // 不包含 draft、handover_rejected（驳回给交接人，离职人无需操作）
     const myResignationPending = await db.prepare(`
       SELECT COUNT(*) as count FROM resignation_requests
-      WHERE employee_user_id = ? AND status IN ('submitted', 'handover_confirmed', 'mutual_confirmed', 'rejected')
+      WHERE employee_user_id = ? AND status IN ('submitted', 'handover_confirmed', 'rejected')
     `).get(userId) as { count: number }
     data.myResignationPending = myResignationPending.count
 

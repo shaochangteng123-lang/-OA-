@@ -12,6 +12,7 @@ import { recognizeReceipt } from '../services/receiptOcr.js'
 import { recognizePaymentProof } from '../services/paymentProofOcr.js'
 import { calculateReimbursementMonth } from '../utils/reimbursement.js'
 import { validateFilePath } from '../utils/file-validation.js'
+import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 import { db } from '../db/index.js'
 
 const router = Router()
@@ -108,7 +109,6 @@ async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise
 // 确保上传目录存在
 const uploadsDir = path.join(process.cwd(), 'uploads')
 const tempDir = path.join(uploadsDir, 'temp')
-const invoicesDir = path.join(uploadsDir, 'invoices')
 
 // 配置 multer 用于文件上传（使用绝对路径）
 const upload = multer({
@@ -164,7 +164,7 @@ const uploadReceipt = multer({
   },
 })
 
-;[uploadsDir, tempDir, invoicesDir].forEach(dir => {
+;[uploadsDir, tempDir].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true })
   }
@@ -505,6 +505,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
     console.log('📝 清洗后文件名:', safeFileName)
     const finalFileName = `invoice-${Date.now()}-${safeFileName}`
     console.log('📝 最终文件名:', finalFileName)
+    const invoicesDir = ensureDatedUploadDirectory('invoices')
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(finalFilePath, finalPath)
 
@@ -517,7 +518,7 @@ router.post('/upload-invoice', requireAuth, upload.single('invoice'), async (req
       }
     }
 
-    const uploadedFilePath = `uploads/invoices/${finalFileName}`
+    const uploadedFilePath = toStoredUploadPath(finalPath)
     const uploadUserId = req.session.userId || req.session.user?.id
 
     // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
@@ -669,10 +670,11 @@ router.post('/upload-receipt', requireAuth, uploadReceipt.single('receipt'), asy
     // 路径清洗：只取文件名部分，防止路径穿越攻击
     const safeReceiptName = path.basename(rawReceiptName).replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
     const finalFileName = `receipt-${Date.now()}-${safeReceiptName}`
+    const invoicesDir = ensureDatedUploadDirectory('invoices')
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.renameSync(tempFilePath, finalPath)
 
-    const receiptFilePath = `uploads/invoices/${finalFileName}`
+    const receiptFilePath = toStoredUploadPath(finalPath)
     const receiptUserId = req.session.userId || req.session.user?.id
 
     // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
@@ -862,6 +864,7 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
 
     // 保存文件
     const finalFileName = `deduction-${nanoid(8)}-${Date.now()}.pdf`
+    const invoicesDir = ensureDatedUploadDirectory('invoices')
     const finalPath = path.join(invoicesDir, finalFileName)
     fs.copyFileSync(tempFilePath, finalPath)
 
@@ -871,7 +874,7 @@ router.post('/upload-deduction-invoice', requireAuth, uploadDeduction.single('in
     // 缓存核减发票OCR结果（防客户端篡改金额）
     deductionOcrCache.set(finalFileName, { amount: ocrResult.amount, timestamp: Date.now() })
 
-    const deductionFilePath = `uploads/invoices/${finalFileName}`
+    const deductionFilePath = toStoredUploadPath(finalPath)
     const deductionUserId = req.session.userId || req.session.user?.id
 
     // 将上传路径记录到数据库，供草稿预览权限校验使用（替代 session，避免刷新后丢失）
@@ -2452,6 +2455,7 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
     }
 
     const paymentProofPaths: string[] = []
+    const invoicesDir = ensureDatedUploadDirectory('invoices')
     for (const file of verifiedFiles) {
       const tempPath = path.join(tempDir, path.basename(file.tempFileName))
       if (!fs.existsSync(tempPath)) {
@@ -2461,7 +2465,7 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       const finalFileName = `payment-proof-${id}-${Date.now()}-${safeFileName}`
       const finalPath = path.join(invoicesDir, finalFileName)
       fs.renameSync(tempPath, finalPath)
-      paymentProofPaths.push(`uploads/invoices/${finalFileName}`)
+      paymentProofPaths.push(toStoredUploadPath(finalPath))
     }
 
     const paymentProofPath = paymentProofPaths.join(',')
@@ -3876,6 +3880,7 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
     }
 
     const paymentProofPaths: string[] = []
+    const invoicesDir = ensureDatedUploadDirectory('invoices')
     for (const file of verifiedFiles) {
       const tempPath = path.join(tempDir, path.basename(file.tempFileName))
       if (!fs.existsSync(tempPath)) {
@@ -3885,7 +3890,7 @@ router.post('/payment-batch/:batchId/complete', requireAdmin, async (req, res) =
       const finalFileName = `payment-proof-batch-${batch.batch_no}-${Date.now()}-${safeFileName}`
       const finalPath = path.join(invoicesDir, finalFileName)
       fs.renameSync(tempPath, finalPath)
-      paymentProofPaths.push(`uploads/invoices/${finalFileName}`)
+      paymentProofPaths.push(toStoredUploadPath(finalPath))
     }
 
     const paymentProofPath = paymentProofPaths.join(',')

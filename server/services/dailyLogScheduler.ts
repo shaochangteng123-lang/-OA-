@@ -62,58 +62,90 @@ async function getLastWorkdayOfWeek(): Promise<string> {
 }
 
 /**
+ * 归档指定日期的非空草稿为正式日志
+ */
+async function archiveLogsForDate(targetDate: string) {
+  const now = new Date().toISOString()
+
+  const drafts = await db.all<any>(
+    `SELECT * FROM daily_logs WHERE log_date = ? AND status = 'draft' AND content != '' AND content IS NOT NULL`,
+    targetDate,
+  )
+
+  if (drafts.length === 0) return 0
+
+  let archived = 0
+  for (const draft of drafts) {
+    const existing = await db.get<any>(
+      `SELECT id FROM daily_log_submissions WHERE user_id = ? AND log_date = ?`,
+      draft.user_id, targetDate,
+    )
+
+    if (existing) {
+      await db.run(
+        `UPDATE daily_log_submissions SET content = ?, submitted_at = ? WHERE id = ?`,
+        draft.content, now, existing.id,
+      )
+    } else {
+      const submissionId = nanoid()
+      await db.run(
+        `INSERT INTO daily_log_submissions (id, user_id, log_date, content, submitted_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        submissionId, draft.user_id, targetDate, draft.content, now,
+      )
+    }
+
+    await db.run(
+      `UPDATE daily_logs SET content = '', status = 'submitted', updated_at = ? WHERE id = ?`,
+      now, draft.id,
+    )
+    archived++
+  }
+
+  return archived
+}
+
+/**
  * 每日 23:59 自动归档：将当天非空草稿转为正式日志
  */
 async function archiveDailyLogs() {
   const today = new Date().toISOString().slice(0, 10)
-  const now = new Date().toISOString()
-
   try {
-    const drafts = await db.all<any>(
-      `SELECT * FROM daily_logs WHERE log_date = ? AND status = 'draft' AND content != '' AND content IS NOT NULL`,
-      today,
-    )
-
-    if (drafts.length === 0) {
+    const archived = await archiveLogsForDate(today)
+    if (archived === 0) {
       console.log(`📋 日志自动归档：${today} 无需归档（无非空草稿）`)
-      return
+    } else {
+      console.log(`✅ 日志自动归档：${today} 归档 ${archived} 条日志`)
     }
-
-    let archived = 0
-    for (const draft of drafts) {
-      // 检查是否已有提交记录（避免重复）
-      const existing = await db.get<any>(
-        `SELECT id FROM daily_log_submissions WHERE user_id = ? AND log_date = ?`,
-        draft.user_id, today,
-      )
-
-      if (existing) {
-        // 已有提交记录，更新内容
-        await db.run(
-          `UPDATE daily_log_submissions SET content = ?, submitted_at = ? WHERE id = ?`,
-          draft.content, now, existing.id,
-        )
-      } else {
-        // 新建提交记录
-        const submissionId = nanoid()
-        await db.run(
-          `INSERT INTO daily_log_submissions (id, user_id, log_date, content, submitted_at)
-           VALUES (?, ?, ?, ?, ?)`,
-          submissionId, draft.user_id, today, draft.content, now,
-        )
-      }
-
-      // 清空草稿内容，标记为已提交
-      await db.run(
-        `UPDATE daily_logs SET content = '', status = 'submitted', updated_at = ? WHERE id = ?`,
-        now, draft.id,
-      )
-      archived++
-    }
-
-    console.log(`✅ 日志自动归档：${today} 归档 ${archived} 条日志`)
   } catch (err) {
     console.error('❌ 日志自动归档失败:', err)
+  }
+}
+
+/**
+ * 启动时补归档：检查过去7天内未归档的草稿并自动归档
+ * 防止因容器重启、定时器未触发等原因导致日志丢失
+ */
+async function catchUpArchive() {
+  const today = new Date()
+  let totalArchived = 0
+
+  try {
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(today)
+      d.setDate(today.getDate() - i)
+      const dateStr = d.toISOString().slice(0, 10)
+      const archived = await archiveLogsForDate(dateStr)
+      totalArchived += archived
+    }
+
+    if (totalArchived > 0) {
+      console.log(`🔄 启动补归档完成：补归档 ${totalArchived} 条历史草稿`)
+    } else {
+      console.log(`🔄 启动补归档检查完成：无遗漏`)
+    }
+  } catch (err) {
+    console.error('❌ 启动补归档失败:', err)
   }
 }
 
@@ -331,5 +363,9 @@ export function setupDailyLogScheduler() {
 
   scheduleArchive()
   scheduleWeekly()
-  console.log('✅ 日志定时任务已启动（每日 23:59 自动归档，每周最后工作日 20:00 自动生成周报）')
+
+  // 启动时立即检查并补归档遗漏的历史草稿
+  void catchUpArchive()
+
+  console.log('✅ 日志定时任务已启动（每日 23:59 自动归档，每周最后工作日 20:00 自动生成周报，启动时补归档遗漏）')
 }

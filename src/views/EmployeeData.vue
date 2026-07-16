@@ -189,10 +189,8 @@
                 </el-table-column>
                 <el-table-column label="已上传文件" min-width="300">
                   <template #default="{ row }">
-                    <!-- 邀请函无需上传 -->
-                    <span v-if="row.id === 'invitation'" class="no-upload">无需上传</span>
                     <!-- 个人入职材料由员工自行准备 -->
-                    <span v-else-if="row.id === 'personal'" class="self-prepare">员工自行准备后上交</span>
+                    <span v-if="row.id === 'personal'" class="self-prepare">员工自行准备后上交</span>
                     <div v-else-if="row.files && row.files.length > 0" class="uploaded-files">
                       <div v-for="file in row.files" :key="file.id" class="file-item">
                         <el-icon class="file-icon"><Document /></el-icon>
@@ -222,8 +220,8 @@
                 </el-table-column>
                 <el-table-column label="操作" min-width="120" align="center">
                   <template #default="{ row }">
-                    <!-- 邀请函和个人入职材料无需上传 -->
-                    <template v-if="row.id !== 'invitation' && row.id !== 'personal'">
+                    <!-- 个人入职材料无需上传公共模板 -->
+                    <template v-if="row.id !== 'personal'">
                       <el-upload
                         :show-file-list="false"
                         :before-upload="(file: File) => handleUpload(row.id, file)"
@@ -487,6 +485,13 @@
               <LeaveAdminPanel />
             </div>
           </el-tab-pane>
+
+          <!-- 人力成本 Tab -->
+          <el-tab-pane label="人力成本" name="human-cost">
+            <div class="tab-content human-cost-tab-content">
+              <HumanCostPanel />
+            </div>
+          </el-tab-pane>
         </el-tabs>
       </div>
     </el-card>
@@ -656,11 +661,15 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="8">
-                  <el-form-item label="合同到期">
-                    <el-input
-                      :model-value="computedContractEndDate"
+                  <el-form-item label="合同到期" prop="contract_end_date">
+                    <el-date-picker
+                      :model-value="editFormData.contract_end_date"
+                      type="date"
+                      placeholder="-"
+                      format="YYYY-MM-DD"
+                      value-format="YYYY-MM-DD"
                       disabled
-                      placeholder="根据入职日期自动计算"
+                      style="width: 100%"
                     />
                   </el-form-item>
                 </el-col>
@@ -732,7 +741,39 @@
                 :stroke-width="10"
                 style="width: 200px"
               />
-              <span class="count">{{ completedDocTypes }} / {{ documentTypes.length }}</span>
+              <span class="count">{{ completedDocTypes }} / {{ requiredDocumentTypes.length }}</span>
+              <div v-if="isEditing" class="documents-upload-action">
+                <el-tooltip content="删除该员工的全部人事档案文件" placement="top">
+                  <el-button
+                    type="danger"
+                    plain
+                    :icon="Delete"
+                    :loading="deletingAllDocuments"
+                    :disabled="employeeDocuments.length === 0 || documentControlsDisabled"
+                    @click="handleDeleteAllDocuments"
+                  >
+                    一键删除
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="可一次选择多个 PDF，系统将逐页识别、拆分并自动归档" placement="top">
+                  <el-upload
+                    multiple
+                    :show-file-list="false"
+                    :before-upload="handleAutoUploadDoc"
+                    :disabled="documentControlsDisabled"
+                    accept=".pdf"
+                  >
+                    <el-button
+                      type="primary"
+                      :icon="Upload"
+                      :loading="autoDocumentUploadCount > 0"
+                      class="auto-document-upload-button"
+                    >
+                      {{ autoDocumentUploadCount > 0 ? `正在识别（${autoDocumentUploadCount}）` : '一键识别上传' }}
+                    </el-button>
+                  </el-upload>
+                </el-tooltip>
+              </div>
             </div>
 
             <!-- 文档列表 -->
@@ -745,12 +786,22 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="已上传文件" min-width="350">
+              <el-table-column label="已上传文件" min-width="580">
                 <template #default="{ row }">
                   <div v-if="getDocumentsByType(row.type).length > 0" class="uploaded-docs">
                     <div v-for="doc in getDocumentsByType(row.type)" :key="doc.id" class="doc-item">
                       <el-icon class="doc-icon"><Document /></el-icon>
                       <span class="doc-name">{{ doc.file_name }}</span>
+                      <template v-if="row.type === 'contract'">
+                        <el-tag
+                          size="small"
+                          :type="getContractStatusType(doc)"
+                          effect="plain"
+                        >
+                          {{ getContractStatusText(doc) }}
+                        </el-tag>
+                        <span class="contract-term">{{ formatContractTerm(doc) }}</span>
+                      </template>
                       <span class="doc-info">{{ formatFileSize(doc.file_size) }}</span>
                       <el-button link type="primary" size="small" @click="handlePreviewDoc(doc)">
                         预览
@@ -758,7 +809,14 @@
                       <el-button link type="primary" size="small" @click="handleDownloadDoc(doc)">
                         下载
                       </el-button>
-                      <el-button v-if="isEditing" link type="danger" size="small" @click="handleDeleteDoc(doc)">
+                      <el-button
+                        v-if="isEditing"
+                        link
+                        type="danger"
+                        size="small"
+                        :disabled="documentControlsDisabled"
+                        @click="handleDeleteDoc(doc)"
+                      >
                         删除
                       </el-button>
                     </div>
@@ -766,15 +824,16 @@
                   <span v-else class="no-doc">暂无文件</span>
                 </template>
               </el-table-column>
-              <el-table-column v-if="isEditing" label="操作" min-width="120" align="center">
+              <el-table-column v-if="isEditing" label="操作" min-width="150" align="center">
                 <template #default="{ row }">
                   <el-upload
                     :show-file-list="false"
                     :before-upload="(file: File) => handleUploadDoc(row.type, file)"
+                    :disabled="documentControlsDisabled"
                     accept=".pdf"
                   >
-                    <el-button type="primary" size="small" :icon="Upload">
-                      上传 PDF
+                    <el-button type="primary" size="small" :icon="Upload" :disabled="documentControlsDisabled">
+                      {{ row.type === 'contract' && getDocumentsByType('contract').length > 0 ? '上传续签合同' : '上传 PDF' }}
                     </el-button>
                   </el-upload>
                   <div class="upload-only-pdf-tip">仅支持 PDF，大小不超过 10MB</div>
@@ -1086,6 +1145,7 @@ import { useResignationStore, type ResignationDocumentType, type ResignationTemp
 import { usePendingStore } from '@/stores/pending'
 import { api } from '@/utils/api'
 import LeaveAdminPanel from '@/components/leave/LeaveAdminPanel.vue'
+import HumanCostPanel from '@/components/payroll/HumanCostPanel.vue'
 
 type ResignationTemplateType =
   | 'application_form'
@@ -1696,6 +1756,9 @@ interface EmployeeDocument {
   mime_type: string | null
   uploaded_by: string
   uploaded_by_name: string | null
+  contract_start_date: string | null
+  contract_end_date: string | null
+  contract_recognized_at: string | null
   created_at: string
 }
 
@@ -1745,17 +1808,20 @@ interface EmployeeResignationArchive {
 
 // 文档类型配置
 const documentTypes = [
-  { type: 'invitation', label: '邀请函' },
-  { type: 'application', label: '入职申请表' },
-  { type: 'contract', label: '劳动合同' },
+  { type: 'invitation', label: '入职邀请函' },
+  { type: 'application', label: '新员工入职申请表' },
+  { type: 'contract', label: '劳动合同书' },
   { type: 'nda', label: '保密协议' },
   { type: 'declaration', label: '个人声明' },
-  { type: 'asset_handover', label: '固定资产交接单' },
+  { type: 'asset_handover', label: '2025年度公司电脑管理办法' },
   { type: 'id_card', label: '身份证复印件' },
   { type: 'health_report', label: '入职体检报告' },
   { type: 'diploma', label: '学历证书复印件' },
   { type: 'bank_card', label: '工资卡复印件（中国工商银行）' },
+  { type: 'other', label: '其他' },
 ]
+
+const requiredDocumentTypes = documentTypes.filter(item => item.type !== 'other')
 
 // 当前 Tab - 默认显示员工数据
 const activeTab = ref('data')
@@ -1802,6 +1868,12 @@ const currentEmployee = ref<EmployeeProfile | null>(null)
 // 员工档案文件相关
 const employeeDocuments = ref<EmployeeDocument[]>([])
 const documentsLoading = ref(false)
+const autoDocumentUploadCount = ref(0)
+const documentMutationPending = ref(false)
+const deletingAllDocuments = ref(false)
+const documentControlsDisabled = computed(() => {
+  return documentMutationPending.value || autoDocumentUploadCount.value > 0
+})
 const employeeResignationArchive = ref<EmployeeResignationArchive | null>(null)
 const resignationArchiveLoading = ref(false)
 
@@ -1861,17 +1933,47 @@ const handleDownloadResignationArchiveDocument = async (doc: EmployeeResignation
 // 计算已完成的文档类型数量
 const completedDocTypes = computed(() => {
   const uploadedTypes = new Set(employeeDocuments.value.map(doc => doc.document_type))
-  return documentTypes.filter(dt => uploadedTypes.has(dt.type)).length
+  return requiredDocumentTypes.filter(dt => uploadedTypes.has(dt.type)).length
 })
 
 // 计算档案完成度
 const documentsProgress = computed(() => {
-  return Math.round((completedDocTypes.value / documentTypes.length) * 100)
+  return Math.round((completedDocTypes.value / requiredDocumentTypes.length) * 100)
 })
 
 // 根据类型获取文档
 const getDocumentsByType = (type: string) => {
-  return employeeDocuments.value.filter(doc => doc.document_type === type)
+  const documents = employeeDocuments.value.filter(doc => doc.document_type === type)
+  if (type !== 'contract') return documents
+
+  return [...documents].sort((left, right) => {
+    const endDateCompare = (right.contract_end_date || '').localeCompare(left.contract_end_date || '')
+    return endDateCompare || right.created_at.localeCompare(left.created_at)
+  })
+}
+
+const isCurrentContractDocument = (doc: EmployeeDocument) => {
+  return getDocumentsByType('contract')[0]?.id === doc.id
+}
+
+const getContractStatusText = (doc: EmployeeDocument) => {
+  if (!doc.contract_start_date || !doc.contract_end_date) return '期限未识别'
+  return isCurrentContractDocument(doc) ? '当前合同' : '历史合同'
+}
+
+const getContractStatusType = (doc: EmployeeDocument) => {
+  if (!doc.contract_start_date || !doc.contract_end_date) return 'warning'
+  return isCurrentContractDocument(doc) ? 'success' : 'info'
+}
+
+const formatContractTerm = (doc: EmployeeDocument) => {
+  if (!doc.contract_start_date || !doc.contract_end_date) return '期限未识别'
+  return `${doc.contract_start_date} 至 ${doc.contract_end_date}`
+}
+
+const applyCurrentContractEndDate = (contractEndDate: string | null) => {
+  if (currentEmployee.value) currentEmployee.value.contract_end_date = contractEndDate
+  editFormData.contract_end_date = contractEndDate
 }
 
 // 格式化文件大小
@@ -1899,28 +2001,130 @@ const fetchEmployeeDocuments = async () => {
   }
 }
 
+let autoDocumentUploadQueue: Promise<void> = Promise.resolve()
+
+const uploadAutoClassifiedDocument = async (employeeId: string, file: File) => {
+  const formData = new FormData()
+  formData.append('originalFileName', file.name)
+  formData.append('file', file)
+
+  try {
+    const res = await api.post(`/api/employees/${employeeId}/documents/auto-classify`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 600000,
+    })
+    if (!res.data.success) {
+      ElMessage.error(res.data.message || `文件「${file.name}」上传失败`)
+      return
+    }
+
+    const classifications = Array.isArray(res.data.classifications) ? res.data.classifications : []
+    const labels = classifications.map((item: { label: string }) => item.label).join('、') || '人事档案文件'
+    const details: string[] = []
+    if (res.data.salaryRecognition?.status === 'success') {
+      details.push(`月保障薪酬 ${res.data.salaryRecognition.monthlySalary} 元已同步到人力成本`)
+      window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+    }
+    if (res.data.contractRecognition?.status === 'success') {
+      details.push(`合同期限 ${res.data.contractRecognition.contractStartDate} 至 ${res.data.contractRecognition.contractEndDate}`)
+      applyCurrentContractEndDate(res.data.currentContractEndDate || res.data.contractRecognition.contractEndDate)
+      window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+      await fetchEmployeeList()
+    }
+    ElMessage.success(`文件「${file.name}」已拆分归档：${labels}${details.length > 0 ? `；${details.join('；')}` : ''}`)
+
+    if (res.data.salaryRecognition?.status === 'failed') {
+      ElMessage.warning(`入职邀请函已归档，但${res.data.salaryRecognition.message}，请在人力成本中填写本月工资`)
+    }
+    if (res.data.contractRecognition?.status === 'failed') {
+      ElMessage.warning(`劳动合同已归档，但${res.data.contractRecognition.message}，合同到期时间未更新`)
+    }
+
+    const otherSegments = Array.isArray(res.data.otherSegments)
+      ? res.data.otherSegments
+      : Array.isArray(res.data.unsupportedSegments) ? res.data.unsupportedSegments : []
+    if (otherSegments.length > 0) {
+      const otherText = otherSegments
+        .map((segment: { label: string; pageNumbers: number[] }) => `${segment.label}（第${segment.pageNumbers.join('、')}页）`)
+        .join('、')
+      ElMessage.info(`以下资料已归档至“其他”：${otherText}`)
+    }
+
+    const missingTypes = Array.isArray(res.data.missingTypes) ? res.data.missingTypes : []
+    if (classifications.length > 1 && missingTypes.length > 0) {
+      const missingLabels = missingTypes
+        .map((type: string) => documentTypes.find(item => item.type === type)?.label || type)
+        .join('、')
+      ElMessage.warning(`本次合并文件未识别到：${missingLabels}；如文件中确实包含，请检查对应档案行`)
+    }
+  } catch (error: any) {
+    const message = error.response?.data?.message || '上传失败'
+    if (error.response?.status === 422) {
+      ElMessage.warning(`文件「${file.name}」：${message}`)
+    } else {
+      ElMessage.error(`文件「${file.name}」：${message}`)
+    }
+  }
+}
+
+const handleAutoUploadDoc = (file: File) => {
+  const employeeId = currentEmployee.value?.id
+  if (!employeeId || documentMutationPending.value || !validatePdfUpload(file)) return false
+
+  autoDocumentUploadCount.value += 1
+  autoDocumentUploadQueue = autoDocumentUploadQueue
+    .then(() => uploadAutoClassifiedDocument(employeeId, file))
+    .finally(async () => {
+      autoDocumentUploadCount.value = Math.max(0, autoDocumentUploadCount.value - 1)
+      if (autoDocumentUploadCount.value === 0 && currentEmployee.value?.id === employeeId) {
+        await fetchEmployeeDocuments()
+      }
+    })
+
+  return false
+}
+
 // 上传员工档案文件
 const handleUploadDoc = async (documentType: string, file: File) => {
   if (!currentEmployee.value) return false
+  if (documentControlsDisabled.value) return false
   if (!validatePdfUpload(file)) return false
 
+  documentMutationPending.value = true
   const formData = new FormData()
-  formData.append('file', file)
   formData.append('document_type', documentType)
   formData.append('originalFileName', file.name)
+  formData.append('file', file)
 
   try {
     const res = await api.post(`/api/employees/${currentEmployee.value.id}/documents`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: documentType === 'contract' ? 600000 : documentType === 'invitation' ? 240000 : 30000,
     })
     if (res.data.success) {
-      ElMessage.success('文件上传成功')
-      fetchEmployeeDocuments()
+      if (documentType === 'invitation' && res.data.salaryRecognition?.status === 'success') {
+        ElMessage.success(`入职邀请函上传成功，月保障薪酬 ${res.data.salaryRecognition.monthlySalary} 元已同步到人力成本`)
+        window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+      } else if (documentType === 'invitation' && res.data.salaryRecognition?.status === 'failed') {
+        ElMessage.warning(`入职邀请函已上传，但${res.data.salaryRecognition.message}，请在人力成本中填写本月工资`)
+      } else if (documentType === 'contract' && res.data.contractRecognition?.status === 'success') {
+        applyCurrentContractEndDate(res.data.currentContractEndDate || res.data.contractRecognition.contractEndDate)
+        ElMessage.success(`劳动合同已归档，合同期限 ${res.data.contractRecognition.contractStartDate} 至 ${res.data.contractRecognition.contractEndDate}`)
+        window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+        await fetchEmployeeList()
+      } else if (documentType === 'contract' && res.data.contractRecognition?.status === 'failed') {
+        ElMessage.warning(`劳动合同已归档，但${res.data.contractRecognition.message}，合同到期时间未更新`)
+      } else {
+        ElMessage.success('文件上传成功')
+      }
+      await fetchEmployeeDocuments()
     } else {
       ElMessage.error(res.data.message || '上传失败')
     }
   } catch (error: any) {
     ElMessage.error(error.response?.data?.message || '上传失败')
+  } finally {
+    documentMutationPending.value = false
   }
 
   return false
@@ -1953,9 +2157,61 @@ const handleDownloadDoc = async (doc: EmployeeDocument) => {
   }
 }
 
+// 一键删除全部人事档案
+const handleDeleteAllDocuments = async () => {
+  const employee = currentEmployee.value
+  const documentCount = employeeDocuments.value.length
+  if (!employee || documentCount === 0 || documentControlsDisabled.value) return
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除「${employee.name}」的全部 ${documentCount} 份人事档案吗？删除后无法恢复，合同到期时间将被清空；已生成的历史工资记录不会删除。`,
+      '一键删除确认',
+      {
+        confirmButtonText: '全部删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch {
+    return
+  }
+
+  if (currentEmployee.value?.id !== employee.id || documentControlsDisabled.value) return
+
+  deletingAllDocuments.value = true
+  documentMutationPending.value = true
+  try {
+    const res = await api.delete(`/api/employees/${employee.id}/documents`)
+    if (!res.data.success) {
+      ElMessage.error(res.data.message || '一键删除失败')
+      return
+    }
+
+    employeeDocuments.value = []
+    applyCurrentContractEndDate(null)
+    if (res.data.payrollRecalculated) {
+      window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+    }
+    await fetchEmployeeList()
+
+    const cleanupFailedCount = Number(res.data.fileCleanupFailedCount) || 0
+    if (cleanupFailedCount > 0) {
+      ElMessage.warning(`档案记录已全部删除，但有 ${cleanupFailedCount} 个存储文件未能清理`)
+    } else {
+      ElMessage.success(res.data.message || '全部人事档案已删除')
+    }
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.message || '一键删除失败')
+  } finally {
+    documentMutationPending.value = false
+    deletingAllDocuments.value = false
+  }
+}
+
 // 删除文档
 const handleDeleteDoc = (doc: EmployeeDocument) => {
-  if (!currentEmployee.value) return
+  if (!currentEmployee.value || documentControlsDisabled.value) return
 
   ElMessageBox.confirm(
     `确定要删除文件「${doc.file_name}」吗？`,
@@ -1966,16 +2222,25 @@ const handleDeleteDoc = (doc: EmployeeDocument) => {
       type: 'warning',
     }
   ).then(async () => {
+    if (documentControlsDisabled.value) return
+    documentMutationPending.value = true
     try {
       const res = await api.delete(`/api/employees/${currentEmployee.value!.id}/documents/${doc.id}`)
       if (res.data.success) {
         ElMessage.success('文件已删除')
-        fetchEmployeeDocuments()
+        if (doc.document_type === 'contract') {
+          applyCurrentContractEndDate(res.data.currentContractEndDate ?? null)
+          window.dispatchEvent(new CustomEvent('employee-payroll-source-updated'))
+          await fetchEmployeeList()
+        }
+        await fetchEmployeeDocuments()
       } else {
         ElMessage.error(res.data.message || '删除失败')
       }
     } catch (error: any) {
       ElMessage.error(error.response?.data?.message || '删除失败')
+    } finally {
+      documentMutationPending.value = false
     }
   }).catch(() => {})
 }
@@ -2103,7 +2368,7 @@ const handleRemoveFile = (_fileTypeId: string, fileId: string, fileName: string)
 
 // 预览入职文件模板
 const handlePreviewTemplate = (file: { id: string; name: string; url: string }) => {
-  window.open(file.url, '_blank')
+  window.open(`/api/employees/onboarding/templates/${file.id}/original`, '_blank')
 }
 
 // 获取性别文本
@@ -2153,19 +2418,6 @@ const getRowClassName = ({ row }: { row: EmployeeProfile }) => {
   if (isContractExpiring(row)) return 'contract-expiring-row'
   return ''
 }
-
-// 根据入职日期自动计算合同到期日期（编辑表单用）
-const computedContractEndDate = computed(() => {
-  if (!editFormData.hire_date) return ''
-  try {
-    const date = new Date(editFormData.hire_date)
-    if (isNaN(date.getTime())) return ''
-    date.setFullYear(date.getFullYear() + 1)
-    return date.toISOString().split('T')[0]
-  } catch {
-    return ''
-  }
-})
 
 // 导出数据
 const handleExport = () => {
@@ -2609,6 +2861,18 @@ watch(activeTab, (newTab) => {
   font-size: 14px;
 }
 
+.documents-upload-action {
+  margin-left: auto;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-document-upload-button {
+  min-width: 132px;
+}
+
 .doc-type-name {
   display: flex;
   align-items: center;
@@ -2649,6 +2913,13 @@ watch(activeTab, (newTab) => {
 .doc-info {
   color: #909399;
   font-size: 12px;
+  flex-shrink: 0;
+}
+
+.contract-term {
+  color: #606266;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 

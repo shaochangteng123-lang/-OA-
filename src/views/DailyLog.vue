@@ -1789,7 +1789,13 @@ function getTopComments(comments: HistoryComment[]) {
   return comments.filter(c => !c.replyTo)
 }
 function getReplies(comments: HistoryComment[], parentId: string) {
-  return comments.filter(c => c.replyTo === parentId)
+  const result: HistoryComment[] = []
+  const directReplies = comments.filter(c => c.replyTo === parentId)
+  for (const r of directReplies) {
+    result.push(r)
+    result.push(...getReplies(comments, r.id))
+  }
+  return result
 }
 
 function setCommentReply(comment: HistoryComment) {

@@ -15,6 +15,19 @@ function formatDate(date: Date): string {
   return `${y}-${m}-${d}`
 }
 
+export type LeaveHalf = 'morning' | 'afternoon'
+
+export interface LeaveYearAllocation {
+  year: number
+  days: number
+}
+
+export function isValidLeaveDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00`)
+  return !Number.isNaN(date.getTime()) && formatDate(date) === value
+}
+
 /**
  * 计算两个半天之间的实际工作天数
  * - 排除周六、周日（除非 holidays 表标注为 workday 调班日）
@@ -24,9 +37,9 @@ function formatDate(date: Date): string {
  */
 export async function calculateLeaveDays(
   startDate: string,
-  startHalf: 'morning' | 'afternoon',
+  startHalf: LeaveHalf,
   endDate: string,
-  endHalf: 'morning' | 'afternoon'
+  endHalf: LeaveHalf
 ): Promise<number> {
   if (startDate > endDate) return 0
   if (startDate === endDate && startHalf === 'afternoon' && endHalf === 'morning') return 0
@@ -86,6 +99,37 @@ export async function calculateLeaveDays(
 }
 
 /**
+ * 按实际请假日期所属年份拆分工作日天数。
+ */
+export async function calculateLeaveDaysByYear(
+  startDate: string,
+  startHalf: LeaveHalf,
+  endDate: string,
+  endHalf: LeaveHalf
+): Promise<LeaveYearAllocation[]> {
+  if (!isValidLeaveDate(startDate) || !isValidLeaveDate(endDate) || startDate > endDate) {
+    return []
+  }
+
+  const startYear = Number(startDate.slice(0, 4))
+  const endYear = Number(endDate.slice(0, 4))
+  if (endYear - startYear > 1) return []
+  const allocations: LeaveYearAllocation[] = []
+
+  for (let year = startYear; year <= endYear; year++) {
+    const segmentStart = year === startYear ? startDate : `${year}-01-01`
+    const segmentEnd = year === endYear ? endDate : `${year}-12-31`
+    const segmentStartHalf: LeaveHalf = year === startYear ? startHalf : 'morning'
+    const segmentEndHalf: LeaveHalf = year === endYear ? endHalf : 'afternoon'
+    const days = await calculateLeaveDays(segmentStart, segmentStartHalf, segmentEnd, segmentEndHalf)
+
+    if (days > 0) allocations.push({ year, days })
+  }
+
+  return allocations
+}
+
+/**
  * 根据入职日期和指定年份计算年假额度
  * - 工龄 < 1 年：0 天
  * - 1 ≤ 工龄 < 10 年：5 天
@@ -115,7 +159,7 @@ export function calculateAnnualLeaveDays(hireDate: Date | string, year: number):
 export function getLegalLeaveDays(leaveTypeCode: string): number {
   const defaults: Record<string, number> = {
     annual: 5,
-    personal: 999,
+    personal: 3,
     sick: 30,
     compensatory: 0,
     marriage: 3,

@@ -156,7 +156,7 @@
             <div v-if="sub.comments && sub.comments.length > 0" class="comment-list">
               <template v-for="c in getTopComments(sub.comments)" :key="c.id">
                 <div :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
-                  <span :class="['comment-author', c.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ c.userName }}</span>
+                  <span :class="['comment-author', c.userId === sub.userId ? 'is-self' : 'is-other']">{{ c.userName }}</span>
                   <span class="comment-text">{{ c.content }}</span>
                   <!-- 完成期限标签 -->
                   <span v-if="c.dueDate"
@@ -170,9 +170,9 @@
                 <!-- 该条评论的回复 -->
                 <div v-for="r in getReplies(sub.comments, c.id)" :key="r.id"
                   :class="['comment-item', 'comment-item-reply', { 'comment-item-unread': r.isUnread }]">
-                  <span :class="['comment-author', r.userId === authStore.user?.id ? 'is-self' : 'is-other']">{{ r.userName }}</span>
+                  <span :class="['comment-author', r.userId === sub.userId ? 'is-self' : 'is-other']">{{ r.userName }}</span>
                   <span class="comment-reply-label">回复</span>
-                  <span :class="['comment-reply-target', r.replyToUserId === authStore.user?.id ? 'is-self' : 'is-other']">@{{ r.replyToUserName }}</span>
+                  <span :class="['comment-reply-target', r.replyToUserId === sub.userId ? 'is-self' : 'is-other']">@{{ r.replyToUserName }}</span>
                   <span class="comment-text">{{ r.content }}</span>
                   <span class="comment-time">{{ formatTime(r.createdAt) }}</span>
                   <span v-if="r.userId !== authStore.user?.id" class="comment-reply-btn" @click="setReplyTo(sub.id, r)">回复</span>
@@ -367,7 +367,13 @@ function getTopComments(comments: Comment[]) {
   return comments.filter(c => !c.replyTo)
 }
 function getReplies(comments: Comment[], parentId: string) {
-  return comments.filter(c => c.replyTo === parentId)
+  const result: Comment[] = []
+  const directReplies = comments.filter(c => c.replyTo === parentId)
+  for (const r of directReplies) {
+    result.push(r)
+    result.push(...getReplies(comments, r.id))
+  }
+  return result
 }
 
 function setReplyTo(submissionId: string, comment: Comment) {

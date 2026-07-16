@@ -54,6 +54,7 @@
             <div class="summary-item"><span>下一步</span><span>{{ nextActionText }}</span></div>
             <div class="summary-actions">
               <el-button type="primary" plain @click="detailVisible = true" :disabled="!myRequest">查看流程</el-button>
+              <el-button :disabled="isFormLocked" :loading="saving" @click="handleSaveDraft">保存草稿</el-button>
               <el-button type="success" :disabled="!canSubmit" :loading="submitting" @click="handleSubmit">提交申请</el-button>
               <el-button type="danger" plain :disabled="!canWithdraw" :loading="withdrawing" @click="handleWithdraw">撤回申请</el-button>
               <el-button type="warning" plain :disabled="!canConfirm" :loading="confirming" @click="handleConfirm">确认交接完成</el-button>
@@ -290,9 +291,10 @@
                   <span v-else class="empty-text">-</span>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="100" align="center">
+              <el-table-column label="操作" width="160" align="center">
                 <template #default="{ row }">
                   <el-button type="info" link @click="openFlowDialog(row)">审批流程</el-button>
+                  <el-button type="primary" link @click="openHistoryDialog(row.id)">历史材料</el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -1059,11 +1061,13 @@ const beforeUploadHandover = (role: 'employee' | 'handover', requestId?: string)
   return false
 }
 
-const getTaskHandoverDoc = (row: { documents?: ResignationDocument[] }) => {
+type ResignationRequestWithDocuments = ResignationRequest & { documents?: ResignationDocument[] }
+
+const getTaskHandoverDoc = (row: ResignationRequestWithDocuments) => {
   return row.documents?.find(doc => doc.document_type === 'handover_form_handover' && doc.uploader_role === 'handover')
 }
 
-const getTaskEmployeeHandoverDoc = (row: { documents?: ResignationDocument[] }) => {
+const getTaskEmployeeHandoverDoc = (row: ResignationRequestWithDocuments) => {
   return row.documents?.find(doc => doc.document_type === 'handover_form_employee' && doc.uploader_role === 'employee')
 }
 
@@ -1088,7 +1092,7 @@ const handleDeleteHandoverDoc = async (requestId: string, doc: ResignationDocume
 
 // 签名弹窗 —— 田字格字帖 + 贝塞尔平滑 + 毛笔压力 + 区域限制
 const signDialogVisible = ref(false)
-const signTarget = ref<ResignationRequest | null>(null)
+const signTarget = ref<ResignationRequestWithDocuments | null>(null)
 const signing = ref(false)
 const signCanvasRef = ref<HTMLCanvasElement>()
 const signIsEmpty = ref(true)
@@ -1099,8 +1103,6 @@ const signCellSize = 150
 const currentSignerChars = computed(() => (currentSignerName.value || '').split(''))
 const signAreaHeight = computed(() => signCellSize + 2) // 格子 + 边框
 
-// 字格区域（像素坐标），由 onSignDialogOpened 计算
-let cellRects: { x1: number; y1: number; x2: number; y2: number }[] = []
 // 离屏 canvas 的像素数据，用于检测笔画区域
 let strokeMaskData: ImageData | null = null
 let strokeMaskW = 0
@@ -1110,7 +1112,7 @@ interface BrushPoint { x: number; y: number; t: number }
 let points: BrushPoint[] = []
 let isDown = false
 
-const openSignDialog = (row: ResignationRequest) => {
+const openSignDialog = (row: ResignationRequestWithDocuments) => {
   signTarget.value = row
   signIsEmpty.value = true
   signDialogVisible.value = true
@@ -1178,6 +1180,7 @@ function addPoint(x: number, y: number) {
 const onSignDialogOpened = () => {
   const canvas = signCanvasRef.value
   if (!canvas) return
+  const activeCanvas = canvas
   const parent = canvas.parentElement
   if (!parent) return
 
@@ -1199,13 +1202,6 @@ const onSignDialogOpened = () => {
   const totalW = chars.length * cellW
   const startX = (w - totalW) / 2
   const startY = (h - cellH) / 2
-  cellRects = chars.map((_, i) => ({
-    x1: startX + i * cellW,
-    y1: startY,
-    x2: startX + (i + 1) * cellW,
-    y2: startY + cellH,
-  }))
-
   // 生成笔画蒙版：在离屏 canvas 上用楷体渲染文字，提取像素数据
   const offscreen = document.createElement('canvas')
   offscreen.width = w
@@ -1243,11 +1239,11 @@ const onSignDialogOpened = () => {
 
   // 触屏事件 —— 将 clientX/Y 转为与 offsetX/Y 等价的 canvas 像素坐标
   function touchToCanvasXY(touch: Touch) {
-    const rect = canvas.getBoundingClientRect()
+    const rect = activeCanvas.getBoundingClientRect()
     const cssX = touch.clientX - rect.left
     const cssY = touch.clientY - rect.top
     // CSS 尺寸 → canvas 像素尺寸
-    return { x: cssX * (canvas.width / rect.width), y: cssY * (canvas.height / rect.height) }
+    return { x: cssX * (activeCanvas.width / rect.width), y: cssY * (activeCanvas.height / rect.height) }
   }
 
   canvas.ontouchstart = (e: TouchEvent) => {

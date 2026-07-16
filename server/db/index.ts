@@ -513,8 +513,50 @@ export async function initDatabase() {
       mime_type TEXT,
       uploaded_by TEXT NOT NULL REFERENCES users(id),
       uploaded_by_name TEXT,
+      contract_start_date TEXT,
+      contract_end_date TEXT,
+      contract_recognized_at TEXT,
       created_at TEXT NOT NULL
     )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS employee_salary_profiles (
+      employee_id TEXT PRIMARY KEY REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      initial_monthly_salary NUMERIC NOT NULL CHECK(initial_monthly_salary >= 0),
+      source_document_id TEXT REFERENCES employee_documents(id) ON DELETE SET NULL,
+      recognized_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `)
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS payroll_records (
+      id TEXT PRIMARY KEY,
+      employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      payroll_month TEXT NOT NULL CHECK(payroll_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      automatic_salary NUMERIC NOT NULL DEFAULT 0 CHECK(automatic_salary >= 0),
+      monthly_salary NUMERIC NOT NULL DEFAULT 0 CHECK(monthly_salary >= 0),
+      contribution_base NUMERIC NOT NULL DEFAULT 0 CHECK(contribution_base >= 0),
+      individual_income_tax NUMERIC NOT NULL DEFAULT 0 CHECK(individual_income_tax >= 0),
+      monthly_salary_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
+      contribution_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
+      tax_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
+      updated_by TEXT REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(employee_id, payroll_month)
+    )
+  `)
+
+    // 超级管理员是系统维护账号，不属于公司人力成本统计范围。
+    await ddlClient.query(`
+    DELETE FROM payroll_records pr
+    USING employee_profiles ep, users u
+    WHERE pr.employee_id = ep.id
+      AND ep.user_id = u.id
+      AND u.role = 'super_admin'
   `)
 
     await ddlClient.query(`
@@ -573,13 +615,14 @@ export async function initDatabase() {
       resign_type TEXT NOT NULL CHECK(resign_type IN ('voluntary', 'contract_end', 'dismissal')),
       resign_date TEXT NOT NULL,
       reason TEXT,
-      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected')),
       employee_confirm_time TEXT,
       handover_confirm_time TEXT,
       submit_time TEXT,
       approve_time TEXT,
       approver_id TEXT REFERENCES users(id),
       approver_comment TEXT,
+      reject_target TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(employee_id)
@@ -724,6 +767,8 @@ export async function initDatabase() {
       end_date TEXT NOT NULL,
       end_half TEXT NOT NULL,
       total_days NUMERIC(5,1) NOT NULL,
+      balance_allocations_json TEXT,
+      balance_reserved BOOLEAN NOT NULL DEFAULT FALSE,
       reason TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       approver_id TEXT REFERENCES users(id),
@@ -739,6 +784,28 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL
     )
   `)
+
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS balance_allocations_json TEXT
+    `)
+
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS balance_reserved BOOLEAN
+    `)
+    await ddlClient.query(`
+      UPDATE leave_requests lr
+      SET balance_reserved = ltc.requires_balance_check
+      FROM leave_type_configs ltc
+      WHERE lr.leave_type_code = ltc.code
+        AND lr.balance_reserved IS NULL
+    `)
+    await ddlClient.query(`
+      ALTER TABLE leave_requests ALTER COLUMN balance_reserved SET DEFAULT FALSE;
+      UPDATE leave_requests SET balance_reserved = FALSE WHERE balance_reserved IS NULL;
+      ALTER TABLE leave_requests ALTER COLUMN balance_reserved SET NOT NULL;
+    `)
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS leave_attachments (
@@ -767,6 +834,9 @@ export async function initDatabase() {
 
     await ddlClient.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_users_employee_no
+      ON users(employee_no)
+      WHERE employee_no IS NOT NULL AND BTRIM(employee_no) <> '';
     CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
     CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
@@ -818,6 +888,9 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_approval_instances_status ON approval_instances(status);
     CREATE INDEX IF NOT EXISTS idx_approval_instances_applicant ON approval_instances(applicant_id);
     CREATE INDEX IF NOT EXISTS idx_approval_instances_target ON approval_instances(target_id, target_type);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_instances_pending_probation_target
+      ON approval_instances(target_id)
+      WHERE target_type = 'probation' AND status = 'pending';
     CREATE INDEX IF NOT EXISTS idx_approval_records_instance ON approval_records(instance_id);
     CREATE INDEX IF NOT EXISTS idx_approval_records_approver ON approval_records(approver_id);
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_user_id ON employee_profiles(user_id);
@@ -826,7 +899,10 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_department ON employee_profiles(department);
     CREATE INDEX IF NOT EXISTS idx_employee_documents_employee_id ON employee_documents(employee_id);
     CREATE INDEX IF NOT EXISTS idx_employee_documents_document_type ON employee_documents(document_type);
-    CREATE INDEX IF NOT EXISTS idx_probation_confirmations_employee_id ON probation_confirmations(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_employee_salary_profiles_source_document ON employee_salary_profiles(source_document_id);
+    CREATE INDEX IF NOT EXISTS idx_payroll_records_month ON payroll_records(payroll_month);
+    CREATE INDEX IF NOT EXISTS idx_payroll_records_employee ON payroll_records(employee_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_probation_confirmations_employee_id ON probation_confirmations(employee_id);
     CREATE INDEX IF NOT EXISTS idx_probation_confirmations_status ON probation_confirmations(status);
     CREATE INDEX IF NOT EXISTS idx_probation_documents_confirmation_id ON probation_documents(confirmation_id);
     CREATE INDEX IF NOT EXISTS idx_resignation_requests_employee_id ON resignation_requests(employee_id);
@@ -1158,16 +1234,46 @@ export async function initDatabase() {
       `)
       if (contractEndCol.rows.length === 0) {
         await ddlClient.query(`ALTER TABLE employee_profiles ADD COLUMN contract_end_date TEXT`)
-        // 根据已有 hire_date 回填 contract_end_date（+1年）
-        await ddlClient.query(`
-          UPDATE employee_profiles
-          SET contract_end_date = TO_CHAR((hire_date::date + INTERVAL '1 year'), 'YYYY-MM-DD')
-          WHERE hire_date IS NOT NULL AND contract_end_date IS NULL
-        `)
         console.log('✅ 数据库迁移：employee_profiles 添加 contract_end_date 字段')
       }
     } catch (error: any) {
       console.log('ℹ️  contract_end_date 迁移失败:', error.message)
+    }
+
+    // 数据库迁移：劳动合同档案保存识别出的合同期限
+    try {
+      await ddlClient.query(`
+        ALTER TABLE employee_documents
+          ADD COLUMN IF NOT EXISTS contract_start_date TEXT,
+          ADD COLUMN IF NOT EXISTS contract_end_date TEXT,
+          ADD COLUMN IF NOT EXISTS contract_recognized_at TEXT
+      `)
+      await ddlClient.query(`
+        CREATE INDEX IF NOT EXISTS idx_employee_documents_contract_end
+        ON employee_documents (employee_id, contract_end_date)
+      `)
+      const inferredContractCleanup = await ddlClient.query(`
+        UPDATE employee_profiles ep
+        SET contract_end_date = NULL
+        WHERE ep.hire_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+          AND ep.contract_end_date = TO_CHAR(
+            (ep.hire_date::date + INTERVAL '1 year')::date,
+            'YYYY-MM-DD'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM employee_documents ed
+            WHERE ed.employee_id = ep.id
+              AND ed.document_type = 'contract'
+              AND ed.contract_end_date IS NOT NULL
+          )
+      `)
+      if ((inferredContractCleanup.rowCount ?? 0) > 0) {
+        console.log(`✅ 已清理 ${inferredContractCleanup.rowCount} 条由入职日期推算的旧合同到期时间`)
+      }
+      console.log('✅ 数据库迁移：劳动合同期限字段检查完成')
+    } catch (error: any) {
+      console.log('ℹ️  劳动合同期限字段迁移失败:', error.message)
     }
 
     // 数据库迁移：新建 probation_history 表，记录管理员将员工改回实习期时的历史转正记录
@@ -1295,25 +1401,21 @@ export async function initDatabase() {
     console.log('✅ 初始化默认报销范围配置')
   }
 
-  const usersWithoutNo = await db.all<{ id: string }>(`SELECT id FROM users WHERE employee_no IS NULL OR employee_no = '' ORDER BY created_at ASC`)
-  if (usersWithoutNo.length > 0) {
-    const maxResult = await db.get<{ employee_no: string }>(
-      `SELECT employee_no FROM users WHERE employee_no IS NOT NULL AND employee_no LIKE 'YULI-CS%' ORDER BY employee_no DESC LIMIT 1`
-    )
-
-    let nextNum = 1
-    if (maxResult?.employee_no) {
-      const match = maxResult.employee_no.match(/YULI-CS(\d+)/)
-      if (match) nextNum = parseInt(match[1], 10) + 1
-    }
-
-    for (const user of usersWithoutNo) {
-      const employeeNo = `YULI-CS${nextNum.toString().padStart(3, '0')}`
-      await db.run('UPDATE users SET employee_no = ? WHERE id = ?', employeeNo, user.id)
-      await db.run('UPDATE employee_profiles SET employee_no = ? WHERE user_id = ?', employeeNo, user.id)
-      nextNum++
-    }
-    console.log(`✅ 已为 ${usersWithoutNo.length} 个用户补充员工编号`)
+  const employeeNumberSyncResult = await db.run(`
+    UPDATE employee_profiles ep
+    SET employee_no = u.employee_no,
+        updated_at = CASE
+          WHEN COALESCE(ep.employee_no, '') <> COALESCE(u.employee_no, '') THEN ?
+          ELSE ep.updated_at
+        END
+    FROM users u
+    WHERE ep.user_id = u.id
+      AND u.employee_no IS NOT NULL
+      AND BTRIM(u.employee_no) <> ''
+      AND COALESCE(ep.employee_no, '') <> COALESCE(u.employee_no, '')
+  `, new Date().toISOString())
+  if (employeeNumberSyncResult.changes > 0) {
+    console.log(`✅ 已同步 ${employeeNumberSyncResult.changes} 份员工档案的员工编号`)
   }
 
   const existingConfig = await db.get<{ id: string }>('SELECT id FROM department_position_configs WHERE id = ?', 'default')
@@ -1380,7 +1482,7 @@ export async function initDatabase() {
     const now = new Date().toISOString()
     const leaveTypes = [
       { id: 'lt_annual', code: 'annual', name: '年假', requires_attachment: false, requires_balance_check: true, default_days: 5, description: '法定年假，根据工龄计算：工龄<1年无年假，1-10年5天，10-20年10天，20年以上15天', sort_order: 1 },
-      { id: 'lt_personal', code: 'personal', name: '事假', requires_attachment: false, requires_balance_check: false, default_days: 999, description: '个人原因请假，无余额限制', sort_order: 2 },
+      { id: 'lt_personal', code: 'personal', name: '带薪事假', requires_attachment: false, requires_balance_check: true, default_days: 3, description: '个人原因请假，每年默认3天带薪额度', sort_order: 2 },
       { id: 'lt_sick', code: 'sick', name: '病假', requires_attachment: true, requires_balance_check: true, default_days: 30, description: '因病请假，需提供三甲医院病历或假条', sort_order: 3 },
       { id: 'lt_compensatory', code: 'compensatory', name: '调休假', requires_attachment: false, requires_balance_check: true, default_days: 0, description: '加班后的调休，由管理员手动调整余额', sort_order: 4 },
       { id: 'lt_marriage', code: 'marriage', name: '婚假', requires_attachment: false, requires_balance_check: true, default_days: 3, description: '法定婚假3天', sort_order: 5 },
@@ -1395,6 +1497,46 @@ export async function initDatabase() {
       )
     }
     console.log('✅ 初始化假期类型配置（7种）')
+  }
+
+  // 将旧版“999 天且不校验余额”的事假哨兵配置迁移为每年 3 天带薪事假。
+  try {
+    await db.transaction(async (client) => {
+      const legacyConfigResult = await client.query<{
+        default_days: number
+        requires_balance_check: boolean
+      }>(
+        `SELECT default_days, requires_balance_check
+         FROM leave_type_configs
+         WHERE code = 'personal'
+         FOR UPDATE`
+      )
+      const legacyConfig = legacyConfigResult.rows[0]
+      if (
+        legacyConfig &&
+        Number(legacyConfig.default_days) === 999 &&
+        legacyConfig.requires_balance_check === false
+      ) {
+        const now = new Date().toISOString()
+        await client.query(
+          `UPDATE leave_type_configs
+           SET name = '带薪事假', requires_balance_check = true, default_days = 3,
+               description = '个人原因请假，每年默认3天带薪额度'
+           WHERE code = 'personal'`
+        )
+        const balanceResult = await client.query(
+          `UPDATE leave_balances
+           SET total_days = 3, updated_at = $1
+           WHERE leave_type_code = 'personal'
+             AND total_days = 999
+             AND used_days + pending_days <= 3`,
+          [now]
+        )
+        console.log(`✅ 数据库迁移：带薪事假旧配置已修正，同步 ${balanceResult.rowCount ?? 0} 条余额`)
+      }
+    })
+  } catch (error: any) {
+    console.log('ℹ️  带薪事假旧配置迁移:', error.message)
   }
 
   // 数据库迁移：users 表添加 force_change_password 字段

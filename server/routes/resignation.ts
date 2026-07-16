@@ -3,6 +3,7 @@ import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
 import { PDFDocument } from 'pdf-lib'
+import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import type {
@@ -17,8 +18,19 @@ import type {
   ResignationUploaderRole,
 } from '../types/database.js'
 import { nanoid } from 'nanoid'
+import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
+
+const EMPLOYEE_EDITABLE_STATUSES: ResignationRequest['status'][] = ['draft', 'rejected']
+const HANDOVER_EDITABLE_STATUSES: ResignationRequest['status'][] = ['submitted', 'handover_rejected']
+
+class ResignationOperationError extends Error {
+  constructor(message: string, public readonly statusCode = 400) {
+    super(message)
+    this.name = 'ResignationOperationError'
+  }
+}
 
 // 写入审批流程日志
 async function addAuditLog(requestId: string, action: string, operatorId: string, comment?: string | null) {
@@ -29,14 +41,24 @@ async function addAuditLog(requestId: string, action: string, operatorId: string
   `).run(nanoid(), requestId, action, operatorId, operatorName, comment || null, new Date().toISOString())
 }
 
-const resignationDocsDir = path.join(process.cwd(), 'uploads', 'resignation-documents')
-const resignationTemplatesDir = path.join(process.cwd(), 'uploads', 'resignation-templates')
-
-if (!fs.existsSync(resignationDocsDir)) {
-  fs.mkdirSync(resignationDocsDir, { recursive: true })
-}
-if (!fs.existsSync(resignationTemplatesDir)) {
-  fs.mkdirSync(resignationTemplatesDir, { recursive: true })
+async function addAuditLogWithClient(
+  client: PoolClient,
+  requestId: string,
+  action: string,
+  operatorId: string,
+  comment: string | null,
+  createdAt: string
+) {
+  const operatorResult = await client.query<{ name: string }>(
+    `SELECT name FROM users WHERE id = $1`,
+    [operatorId]
+  )
+  await client.query(
+    `INSERT INTO resignation_audit_logs (
+       id, request_id, action, operator_id, operator_name, comment, created_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [nanoid(), requestId, action, operatorId, operatorResult.rows[0]?.name || null, comment, createdAt]
+  )
 }
 
 function isInlinePreviewMimeType(mimeType: string | null | undefined): boolean {
@@ -158,6 +180,22 @@ function canAccessRequest(request: ResignationRequest, userId: string, isAdmin: 
   return isAdmin || request.employee_user_id === userId || request.handover_user_id === userId
 }
 
+async function isDatabaseAdmin(userId: string): Promise<boolean> {
+  const user = await db.prepare(`
+    SELECT role, status FROM users WHERE id = ?
+  `).get(userId) as { role: string; status: string } | undefined
+  return user?.status === 'active' && ['admin', 'super_admin'].includes(user.role)
+}
+
+function canEmployeeEditDocuments(request: ResignationRequest): boolean {
+  return EMPLOYEE_EDITABLE_STATUSES.includes(request.status)
+}
+
+function canHandoverEditDocuments(request: ResignationRequest): boolean {
+  if (!HANDOVER_EDITABLE_STATUSES.includes(request.status)) return false
+  return request.status === 'handover_rejected' || !request.handover_confirm_time
+}
+
 function computeStatus(request: ResignationRequest, documents: ResignationDocument[]): ResignationRequest['status'] {
   if (request.status === 'approved' || request.status === 'rejected' || request.status === 'handover_rejected') {
     return request.status
@@ -202,10 +240,7 @@ const uploadResignationDocument = multer({
   storage: multer.diskStorage({
     destination: (req, _file, cb) => {
       const requestId = req.params.id || req.body.requestId || req.body.request_id || 'temp'
-      const destDir = path.join(resignationDocsDir, requestId)
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true })
-      }
+      const destDir = ensureDatedUploadDirectory('resignation-documents', new Date(), requestId)
       cb(null, destDir)
     },
     filename: (req, file, cb) => {
@@ -232,7 +267,7 @@ const uploadResignationDocument = multer({
 
 const uploadResignationTemplate = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, resignationTemplatesDir),
+    destination: (_req, _file, cb) => cb(null, ensureDatedUploadDirectory('resignation-templates')),
     filename: (req, file, cb) => {
       const templateType = req.body.template_type || 'template'
       const ext = path.extname(file.originalname)
@@ -285,7 +320,7 @@ router.post('/templates', requireAdmin, uploadResignationTemplate.single('file')
 
     const id = nanoid()
     const now = new Date().toISOString()
-    const relativePath = `/uploads/resignation-templates/${file.filename}`
+    const relativePath = toStoredUploadPath(file.path, true)
 
     await db.prepare(`
       INSERT INTO resignation_templates (
@@ -528,34 +563,55 @@ async function saveRequestDocument(options: {
   const uploaderName = await getUploaderName(options.uploadedBy)
   const docId = nanoid()
   const now = new Date().toISOString()
-  const relativePath = `/uploads/resignation-documents/${options.requestId}/${options.file.filename}`
+  const relativePath = toStoredUploadPath(options.file.path, true)
 
-  // 每种文档类型只保留最新的一份，旧文档标记为历史版本（不删除）
-  await db.prepare(`
-    UPDATE resignation_documents SET is_current = 0
-    WHERE request_id = ? AND document_type = ? AND uploader_role = ? AND is_current = 1
-  `).run(options.requestId, options.documentType, options.uploaderRole)
+  await db.transaction(async (client) => {
+    const requestResult = await client.query(
+      `SELECT * FROM resignation_requests WHERE id = $1 FOR UPDATE`,
+      [options.requestId]
+    )
+    const request = requestResult.rows[0] as ResignationRequest | undefined
+    if (!request) throw new ResignationOperationError('离职申请不存在', 404)
+    if (options.uploaderRole === 'employee' && !canEmployeeEditDocuments(request)) {
+      throw new ResignationOperationError('当前状态不允许修改离职材料，请先撤回申请', 409)
+    }
+    if (options.uploaderRole === 'handover' && !canHandoverEditDocuments(request)) {
+      throw new ResignationOperationError('当前状态不允许修改交接材料', 409)
+    }
 
-  await db.prepare(`
-    INSERT INTO resignation_documents (
-      id, request_id, document_type, uploader_role, file_name, file_path,
-      file_size, mime_type, uploaded_by, uploaded_by_name, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    docId,
-    options.requestId,
-    options.documentType,
-    options.uploaderRole,
-    getSafeOriginalName(options.file, options.originalFileName),
-    relativePath,
-    options.file.size,
-    options.file.mimetype,
-    options.uploadedBy,
-    uploaderName,
-    now,
-  )
+    // 每种文档类型只保留最新的一份，旧文档标记为历史版本（不删除）。
+    await client.query(
+      `UPDATE resignation_documents SET is_current = 0
+       WHERE request_id = $1 AND document_type = $2 AND uploader_role = $3 AND is_current = 1`,
+      [options.requestId, options.documentType, options.uploaderRole]
+    )
 
-  await db.prepare(`UPDATE resignation_requests SET updated_at = ? WHERE id = ?`).run(now, options.requestId)
+    await client.query(
+      `INSERT INTO resignation_documents (
+         id, request_id, document_type, uploader_role, file_name, file_path,
+         file_size, mime_type, uploaded_by, uploaded_by_name, created_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [
+        docId,
+        options.requestId,
+        options.documentType,
+        options.uploaderRole,
+        getSafeOriginalName(options.file, options.originalFileName),
+        relativePath,
+        options.file.size,
+        options.file.mimetype,
+        options.uploadedBy,
+        uploaderName,
+        now,
+      ]
+    )
+
+    await client.query(
+      `UPDATE resignation_requests SET updated_at = $1 WHERE id = $2`,
+      [now, options.requestId]
+    )
+  })
+
   await refreshRequestStatus(options.requestId)
 
   return await db.prepare(`SELECT * FROM resignation_documents WHERE id = ?`).get(docId)
@@ -574,6 +630,10 @@ router.post('/my-request/upload-application', requireAuth, uploadResignationDocu
       fs.unlinkSync(file.path)
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
+    if (!canEmployeeEditDocuments(request)) {
+      fs.unlinkSync(file.path)
+      return res.status(409).json({ success: false, message: '当前状态不允许修改离职材料，请先撤回申请' })
+    }
 
     const doc = await saveRequestDocument({
       requestId,
@@ -588,6 +648,9 @@ router.post('/my-request/upload-application', requireAuth, uploadResignationDocu
   } catch (error) {
     console.error('上传离职申请表失败:', error)
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '上传离职申请表失败' })
   }
 })
@@ -605,6 +668,10 @@ router.post('/my-request/upload-handover', requireAuth, uploadResignationDocumen
       fs.unlinkSync(file.path)
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
+    if (!canEmployeeEditDocuments(request)) {
+      fs.unlinkSync(file.path)
+      return res.status(409).json({ success: false, message: '当前状态不允许修改离职材料，请先撤回申请' })
+    }
 
     const doc = await saveRequestDocument({
       requestId,
@@ -619,6 +686,9 @@ router.post('/my-request/upload-handover', requireAuth, uploadResignationDocumen
   } catch (error) {
     console.error('上传离职人交接单失败:', error)
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '上传交接单失败' })
   }
 })
@@ -649,6 +719,10 @@ router.post('/my-request/upload-document', requireAuth, uploadResignationDocumen
       fs.unlinkSync(file.path)
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
+    if (!canEmployeeEditDocuments(request)) {
+      fs.unlinkSync(file.path)
+      return res.status(409).json({ success: false, message: '当前状态不允许修改离职材料，请先撤回申请' })
+    }
 
     const doc = await saveRequestDocument({
       requestId,
@@ -664,6 +738,9 @@ router.post('/my-request/upload-document', requireAuth, uploadResignationDocumen
   } catch (error) {
     console.error('上传离职文档失败:', error)
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '上传文档失败' })
   }
 })
@@ -690,9 +767,8 @@ router.delete('/my-request/documents/:docId', requireAuth, async (req, res) => {
       return res.status(403).json({ success: false, message: '无权删除该文档' })
     }
 
-    // 已审批通过的申请不允许删除文档
-    if (document.request_status === 'approved') {
-      return res.status(400).json({ success: false, message: '离职申请已审批通过，无法删除文档' })
+    if (!EMPLOYEE_EDITABLE_STATUSES.includes(document.request_status as ResignationRequest['status'])) {
+      return res.status(409).json({ success: false, message: '当前状态不允许删除离职材料，请先撤回申请' })
     }
 
     // 删除物理文件
@@ -724,6 +800,9 @@ router.post('/my-request/submit', requireAuth, async (req, res) => {
     if (!request) {
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
+    if (!EMPLOYEE_EDITABLE_STATUSES.includes(request.status)) {
+      return res.status(409).json({ success: false, message: '当前状态不允许提交离职申请' })
+    }
 
     const documents = await getRequestDocuments(requestId)
     const missingLabels = getMissingRequiredDocumentLabels(request, documents)
@@ -743,7 +822,9 @@ router.post('/my-request/submit', requireAuth, async (req, res) => {
     const isResubmit = request.status === 'rejected'
     await db.prepare(`
       UPDATE resignation_requests
-      SET status = 'submitted', submit_time = COALESCE(submit_time, ?), updated_at = ?
+      SET status = 'submitted', submit_time = ?, reject_target = NULL,
+          approve_time = NULL, approver_id = NULL, approver_comment = NULL,
+          updated_at = ?
       WHERE id = ?
     `).run(now, now, requestId)
 
@@ -811,10 +892,6 @@ router.delete('/my-request', requireAuth, async (req, res) => {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
     }
 
-    // 删除整个请求目录
-    const requestDir = path.join(resignationDocsDir, request.id)
-    if (fs.existsSync(requestDir)) fs.rmSync(requestDir, { recursive: true })
-
     // 数据库级联删除会自动清理 resignation_documents
     await db.prepare(`DELETE FROM resignation_requests WHERE id = ?`).run(request.id)
 
@@ -834,6 +911,9 @@ router.post('/my-request/confirm', requireAuth, async (req, res) => {
     }
     if (!request.submit_time) {
       return res.status(400).json({ success: false, message: '请先提交离职申请' })
+    }
+    if (!['submitted', 'handover_confirmed'].includes(request.status) || request.employee_confirm_time) {
+      return res.status(409).json({ success: false, message: '当前状态不允许重复确认' })
     }
 
     const now = new Date().toISOString()
@@ -864,10 +944,9 @@ router.post('/:id/handover-upload', requireAuth, uploadResignationDocument.singl
       return res.status(404).json({ success: false, message: '交接任务不存在' })
     }
 
-    // 已确认且非驳回状态，不允许再上传
-    if (request.handover_confirm_time && request.status !== 'handover_rejected') {
+    if (!canHandoverEditDocuments(request)) {
       fs.unlinkSync(file.path)
-      return res.status(400).json({ success: false, message: '已确认交接完成，无法重新上传' })
+      return res.status(409).json({ success: false, message: '当前状态不允许修改交接材料' })
     }
 
     // handover_rejected 状态下重新上传：先删除旧文件，再重置确认时间和状态
@@ -903,6 +982,9 @@ router.post('/:id/handover-upload', requireAuth, uploadResignationDocument.singl
   } catch (error) {
     console.error('上传交接人交接单失败:', error)
     if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '上传交接单失败' })
   }
 })
@@ -922,8 +1004,8 @@ router.post('/:id/handover-sign', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '交接任务不存在' })
     }
 
-    if (request.handover_confirm_time && request.status !== 'handover_rejected') {
-      return res.status(400).json({ success: false, message: '已确认交接完成，无法重复签名' })
+    if (!canHandoverEditDocuments(request)) {
+      return res.status(409).json({ success: false, message: '当前状态不允许修改交接材料' })
     }
 
     // handover_rejected 状态下重新签名：先删除旧文件，再重置状态
@@ -974,8 +1056,7 @@ router.post('/:id/handover-sign', requireAuth, async (req, res) => {
     let outputRelativePath: string
     let outputMimeType: string
 
-    const destDir = path.join(resignationDocsDir, id)
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
+    const destDir = ensureDatedUploadDirectory('resignation-documents', new Date(), id)
 
     if (mimeType === 'application/pdf') {
       // PDF: 在最后一页底部合成签名
@@ -1013,7 +1094,7 @@ router.post('/:id/handover-sign', requireAuth, async (req, res) => {
       const outputPath = path.join(destDir, outputFileName)
       const signedPdfBytes = await pdfDoc.save()
       fs.writeFileSync(outputPath, signedPdfBytes)
-      outputRelativePath = `/uploads/resignation-documents/${id}/${outputFileName}`
+      outputRelativePath = toStoredUploadPath(outputPath, true)
       outputMimeType = 'application/pdf'
     } else {
       // 图片 (jpg/png): 用 canvas 将签名绘制到图片右下角
@@ -1021,7 +1102,7 @@ router.post('/:id/handover-sign', requireAuth, async (req, res) => {
       outputFileName = `signature-${Date.now()}.png`
       const outputPath = path.join(destDir, outputFileName)
       fs.writeFileSync(outputPath, sigBytes)
-      outputRelativePath = `/uploads/resignation-documents/${id}/${outputFileName}`
+      outputRelativePath = toStoredUploadPath(outputPath, true)
       outputMimeType = 'image/png'
     }
 
@@ -1048,6 +1129,9 @@ router.post('/:id/handover-sign', requireAuth, async (req, res) => {
     res.json({ success: true, message: '签名确认成功', data: doc })
   } catch (error) {
     console.error('签名确认失败:', error)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '签名确认失败' })
   }
 })
@@ -1063,8 +1147,8 @@ router.delete('/:id/handover-documents/:docId', requireAuth, async (req, res) =>
       return res.status(404).json({ success: false, message: '交接任务不存在' })
     }
 
-    if (request.handover_confirm_time && request.status !== 'handover_rejected') {
-      return res.status(400).json({ success: false, message: '已确认交接完成，无法删除' })
+    if (!canHandoverEditDocuments(request)) {
+      return res.status(409).json({ success: false, message: '当前状态不允许删除交接材料' })
     }
 
     const document = await db.prepare(`
@@ -1100,6 +1184,9 @@ router.post('/:id/handover-confirm', requireAuth, async (req, res) => {
     if (!request.submit_time) {
       return res.status(400).json({ success: false, message: '该离职申请尚未提交' })
     }
+    if (request.status !== 'submitted' || request.handover_confirm_time) {
+      return res.status(409).json({ success: false, message: '当前状态不允许重复确认' })
+    }
 
     const documents = await getRequestDocuments(id)
     const hasHandoverForm = documents.some(doc => doc.document_type === 'handover_form_handover' && doc.uploader_role === 'handover')
@@ -1132,8 +1219,7 @@ router.get('/:id/document-history', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
 
-    const userRole = req.session.user?.role
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin = await isDatabaseAdmin(userId)
     if (!canAccessRequest(request, userId, isAdmin)) {
       return res.status(403).json({ success: false, message: '无权查看' })
     }
@@ -1161,8 +1247,7 @@ router.get('/:id/audit-logs', requireAuth, async (req, res) => {
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
 
-    const userRole = req.session.user?.role
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin = await isDatabaseAdmin(req.session.userId!)
     if (!canAccessRequest(request, req.session.userId!, isAdmin)) {
       return res.status(403).json({ success: false, message: '无权查看' })
     }
@@ -1244,32 +1329,62 @@ router.get('/management/:id', requireAdmin, async (req, res) => {
 router.post('/management/:id/approve', requireAdmin, async (req, res) => {
   try {
     const { comment } = req.body
-    const request = await db.prepare(`SELECT * FROM resignation_requests WHERE id = ?`).get(req.params.id) as ResignationRequest | undefined
-    if (!request) {
-      return res.status(404).json({ success: false, message: '离职申请不存在' })
-    }
-
-    const documents = await getRequestDocuments(request.id)
-    const status = computeStatus(request, documents)
-    if (status !== 'mutual_confirmed') {
-      return res.status(400).json({ success: false, message: '双方尚未完成交接确认，无法审批通过' })
-    }
-
+    const operatorId = req.session.userId!
     const now = new Date().toISOString()
-    await db.prepare(`
-      UPDATE resignation_requests
-      SET status = 'approved', approve_time = ?, approver_id = ?, approver_comment = ?, updated_at = ?
-      WHERE id = ?
-    `).run(now, req.session.userId, comment || null, now, request.id)
 
-    await db.prepare(`
-      UPDATE employee_profiles SET employment_status = 'resigned', updated_at = ? WHERE id = ?
-    `).run(now, request.employee_id)
+    await db.transaction(async (client) => {
+      const requestResult = await client.query(
+        `SELECT * FROM resignation_requests WHERE id = $1 FOR UPDATE`,
+        [req.params.id]
+      )
+      const request = requestResult.rows[0] as ResignationRequest | undefined
+      if (!request) throw new ResignationOperationError('离职申请不存在', 404)
 
-    await addAuditLog(request.id, '管理员审批通过', req.session.userId!, comment)
+      const documentsResult = await client.query(
+        `SELECT * FROM resignation_documents
+         WHERE request_id = $1 AND is_current = 1
+         ORDER BY created_at DESC`,
+        [request.id]
+      )
+      const status = computeStatus(request, documentsResult.rows as ResignationDocument[])
+      if (status !== 'mutual_confirmed') {
+        throw new ResignationOperationError('双方尚未完成交接确认，无法审批通过', 409)
+      }
+
+      await client.query(
+        `UPDATE resignation_requests
+         SET status = 'approved', approve_time = $1, approver_id = $2,
+             approver_comment = $3, reject_target = NULL, updated_at = $4
+         WHERE id = $5`,
+        [now, operatorId, String(comment || '').trim() || null, now, request.id]
+      )
+
+      const employeeResult = await client.query(
+        `UPDATE employee_profiles
+         SET employment_status = 'resigned', updated_at = $1
+         WHERE id = $2`,
+        [now, request.employee_id]
+      )
+      if ((employeeResult.rowCount ?? 0) !== 1) {
+        throw new ResignationOperationError('员工档案不存在，无法完成离职审批', 409)
+      }
+
+      await addAuditLogWithClient(
+        client,
+        request.id,
+        '管理员审批通过',
+        operatorId,
+        String(comment || '').trim() || null,
+        now
+      )
+    })
+
     res.json({ success: true, message: '离职审批通过' })
   } catch (error) {
     console.error('审批通过离职申请失败:', error)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '审批通过离职申请失败' })
   }
 })
@@ -1291,9 +1406,6 @@ router.delete('/management/:id', requireAdmin, async (req, res) => {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
     }
 
-    const requestDir = path.join(resignationDocsDir, request.id)
-    if (fs.existsSync(requestDir)) fs.rmSync(requestDir, { recursive: true })
-
     await db.prepare(`DELETE FROM resignation_requests WHERE id = ?`).run(request.id)
 
     res.json({ success: true, message: '离职申请已删除' })
@@ -1306,22 +1418,15 @@ router.delete('/management/:id', requireAdmin, async (req, res) => {
 router.post('/management/:id/reject', requireAdmin, async (req, res) => {
   try {
     const { comment, rejectTarget } = req.body
-    const request = await db.prepare(`SELECT * FROM resignation_requests WHERE id = ?`).get(req.params.id) as ResignationRequest | undefined
-    if (!request) {
-      return res.status(404).json({ success: false, message: '离职申请不存在' })
+    if (!String(comment || '').trim()) {
+      return res.status(400).json({ success: false, message: '请填写驳回原因' })
+    }
+    if (!['employee', 'handover', 'both'].includes(rejectTarget)) {
+      return res.status(400).json({ success: false, message: '请选择有效的驳回对象' })
     }
 
+    const operatorId = req.session.userId!
     const now = new Date().toISOString()
-
-    // 仅驳回给交接人时，状态设为 handover_rejected（离职人无感知）
-    // 驳回给离职人或双方时，状态设为 rejected
-    const newStatus: ResignationRequest['status'] = rejectTarget === 'handover' ? 'handover_rejected' : 'rejected'
-
-    await db.prepare(`
-      UPDATE resignation_requests
-      SET status = ?, reject_target = ?, approver_id = ?, approver_comment = ?, approve_time = NULL, updated_at = ?
-      WHERE id = ?
-    `).run(newStatus, rejectTarget || null, req.session.userId, comment || null, now, request.id)
 
     // 根据驳回对象生成不同日志描述
     const targetLabel: Record<string, string> = {
@@ -1329,11 +1434,70 @@ router.post('/management/:id/reject', requireAdmin, async (req, res) => {
       handover: '（驳回给交接人）',
       both: '（同时驳回给离职人和交接人）',
     }
-    const suffix = rejectTarget ? (targetLabel[rejectTarget] || '') : ''
-    await addAuditLog(request.id, `管理员驳回申请${suffix}`, req.session.userId!, comment)
+    const suffix = targetLabel[rejectTarget] || ''
+
+    await db.transaction(async (client) => {
+      const requestResult = await client.query(
+        `SELECT * FROM resignation_requests WHERE id = $1 FOR UPDATE`,
+        [req.params.id]
+      )
+      const request = requestResult.rows[0] as ResignationRequest | undefined
+      if (!request) throw new ResignationOperationError('离职申请不存在', 404)
+
+      const documentsResult = await client.query(
+        `SELECT * FROM resignation_documents
+         WHERE request_id = $1 AND is_current = 1
+         ORDER BY created_at DESC`,
+        [request.id]
+      )
+      const status = computeStatus(request, documentsResult.rows as ResignationDocument[])
+      if (status !== 'mutual_confirmed') {
+        throw new ResignationOperationError('只有等待管理员审批的申请可以驳回', 409)
+      }
+
+      const newStatus: ResignationRequest['status'] = rejectTarget === 'handover' ? 'handover_rejected' : 'rejected'
+      const clearEmployeeConfirmation = rejectTarget === 'employee' || rejectTarget === 'both'
+      const clearHandoverConfirmation = true
+
+      await client.query(
+        `UPDATE resignation_requests
+         SET status = $1,
+             reject_target = $2,
+             employee_confirm_time = CASE WHEN $3 THEN NULL ELSE employee_confirm_time END,
+             handover_confirm_time = CASE WHEN $4 THEN NULL ELSE handover_confirm_time END,
+             approver_id = $5,
+             approver_comment = $6,
+             approve_time = NULL,
+             updated_at = $7
+         WHERE id = $8`,
+        [
+          newStatus,
+          rejectTarget,
+          clearEmployeeConfirmation,
+          clearHandoverConfirmation,
+          operatorId,
+          String(comment).trim(),
+          now,
+          request.id,
+        ]
+      )
+
+      await addAuditLogWithClient(
+        client,
+        request.id,
+        `管理员驳回申请${suffix}`,
+        operatorId,
+        String(comment).trim(),
+        now
+      )
+    })
+
     res.json({ success: true, message: '已驳回离职申请' })
   } catch (error) {
     console.error('驳回离职申请失败:', error)
+    if (error instanceof ResignationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '驳回离职申请失败' })
   }
 })
@@ -1345,8 +1509,7 @@ router.get('/requests/:id/documents/:docId/download', requireAuth, async (req, r
       return res.status(404).json({ success: false, message: '离职申请不存在' })
     }
 
-    const userRole = req.session.user?.role
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin = await isDatabaseAdmin(req.session.userId!)
     if (!canAccessRequest(request, req.session.userId!, isAdmin)) {
       return res.status(403).json({ success: false, message: '无权查看该文件' })
     }

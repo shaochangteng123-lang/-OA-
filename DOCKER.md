@@ -118,7 +118,9 @@ Dockerfile                 # 生产环境镜像
 ## 数据持久化
 
 - **数据库数据**：存储在 Docker volume `postgres_data` 中
-- **上传文件**：挂载到 `./uploads` 目录
+- **生产上传文件**：挂载到 `./uploads/production` 目录
+- **开发上传文件**：挂载到 `./uploads/development` 目录
+- **未归属历史文件**：保存在 `./uploads/unassigned`，不挂载到应用容器
 - **调试文件**：挂载到 `./debug` 目录
 
 ## 故障排查

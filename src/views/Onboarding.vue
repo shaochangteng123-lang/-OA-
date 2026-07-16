@@ -275,7 +275,7 @@
                   <template #default="{ row }">
                     <div class="file-type-name">
                       <span class="name-text">{{ row.name }}</span>
-                      <!-- 劳动合同显示员工编号 -->
+                      <!-- 劳动合同书显示员工编号 -->
                       <span v-if="row.id === 'contract' && formData.employeeNo" class="employee-no-badge">
                         编号：{{ formData.employeeNo }}
                       </span>
@@ -317,7 +317,7 @@
                     <!-- 无文件时显示提示 -->
                     <div v-else class="no-file-tip">
                       <el-icon class="waiting-icon"><Clock /></el-icon>
-                      <span class="waiting-text">{{ row.id === 'personal' ? '请自行准备后上交' : row.id === 'invitation' ? '已发送邮箱无需上交' : '暂无文件，等待管理员上传' }}</span>
+                      <span class="waiting-text">{{ row.id === 'personal' ? '请自行准备后上交' : '暂无文件，等待管理员上传' }}</span>
                     </div>
                   </template>
                 </el-table-column>

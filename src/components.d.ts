@@ -69,6 +69,7 @@ declare module 'vue' {
     EventCard: typeof import('./components/calendar/EventCard.vue')['default']
     EventEditPanel: typeof import('./components/calendar/EventEditPanel.vue')['default']
     FloatingActionBar: typeof import('./components/worklog/FloatingActionBar.vue')['default']
+    HumanCostPanel: typeof import('./components/payroll/HumanCostPanel.vue')['default']
     InvoiceTable: typeof import('./components/reimbursement/InvoiceTable.vue')['default']
     InvoiceUploader: typeof import('./components/reimbursement/InvoiceUploader.vue')['default']
     LeaveAdminPanel: typeof import('./components/leave/LeaveAdminPanel.vue')['default']

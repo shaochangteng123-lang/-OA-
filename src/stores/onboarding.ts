@@ -25,12 +25,12 @@ export interface OnboardingFile {
 
 // 入职文件类型配置
 const FILE_TYPE_CONFIG = [
-  { id: 'invitation', name: '邀请函' },
-  { id: 'application', name: '入职申请表' },
-  { id: 'contract', name: '劳动合同' },
+  { id: 'invitation', name: '入职邀请函' },
+  { id: 'application', name: '新员工入职申请表' },
+  { id: 'contract', name: '劳动合同书' },
   { id: 'nda', name: '保密协议' },
   { id: 'declaration', name: '个人声明' },
-  { id: 'asset', name: '固定资产交接单' },
+  { id: 'asset', name: '2025年度公司电脑管理办法' },
   {
     id: 'personal',
     name: '个人入职材料',
@@ -96,9 +96,9 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   // 上传文件
   async function uploadFile(fileTypeId: string, file: File) {
     const formData = new FormData()
-    formData.append('file', file)
     formData.append('file_type', fileTypeId)
     formData.append('originalFileName', file.name)
+    formData.append('file', file)
 
     try {
       const res = await api.post('/api/employees/onboarding/templates', formData, {

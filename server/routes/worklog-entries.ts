@@ -6,15 +6,11 @@ import { nanoid } from 'nanoid'
 import { db } from '../db/index.js'
 import { requireAuth } from '../middleware/auth.js'
 import { checkEntryWritePermission, checkFinalizedLock, isAdminLike } from '../utils/worklog-auth.js'
+import { ensureDatedUploadDirectory } from '../utils/upload-date.js'
 
 const router = Router()
 
-const worklogUploadsDir = path.resolve(process.cwd(), 'uploads/worklog')
-if (!fs.existsSync(worklogUploadsDir)) {
-  fs.mkdirSync(worklogUploadsDir, { recursive: true })
-}
-
-// multer 配置：按 projectId/logDate 分子目录
+// 上传日期在前，项目和日志日期作为后续定位信息。
 const uploadWorklogAttachment = multer({
   storage: multer.diskStorage({
     destination: async (req, _file, cb) => {
@@ -25,8 +21,12 @@ const uploadWorklogAttachment = multer({
           entryId,
         )
         if (!entry) return cb(new Error('日志不存在'), '')
-        const destDir = path.join(worklogUploadsDir, entry.project_id, entry.log_date)
-        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
+        const destDir = ensureDatedUploadDirectory(
+          'worklog',
+          new Date(),
+          entry.project_id,
+          entry.log_date,
+        )
         cb(null, destDir)
       } catch (err: any) {
         cb(err, '')

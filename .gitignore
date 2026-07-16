@@ -77,3 +77,11 @@ uploads/
 # 配置文件（敏感信息）
 *.local.json
 .claude/
+.codex/
+
+# 本地生成产物
+generated/
+
+# Python 缓存
+__pycache__/
+*.py[cod]

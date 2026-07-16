@@ -2,13 +2,20 @@ import { Router } from 'express'
 import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
-import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
 import { requireAuth, requireAdmin, requireAdminOrGM } from '../middleware/auth.js'
 import type { ProbationConfirmation, ProbationConfirmationWithEmployee, ProbationDocument, ProbationTemplate } from '../types/database.js'
 import { nanoid } from 'nanoid'
+import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
+
+class ProbationOperationError extends Error {
+  constructor(message: string, public readonly statusCode = 400) {
+    super(message)
+    this.name = 'ProbationOperationError'
+  }
+}
 
 function isInlinePreviewMimeType(mimeType: string | null | undefined): boolean {
   return !!mimeType && [
@@ -19,36 +26,12 @@ function isInlinePreviewMimeType(mimeType: string | null | undefined): boolean {
   ].includes(mimeType)
 }
 
-function convertPlaceholders(sql: string): string {
-  let index = 0
-  return sql.replace(/\?/g, () => `$${++index}`)
-}
-
-async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise<void> {
-  await client.query(convertPlaceholders(sql), params)
-}
-
-// 转正文件上传目录
-const probationDocsDir = path.join(process.cwd(), 'uploads', 'probation-documents')
-const probationTemplatesDir = path.join(process.cwd(), 'uploads', 'probation-templates')
-
-// 确保目录存在
-if (!fs.existsSync(probationDocsDir)) {
-  fs.mkdirSync(probationDocsDir, { recursive: true })
-}
-if (!fs.existsSync(probationTemplatesDir)) {
-  fs.mkdirSync(probationTemplatesDir, { recursive: true })
-}
-
 // 配置 multer 用于转正文件上传
 const uploadProbationDoc = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
       const confirmationId = req.params.id || 'temp'
-      const destDir = path.join(probationDocsDir, confirmationId)
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true })
-      }
+      const destDir = ensureDatedUploadDirectory('probation-documents', new Date(), confirmationId)
       cb(null, destDir)
     },
     filename: (req, file, cb) => {
@@ -76,7 +59,7 @@ const uploadProbationDoc = multer({
 const uploadTemplate = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
-      cb(null, probationTemplatesDir)
+      cb(null, ensureDatedUploadDirectory('probation-templates'))
     },
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname)
@@ -143,7 +126,7 @@ router.post('/templates', requireAdmin, uploadTemplate.single('file'), async (re
 
     const id = nanoid()
     const now = new Date().toISOString()
-    const relativePath = `/uploads/probation-templates/${file.filename}`
+    const relativePath = toStoredUploadPath(file.path, true)
 
     await db.prepare(`
       INSERT INTO probation_templates (
@@ -572,88 +555,104 @@ router.get('/my-status', requireAuth, async (req, res) => {
 // 提交转正申请（员工）
 router.post('/apply', requireAuth, async (req, res) => {
   try {
-    const userId = req.session.userId
+    const userId = req.session.userId!
     const applicationComment = typeof req.body?.comment === 'string'
       ? req.body.comment.trim() || null
       : typeof req.body?.application_comment === 'string'
         ? req.body.application_comment.trim() || null
         : null
-
-    // 获取当前用户的员工信息
-    const profile = await db.prepare(`
-      SELECT id, hire_date, employment_status FROM employee_profiles WHERE user_id = ?
-    `).get(userId) as { id: string; hire_date: string; employment_status: string } | undefined
-
-    if (!profile) {
-      return res.status(400).json({ success: false, message: '请先完成入职信息填写' })
-    }
-
-    if (profile.employment_status !== 'probation') {
-      return res.status(400).json({ success: false, message: '当前状态不是实习期，无法申请转正' })
-    }
-
-    // 检查是否已有转正申请
-    const existing = await db.prepare(`
-      SELECT id, status, application_comment FROM probation_confirmations WHERE employee_id = ?
-    `).get(profile.id) as { id: string; status: string; application_comment: string | null } | undefined
-
-    if (existing) {
-      if (existing.status === 'submitted') {
-        return res.status(400).json({ success: false, message: '您已提交转正申请，请等待审批' })
-      }
-      if (existing.status === 'approved') {
-        return res.status(400).json({ success: false, message: '您的转正申请已通过' })
-      }
-    }
-
-    if (!existing) {
-      return res.status(400).json({ success: false, message: '转正记录不存在，请联系管理员' })
-    }
-
-    // 检查是否已上传文件
-    const docCount = await db.prepare(`
-      SELECT COUNT(*) as count FROM probation_documents WHERE confirmation_id = ?
-    `).get(existing.id) as { count: number }
-    if (Number(docCount.count) === 0) {
-      return res.status(400).json({ success: false, message: '请先上传转正申请表' })
-    }
-
     const now = new Date().toISOString()
+    let confirmationId = ''
 
-    // 更新转正申请状态为已提交
-    await db.prepare(`
-      UPDATE probation_confirmations SET status = 'submitted', submit_time = ?, application_comment = ?, updated_at = ? WHERE id = ?
-    `).run(now, applicationComment, now, existing.id)
+    await db.transaction(async (client) => {
+      const profileResult = await client.query<{
+        id: string
+        employment_status: string
+      }>(
+        `SELECT id, employment_status
+         FROM employee_profiles
+         WHERE user_id = $1
+         FOR UPDATE`,
+        [userId]
+      )
+      const profile = profileResult.rows[0]
+      if (!profile) throw new ProbationOperationError('请先完成入职信息填写')
+      if (profile.employment_status !== 'probation') {
+        throw new ProbationOperationError('当前状态不是实习期，无法申请转正', 409)
+      }
 
-    // 将旧的审批实例（如有）关闭，然后新建审批实例（支持驳回后重新提交）
-    const hadRejected = existing.status === 'rejected'
-    await db.prepare(`
-      UPDATE approval_instances SET status = 'cancelled', updated_at = ?
-      WHERE target_id = ? AND target_type = 'probation' AND status = 'pending'
-    `).run(now, existing.id)
+      const confirmationResult = await client.query<{
+        id: string
+        status: string
+      }>(
+        `SELECT id, status
+         FROM probation_confirmations
+         WHERE employee_id = $1
+         FOR UPDATE`,
+        [profile.id]
+      )
+      const confirmation = confirmationResult.rows[0]
+      if (!confirmation) throw new ProbationOperationError('转正记录不存在，请联系管理员', 404)
+      if (confirmation.status === 'submitted') {
+        throw new ProbationOperationError('您已提交转正申请，请等待审批', 409)
+      }
+      if (confirmation.status === 'approved') {
+        throw new ProbationOperationError('您的转正申请已通过', 409)
+      }
+      if (!['pending', 'rejected'].includes(confirmation.status)) {
+        throw new ProbationOperationError('当前转正记录状态不允许提交', 409)
+      }
 
-    const instanceId = nanoid()
-    await db.prepare(`
-      INSERT INTO approval_instances (
-        id, flow_id, type, target_id, target_type,
-        applicant_id, current_step, status, submit_time, created_at, updated_at
-      ) VALUES (?, NULL, 'probation', ?, 'probation', ?, 1, 'pending', ?, ?, ?)
-    `).run(instanceId, existing.id, userId, now, now, now)
+      const documentResult = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+         FROM probation_documents
+         WHERE confirmation_id = $1`,
+        [confirmation.id]
+      )
+      if (Number(documentResult.rows[0]?.count || 0) === 0) {
+        throw new ProbationOperationError('请先上传转正申请表')
+      }
 
-    // 如果是驳回后重新提交，记录 resubmit；否则记录 submit
-    const submitAction = hadRejected ? 'resubmit' : 'submit'
-    const baseSubmitComment = hadRejected ? '员工驳回后重新提交转正申请' : '员工提交转正申请'
-    const submitComment = applicationComment
-      ? `${baseSubmitComment}；说明：${applicationComment}`
-      : baseSubmitComment
-    await db.prepare(`
-      INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-      VALUES (?, ?, 0, ?, ?, ?, ?)
-    `).run(nanoid(), instanceId, userId, submitAction, submitComment, now)
+      confirmationId = confirmation.id
+      const hadRejected = confirmation.status === 'rejected'
+      await client.query(
+        `UPDATE probation_confirmations
+         SET status = 'submitted', submit_time = $1, application_comment = $2, updated_at = $3
+         WHERE id = $4`,
+        [now, applicationComment, now, confirmation.id]
+      )
+
+      await client.query(
+        `UPDATE approval_instances
+         SET status = 'cancelled', updated_at = $1
+         WHERE target_id = $2 AND target_type = 'probation' AND status = 'pending'`,
+        [now, confirmation.id]
+      )
+
+      const instanceId = nanoid()
+      await client.query(
+        `INSERT INTO approval_instances (
+           id, flow_id, type, target_id, target_type,
+           applicant_id, current_step, status, submit_time, created_at, updated_at
+         ) VALUES ($1, NULL, 'probation', $2, 'probation', $3, 1, 'pending', $4, $5, $6)`,
+        [instanceId, confirmation.id, userId, now, now, now]
+      )
+
+      const submitAction = hadRejected ? 'resubmit' : 'submit'
+      const baseSubmitComment = hadRejected ? '员工驳回后重新提交转正申请' : '员工提交转正申请'
+      const submitComment = applicationComment
+        ? `${baseSubmitComment}；说明：${applicationComment}`
+        : baseSubmitComment
+      await client.query(
+        `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+         VALUES ($1,$2,0,$3,$4,$5,$6)`,
+        [nanoid(), instanceId, userId, submitAction, submitComment, now]
+      )
+    })
 
     const updated = await db.prepare(`
       SELECT * FROM probation_confirmations WHERE id = ?
-    `).get(existing.id)
+    `).get(confirmationId)
 
     res.json({
       success: true,
@@ -662,6 +661,9 @@ router.post('/apply', requireAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('提交转正申请失败:', error)
+    if (error instanceof ProbationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '提交转正申请失败' })
   }
 })
@@ -699,27 +701,24 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
         SELECT hire_date FROM employee_profiles WHERE id = ?
       `).get(profile.id) as { hire_date: string } | undefined
 
-      let probationEndDate: string | null = null
-      if (hireDate?.hire_date) {
-        const hireDateObj = new Date(hireDate.hire_date)
-        hireDateObj.setMonth(hireDateObj.getMonth() + 6)
-        probationEndDate = hireDateObj.toISOString().split('T')[0]
-      }
-
-      const confirmationId = nanoid()
       const now = new Date().toISOString()
+      const effectiveHireDate = hireDate?.hire_date || now.split('T')[0]
+      const hireDateObj = new Date(effectiveHireDate)
+      hireDateObj.setMonth(hireDateObj.getMonth() + 6)
+      const probationEndDate = hireDateObj.toISOString().split('T')[0]
 
       await db.prepare(`
         INSERT INTO probation_confirmations (
           id, employee_id, hire_date, probation_end_date, status, application_comment, created_at, updated_at
         ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
-      `).run(confirmationId, profile.id, hireDate?.hire_date || null, probationEndDate, application_comment?.trim() || null, now, now)
+        ON CONFLICT (employee_id) DO NOTHING
+      `).run(nanoid(), profile.id, effectiveHireDate, probationEndDate, application_comment?.trim() || null, now, now)
 
-      confirmation = {
-        id: confirmationId,
-        status: 'pending',
-        application_comment: application_comment?.trim() || null,
-      }
+      confirmation = await db.prepare(`
+        SELECT id, status, application_comment
+        FROM probation_confirmations
+        WHERE employee_id = ?
+      `).get(profile.id) as { id: string; status: string; application_comment: string | null } | undefined
     }
 
     if (!confirmation) {
@@ -740,10 +739,8 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
     }
 
     // 移动文件到正确目录
-    const destDir = path.join(probationDocsDir, confirmation.id)
-    if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true })
-    }
+    const uploadedAt = fs.statSync(file.path).mtime
+    const destDir = ensureDatedUploadDirectory('probation-documents', uploadedAt, confirmation.id)
     const newPath = path.join(destDir, file.filename)
     fs.renameSync(file.path, newPath)
 
@@ -757,7 +754,7 @@ router.post('/upload-doc', requireAuth, uploadProbationDoc.single('file'), async
 
     const docId = nanoid()
     const now = new Date().toISOString()
-    const relativePath = `/uploads/probation-documents/${confirmation.id}/${file.filename}`
+    const relativePath = toStoredUploadPath(newPath, true)
 
     await db.prepare(`
       INSERT INTO probation_documents (
@@ -1046,82 +1043,83 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
-    const approverId = req.session.userId
-
-    // 查询审批人角色
-    const approver = await db.prepare('SELECT role FROM users WHERE id = ?').get(approverId) as { role: string } | undefined
-    if (!approver) {
-      return res.status(401).json({ success: false, message: '用户不存在' })
-    }
-
-    // 检查权限：只有总经理可以审批转正
-    if (approver.role !== 'general_manager' && approver.role !== 'super_admin') {
-      return res.status(403).json({ success: false, message: '只有总经理可以审批转正申请' })
-    }
-
-    const confirmation = await db.prepare(`
-      SELECT * FROM probation_confirmations WHERE id = ?
-    `).get(id) as ProbationConfirmation | undefined
-
-    if (!confirmation) {
-      return res.status(404).json({ success: false, message: '转正申请不存在' })
-    }
-
-    if (confirmation.status !== 'submitted') {
-      return res.status(400).json({ success: false, message: '该申请不在待审批状态' })
-    }
-
+    const approverId = req.session.userId!
+    const commentText = typeof comment === 'string' ? comment.trim() : ''
     const now = new Date().toISOString()
-
-    // 获取审批实例
-    const instance = await db.prepare(`
-      SELECT id FROM approval_instances
-      WHERE target_id = ? AND target_type = 'probation' AND status = 'pending'
-    `).get(id) as { id: string } | undefined
-
-    if (!instance) {
-      return res.status(400).json({ success: false, message: '审批实例不存在' })
-    }
-
-    // 获取所有管理员用户（用于抄送）
-    const adminUsers = await db.prepare(`
-      SELECT id FROM users WHERE role IN ('admin', 'super_admin')
-    `).all() as { id: string }[]
-
-    // 使用事务处理多表更新
     await db.transaction(async (client) => {
-      // 1. 更新转正申请状态
-      await txRun(client, `
-        UPDATE probation_confirmations
-        SET status = 'approved', approve_time = ?, approver_id = ?, approver_comment = ?, updated_at = ?
-        WHERE id = ?
-      `, now, approverId, comment || null, now, id)
-
-      // 2. 更新审批实例状态
-      await txRun(client, `
-        UPDATE approval_instances
-        SET status = 'approved', complete_time = ?, updated_at = ?
-        WHERE id = ?
-      `, now, now, instance.id)
-
-      // 3. 创建总经理审批记录
-      await txRun(client, `
-        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-        VALUES (?, ?, 1, ?, 'approve', ?, ?)
-      `, nanoid(), instance.id, approverId, comment || '审批通过', now)
-
-      // 4. 为每个管理员创建抄送记录
-      for (const adminUser of adminUsers) {
-        await txRun(client, `
-          INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-          VALUES (?, ?, 2, ?, 'cc', '已抄送存档', ?)
-        `, nanoid(), instance.id, adminUser.id, now)
+      const approverResult = await client.query<{ role: string }>(
+        `SELECT role FROM users WHERE id = $1 AND status = 'active' FOR SHARE`,
+        [approverId]
+      )
+      const approver = approverResult.rows[0]
+      if (!approver) throw new ProbationOperationError('用户不存在或已停用', 401)
+      if (!['general_manager', 'super_admin'].includes(approver.role)) {
+        throw new ProbationOperationError('只有总经理或超级管理员可以审批转正申请', 403)
       }
 
-      // 5. 更新员工状态为在职
-      await txRun(client, `
-        UPDATE employee_profiles SET employment_status = 'active', updated_at = ? WHERE id = ?
-      `, now, confirmation.employee_id)
+      const confirmationResult = await client.query<ProbationConfirmation>(
+        `SELECT * FROM probation_confirmations WHERE id = $1 FOR UPDATE`,
+        [id]
+      )
+      const confirmation = confirmationResult.rows[0]
+      if (!confirmation) throw new ProbationOperationError('转正申请不存在', 404)
+      if (confirmation.status !== 'submitted') {
+        throw new ProbationOperationError('该申请已经处理或不在待审批状态', 409)
+      }
+
+      const instanceResult = await client.query<{ id: string }>(
+        `SELECT id FROM approval_instances
+         WHERE target_id = $1 AND target_type = 'probation' AND status = 'pending'
+         FOR UPDATE`,
+        [id]
+      )
+      const instance = instanceResult.rows[0]
+      if (!instance || instanceResult.rows.length !== 1) {
+        throw new ProbationOperationError('审批实例不存在、已经处理或数据不一致', 409)
+      }
+
+      const adminUsersResult = await client.query<{ id: string }>(
+        `SELECT id FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active'`
+      )
+
+      await client.query(
+        `UPDATE probation_confirmations
+         SET status = 'approved', approve_time = $1, approver_id = $2,
+             approver_comment = $3, updated_at = $4
+         WHERE id = $5`,
+        [now, approverId, commentText || null, now, id]
+      )
+      await client.query(
+        `UPDATE approval_instances
+         SET status = 'approved', complete_time = $1, updated_at = $2
+         WHERE id = $3`,
+        [now, now, instance.id]
+      )
+      await client.query(
+        `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+         VALUES ($1,$2,1,$3,'approve',$4,$5)`,
+        [nanoid(), instance.id, approverId, commentText || '审批通过', now]
+      )
+
+      // 管理员收到转正结果抄送记录。
+      const adminUsers = adminUsersResult.rows
+      for (const adminUser of adminUsers) {
+        await client.query(
+          `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+           VALUES ($1,$2,2,$3,'cc','已抄送存档',$4)`,
+          [nanoid(), instance.id, adminUser.id, now]
+        )
+      }
+
+      const employeeResult = await client.query(
+        `UPDATE employee_profiles
+         SET employment_status = 'active', updated_at = $1
+         WHERE id = $2`,
+        [now, confirmation.employee_id]
+      )
+      if ((employeeResult.rowCount ?? 0) !== 1) {
+        throw new ProbationOperationError('员工档案不存在，无法完成转正审批', 409)
+      }
     })
 
     const updated = await db.prepare(`
@@ -1135,6 +1133,9 @@ router.post('/:id/approve', requireAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('审批转正申请失败:', error)
+    if (error instanceof ProbationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '审批转正申请失败' })
   }
 })
@@ -1144,68 +1145,63 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
   try {
     const { id } = req.params
     const { comment } = req.body
-    const approverId = req.session.userId
+    const approverId = req.session.userId!
+    const commentText = typeof comment === 'string' ? comment.trim() : ''
 
-    if (!comment) {
+    if (!commentText) {
       return res.status(400).json({ success: false, message: '请填写拒绝原因' })
     }
-
-    // 查询审批人角色
-    const approver = await db.prepare('SELECT role FROM users WHERE id = ?').get(approverId) as { role: string } | undefined
-    if (!approver) {
-      return res.status(401).json({ success: false, message: '用户不存在' })
-    }
-
-    // 检查权限：只有总经理可以审批转正
-    if (approver.role !== 'general_manager' && approver.role !== 'super_admin') {
-      return res.status(403).json({ success: false, message: '只有总经理可以审批转正申请' })
-    }
-
-    const confirmation = await db.prepare(`
-      SELECT * FROM probation_confirmations WHERE id = ?
-    `).get(id) as ProbationConfirmation | undefined
-
-    if (!confirmation) {
-      return res.status(404).json({ success: false, message: '转正申请不存在' })
-    }
-
-    if (confirmation.status !== 'submitted') {
-      return res.status(400).json({ success: false, message: '该申请不在待审批状态' })
-    }
-
     const now = new Date().toISOString()
-
-    // 获取审批实例
-    const instance = await db.prepare(`
-      SELECT id FROM approval_instances
-      WHERE target_id = ? AND target_type = 'probation' AND status = 'pending'
-    `).get(id) as { id: string } | undefined
-
-    if (!instance) {
-      return res.status(400).json({ success: false, message: '审批实例不存在' })
-    }
-
-    // 使用事务处理多表更新
     await db.transaction(async (client) => {
-      // 1. 更新转正申请状态
-      await txRun(client, `
-        UPDATE probation_confirmations
-        SET status = 'rejected', approve_time = ?, approver_id = ?, approver_comment = ?, updated_at = ?
-        WHERE id = ?
-      `, now, approverId, comment, now, id)
+      const approverResult = await client.query<{ role: string }>(
+        `SELECT role FROM users WHERE id = $1 AND status = 'active' FOR SHARE`,
+        [approverId]
+      )
+      const approver = approverResult.rows[0]
+      if (!approver) throw new ProbationOperationError('用户不存在或已停用', 401)
+      if (!['general_manager', 'super_admin'].includes(approver.role)) {
+        throw new ProbationOperationError('只有总经理或超级管理员可以审批转正申请', 403)
+      }
 
-      // 2. 更新审批实例状态
-      await txRun(client, `
-        UPDATE approval_instances
-        SET status = 'rejected', complete_time = ?, updated_at = ?
-        WHERE id = ?
-      `, now, now, instance.id)
+      const confirmationResult = await client.query<ProbationConfirmation>(
+        `SELECT * FROM probation_confirmations WHERE id = $1 FOR UPDATE`,
+        [id]
+      )
+      const confirmation = confirmationResult.rows[0]
+      if (!confirmation) throw new ProbationOperationError('转正申请不存在', 404)
+      if (confirmation.status !== 'submitted') {
+        throw new ProbationOperationError('该申请已经处理或不在待审批状态', 409)
+      }
 
-      // 3. 创建总经理驳回记录
-      await txRun(client, `
-        INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-        VALUES (?, ?, 1, ?, 'reject', ?, ?)
-      `, nanoid(), instance.id, approverId, comment, now)
+      const instanceResult = await client.query<{ id: string }>(
+        `SELECT id FROM approval_instances
+         WHERE target_id = $1 AND target_type = 'probation' AND status = 'pending'
+         FOR UPDATE`,
+        [id]
+      )
+      const instance = instanceResult.rows[0]
+      if (!instance || instanceResult.rows.length !== 1) {
+        throw new ProbationOperationError('审批实例不存在、已经处理或数据不一致', 409)
+      }
+
+      await client.query(
+        `UPDATE probation_confirmations
+         SET status = 'rejected', approve_time = $1, approver_id = $2,
+             approver_comment = $3, updated_at = $4
+         WHERE id = $5`,
+        [now, approverId, commentText, now, id]
+      )
+      await client.query(
+        `UPDATE approval_instances
+         SET status = 'rejected', complete_time = $1, updated_at = $2
+         WHERE id = $3`,
+        [now, now, instance.id]
+      )
+      await client.query(
+        `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
+         VALUES ($1,$2,1,$3,'reject',$4,$5)`,
+        [nanoid(), instance.id, approverId, commentText, now]
+      )
     })
 
     const updated = await db.prepare(`
@@ -1219,6 +1215,9 @@ router.post('/:id/reject', requireAuth, async (req, res) => {
     })
   } catch (error) {
     console.error('拒绝转正申请失败:', error)
+    if (error instanceof ProbationOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '拒绝转正申请失败' })
   }
 })
@@ -1322,10 +1321,8 @@ router.post('/:id/documents', requireAdmin, uploadProbationDoc.single('file'), a
     }
 
     // 移动文件到正确目录
-    const destDir = path.join(probationDocsDir, id)
-    if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true })
-    }
+    const uploadedAt = fs.statSync(file.path).mtime
+    const destDir = ensureDatedUploadDirectory('probation-documents', uploadedAt, id)
     const newPath = path.join(destDir, file.filename)
     fs.renameSync(file.path, newPath)
 
@@ -1339,7 +1336,7 @@ router.post('/:id/documents', requireAdmin, uploadProbationDoc.single('file'), a
 
     const docId = nanoid()
     const now = new Date().toISOString()
-    const relativePath = `/uploads/probation-documents/${id}/${file.filename}`
+    const relativePath = toStoredUploadPath(newPath, true)
 
     await db.prepare(`
       INSERT INTO probation_documents (

@@ -7,18 +7,19 @@ import { PDFDocument } from 'pdf-lib'
 import { requireAdmin } from '../middleware/auth.js'
 import { db } from '../db/index.js'
 import { processBankReceiptPdf } from '../services/bankReceiptProcessor.js'
+import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
 
 const uploadsDir = path.join(process.cwd(), 'uploads')
-const bankReceiptsDir = path.join(uploadsDir, 'bank-receipts')
-;[uploadsDir, bankReceiptsDir].forEach(dir => {
+const tempDir = path.join(uploadsDir, 'temp')
+;[uploadsDir, tempDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 })
 
 const uploadPdf = multer({
   storage: multer.diskStorage({
-    destination: (_, __, cb) => cb(null, path.join(uploadsDir, 'temp')),
+    destination: (_, __, cb) => cb(null, tempDir),
     filename: (_, file, cb) => cb(null, `bank-receipt-${Date.now()}-${file.originalname}`),
   }),
   limits: { fileSize: 50 * 1024 * 1024 },
@@ -43,6 +44,7 @@ router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, re
   const batchId = `brb_${nanoid(10)}`
   const now = new Date().toISOString()
   const pdfFileName = `batch-${batchId}.pdf`
+  const bankReceiptsDir = ensureDatedUploadDirectory('bank-receipts')
   const pdfPath = path.join(bankReceiptsDir, pdfFileName)
 
   try {
@@ -69,7 +71,7 @@ router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, re
   await db.run(
     `INSERT INTO bank_receipt_batches (id, pdf_path, uploaded_by, status, created_at, updated_at)
      VALUES (?, ?, ?, 'processing', ?, ?)`,
-    batchId, `uploads/bank-receipts/${pdfFileName}`, currentUserId, now, now,
+    batchId, toStoredUploadPath(pdfPath), currentUserId, now, now,
   )
 
   res.json({ success: true, data: { batchId } })
