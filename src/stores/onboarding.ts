@@ -20,7 +20,13 @@ export interface OnboardingFile {
   id: string
   name: string
   children?: string[]
-  files: { id: string; name: string; url: string; uploadTime: string }[]
+  files: {
+    id: string
+    name: string
+    previewUrl: string
+    downloadUrl: string
+    uploadTime: string
+  }[]
 }
 
 // 入职文件类型配置
@@ -60,7 +66,8 @@ export const useOnboardingStore = defineStore('onboarding', () => {
         files: typeTemplates.map(t => ({
           id: t.id,
           name: t.file_name,
-          url: `/api/employees/onboarding/templates/${t.id}/download`,
+          previewUrl: `/api/employees/onboarding/templates/${t.id}/preview`,
+          downloadUrl: `/api/employees/onboarding/templates/${t.id}/download`,
           uploadTime: t.created_at,
         })),
       }

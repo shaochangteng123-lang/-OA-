@@ -3,12 +3,9 @@
 // 参考：https://www.beijing.gov.cn/zhengce/zhengcefagui/202511/t20251104_4258873.html
 
 import { api } from './api.js'
+import { fallbackHolidays, mergeHolidaysWithFallback, type HolidayInfo } from './holidayData.js'
 
-export interface HolidayInfo {
-  date: string // yyyy-MM-dd 格式
-  name: string // 节假日名称
-  type: 'holiday' | 'workday' // holiday: 放假, workday: 补班
-}
+export type { HolidayInfo } from './holidayData.js'
 
 // 节假日数据缓存
 let holidaysCache: HolidayInfo[] | null = null
@@ -18,16 +15,16 @@ const CACHE_DURATION = 1000 * 60 * 60 // 1小时缓存
 /**
  * 从API获取节假日数据
  */
-async function fetchHolidays(): Promise<HolidayInfo[]> {
+async function fetchHolidays(): Promise<HolidayInfo[] | null> {
   try {
     const response = await api.get<{ success: boolean; data: HolidayInfo[] }>('/api/holidays')
-    if (response.data.success && response.data.data) {
+    if (response.data.success && Array.isArray(response.data.data)) {
       return response.data.data
     }
-    return []
+    return null
   } catch (error) {
     console.error('获取节假日数据失败:', error)
-    return []
+    return null
   }
 }
 
@@ -36,62 +33,25 @@ async function fetchHolidays(): Promise<HolidayInfo[]> {
  */
 async function getHolidaysData(): Promise<HolidayInfo[]> {
   const now = Date.now()
-  
+
   // 如果缓存有效，直接返回
   if (holidaysCache && now - cacheTimestamp < CACHE_DURATION) {
     return holidaysCache
   }
 
-  // 从API获取数据
-  holidaysCache = await fetchHolidays()
-  cacheTimestamp = now
-  
+  const fetchedHolidays = await fetchHolidays()
+  const availableHolidays = fetchedHolidays ?? holidaysCache ?? []
+  holidaysCache = mergeHolidaysWithFallback(availableHolidays)
+
+  // 请求失败或空表通常发生在前后端启动阶段，不缓存该状态，允许后续重新获取。
+  cacheTimestamp = fetchedHolidays?.length ? now : 0
+
   return holidaysCache
 }
 
-// 备用数据（当API不可用时使用）
-const fallbackHolidays: HolidayInfo[] = [
-  // 2026年节假日数据（备用）
-  { date: '2026-01-01', name: '元旦', type: 'holiday' },
-  { date: '2026-01-02', name: '元旦', type: 'holiday' },
-  { date: '2026-01-03', name: '元旦', type: 'holiday' },
-  { date: '2026-01-04', name: '元旦补班', type: 'workday' },
-  { date: '2026-02-14', name: '春节补班', type: 'workday' },
-  { date: '2026-02-15', name: '春节', type: 'holiday' },
-  { date: '2026-02-16', name: '春节', type: 'holiday' },
-  { date: '2026-02-17', name: '春节', type: 'holiday' },
-  { date: '2026-02-18', name: '春节', type: 'holiday' },
-  { date: '2026-02-19', name: '春节', type: 'holiday' },
-  { date: '2026-02-20', name: '春节', type: 'holiday' },
-  { date: '2026-02-21', name: '春节', type: 'holiday' },
-  { date: '2026-02-22', name: '春节', type: 'holiday' },
-  { date: '2026-02-23', name: '春节', type: 'holiday' },
-  { date: '2026-02-28', name: '春节补班', type: 'workday' },
-  { date: '2026-04-04', name: '清明节', type: 'holiday' },
-  { date: '2026-04-05', name: '清明节', type: 'holiday' },
-  { date: '2026-04-06', name: '清明节', type: 'holiday' },
-  { date: '2026-05-01', name: '劳动节', type: 'holiday' },
-  { date: '2026-05-02', name: '劳动节', type: 'holiday' },
-  { date: '2026-05-03', name: '劳动节', type: 'holiday' },
-  { date: '2026-05-04', name: '劳动节', type: 'holiday' },
-  { date: '2026-05-05', name: '劳动节', type: 'holiday' },
-  { date: '2026-05-09', name: '劳动节补班', type: 'workday' },
-  { date: '2026-06-19', name: '端午节', type: 'holiday' },
-  { date: '2026-06-20', name: '端午节', type: 'holiday' },
-  { date: '2026-06-21', name: '端午节', type: 'holiday' },
-  { date: '2026-09-25', name: '中秋节', type: 'holiday' },
-  { date: '2026-09-26', name: '中秋节', type: 'holiday' },
-  { date: '2026-09-27', name: '中秋节', type: 'holiday' },
-  { date: '2026-09-20', name: '国庆节补班', type: 'workday' },
-  { date: '2026-10-01', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-02', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-03', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-04', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-05', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-06', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-07', name: '国庆节', type: 'holiday' },
-  { date: '2026-10-10', name: '国庆节补班', type: 'workday' },
-]
+function getSynchronousHolidayData(): HolidayInfo[] {
+  return holidaysCache?.length ? holidaysCache : fallbackHolidays
+}
 
 /**
  * 获取指定日期的节假日信息
@@ -110,12 +70,7 @@ export async function getHolidayInfo(date: Date | string): Promise<HolidayInfo |
  */
 export function getHolidayInfoSync(date: Date | string): HolidayInfo | null {
   const dateStr = typeof date === 'string' ? date : formatDateString(date)
-  // 如果缓存存在，使用缓存
-  if (holidaysCache) {
-    return holidaysCache.find((h) => h.date === dateStr) || null
-  }
-  // 否则使用备用数据
-  return fallbackHolidays.find((h) => h.date === dateStr) || null
+  return getSynchronousHolidayData().find((h) => h.date === dateStr) || null
 }
 
 /**
@@ -195,7 +150,7 @@ export async function getHolidaysByYear(year: number): Promise<HolidayInfo[]> {
  * 同步版本的获取指定年份的所有节假日
  */
 export function getHolidaysByYearSync(year: number): HolidayInfo[] {
-  const holidays = holidaysCache || fallbackHolidays
+  const holidays = getSynchronousHolidayData()
   return holidays.filter((h) => h.date.startsWith(`${year}-`))
 }
 
@@ -214,7 +169,7 @@ export async function getHolidaysByMonth(year: number, month: number): Promise<H
  * 同步版本的获取指定月份的所有节假日
  */
 export function getHolidaysByMonthSync(year: number, month: number): HolidayInfo[] {
-  const holidays = holidaysCache || fallbackHolidays
+  const holidays = getSynchronousHolidayData()
   const monthStr = String(month).padStart(2, '0')
   return holidays.filter((h) => h.date.startsWith(`${year}-${monthStr}-`))
 }

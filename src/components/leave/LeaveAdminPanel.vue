@@ -1,6 +1,6 @@
 <template>
   <div class="leave-admin-panel">
-    <!-- 申请记录工具栏 -->
+    <!-- 抄送记录工具栏 -->
     <div v-if="activeSubTab === 'requests'" class="toolbar">
       <el-input
         v-model="filters.keyword"
@@ -15,6 +15,7 @@
       </el-select>
       <el-select v-model="filters.status" placeholder="状态" clearable style="width: 110px" @change="fetchRequests(1)">
         <el-option label="审批中" value="pending" />
+        <el-option label="草稿" value="draft" />
         <el-option label="已批准" value="approved" />
         <el-option label="已驳回" value="rejected" />
         <el-option label="已撤销" value="cancelled" />
@@ -38,8 +39,8 @@
 
     <!-- 子 Tab -->
     <el-tabs v-model="activeSubTab" style="margin-top: 8px">
-      <!-- 申请记录 -->
-      <el-tab-pane label="申请记录" name="requests">
+      <!-- 管理员抄送记录 -->
+      <el-tab-pane label="抄送记录" name="requests">
         <el-table
           v-loading="requestsLoading"
           :data="requestList"
@@ -62,6 +63,29 @@
             </template>
           </el-table-column>
           <el-table-column label="天数" prop="total_days" width="65" align="center" />
+          <el-table-column label="剩余天数" width="130" align="center">
+            <template #default="{ row }">
+              <div v-if="row.status === 'approved'" class="return-info">
+                <span :class="['remaining-days', `is-${row.leave_timing_status || 'upcoming'}`]">
+                  {{ remainingDaysLabel(row) }}
+                </span>
+                <span v-if="row.return_to_work_date" class="return-time">
+                  返岗：{{ row.return_to_work_date }}{{ row.return_to_work_half === 'morning' ? '上午' : '下午' }}
+                </span>
+              </div>
+              <span v-else class="empty-value">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="审批人" width="130" align="center">
+            <template #default="{ row }">
+              {{ formatPerson(row.approver_position, row.approver_real_name || row.approver_name || '总经理') }}
+            </template>
+          </el-table-column>
+          <el-table-column label="抄送" width="150" align="center">
+            <template #default="{ row }">
+              {{ formatCcRecipient(row) }}
+            </template>
+          </el-table-column>
           <el-table-column label="状态" width="90" align="center">
             <template #default="{ row }">
               <el-tag :type="statusTagType(row.status)" size="small">
@@ -144,11 +168,20 @@
             <el-option v-for="d in departments" :key="d" :label="d" :value="d" />
           </el-select>
           <span class="balances-label">年份</span>
-          <el-input-number v-model="balanceYear" :min="2020" :max="2099" style="width: 110px" @change="fetchBalances" />
+          <el-input-number
+            v-model="balanceYear"
+            :min="2020"
+            :max="2099"
+            class="balance-year-input"
+            @change="fetchBalances"
+          />
         </div>
 
         <el-table v-loading="balancesLoading" :data="balanceUsers" border size="small" style="margin-top:8px">
           <el-table-column label="序号" type="index" width="60" align="center" :index="(i) => i + 1" fixed />
+          <el-table-column label="员工编号" prop="employeeNo" width="120" fixed align="center">
+            <template #default="{ row }">{{ row.employeeNo || '-' }}</template>
+          </el-table-column>
           <el-table-column label="员工" prop="userName" width="100" fixed align="center" />
           <el-table-column label="部门" prop="department" width="90" fixed align="center" />
           <el-table-column
@@ -252,7 +285,7 @@ import {
 const activeSubTab = ref('requests')
 const leaveTypes = ref<LeaveTypeConfig[]>([])
 
-// ---- 申请记录 ----
+// ---- 全员请假记录 ----
 const requestList = ref<LeaveRequest[]>([])
 const requestsLoading = ref(false)
 const requestTotal = ref(0)
@@ -302,15 +335,34 @@ const balanceYear = ref(new Date().getFullYear())
 const departments = ref<string[]>([])
 
 function statusLabel(status: string): string {
-  const m: Record<string, string> = { pending: '审批中', approved: '已批准', rejected: '已驳回', cancelled: '已撤销' }
+  const m: Record<string, string> = {
+    draft: '草稿', pending: '审批中', approved: '已批准', rejected: '已驳回', cancelled: '已撤销'
+  }
   return m[status] || status
 }
 
 function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' | undefined {
   const m: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
-    pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
+    draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return m[status] || undefined
+}
+
+function formatPerson(position: string | null | undefined, name: string): string {
+  return position ? `${position} ${name}` : name
+}
+
+function formatCcRecipient(request: LeaveRequest): string {
+  const role = request.cc_recipient_role?.trim()
+  const name = request.cc_recipient_name?.trim()
+  if (role && name) return `${role} ${name}`
+  return role || name || '-'
+}
+
+function remainingDaysLabel(request: LeaveRequest): string {
+  if (request.leave_timing_status === 'returned') return '已返岗'
+  const days = Number(request.remaining_days)
+  return Number.isFinite(days) ? `${days}天` : '-'
 }
 
 async function fetchRequests(page?: number) {
@@ -455,6 +507,25 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.return-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.35;
+}
+.remaining-days {
+  color: #409eff;
+  font-weight: 600;
+}
+.remaining-days.is-on_leave { color: #e6a23c; }
+.remaining-days.is-returned { color: #67c23a; }
+.return-time {
+  color: #909399;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.empty-value { color: #c0c4cc; }
 .leave-admin-panel {}
 .toolbar {
   display: flex;
@@ -482,6 +553,9 @@ onMounted(async () => {
 .balances-label {
   font-size: 13px;
   color: #606266;
+}
+.balance-year-input {
+  width: 136px;
 }
 .text-warning {
   color: #e6a23c;

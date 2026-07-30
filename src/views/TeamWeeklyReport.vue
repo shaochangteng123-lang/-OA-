@@ -65,8 +65,8 @@
               <el-image
                 v-for="att in getImages(report.attachments)"
                 :key="att.id"
-                :src="`/${att.filePath}`"
-                :preview-src-list="getImages(report.attachments).map(a => `/${a.filePath}`)"
+                :src="getTeamAttachmentUrl(att.id)"
+                :preview-src-list="getImages(report.attachments).map(a => getTeamAttachmentUrl(a.id))"
                 :initial-index="getImages(report.attachments).indexOf(att)"
                 fit="cover"
                 class="attach-image-thumb"
@@ -257,6 +257,10 @@ function getImages(attachments: Attachment[]) {
 
 function getDocs(attachments: Attachment[]) {
   return attachments.filter(a => a.fileKind === 'document')
+}
+
+function getTeamAttachmentUrl(attachmentId: string) {
+  return `/api/daily-logs/team/attachments/${attachmentId}/preview`
 }
 
 function getFileExt(name: string) {

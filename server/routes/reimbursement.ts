@@ -10,12 +10,23 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
 import { recognizeReceipt } from '../services/receiptOcr.js'
 import { recognizePaymentProof } from '../services/paymentProofOcr.js'
-import { calculateReimbursementMonth } from '../utils/reimbursement.js'
+import {
+  calculateReimbursementMonth,
+  isTransportFuelCategory,
+  TRANSPORT_FUEL_CATEGORY_KEYWORDS,
+} from '../utils/reimbursement.js'
 import { validateFilePath } from '../utils/file-validation.js'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 import { db } from '../db/index.js'
 
 const router = Router()
+
+function buildTransportFuelCategoryCondition(alias: string): string {
+  const categoryField = `LOWER(${alias}.category)`
+  return TRANSPORT_FUEL_CATEGORY_KEYWORDS
+    .map(keyword => `${categoryField} LIKE '%${keyword.toLowerCase()}%'`)
+    .join('\n          OR ')
+}
 
 // 付款回单 OCR 验证缓存（临时文件名 -> OCR 结果）
 // 绑定目标单据/批次、验证人、文件哈希、交易流水号，一次性消费，防止重放
@@ -287,7 +298,7 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
 })
 
 /**
- * 查询用户当月运输/交通/汽油/柴油/通行费类发票已使用额度
+ * 查询用户当月交通额度类发票已使用额度
  * GET /api/reimbursement/transport-fuel-quota?excludeId=xxx
  */
 router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
@@ -303,8 +314,6 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
       })
     }
 
-    const { db } = await import('../db/index.js')
-
     // 管理员查看他人报销单时，使用申请人的 user_id 计算月度额度
     // 避免用管理员自己的额度数据影响申请人的报销显示
     let userId = sessionUserId
@@ -318,10 +327,9 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
 
     // 获取当前报销月份(使用与创建报销单相同的逻辑)
     const now = new Date()
-    const { calculateReimbursementMonth } = await import('../utils/reimbursement.js')
     const currentReimbursementMonth = calculateReimbursementMonth(now, 'basic')
 
-    // 查询当前报销月份所有已提交(非草稿、非驳回)的基础报销单中的运输/交通/汽油/柴油/通行费类发票
+    // 查询当前报销月份所有已提交(非草稿、非驳回)的基础报销单中的交通额度类发票
     // 如果提供了 excludeId，则排除该报销单（用于编辑模式）
     let sql = `
       SELECT COALESCE(SUM(ri.amount), 0) as used_amount
@@ -342,11 +350,7 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
 
     sql += `
         AND (
-          LOWER(ri.category) LIKE '%运输%'
-          OR LOWER(ri.category) LIKE '%交通%'
-          OR LOWER(ri.category) LIKE '%汽油%'
-          OR LOWER(ri.category) LIKE '%柴油%'
-          OR LOWER(ri.category) LIKE '%通行费%'
+          ${buildTransportFuelCategoryCondition('ri')}
         )
     `
 
@@ -1512,7 +1516,7 @@ router.post('/create', requireAuth, async (req, res) => {
     // 服务端统一重算核减金额，不信任客户端传入的 deductedAmount
     let processedInvoices = invoices.map((inv: any) => ({ ...inv, deductedAmount: 0 }))
     if (type === 'basic') {
-      // 获取当月已使用的运输/交通/汽油/柴油/通行费类发票额度
+      // 获取当月已使用的交通额度类发票额度
       // 使用 calculateReimbursementMonth 确保与入库时的 reimbursement_month 口径一致（本地时区）
       const currentMonth = calculateReimbursementMonth(new Date(), 'basic')
       const monthlyUsedResult = await db.prepare(`
@@ -1524,68 +1528,46 @@ router.post('/create', requireAuth, async (req, res) => {
         AND r.reimbursement_month = ?
         AND r.status NOT IN ('draft', 'rejected')
         AND (
-          LOWER(i.category) LIKE '%运输%'
-          OR LOWER(i.category) LIKE '%交通%'
-          OR LOWER(i.category) LIKE '%汽油%'
-          OR LOWER(i.category) LIKE '%柴油%'
-          OR LOWER(i.category) LIKE '%通行费%'
+          ${buildTransportFuelCategoryCondition('i')}
         )
       `).get(userId, currentMonth) as { used_amount: number }
 
       const monthlyUsedQuota = monthlyUsedResult?.used_amount || 0
       const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota)
 
-      // 计算本次提交的运输/交通/汽油/柴油/通行费/通行费类发票总额
+      // 计算本次提交的交通额度类发票总额
       let transportFuelTotal = 0
-      const transportFuelInvoices: any[] = []
 
       processedInvoices = invoices.map((inv: any) => {
-        const category = (inv.category || '').toLowerCase()
-        const isTransportOrFuel =
-          category.includes('运输') ||
-          category.includes('交通') ||
-          category.includes('汽油') ||
-          category.includes('柴油') ||
-          category.includes('通行费')
+        const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
         if (isTransportOrFuel) {
-          transportFuelInvoices.push(inv)
           transportFuelTotal += inv.amount || 0
         }
 
         return { ...inv, deductedAmount: 0 }
       })
 
-      // 如果运输/交通/汽油/柴油/通行费类发票总额超过剩余额度，需要核减
+      // 如果交通额度类发票总额超过剩余额度，需要核减
       if (transportFuelTotal > remainingQuota) {
         const deductionAmountCents = Math.round((transportFuelTotal - remainingQuota) * 100)
         const transportFuelTotalCents = Math.round(transportFuelTotal * 100)
 
-        // 按比例分配核减金额到每张运输/交通/汽油/柴油/通行费类发票
+        // 按比例分配核减金额到每张交通额度类发票
         // 使用分（cents）来避免精度问题
         let accumulatedDeductionCents = 0
         const transportInvoices: any[] = []
 
         processedInvoices.forEach((inv: any) => {
-          const category = (inv.category || '').toLowerCase()
-          const isTransportOrFuel =
-            category.includes('运输') ||
-            category.includes('交通') ||
-            category.includes('汽油') ||
-            category.includes('柴油')
+          const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
           if (isTransportOrFuel) {
             transportInvoices.push(inv)
           }
         })
 
-        processedInvoices = processedInvoices.map((inv: any, index: number) => {
-          const category = (inv.category || '').toLowerCase()
-          const isTransportOrFuel =
-            category.includes('运输') ||
-            category.includes('交通') ||
-            category.includes('汽油') ||
-            category.includes('柴油')
+        processedInvoices = processedInvoices.map((inv: any) => {
+          const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
           if (isTransportOrFuel && transportFuelTotalCents > 0) {
             const invAmountCents = Math.round((inv.amount || 0) * 100)
@@ -2883,7 +2865,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     const reimbursementMonth = calculateReimbursementMonth(new Date(), existingReimbursement.type)
 
     if (existingReimbursement.type === 'basic') {
-      // 获取当月已使用的运输/交通/汽油/柴油/通行费类发票额度（排除当前报销单自身）
+      // 获取当月已使用的交通额度类发票额度（排除当前报销单自身）
       // 口径与前端 transport-fuel-quota 一致：排除草稿和已驳回
       const monthlyUsedResult = await db.prepare(`
         SELECT COALESCE(SUM(i.amount), 0) as used_amount
@@ -2895,39 +2877,27 @@ router.put('/:id', requireAuth, async (req, res) => {
         AND r.status NOT IN ('draft', 'rejected')
         AND r.id != ?
         AND (
-          LOWER(i.category) LIKE '%运输%'
-          OR LOWER(i.category) LIKE '%交通%'
-          OR LOWER(i.category) LIKE '%汽油%'
-          OR LOWER(i.category) LIKE '%柴油%'
-          OR LOWER(i.category) LIKE '%通行费%'
+          ${buildTransportFuelCategoryCondition('i')}
         )
       `).get(userId, reimbursementMonth, id) as { used_amount: number }
 
       const monthlyUsedQuota = monthlyUsedResult?.used_amount || 0
       const remainingQuota = Math.max(0, 1500 - monthlyUsedQuota)
 
-      // 计算本次提交的运输/交通/汽油/柴油/通行费/通行费类发票总额
+      // 计算本次提交的交通额度类发票总额
       let transportFuelTotal = 0
-      const transportFuelInvoices: any[] = []
 
       processedInvoices = invoices.map((inv: any) => {
-        const category = (inv.category || '').toLowerCase()
-        const isTransportOrFuel =
-          category.includes('运输') ||
-          category.includes('交通') ||
-          category.includes('汽油') ||
-          category.includes('柴油') ||
-          category.includes('通行费')
+        const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
         if (isTransportOrFuel) {
-          transportFuelInvoices.push(inv)
           transportFuelTotal += inv.amount || 0
         }
 
         return { ...inv, deductedAmount: 0 }
       })
 
-      // 如果运输/交通/汽油/柴油/通行费类发票总额超过剩余额度，需要核减
+      // 如果交通额度类发票总额超过剩余额度，需要核减
       if (transportFuelTotal > remainingQuota) {
         const deductionAmountCents = Math.round((transportFuelTotal - remainingQuota) * 100)
         const transportFuelTotalCents = Math.round(transportFuelTotal * 100)
@@ -2936,12 +2906,7 @@ router.put('/:id', requireAuth, async (req, res) => {
         const transportInvoices: any[] = []
 
         processedInvoices.forEach((inv: any) => {
-          const category = (inv.category || '').toLowerCase()
-          const isTransportOrFuel =
-            category.includes('运输') ||
-            category.includes('交通') ||
-            category.includes('汽油') ||
-            category.includes('柴油')
+          const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
           if (isTransportOrFuel) {
             transportInvoices.push(inv)
@@ -2949,12 +2914,7 @@ router.put('/:id', requireAuth, async (req, res) => {
         })
 
         processedInvoices = processedInvoices.map((inv: any) => {
-          const category = (inv.category || '').toLowerCase()
-          const isTransportOrFuel =
-            category.includes('运输') ||
-            category.includes('交通') ||
-            category.includes('汽油') ||
-            category.includes('柴油')
+          const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
           if (isTransportOrFuel && transportFuelTotalCents > 0) {
             const invAmountCents = Math.round((inv.amount || 0) * 100)

@@ -468,6 +468,26 @@ function validatePaymentProof(rawText: string, result: PaymentProofOcrResult): {
   return { isValid: true }
 }
 
+export function parseAndValidatePaymentProofText(
+  text: string,
+): PaymentProofOcrResult {
+  const result: PaymentProofOcrResult = {
+    payer: '',
+    payee: '',
+    payeeAccount: '',
+    amount: 0,
+    proofNo: '',
+    rawText: text,
+  }
+
+  parsePaymentProofText(text, result)
+  const validation = validatePaymentProof(text, result)
+  if (!validation.isValid) {
+    throw new Error(validation.reason || '此不是付款回单')
+  }
+  return result
+}
+
 // ==================== 主识别函数 ====================
 
 /**
@@ -499,23 +519,8 @@ export async function recognizePaymentProof(
     console.log('📄 识别文本成功，长度:', text.length, '字符')
     console.log('📄 完整识别文本:\n---START---\n' + text + '\n---END---')
 
-    const result: PaymentProofOcrResult = {
-      payer: '',
-      payee: '',
-      payeeAccount: '',
-      amount: 0,
-      proofNo: '',
-      rawText: text,
-    }
-
-    // 解析文本，提取各字段
-    parsePaymentProofText(text, result)
-
-    // 验证是否为银行回单（检查关键字和必要字段）
-    const validation = validatePaymentProof(text, result)
-    if (!validation.isValid) {
-      throw new Error(validation.reason || '此不是付款回单')
-    }
+    // 和其他付款回单入口复用同一解析及真实性校验。
+    const result = parseAndValidatePaymentProofText(text)
 
     console.log('📋 最终结果:', {
       payer: result.payer || '未识别',

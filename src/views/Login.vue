@@ -113,6 +113,21 @@ const loginRules: FormRules = {
   ],
 }
 
+function goToAuthenticatedHome() {
+  if (authStore.user?.role === 'boss') {
+    router.push({ name: 'BossDashboard' })
+    return
+  }
+
+  if (!authStore.hasCompletedOnboarding) {
+    router.push({ name: 'Onboarding' })
+    return
+  }
+
+  const redirect = (route.query.redirect as string) || '/'
+  router.push(redirect)
+}
+
 // 账号密码登录
 async function handleLogin() {
   if (!loginFormRef.value) return
@@ -134,13 +149,7 @@ async function handleLogin() {
 
     if (response.data.success) {
       await authStore.checkSession()
-      // 登录后检查入职信息是否已完成，未完成则跳转到入职页面
-      if (!authStore.hasCompletedOnboarding) {
-        router.push({ name: 'Onboarding' })
-      } else {
-        const redirect = (route.query.redirect as string) || '/'
-        router.push(redirect)
-      }
+      goToAuthenticatedHome()
     }
   } catch (err: any) {
     const status = err.response?.status
@@ -172,12 +181,7 @@ onMounted(async () => {
 
   // 如果已经登录，检查强制修改密码和入职状态后跳转
   if (authStore.isLoggedIn) {
-    if (!authStore.hasCompletedOnboarding) {
-      router.push({ name: 'Onboarding' })
-    } else {
-      const redirect = (route.query.redirect as string) || '/'
-      router.push(redirect)
-    }
+    goToAuthenticatedHome()
     return
   }
 
@@ -187,12 +191,7 @@ onMounted(async () => {
   loading.value = false
 
   if (isLoggedIn) {
-    if (!authStore.hasCompletedOnboarding) {
-      router.push({ name: 'Onboarding' })
-    } else {
-      const redirect = (route.query.redirect as string) || '/'
-      router.push(redirect)
-    }
+    goToAuthenticatedHome()
   }
 })
 </script>

@@ -34,6 +34,19 @@ interface XmlInvoiceResult {
   type?: string
 }
 
+const TRANSPORT_PREPAID_CARD_PATTERN = /(市政交通一卡通|交通一卡通|交通卡|一卡通|公交卡|地铁卡|乘车卡)(?:充值|储值|加值)?/
+
+function extractTransportPrepaidCardType(text: string): string | null {
+  const compactText = text.replace(/\s+/g, '')
+  if (!compactText.includes('*预付卡销售*')) return null
+
+  const prepaidProject = compactText.match(/\*预付卡销售\*([^*；;，,。]*)/)
+  const projectDetail = prepaidProject?.[1] || compactText
+  const transportCardMatch = projectDetail.match(TRANSPORT_PREPAID_CARD_PATTERN)
+
+  return transportCardMatch?.[0] || null
+}
+
 /**
  * 通过 pdftohtml -xml 坐标方案提取发票所有关键字段
  * 返回 null 表示 pdftohtml 不可用或 PDF 无文字层（扫描件）
@@ -148,15 +161,22 @@ async function extractInvoiceFromXml(pdfPath: string): Promise<XmlInvoiceResult 
     if (result.date) console.log('📅 XML开票日期:', result.date)
 
     // ── 4. 提取报销类型（项目名称 *...*格式）──
-    // 先找通行费（高速费需特殊处理）
-    const tollNode = textNodes.find(n => /\*[^*]+\*\s*通行费/.test(n.text))
-    if (tollNode) {
-      result.type = '通行费'
+    // 预付卡销售需要继续看后面的具体名称，交通卡充值应进入交通额度
+    const allNodeText = textNodes.map(n => n.text).join('')
+    const transportPrepaidCardType = extractTransportPrepaidCardType(allNodeText)
+    if (transportPrepaidCardType) {
+      result.type = transportPrepaidCardType
     } else {
-      const typeNode = textNodes.find(n => /\*[^*]+\*/.test(n.text))
-      if (typeNode) {
-        const m2 = typeNode.text.match(/\*([^*]+)\*/)
-        if (m2) result.type = m2[1].trim()
+      // 先找通行费（高速费需特殊处理）
+      const tollNode = textNodes.find(n => /\*[^*]+\*\s*通行费/.test(n.text))
+      if (tollNode) {
+        result.type = '通行费'
+      } else {
+        const typeNode = textNodes.find(n => /\*[^*]+\*/.test(n.text))
+        if (typeNode) {
+          const m2 = typeNode.text.match(/\*([^*]+)\*/)
+          if (m2) result.type = m2[1].trim()
+        }
       }
     }
     if (result.type) console.log('📋 XML报销类型:', result.type)
@@ -179,7 +199,7 @@ function preprocessOcrText(text: string): string {
 
   // 修复 OCR 常见的数字间空格（如 "123 456 789" → 保留原文，但在金额匹配时处理）
   // 修复 OCR 将 "¥" 识别为其他字符的情况
-  processed = processed.replace(/[＄﹩\$]/g, '¥')
+  processed = processed.replace(/[＄﹩$]/g, '¥')
 
   // 修复 OCR 将中文冒号识别为其他字符
   processed = processed.replace(/[∶︰]/g, '：')
@@ -483,20 +503,27 @@ function parseInvoiceText(text: string): InvoiceOcrResult {
     result.type = '铁路电子客票'
     console.log('📋 铁路电子客票，自动填充报销类型:', result.type)
   } else {
-    // 特殊处理：*经营租赁*通行费 -> 提取 "通行费"（高速费电子发票需参与核减）
-    // 精确匹配项目名称格式 *...*通行费，避免全文搜索误判
-    const tollPattern = /\*([^*]+)\*\s*通行费/
-    const tollMatch = text.match(tollPattern)
-    if (tollMatch) {
-      result.type = '通行费'
-      console.log('📋 检测到通行费发票（项目名称: *' + tollMatch[1] + '*通行费），报销类型设为:', result.type)
+    // 预付卡销售需继续看后缀，避免交通卡充值被归为普通"预付卡销售"
+    const transportPrepaidCardType = extractTransportPrepaidCardType(text)
+    if (transportPrepaidCardType) {
+      result.type = transportPrepaidCardType
+      console.log('📋 检测到交通预付卡发票，报销类型设为:', result.type)
     } else {
-      // 通用格式：*保险服务*附加公共场所 -> 提取 "保险服务"
-      const typePattern = /\*([^*]+)\*/
-      const typeMatch = text.match(typePattern)
-      if (typeMatch && typeMatch[1]) {
-        result.type = typeMatch[1].trim()
-        console.log('📋 提取到报销类型:', result.type)
+      // 特殊处理：*经营租赁*通行费 -> 提取 "通行费"（高速费电子发票需参与核减）
+      // 精确匹配项目名称格式 *...*通行费，避免全文搜索误判
+      const tollPattern = /\*([^*]+)\*\s*通行费/
+      const tollMatch = text.match(tollPattern)
+      if (tollMatch) {
+        result.type = '通行费'
+        console.log('📋 检测到通行费发票（项目名称: *' + tollMatch[1] + '*通行费），报销类型设为:', result.type)
+      } else {
+        // 通用格式：*保险服务*附加公共场所 -> 提取 "保险服务"
+        const typePattern = /\*([^*]+)\*/
+        const typeMatch = text.match(typePattern)
+        if (typeMatch && typeMatch[1]) {
+          result.type = typeMatch[1].trim()
+          console.log('📋 提取到报销类型:', result.type)
+        }
       }
     }
   }

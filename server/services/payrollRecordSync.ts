@@ -41,8 +41,10 @@ export async function syncEmployeeCurrentAndFuturePayroll(
          ep.hire_date
        ) AS salary_start_date
      FROM employee_profiles ep
+     LEFT JOIN users u ON u.id = ep.user_id
      LEFT JOIN employee_salary_profiles esp ON esp.employee_id = ep.id
-     WHERE ep.id = $1`,
+     WHERE ep.id = $1
+       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')`,
     [employeeId],
   );
   const source = sourceResult.rows[0];
@@ -56,32 +58,48 @@ export async function syncEmployeeCurrentAndFuturePayroll(
 
   if (options.ensureCurrentMonth) {
     const previousBaseResult = await client.query<{
+      housing_fund_base: string;
       contribution_base: string;
     }>(
-      `SELECT contribution_base::text AS contribution_base
+      `SELECT
+         housing_fund_base::text AS housing_fund_base,
+         contribution_base::text AS contribution_base
        FROM payroll_records
        WHERE employee_id = $1 AND payroll_month < $2
        ORDER BY payroll_month DESC
        LIMIT 1`,
       [employeeId, currentPayrollMonth],
     );
-    const previousBase = previousBaseResult.rows[0]?.contribution_base;
+    const previousHousingFundBase =
+      previousBaseResult.rows[0]?.housing_fund_base;
+    const previousContributionBase =
+      previousBaseResult.rows[0]?.contribution_base;
+    const defaultHousingFundBase =
+      previousHousingFundBase &&
+      comparePayrollAmounts(previousHousingFundBase, "0") > 0
+        ? previousHousingFundBase
+        : currentAutomaticSalary;
     const defaultContributionBase =
-      previousBase && comparePayrollAmounts(previousBase, "0") > 0
-        ? previousBase
+      previousContributionBase &&
+      comparePayrollAmounts(previousContributionBase, "0") > 0
+        ? previousContributionBase
         : currentAutomaticSalary;
 
     await client.query(
       `INSERT INTO payroll_records (
          id, employee_id, payroll_month, automatic_salary, monthly_salary,
-         contribution_base, individual_income_tax, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4::numeric,$4::numeric,$5::numeric,0,$6,$6)
+         housing_fund_base, contribution_base, individual_income_tax,
+         created_at, updated_at
+       ) VALUES (
+         $1,$2,$3,$4::numeric,$4::numeric,$5::numeric,$6::numeric,0,$7,$7
+       )
        ON CONFLICT (employee_id, payroll_month) DO NOTHING`,
       [
         nanoid(),
         employeeId,
         currentPayrollMonth,
         currentAutomaticSalary,
+        defaultHousingFundBase,
         defaultContributionBase,
         options.updatedAt,
       ],
@@ -105,7 +123,16 @@ export async function syncEmployeeCurrentAndFuturePayroll(
     );
     await client.query(
       `UPDATE payroll_records
-       SET automatic_salary = $1::numeric,
+       SET version = version + CASE
+             WHEN automatic_salary IS DISTINCT FROM $1::numeric
+               OR (
+                 ($2::boolean OR NOT monthly_salary_is_manual)
+                 AND monthly_salary IS DISTINCT FROM $1::numeric
+               )
+               OR ($2::boolean AND monthly_salary_is_manual)
+             THEN 1 ELSE 0
+           END,
+           automatic_salary = $1::numeric,
            monthly_salary = CASE
              WHEN $2::boolean OR NOT monthly_salary_is_manual
                THEN $1::numeric

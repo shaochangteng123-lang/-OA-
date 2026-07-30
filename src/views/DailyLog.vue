@@ -688,10 +688,6 @@ const pendingStore = usePendingStore()
 const commentInput = ref('')
 const commentLoading = ref(false)
 const commentReplyTarget = ref<{ id: string; userName: string } | null>(null)
-const canInitiateComment = computed(() => {
-  const role = authStore.user?.role
-  return role && ['super_admin', 'general_manager'].includes(role)
-})
 
 const showUnreadHint = ref(false)
 const unreadCommentCount = ref(0)
@@ -737,7 +733,6 @@ const weeklySupplementContent = ref('')
 const weeklySupplementSubmitting = ref(false)
 const weeklySupplementMode = ref(false)
 const weeklySupplementOriginalContent = ref('')
-const weeklyReportExpandedSet = ref<Set<string>>(new Set())
 
 // 日历视图状态
 interface CalendarDay {
@@ -828,13 +823,6 @@ function canSupplementReport(summary: WeeklySummary): boolean {
   nextSunday.setDate(lockedDate.getDate() + (7 - lockedDayOfWeek) + 7)
   nextSunday.setHours(23, 59, 59, 999)
   return new Date() <= nextSunday
-}
-
-function toggleWeeklyReport(id: string) {
-  const s = new Set(weeklyReportExpandedSet.value)
-  if (s.has(id)) s.delete(id)
-  else s.add(id)
-  weeklyReportExpandedSet.value = s
 }
 
 function getReportLabel(summary: WeeklySummary): string {
@@ -1640,39 +1628,6 @@ function getExtClass(fileName: string): string {
   if (['doc', 'docx'].includes(ext)) return 'ext-word'
   if (['xls', 'xlsx'].includes(ext)) return 'ext-excel'
   return 'ext-other'
-}
-
-
-function splitReportByDate(report: WeeklySummary): { html: string; date: string; attachments: Attachment[] }[] {
-  const content = report.content || ''
-  const attachments = report.attachments || []
-
-  // 按【YYYY-MM-DD】分割内容
-  const datePattern = /【(\d{4}-\d{2}-\d{2})】/g
-  const matches = [...content.matchAll(datePattern)]
-
-  if (matches.length === 0) {
-    return [{ html: content, date: '', attachments }]
-  }
-
-  const sections: { html: string; date: string; attachments: Attachment[] }[] = []
-
-  // 如果第一个日期标记前有内容
-  if (matches[0].index! > 0) {
-    const before = content.slice(0, matches[0].index!).trim()
-    if (before) sections.push({ html: before, date: '', attachments: [] })
-  }
-
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i].index!
-    const end = i + 1 < matches.length ? matches[i + 1].index! : content.length
-    const date = matches[i][1]
-    const html = content.slice(start, end).trim()
-    const dayAtts = attachments.filter(a => a.logDate === date)
-    sections.push({ html, date, attachments: dayAtts })
-  }
-
-  return sections
 }
 
 async function handleDownloadReportById(report: WeeklySummary) {

@@ -1,4 +1,7 @@
 import { pool } from '../db/index.js'
+import { isValidLeaveDate } from '../utils/leave.js'
+export { calculateAnnualLeaveDays, calculateAnnualLeaveEntitlement } from '../utils/leave.js'
+export { isValidLeaveDate }
 
 /**
  * 工作日计算服务
@@ -20,12 +23,6 @@ export type LeaveHalf = 'morning' | 'afternoon'
 export interface LeaveYearAllocation {
   year: number
   days: number
-}
-
-export function isValidLeaveDate(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
-  const date = new Date(`${value}T00:00:00`)
-  return !Number.isNaN(date.getTime()) && formatDate(date) === value
 }
 
 /**
@@ -127,30 +124,6 @@ export async function calculateLeaveDaysByYear(
   }
 
   return allocations
-}
-
-/**
- * 根据入职日期和指定年份计算年假额度
- * - 工龄 < 1 年：0 天
- * - 1 ≤ 工龄 < 10 年：5 天
- * - 10 ≤ 工龄 < 20 年：10 天
- * - 工龄 ≥ 20 年：15 天
- */
-export function calculateAnnualLeaveDays(hireDate: Date | string, year: number): number {
-  const hire = typeof hireDate === 'string' ? new Date(hireDate) : hireDate
-  if (isNaN(hire.getTime())) return 0
-
-  // 以指定年份1月1日为基准计算工龄
-  const baseDate = new Date(`${year}-01-01`)
-  const diffMs = baseDate.getTime() - hire.getTime()
-  if (diffMs <= 0) return 0 // 当年入职，本年无年假
-
-  const yearsOfService = diffMs / (1000 * 60 * 60 * 24 * 365.25)
-
-  if (yearsOfService < 1) return 0
-  if (yearsOfService < 10) return 5
-  if (yearsOfService < 20) return 10
-  return 15
 }
 
 /**

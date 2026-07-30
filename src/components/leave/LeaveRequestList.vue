@@ -4,9 +4,9 @@
     <el-tabs v-model="activeTab" @tab-change="handleTabChange">
       <el-tab-pane label="全部" name="" />
       <el-tab-pane label="审批中" name="pending" />
+      <el-tab-pane label="草稿" name="draft" />
       <el-tab-pane label="已批准" name="approved" />
       <el-tab-pane label="已驳回" name="rejected" />
-      <el-tab-pane label="已撤销" name="cancelled" />
     </el-tabs>
 
     <!-- 表格 -->
@@ -18,6 +18,13 @@
       style="width: 100%"
       empty-text="暂无申请记录"
     >
+      <el-table-column
+        type="index"
+        label="序号"
+        width="60"
+        align="center"
+        :index="getRowIndex"
+      />
       <el-table-column label="申请编号" prop="request_no" width="160" align="center" />
       <el-table-column label="假期类型" prop="leave_type_name" width="90" align="center" />
       <el-table-column label="时间段" min-width="200" align="center">
@@ -50,14 +57,21 @@
             link type="warning" size="small"
             @click="handleCancel(row)"
           >
-            撤销
+            撤回
           </el-button>
           <el-button
-            v-if="row.status === 'rejected'"
+            v-if="row.status === 'rejected' || row.status === 'draft'"
             link type="primary" size="small"
             @click="handleResubmit(row)"
           >
-            修改重提
+            {{ row.status === 'draft' ? '重新提交' : '修改重提' }}
+          </el-button>
+          <el-button
+            v-if="row.status === 'draft'"
+            link type="danger" size="small"
+            @click="handleDeleteDraft(row)"
+          >
+            删除
           </el-button>
         </template>
       </el-table-column>
@@ -96,7 +110,7 @@
     <!-- 修改重提对话框 -->
     <el-dialog
       v-model="resubmitVisible"
-      title="修改并重新提交"
+      :title="resubmitRequest?.status === 'draft' ? '编辑草稿并重新提交' : '修改并重新提交'"
       width="600px"
       :close-on-click-modal="false"
     >
@@ -115,7 +129,14 @@ import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import LeaveApprovalTimeline from './LeaveApprovalTimeline.vue'
 import LeaveResubmitForm from './LeaveResubmitForm.vue'
-import { getMyRequests, getRequestDetail, cancelRequest, type LeaveRequest, type LeaveRequestDetail } from '@/utils/leaveApi'
+import {
+  getMyRequests,
+  getRequestDetail,
+  cancelRequest,
+  deleteDraftRequest,
+  type LeaveRequest,
+  type LeaveRequestDetail,
+} from '@/utils/leaveApi'
 
 const emit = defineEmits<{
   (e: 'refresh'): void
@@ -132,14 +153,20 @@ const detailRequest = ref<LeaveRequestDetail | null>(null)
 const resubmitVisible = ref(false)
 const resubmitRequest = ref<LeaveRequest | null>(null)
 
+function getRowIndex(index: number): number {
+  return (currentPage.value - 1) * pageSize.value + index + 1
+}
+
 function statusLabel(status: string): string {
-  const map: Record<string, string> = { pending: '审批中', approved: '已批准', rejected: '已驳回', cancelled: '已撤销' }
+  const map: Record<string, string> = {
+    draft: '草稿', pending: '审批中', approved: '已批准', rejected: '已驳回', cancelled: '已撤销'
+  }
   return map[status] || status
 }
 
 function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' | undefined {
   const map: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
-    pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
+    draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return map[status] || undefined
 }
@@ -183,18 +210,40 @@ async function handleView(row: LeaveRequest) {
 }
 
 async function handleCancel(row: LeaveRequest) {
-  await ElMessageBox.confirm('确定要撤销这条请假申请吗？', '提示', {
-    confirmButtonText: '确定撤销',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
   try {
+    await ElMessageBox.confirm('撤回后申请将转为草稿，并释放本次占用的假期余额。', '确认撤回', {
+      confirmButtonText: '撤回并保存草稿',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
     await cancelRequest(row.id)
-    ElMessage.success('已撤销')
-    fetchList()
+    ElMessage.success('已撤回并保存为草稿')
+    await fetchList()
     emit('refresh')
   } catch (err: any) {
-    ElMessage.error(err?.response?.data?.message || '撤销失败')
+    if (err === 'cancel' || err === 'close') return
+    ElMessage.error(err?.response?.data?.message || '撤回失败')
+  }
+}
+
+async function handleDeleteDraft(row: LeaveRequest) {
+  try {
+    await ElMessageBox.confirm(
+      '删除后该申请的全部历史、审批记录和附件将永久清除，且无法恢复。',
+      '永久删除草稿',
+      {
+        confirmButtonText: '永久删除',
+        cancelButtonText: '取消',
+        type: 'error',
+      }
+    )
+    await deleteDraftRequest(row.id)
+    ElMessage.success('草稿已永久删除')
+    await fetchList()
+    emit('refresh')
+  } catch (err: any) {
+    if (err === 'cancel' || err === 'close') return
+    ElMessage.error(err?.response?.data?.message || '删除草稿失败')
   }
 }
 

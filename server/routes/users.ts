@@ -6,20 +6,65 @@ import { requireAuth, requireAdmin } from '../middleware/auth.js'
 import type { UserRow, UserActivityRow } from '../types/database.js'
 import { hashPassword, validatePasswordStrength, validateUsername } from '../utils/password.js'
 import {
+  getNextEmployeeNumber,
   isValidEmployeeNumber,
   normalizeEmployeeNumber,
 } from '../utils/employee-number.js'
+import {
+  parseStoredDepartmentPositionMap,
+  validateDepartmentPositionPair,
+  type DepartmentPositionMap,
+} from '../utils/department-position.js'
+import {
+  getBossRoleTransitionError,
+  getUserCreationRequiredFieldsError,
+  isBossRole,
+  requiresEmployeeProfile,
+  resolveUserAccountName,
+} from '../utils/boss-role.js'
 
 const router = express.Router()
 
-const USER_ROLES = ['super_admin', 'admin', 'general_manager', 'user', 'guest'] as const
+const USER_ROLES = ['super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest'] as const
 const USER_STATUSES = ['active', 'inactive'] as const
 const EMPLOYMENT_STATUSES = ['probation', 'active', 'resigned'] as const
+const EMPLOYEE_NUMBER_SOURCE_QUERY = `
+  SELECT employee_no
+  FROM users
+  WHERE employee_no IS NOT NULL AND BTRIM(employee_no) <> ''
+  UNION
+  SELECT employee_no
+  FROM employee_profiles
+  WHERE employee_no IS NOT NULL AND BTRIM(employee_no) <> ''
+`
+
+type EmployeeNumberRow = {
+  employee_no: string | null
+}
+
+async function getDepartmentPositionMap(): Promise<DepartmentPositionMap> {
+  const config = await db.prepare(
+    'SELECT config_json FROM department_position_configs WHERE id = ?',
+  ).get('default') as { config_json: string } | undefined
+  return parseStoredDepartmentPositionMap(config?.config_json)
+}
 
 class UserOperationError extends Error {
   constructor(message: string, public readonly statusCode = 400) {
     super(message)
     this.name = 'UserOperationError'
+  }
+}
+
+async function getNextAvailableEmployeeNumber(client?: PoolClient): Promise<string> {
+  const rows = client
+    ? (await client.query<EmployeeNumberRow>(EMPLOYEE_NUMBER_SOURCE_QUERY)).rows
+    : await db.prepare(EMPLOYEE_NUMBER_SOURCE_QUERY).all() as EmployeeNumberRow[]
+
+  try {
+    return getNextEmployeeNumber(rows.map((item) => item.employee_no))
+  } catch (error) {
+    throw new UserOperationError((error as Error).message, 409)
   }
 }
 
@@ -62,7 +107,13 @@ router.get('/list', requireAuth, async (req, res) => {
 
     // 只返回激活状态的用户
     const users = await db
-      .prepare('SELECT id, name, email, avatar_url FROM users WHERE status = ? ORDER BY name ASC')
+      .prepare(`
+        SELECT id, name, email, avatar_url
+        FROM users
+        WHERE status = ?
+          AND role <> 'boss'
+        ORDER BY name ASC
+      `)
       .all('active') as Array<{ id: string; name: string; email: string | null; avatar_url: string | null }>
 
     const result = users.map((user) => ({
@@ -93,6 +144,7 @@ router.get('/directory', requireAuth, async (_req, res) => {
         SELECT id, name, avatar_url, department, position, role
         FROM users
         WHERE status = 'active'
+          AND role <> 'boss'
         ORDER BY name ASC
       `)
       .all() as Array<{
@@ -210,8 +262,22 @@ router.post('/', requireAdmin, async (req, res) => {
       })
     }
 
-    const normalizedEmployeeNo = normalizeEmployeeNumber(employeeNo ?? user.employee_no)
-    if (!isValidEmployeeNumber(normalizedEmployeeNo)) {
+    const bossRoleTransitionError = getBossRoleTransitionError(user.role, role)
+    if (bossRoleTransitionError) {
+      return res.status(400).json({
+        success: false,
+        message: bossRoleTransitionError,
+      })
+    }
+
+    const isBoss = isBossRole(role)
+    const needsEmployeeProfile = requiresEmployeeProfile(role)
+    const normalizedEmployeeNo = needsEmployeeProfile
+      ? normalizeEmployeeNumber(employeeNo ?? user.employee_no)
+      : isBoss
+        ? null
+        : user.employee_no
+    if (needsEmployeeProfile && !isValidEmployeeNumber(normalizedEmployeeNo)) {
       return res.status(400).json({
         success: false,
         message: '员工编号格式应为 YULI-CS 加 3 至 6 位数字',
@@ -236,6 +302,25 @@ router.post('/', requireAdmin, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: '无效的员工状态',
+      })
+    }
+
+    const organizationSelection = needsEmployeeProfile
+      ? validateDepartmentPositionPair(
+          await getDepartmentPositionMap(),
+          department,
+          position,
+          true,
+        )
+      : {
+          department: isBoss ? null : user.department,
+          position: isBoss ? null : user.position,
+          error: null,
+        }
+    if (organizationSelection.error) {
+      return res.status(400).json({
+        success: false,
+        message: organizationSelection.error,
       })
     }
 
@@ -295,7 +380,7 @@ router.post('/', requireAdmin, async (req, res) => {
     }
 
     // 验证手机号格式（如果提供）
-    if (mobile && !/^1[3-9]\d{9}$/.test(mobile)) {
+    if (needsEmployeeProfile && mobile && !/^1[3-9]\d{9}$/.test(mobile)) {
       return res.status(400).json({
         success: false,
         message: '手机号格式不正确',
@@ -303,7 +388,7 @@ router.post('/', requireAdmin, async (req, res) => {
     }
 
     // 验证邮箱格式（如果提供）
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (needsEmployeeProfile && email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({
         success: false,
         message: '邮箱格式不正确',
@@ -311,14 +396,14 @@ router.post('/', requireAdmin, async (req, res) => {
     }
 
     // 验证银行卡信息格式（如果提供）
-    if (bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    if (needsEmployeeProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
         success: false,
         message: '收款人手机号格式不正确',
       })
     }
 
-    if (bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+    if (needsEmployeeProfile && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
       return res.status(400).json({
         success: false,
         message: '银行卡号格式不正确（16-19位数字）',
@@ -326,17 +411,21 @@ router.post('/', requireAdmin, async (req, res) => {
     }
 
     const passwordHash = password ? await hashPassword(password) : null
+    const nextUsername = username || user.username
+    const nextName = resolveUserAccountName(role, nextUsername, name, user.name)
     await db.transaction(async (client) => {
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['employee-number-write'])
 
-      const duplicateEmployeeNo = await txGet<{ id: string }>(
-        client,
-        'SELECT id FROM users WHERE employee_no = ? AND id != ?',
-        normalizedEmployeeNo,
-        id,
-      )
-      if (duplicateEmployeeNo) {
-        throw new UserOperationError('员工编号已被使用', 409)
+      if (requiresEmployeeProfile(role)) {
+        const duplicateEmployeeNo = await txGet<{ id: string }>(
+          client,
+          'SELECT id FROM users WHERE employee_no = ? AND id != ?',
+          normalizedEmployeeNo,
+          id,
+        )
+        if (duplicateEmployeeNo) {
+          throw new UserOperationError('员工编号已被使用', 409)
+        }
       }
 
       if (passwordHash) {
@@ -350,32 +439,76 @@ router.post('/', requireAdmin, async (req, res) => {
              department = ?, position = ?, employee_no = ?, bank_account_name = ?,
              bank_account_phone = ?, bank_name = ?, bank_account_number = ?, updated_at = ?
          WHERE id = ?`,
-        username || user.username,
-        name || user.name,
-        email || user.email || null,
-        mobile || user.mobile || null,
+        nextUsername,
+        nextName,
+        needsEmployeeProfile ? email || user.email || null : isBoss ? null : user.email,
+        needsEmployeeProfile ? mobile || user.mobile || null : isBoss ? null : user.mobile,
         role,
         status,
-        department || null,
-        position || null,
+        organizationSelection.department,
+        organizationSelection.position,
         normalizedEmployeeNo,
-        bankAccountName || user.bank_account_name || null,
-        bankAccountPhone || user.bank_account_phone || null,
-        bankName || user.bank_name || null,
-        bankAccountNumber || user.bank_account_number || null,
+        needsEmployeeProfile
+          ? bankAccountName || user.bank_account_name || null
+          : isBoss ? null : user.bank_account_name,
+        needsEmployeeProfile
+          ? bankAccountPhone || user.bank_account_phone || null
+          : isBoss ? null : user.bank_account_phone,
+        needsEmployeeProfile ? bankName || user.bank_name || null : isBoss ? null : user.bank_name,
+        needsEmployeeProfile
+          ? bankAccountNumber || user.bank_account_number || null
+          : isBoss ? null : user.bank_account_number,
         now,
         id,
       )
 
-      const profile = await txGet<{ id: string }>(client, 'SELECT id FROM employee_profiles WHERE user_id = ?', id)
+      if (!needsEmployeeProfile) return
+
+      const profile = await txGet<{ id: string; employment_status: string | null }>(
+        client,
+        'SELECT id, employment_status FROM employee_profiles WHERE user_id = ? FOR UPDATE',
+        id,
+      )
       if (profile) {
+        if (
+          profile.employment_status === 'resigned'
+          && employmentStatus
+          && employmentStatus !== 'resigned'
+        ) {
+          throw new UserOperationError(
+            '已离职员工的原档案不能恢复为在职；返聘请创建新账号和新员工档案',
+            409,
+          )
+        }
+        if (
+          employmentStatus === 'resigned'
+          && profile.employment_status !== 'resigned'
+        ) {
+          throw new UserOperationError(
+            '员工离职状态只能在五类离职档案全部归档后由系统自动更新',
+            409,
+          )
+        }
         if (employmentStatus) {
+          if (employmentStatus === 'active' && profile.employment_status === 'probation') {
+            const confirmation = await txGet<{ status: string }>(
+              client,
+              'SELECT status FROM probation_confirmations WHERE employee_id = ?',
+              profile.id,
+            )
+            if (confirmation?.status !== 'approved') {
+              throw new UserOperationError('实习期员工必须通过转正审批后才能改为在职', 409)
+            }
+          }
           await txRun(
             client,
             `UPDATE employee_profiles
-             SET employee_no = ?, employment_status = ?, updated_at = ?
+             SET employee_no = ?, department = ?, position = ?,
+                 employment_status = ?, updated_at = ?
              WHERE user_id = ?`,
             normalizedEmployeeNo,
+            organizationSelection.department,
+            organizationSelection.position,
             employmentStatus,
             now,
             id,
@@ -383,8 +516,12 @@ router.post('/', requireAdmin, async (req, res) => {
         } else {
           await txRun(
             client,
-            'UPDATE employee_profiles SET employee_no = ?, updated_at = ? WHERE user_id = ?',
+            `UPDATE employee_profiles
+             SET employee_no = ?, department = ?, position = ?, updated_at = ?
+             WHERE user_id = ?`,
             normalizedEmployeeNo,
+            organizationSelection.department,
+            organizationSelection.position,
             now,
             id,
           )
@@ -393,12 +530,15 @@ router.post('/', requireAdmin, async (req, res) => {
         await txRun(
           client,
           `INSERT INTO employee_profiles (
-             id, user_id, name, employee_no, employment_status, status, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, 'draft', ?, ?)`,
+             id, user_id, name, employee_no, department, position,
+             employment_status, status, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)`,
           nanoid(),
           id,
           name || username || '',
           normalizedEmployeeNo,
+          organizationSelection.department,
+          organizationSelection.position,
           employmentStatus,
           now,
           now,
@@ -480,29 +620,56 @@ router.get('/activities', requireAuth, async (req, res) => {
   }
 })
 
+// 获取创建用户时将使用的下一个员工编号
+router.get('/next-employee-number', requireAdmin, async (_req, res) => {
+  try {
+    let employeeNo = ''
+
+    await db.transaction(async (client) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['employee-number-write'])
+      employeeNo = await getNextAvailableEmployeeNumber(client)
+    })
+
+    res.json({
+      success: true,
+      data: { employeeNo },
+    })
+  } catch (error) {
+    console.error('获取下一个员工编号失败:', error)
+    if (error instanceof UserOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
+    res.status(500).json({
+      success: false,
+      message: '获取下一个员工编号失败',
+    })
+  }
+})
+
 // 创建新用户（管理员可用）
 router.post('/create', requireAdmin, async (req, res) => {
   try {
-    const { username, password, email, mobile, employeeNo, role, department, position, employmentStatus, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
+    const { username, password, email, mobile, role, department, position, employmentStatus, bankAccountName, bankAccountPhone, bankName, bankAccountNumber } = req.body
     const normalizedUsername = String(username || '').trim()
     const normalizedEmail = String(email || '').trim()
     const normalizedMobile = String(mobile || '').trim()
-    const normalizedEmployeeNo = normalizeEmployeeNumber(employeeNo)
 
-    // 验证必填字段
-    if (!normalizedEmployeeNo || !normalizedUsername || !password || !normalizedEmail || !normalizedMobile || !department || !position) {
+    const requiredFieldsError = getUserCreationRequiredFieldsError({
+      username: normalizedUsername,
+      password,
+      email: normalizedEmail,
+      mobile: normalizedMobile,
+      department,
+      position,
+      role,
+    })
+    if (requiredFieldsError) {
       return res.status(400).json({
         success: false,
-        message: '员工编号、用户名、密码、邮箱、手机号、部门、职位为必填项',
+        message: requiredFieldsError,
       })
     }
-
-    if (!isValidEmployeeNumber(normalizedEmployeeNo)) {
-      return res.status(400).json({
-        success: false,
-        message: '员工编号格式应为 YULI-CS 加 3 至 6 位数字',
-      })
-    }
+    const isBoss = isBossRole(role)
 
     const usernameValidation = validateUsername(normalizedUsername)
     if (!usernameValidation.valid) {
@@ -519,7 +686,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证手机号格式（必须11位）
-    if (!/^1[3-9]\d{9}$/.test(normalizedMobile)) {
+    if (!isBoss && !/^1[3-9]\d{9}$/.test(normalizedMobile)) {
       return res.status(400).json({
         success: false,
         message: '手机号格式不正确',
@@ -527,7 +694,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证收款人手机号格式（如果提供）
-    if (bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    if (!isBoss && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
         success: false,
         message: '收款人手机号格式不正确',
@@ -535,7 +702,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证银行卡号格式（如果提供）
-    if (bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+    if (!isBoss && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
       return res.status(400).json({
         success: false,
         message: '银行卡号格式不正确（16-19位数字）',
@@ -543,7 +710,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证邮箱格式（如果提供）
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    if (!isBoss && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return res.status(400).json({
         success: false,
         message: '邮箱格式不正确',
@@ -551,42 +718,70 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证角色
-    const validRoles = ['admin', 'general_manager', 'user', 'guest']
+    const validRoles = ['admin', 'general_manager', 'boss', 'user', 'guest']
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
-        message: '无效的角色，可选值：admin, general_manager, user, guest',
+        message: '无效的角色，可选值：admin, general_manager, boss, user, guest',
       })
     }
-    const nextEmploymentStatus = employmentStatus || 'probation'
-    if (!EMPLOYMENT_STATUSES.includes(nextEmploymentStatus)) {
+    const nextEmploymentStatus = isBoss ? null : employmentStatus || 'probation'
+    if (nextEmploymentStatus && !EMPLOYMENT_STATUSES.includes(nextEmploymentStatus)) {
       return res.status(400).json({ success: false, message: '无效的员工状态' })
+    }
+    if (nextEmploymentStatus === 'resigned') {
+      return res.status(400).json({
+        success: false,
+        message: '新账号不能直接创建为已离职状态',
+      })
+    }
+    const organizationSelection = isBoss
+      ? { department: null, position: null, error: null }
+      : validateDepartmentPositionPair(
+          await getDepartmentPositionMap(),
+          department,
+          position,
+        )
+    if (organizationSelection.error) {
+      return res.status(400).json({ success: false, message: organizationSelection.error })
     }
 
     // 创建用户（用户名即为显示名称）
     const userId = nanoid()
     const passwordHash = await hashPassword(password)
     const now = new Date().toISOString()
+    let generatedEmployeeNo: string | null = null
 
     await db.transaction(async (client) => {
       // 串行化账号创建，避免用户名、手机号在并发请求中重复。
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['user-create'])
-      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['employee-number-write'])
+      if (!isBoss) {
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['employee-number-write'])
+      }
 
-      const existingUser = await client.query(
-        `SELECT username, mobile, employee_no
-         FROM users
-         WHERE username = $1 OR mobile = $2 OR employee_no = $3`,
-        [normalizedUsername, normalizedMobile, normalizedEmployeeNo]
+      const existingUser = await client.query<{
+        username: string
+        mobile: string | null
+        employment_status: string | null
+      }>(
+        `SELECT u.username, u.mobile, ep.employment_status
+         FROM users u
+         LEFT JOIN employee_profiles ep ON ep.user_id = u.id
+         WHERE u.username = $1 OR u.mobile = $2`,
+        [normalizedUsername, normalizedMobile || null]
       )
       if (existingUser.rows.some((item) => item.username === normalizedUsername)) {
         throw new UserOperationError('用户名已存在', 409)
       }
-      if (existingUser.rows.some((item) => item.mobile === normalizedMobile)) {
+      if (normalizedMobile && existingUser.rows.some((item) => (
+        item.mobile === normalizedMobile
+        && item.employment_status !== 'resigned'
+      ))) {
         throw new UserOperationError('手机号已被使用', 409)
       }
-      if (existingUser.rows.some((item) => item.employee_no === normalizedEmployeeNo)) {
-        throw new UserOperationError('员工编号已被使用', 409)
+
+      if (!isBoss) {
+        generatedEmployeeNo = await getNextAvailableEmployeeNumber(client)
       }
 
       await client.query(
@@ -596,12 +791,20 @@ router.post('/create', requireAdmin, async (req, res) => {
            force_change_password, created_at, updated_at
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12,$13,$14,true,$15,$16)`,
         [
-          userId, normalizedUsername, passwordHash, normalizedUsername, normalizedEmail,
-          normalizedMobile, role || 'user', department, position, bankAccountName || null,
-          bankAccountPhone || null, bankName || null, bankAccountNumber || null, normalizedEmployeeNo,
+          userId, normalizedUsername, passwordHash, normalizedUsername,
+          isBoss ? null : normalizedEmail,
+          isBoss ? null : normalizedMobile,
+          role || 'user', organizationSelection.department,
+          organizationSelection.position, isBoss ? null : bankAccountName || null,
+          isBoss ? null : bankAccountPhone || null,
+          isBoss ? null : bankName || null,
+          isBoss ? null : bankAccountNumber || null,
+          generatedEmployeeNo,
           now, now,
         ]
       )
+
+      if (isBoss) return
 
       // 同步创建员工档案（草稿），由员工本人完善后提交。
       const profileId = nanoid()
@@ -611,28 +814,14 @@ router.post('/create', requireAdmin, async (req, res) => {
            employment_status, status, created_at, updated_at
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',$10,$11)`,
         [
-          profileId, userId, normalizedUsername, normalizedEmployeeNo, department, position,
+          profileId, userId, normalizedUsername, generatedEmployeeNo,
+          organizationSelection.department, organizationSelection.position,
           normalizedEmail, normalizedMobile, nextEmploymentStatus, now, now,
         ]
       )
-
-      // 如果是实习期，自动创建转正记录
-      if (nextEmploymentStatus === 'probation') {
-        const hireDate = now.split('T')[0]
-        const hireDateObj = new Date(hireDate)
-        hireDateObj.setMonth(hireDateObj.getMonth() + 6)
-        const probationEndDate = hireDateObj.toISOString().split('T')[0]
-
-        await client.query(
-          `INSERT INTO probation_confirmations (
-             id, employee_id, hire_date, probation_end_date, status, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,'pending',$5,$6)`,
-          [nanoid(), profileId, hireDate, probationEndDate, now, now]
-        )
-      }
     })
 
-    console.log('✅ 创建用户成功:', { userId, username: normalizedUsername, employeeNo: normalizedEmployeeNo, role: role || 'user' })
+    console.log('✅ 创建用户成功:', { userId, username: normalizedUsername, employeeNo: generatedEmployeeNo, role: role || 'user' })
 
     res.json({
       success: true,
@@ -640,9 +829,9 @@ router.post('/create', requireAdmin, async (req, res) => {
         id: userId,
         username: normalizedUsername,
         name: normalizedUsername,
-        email: normalizedEmail,
-        mobile: normalizedMobile,
-        employeeNo: normalizedEmployeeNo,
+        email: isBoss ? null : normalizedEmail,
+        mobile: isBoss ? null : normalizedMobile,
+        employeeNo: generatedEmployeeNo,
         role: role || 'user',
       },
       message: '用户创建成功',

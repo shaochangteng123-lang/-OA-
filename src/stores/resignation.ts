@@ -10,8 +10,12 @@ export type ResignationTemplateType =
   | 'compensation_agreement'
   | 'expense_settlement_agreement'
   | 'partner_dividend_settlement'
+  | 'termination_agreement'
+  | 'employee_handover_form'
+  | 'settlement_confirmation'
+  | 'resignation_certificate'
 export type ResignationType = 'voluntary' | 'contract_end' | 'dismissal'
-export type ResignationStatus = 'draft' | 'submitted' | 'handover_confirmed' | 'mutual_confirmed' | 'approved' | 'rejected' | 'handover_rejected'
+export type ResignationStatus = 'draft' | 'pending_confirmation' | 'submitted' | 'handover_confirmed' | 'mutual_confirmed' | 'approved' | 'rejected' | 'handover_rejected'
 export type ResignationDocumentType =
   | 'application_form'
   | 'handover_form_employee'
@@ -20,6 +24,10 @@ export type ResignationDocumentType =
   | 'asset_handover'
   | 'compensation_agreement'
   | 'expense_settlement_agreement'
+  | 'termination_agreement'
+  | 'employee_handover_form'
+  | 'settlement_confirmation'
+  | 'resignation_certificate'
 
 export interface ResignationTemplate {
   id: string
@@ -46,13 +54,14 @@ export interface ResignationDocument {
   uploaded_by: string
   uploaded_by_name: string | null
   created_at: string
+  is_current?: number
 }
 
 export interface ResignationRequest {
   id: string
   employee_id: string
-  employee_user_id: string
-  handover_user_id: string
+  employee_user_id: string | null
+  handover_user_id: string | null
   handover_name: string | null
   resign_type: ResignationType
   resign_date: string
@@ -71,6 +80,13 @@ export interface ResignationRequest {
   employee_department?: string | null
   employee_position?: string | null
   employee_mobile?: string | null
+  employee_no?: string | null
+  hire_date?: string | null
+  employment_status?: string | null
+  account_status?: string | null
+  completedDocumentCount?: number
+  requiredDocumentCount?: number
+  missingDocumentTypes?: ResignationDocumentType[]
 }
 
 export interface HandoverCandidate {
@@ -100,6 +116,19 @@ export interface ResignationDetailData {
   templates: ResignationTemplate[]
   requiredDocumentTypes: ResignationDocumentType[]
   missingDocumentTypes: ResignationDocumentType[]
+  completedDocumentCount?: number
+  documentTypeLabels?: Partial<Record<ResignationDocumentType, string>>
+}
+
+export interface ResignationManagementCandidate {
+  id: string
+  user_id: string | null
+  employee_no: string | null
+  name: string
+  department: string | null
+  position: string | null
+  employment_status: string | null
+  account_status: string | null
 }
 
 export const useResignationStore = defineStore('resignation', () => {
@@ -115,6 +144,7 @@ export const useResignationStore = defineStore('resignation', () => {
   const candidates = ref<HandoverCandidate[]>([])
   const detail = ref<ResignationDetailData | null>(null)
   const detailLoading = ref(false)
+  const managementCandidates = ref<ResignationManagementCandidate[]>([])
 
   const myRequest = computed(() => myData.value?.request || null)
   const myDocuments = computed(() => myData.value?.documents || [])
@@ -344,6 +374,72 @@ export const useResignationStore = defineStore('resignation', () => {
     }
   }
 
+  async function fetchManagementCandidates() {
+    const res = await api.get('/api/resignation/management/candidates')
+    if (res.data.success) managementCandidates.value = res.data.data
+    return res.data
+  }
+
+  async function createManagementRequest(payload: {
+    employeeId: string
+    resignType: ResignationType
+    resignDate: string
+    reason?: string
+  }) {
+    const res = await api.post('/api/resignation/management', payload)
+    if (res.data.success) {
+      await Promise.all([fetchManagementList(), fetchManagementCandidates()])
+    }
+    return res.data
+  }
+
+  async function uploadArchiveDocument(
+    requestId: string,
+    documentType: ResignationDocumentType,
+    file: File,
+  ) {
+    const formData = new FormData()
+    formData.append('originalFileName', file.name)
+    formData.append('file', file)
+    const res = await api.post(
+      `/api/resignation/management/${requestId}/documents/type/${documentType}`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 },
+    )
+    if (res.data.success) {
+      detail.value = res.data.data
+      await fetchManagementList()
+    }
+    return res.data
+  }
+
+  async function autoClassifyArchive(requestId: string, file: File) {
+    const formData = new FormData()
+    formData.append('originalFileName', file.name)
+    formData.append('file', file)
+    const res = await api.post(
+      `/api/resignation/management/${requestId}/documents/auto-classify`,
+      formData,
+      { headers: { 'Content-Type': 'multipart/form-data' }, timeout: 600000 },
+    )
+    if (res.data.success) {
+      detail.value = res.data.data
+      await fetchManagementList()
+    }
+    return res.data
+  }
+
+  async function deleteArchiveDocument(requestId: string, documentId: string) {
+    const res = await api.delete(
+      `/api/resignation/management/${requestId}/documents/${documentId}`,
+    )
+    if (res.data.success) {
+      detail.value = res.data.data
+      await fetchManagementList()
+    }
+    return res.data
+  }
+
   async function approve(id: string, comment?: string) {
     const res = await api.post(`/api/resignation/management/${id}/approve`, { comment })
     if (res.data.success) {
@@ -371,7 +467,6 @@ export const useResignationStore = defineStore('resignation', () => {
     })
     if (res.data.success) {
       await fetchTemplates()
-      await fetchMyRequest()
       await fetchManagementList()
     }
     return res.data
@@ -381,7 +476,6 @@ export const useResignationStore = defineStore('resignation', () => {
     const res = await api.delete(`/api/resignation/templates/${id}`)
     if (res.data.success) {
       await fetchTemplates()
-      await fetchMyRequest()
       await fetchManagementList()
     }
     return res.data
@@ -400,6 +494,7 @@ export const useResignationStore = defineStore('resignation', () => {
     candidates,
     detail,
     detailLoading,
+    managementCandidates,
     myRequest,
     myDocuments,
     myTemplates,
@@ -424,6 +519,11 @@ export const useResignationStore = defineStore('resignation', () => {
     signHandoverTask,
     fetchManagementList,
     fetchDetail,
+    fetchManagementCandidates,
+    createManagementRequest,
+    uploadArchiveDocument,
+    autoClassifyArchive,
+    deleteArchiveDocument,
     approve,
     reject,
     uploadTemplate,

@@ -25,7 +25,7 @@
           show-icon
           class="status-alert"
         >
-          <template #title>双方已完成交接确认，等待管理员审批</template>
+          <template #title>双方已完成交接确认，等待总经理或超级管理员审批</template>
         </el-alert>
 
         <el-alert
@@ -142,7 +142,7 @@
                 <div class="upload-actions">
                   <el-button v-if="employeeHandover" type="primary" link @click="openDocument(employeeHandover)">{{ employeeHandover.file_name }}</el-button>
                   <el-button v-if="employeeHandover && canEditDocs" type="danger" link @click="handleDeleteDocument(employeeHandover)">删除</el-button>
-                  <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('employee')" accept=".pdf,.jpg,.jpeg,.png" :disabled="!canEditDocs">
+                  <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('employee')" accept=".pdf" :disabled="!canEditDocs">
                     <el-button type="primary" :disabled="!canEditDocs">上传文件</el-button>
                   </el-upload>
                 </div>
@@ -249,7 +249,7 @@
                         size="small"
                         @click="openSignDialog(row)"
                       >签名确认</el-button>
-                      <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('handover', row.id)" accept=".pdf,.jpg,.jpeg,.png">
+                      <el-upload :show-file-list="false" :before-upload="beforeUploadHandover('handover', row.id)" accept=".pdf">
                         <el-button type="primary" link>手动上传</el-button>
                       </el-upload>
                     </template>
@@ -501,6 +501,10 @@ const RESIGNATION_DOCUMENT_LABELS: Record<ResignationDocumentType, string> = {
   asset_handover: '固定资产交接单',
   compensation_agreement: '离职经济补偿协议书',
   expense_settlement_agreement: '离职其他费用结算约定',
+  termination_agreement: '终止 / 解除劳动关系协议书',
+  employee_handover_form: '员工离职交接单',
+  settlement_confirmation: '薪资及各类款项结算确认书',
+  resignation_certificate: '离职证明',
 }
 
 const REQUIRED_DOCUMENTS_BY_TYPE: Record<ResignationType, ResignationDocumentType[]> = {
@@ -642,8 +646,8 @@ const nextActionText = computed(() => {
   const statusMap: Record<string, string> = {
     draft: '补充材料后提交申请',
     submitted: '等待交接人上传并确认',
-    handover_confirmed: myRequest.value.employee_confirm_time ? '等待管理员审批' : '请确认交接完成',
-    mutual_confirmed: '等待管理员审批',
+    handover_confirmed: myRequest.value.employee_confirm_time ? '等待最终审批' : '请确认交接完成',
+    mutual_confirmed: '等待最终审批',
     approved: '流程已完成',
     rejected: '请修改后重新提交',
   }
@@ -678,7 +682,7 @@ const timelineSteps = computed(() => {
     } else if (req.status === 'handover_confirmed') {
       items.push({ title: '待离职人确认', desc: `等待 ${employeeName} 确认交接完成`, operator: '', time: '', type: 'info', hollow: true })
     } else if (req.status === 'mutual_confirmed') {
-      items.push({ title: '待管理员审批', desc: '等待管理员审批离职申请', operator: '', time: '', type: 'info', hollow: true })
+      items.push({ title: '待最终审批', desc: '等待总经理或超级管理员审批离职申请', operator: '', time: '', type: 'info', hollow: true })
     } else if (req.status === 'rejected') {
       items.push({ title: '待重新提交', desc: `申请已被驳回，请 ${employeeName} 修改后重新提交`, operator: '', time: '', type: 'info', hollow: true })
     }
@@ -715,13 +719,13 @@ const timelineSteps = computed(() => {
 
   if (req.approve_time) {
     if (req.status === 'approved') {
-      steps.push({ title: '管理员审批通过', desc: req.approver_comment || '管理员已完成审批', operator: '管理员', time: formatTime(req.approve_time), type: 'success', hollow: false })
+      steps.push({ title: '离职最终审批通过', desc: req.approver_comment || '最终审批已完成', operator: '总经理/超级管理员', time: formatTime(req.approve_time), type: 'success', hollow: false })
     } else {
       steps.push({ title: '管理员已驳回', desc: req.approver_comment || '管理员已驳回申请', operator: '管理员', time: formatTime(req.approve_time), type: 'danger', hollow: false })
       steps.push({ title: '待重新提交', desc: `申请已被驳回，请 ${employeeName} 修改后重新提交`, operator: '', time: '', type: 'info', hollow: true })
     }
   } else {
-    steps.push({ title: '待管理员审批', desc: '等待管理员审批离职申请', operator: '', time: '', type: 'info', hollow: true })
+    steps.push({ title: '待最终审批', desc: '等待总经理或超级管理员审批离职申请', operator: '', time: '', type: 'info', hollow: true })
   }
 
   return steps
@@ -729,7 +733,7 @@ const timelineSteps = computed(() => {
 
 const syncForm = () => {
   if (!myRequest.value) return
-  form.handover_user_id = myRequest.value.handover_user_id
+  form.handover_user_id = myRequest.value.handover_user_id || ''
   form.resign_type = myRequest.value.resign_type
   form.resign_date = myRequest.value.resign_date
   form.reason = myRequest.value.reason || ''
@@ -775,7 +779,7 @@ const getStatusText = (status?: string) => {
     submitted: '待交接人处理',
     handover_confirmed: '待本人确认',
     handover_rejected: '交接人待重新提交',
-    mutual_confirmed: '待管理员审批',
+    mutual_confirmed: '待最终审批',
     approved: '已通过',
     rejected: '已驳回',
   }
@@ -1046,7 +1050,7 @@ const beforeUploadAttachment = (documentType: ResignationDocumentType) => async 
 }
 
 const beforeUploadHandover = (role: 'employee' | 'handover', requestId?: string) => async (file: File) => {
-  if (!validateAttachment(file)) return false
+  if (!validatePdf(file)) return false
   if (role === 'employee') {
     return await uploadEmployeeDocument('handover_form_employee', file)
   } else if (requestId) {
@@ -1369,7 +1373,7 @@ const flowTimelineSteps = computed(() => {
     } else if (req.status === 'handover_confirmed') {
       items.push({ key: 'next_employee', title: '待离职人确认', desc: `等待 ${employeeName} 确认交接完成`, time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     } else if (req.status === 'mutual_confirmed') {
-      items.push({ key: 'next_approve', title: '待管理员审批', desc: '等待管理员审批离职申请', time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
+      items.push({ key: 'next_approve', title: '待最终审批', desc: '等待总经理或超级管理员审批离职申请', time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     } else if (req.status === 'rejected') {
       items.push({ key: 'next_resubmit', title: '待重新提交', desc: `申请已被驳回，请 ${employeeName} 修改后重新提交`, time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     }
@@ -1393,7 +1397,7 @@ const flowTimelineSteps = computed(() => {
   }
   if (req.approve_time) {
     const approved = req.status === 'approved'
-    items.push({ key: 'approve', title: approved ? '管理员审批通过' : '管理员驳回申请', desc: req.approver_comment || '', time: formatTime(req.approve_time), type: approved ? 'success' : 'danger', hollow: false, operator: '管理员', sortTime: req.approve_time })
+    items.push({ key: 'approve', title: approved ? '离职最终审批通过' : '离职最终审批驳回', desc: req.approver_comment || '', time: formatTime(req.approve_time), type: approved ? 'success' : 'danger', hollow: false, operator: '总经理/超级管理员', sortTime: req.approve_time })
   }
 
   // 无步骤时提示待提交
@@ -1407,7 +1411,7 @@ const flowTimelineSteps = computed(() => {
     } else if (req.status === 'handover_confirmed') {
       items.push({ key: 'next_employee', title: '待离职人确认', desc: `等待 ${employeeName} 确认交接完成`, time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     } else if (req.status === 'mutual_confirmed') {
-      items.push({ key: 'next_approve', title: '待管理员审批', desc: '等待管理员审批离职申请', time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
+      items.push({ key: 'next_approve', title: '待最终审批', desc: '等待总经理或超级管理员审批离职申请', time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     } else if (req.status === 'rejected') {
       items.push({ key: 'next_resubmit', title: '待重新提交', desc: `申请已被驳回，请 ${employeeName} 修改后重新提交`, time: '', type: 'info', hollow: true, operator: '', sortTime: '' })
     }

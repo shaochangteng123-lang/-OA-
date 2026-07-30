@@ -31,7 +31,7 @@
               </el-avatar>
               <div class="user-menu-info">
                 <div class="user-menu-name">{{ user?.name }}</div>
-                <div class="user-menu-email">{{ user?.email }}</div>
+                <div v-if="user?.email" class="user-menu-email">{{ user.email }}</div>
               </div>
             </div>
 
@@ -83,6 +83,7 @@ function getRoleLabel(role?: string): string {
     super_admin: '超级管理员',
     admin: '管理员',
     general_manager: '总经理',
+    boss: 'BOSS',
     user: '成员',
     guest: '访客',
   }

@@ -6,7 +6,7 @@ export interface User {
   id: string
   username?: string
   name: string
-  email: string
+  email: string | null
   mobile?: string
   avatarUrl: string | null
   role: UserRole
@@ -20,7 +20,7 @@ export interface User {
   forceChangePassword?: boolean
 }
 
-export type UserRole = 'super_admin' | 'admin' | 'general_manager' | 'user' | 'guest'
+export type UserRole = 'super_admin' | 'admin' | 'general_manager' | 'boss' | 'user' | 'guest'
 
 export type Permission =
   | 'view_worklogs'
@@ -120,6 +120,16 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_departments',
     'view_worklog_entries',
     'manage_worklog_entries',
+  ],
+  boss: [
+    'view_worklogs',
+    'view_projects',
+    'view_events',
+    'view_presets',
+    'view_calendar',
+    'view_blocks',
+    'view_departments',
+    'view_worklog_entries',
   ],
   user: [
     'view_worklogs',
@@ -440,6 +450,10 @@ export interface EmployeeProfile {
   emergencyPhone?: string
   address?: string
   hireDate?: string
+  contractTemplateStartDate?: string
+  contractTemplateEndDate?: string
+  probationTemplateStartDate?: string
+  probationTemplateEndDate?: string
   department?: string
   position?: string
   status: 'draft' | 'submitted'

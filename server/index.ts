@@ -28,6 +28,7 @@ import approvalRoutes from './routes/approval.js'
 import employeesRoutes from './routes/employees.js'
 import probationRoutes from './routes/probation.js'
 import resignationRoutes from './routes/resignation.js'
+import resignationManagementRoutes from './routes/resignationManagement.js'
 import filesRoutes from './routes/files.js'
 import leaveRoutes from './routes/leave.js'
 import payrollRoutes from './routes/payroll.js'
@@ -39,7 +40,10 @@ import worklogReportsRoutes from './routes/worklog-reports.js'
 import worklogAiRoutes from './routes/worklog-ai.js'
 import worklogPermissionsRoutes from './routes/worklog-permissions.js'
 import dailyLogsRoutes from './routes/daily-logs.js'
+import bossDashboardRoutes from './routes/boss-dashboard.js'
 import { shutdownOcrDaemon } from './services/ocrDaemon.js'
+import { setupLeaveDraftCleanup } from './services/leaveDraftCleanup.js'
+import { blockBossBusinessMutations } from './middleware/auth.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -51,6 +55,11 @@ const NODE_ENV = process.env.NODE_ENV || 'development'
 const isProduction = NODE_ENV === 'production'
 const isLocalhost = process.env.FRONTEND_URL?.includes('localhost') || !process.env.FRONTEND_URL
 const isHttps = process.env.FRONTEND_URL?.startsWith('https://')
+const sessionSecret = process.env.SESSION_SECRET
+
+if (isProduction && !sessionSecret) {
+  throw new Error('生产环境必须配置 SESSION_SECRET')
+}
 
 app.use(
   cors({
@@ -72,7 +81,7 @@ app.use(
       tableName: 'session',
       createTableIfMissing: true,
     }),
-    secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+    secret: sessionSecret || 'development-only-session-secret',
     resave: false,
     saveUninitialized: false,
     cookie: {
@@ -84,6 +93,8 @@ app.use(
     },
   })
 )
+
+app.use(blockBossBusinessMutations)
 
 app.use('/api/auth', authRoutes)
 app.use('/api/projects', projectsRoutes)
@@ -102,6 +113,7 @@ app.use('/api/reimbursement-scope', reimbursementScopeRoutes)
 app.use('/api/approval', approvalRoutes)
 app.use('/api/employees', employeesRoutes)
 app.use('/api/probation', probationRoutes)
+app.use('/api/resignation', resignationManagementRoutes)
 app.use('/api/resignation', resignationRoutes)
 app.use('/api/files', filesRoutes)
 app.use('/api/leave', leaveRoutes)
@@ -114,9 +126,7 @@ app.use('/api/worklog-reports', worklogReportsRoutes)
 app.use('/api/worklog-ai', worklogAiRoutes)
 app.use('/api/worklog-permissions', worklogPermissionsRoutes)
 app.use('/api/daily-logs', dailyLogsRoutes)
-
-// 静态文件服务：uploads 目录
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')))
+app.use('/api/boss-dashboard', bossDashboardRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ success: true, message: 'Server is running', timestamp: new Date().toISOString() })
@@ -233,9 +243,9 @@ const setupLeaveBalanceReset = () => {
         for (const type of types) {
           let totalDays = Number(type.default_days ?? 0)
           if (type.code === 'annual') {
-            const { calculateAnnualLeaveDays } = await import('./services/leaveCalculator.js')
+            const { calculateAnnualLeaveEntitlement } = await import('./services/leaveCalculator.js')
             const profile = await db.prepare(`SELECT hire_date FROM employee_profiles WHERE user_id = ? AND status = 'submitted'`).get<{ hire_date: string | null }>(user.id)
-            totalDays = profile?.hire_date ? calculateAnnualLeaveDays(profile.hire_date, year) : 0
+            totalDays = calculateAnnualLeaveEntitlement(profile?.hire_date, year, totalDays)
           }
 
           const existing = await db.prepare(`SELECT id FROM leave_balances WHERE user_id = ? AND leave_type_code = ? AND year = ?`).get(user.id, type.code, year)
@@ -285,6 +295,7 @@ async function start() {
 
   setupReimbursementCleanup()
   setupLeaveBalanceReset()
+  setupLeaveDraftCleanup()
 
   const { setupHolidayAutoUpdater } = await import('./services/holidayUpdater.js')
   setupHolidayAutoUpdater()

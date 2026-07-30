@@ -18,7 +18,14 @@ describe("邀请函薪资同步", () => {
         };
       }
       if (sql.includes("payroll_month <")) {
-        return { rows: [{ contribution_base: "7162" }] };
+        return {
+          rows: [
+            {
+              housing_fund_base: "6000",
+              contribution_base: "7162",
+            },
+          ],
+        };
       }
       if (sql.includes("INSERT INTO payroll_records")) {
         return { rows: [], rowCount: 0 };
@@ -44,6 +51,13 @@ describe("邀请函薪资同步", () => {
 
     const updateCall = query.mock.calls.find(([sql]) =>
       sql.includes("UPDATE payroll_records"),
+    );
+    const sourceQuery = query.mock.calls.find(([sql]) =>
+      sql.includes("FROM employee_profiles ep"),
+    )?.[0];
+    expect(sourceQuery).toContain("LEFT JOIN users u ON u.id = ep.user_id");
+    expect(sourceQuery).toContain(
+      "COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')",
     );
     expect(updateCall?.[1]).toEqual([
       "9000.00",

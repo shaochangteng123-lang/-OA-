@@ -10,6 +10,7 @@ export interface EmploymentContractTermRecognition {
   status: "success" | "failed";
   contractStartDate: string | null;
   contractEndDate: string | null;
+  probationEndDate: string | null;
   message: string;
   method?: "text" | "image";
   pageNumber?: number;
@@ -18,8 +19,12 @@ export interface EmploymentContractTermRecognition {
 interface ParsedContractTerm {
   contractStartDate: string | null;
   contractEndDate: string | null;
+  probationEndDate: string | null;
   message: string;
 }
+
+const DATE_PATTERN =
+  "(2[0Oo][0-9Oo]{2})年([0-9Oo]{1,2})月([0-9Oo]{1,2})[日曰]";
 
 function toHalfWidth(value: string): string {
   return value
@@ -60,6 +65,38 @@ function buildDate(
     : null;
 }
 
+function findProbationEndDate(compactText: string): string | null {
+  const probationIndex = compactText.search(/试用期/);
+  if (probationIndex < 0) return null;
+
+  const sectionAfterProbation = compactText.slice(probationIndex);
+  const nextSectionIndex = sectionAfterProbation
+    .slice(3)
+    .search(/(?:^|[一二三四五六七八九十\d][、.．])(?:工作内容|工作地点|劳动报酬|社会保险|劳动保护|合同解除|劳动纪律)|工作内容|工作地点|劳动报酬|社会保险/);
+  const probationSection = sectionAfterProbation.slice(
+    0,
+    nextSectionIndex >= 0 ? nextSectionIndex + 3 : 300,
+  );
+
+  const rangePattern = new RegExp(
+    `${DATE_PATTERN}(?:起|开始)?[，,。；;、]?(?:至|到|止于|截止至?)${DATE_PATTERN}`,
+    "g",
+  );
+  const rangeMatches = [...probationSection.matchAll(rangePattern)];
+  const rangeEndDate = rangeMatches
+    .map((match) => buildDate(match[4], match[5], match[6]))
+    .filter((date): date is string => !!date)
+    .sort()
+    .pop();
+  if (rangeEndDate) return rangeEndDate;
+
+  const dateMatches = [...probationSection.matchAll(new RegExp(DATE_PATTERN, "g"))];
+  const dates = dateMatches
+    .map((match) => buildDate(match[1], match[2], match[3]))
+    .filter((date): date is string => !!date);
+  return dates.length >= 2 ? dates.sort().pop() || null : null;
+}
+
 export function parseEmploymentContractTermText(
   rawText: string,
 ): ParsedContractTerm {
@@ -71,15 +108,14 @@ export function parseEmploymentContractTermText(
     return {
       contractStartDate: null,
       contractEndDate: null,
+      probationEndDate: null,
       message: "未识别到劳动合同期限条款",
     };
   }
 
   const contractSection = compactText.slice(sectionStart, sectionStart + 800);
-  const datePattern =
-    "(2[0Oo][0-9Oo]{2})年([0-9Oo]{1,2})月([0-9Oo]{1,2})[日曰]";
   const rangePattern = new RegExp(
-    `(?:自)?${datePattern}(?:起|开始)?[，,。；;、]?(?:至|到)${datePattern}`,
+    `(?:自)?${DATE_PATTERN}(?:起|开始)?[，,。；;、]?(?:至|到)${DATE_PATTERN}`,
     "g",
   );
   const ranges: Array<{
@@ -114,6 +150,7 @@ export function parseEmploymentContractTermText(
     return {
       contractStartDate: null,
       contractEndDate: null,
+      probationEndDate: null,
       message: "未识别到完整有效的劳动合同起止日期",
     };
   }
@@ -121,6 +158,7 @@ export function parseEmploymentContractTermText(
   return {
     contractStartDate: bestRange.contractStartDate,
     contractEndDate: bestRange.contractEndDate,
+    probationEndDate: findProbationEndDate(compactText),
     message: "劳动合同期限识别成功",
   };
 }
@@ -183,6 +221,7 @@ export async function recognizeEmploymentContractTerm(
         status: "failed",
         contractStartDate: null,
         contractEndDate: null,
+        probationEndDate: null,
         message: "劳动合同文件不存在",
       };
     }
@@ -199,6 +238,7 @@ export async function recognizeEmploymentContractTerm(
         status: "failed",
         contractStartDate: null,
         contractEndDate: null,
+        probationEndDate: null,
         message: "劳动合同没有可识别页面",
       };
     }
@@ -244,6 +284,7 @@ export async function recognizeEmploymentContractTerm(
       status: "failed",
       contractStartDate: null,
       contractEndDate: null,
+      probationEndDate: null,
       message: lastMessage,
     };
   } catch (error) {
@@ -251,6 +292,7 @@ export async function recognizeEmploymentContractTerm(
       status: "failed",
       contractStartDate: null,
       contractEndDate: null,
+      probationEndDate: null,
       message: error instanceof Error ? error.message : "劳动合同期限识别失败",
     };
   }

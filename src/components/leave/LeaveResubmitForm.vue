@@ -1,7 +1,7 @@
 <template>
   <el-form ref="formRef" :model="form" :rules="rules" label-width="90px">
     <el-alert type="info" :closable="false" style="margin-bottom:16px">
-      原申请已被驳回，请修改后重新提交。原申请编号：{{ originalRequest.request_no }}
+      {{ formNotice }}
     </el-alert>
 
     <!-- 假期类型（只读） -->
@@ -12,12 +12,10 @@
     <!-- 开始时间 -->
     <el-form-item label="开始时间" prop="startDate">
       <div class="date-half-row">
-        <el-date-picker
+        <LeaveDatePicker
           v-model="form.startDate"
-          type="date"
           placeholder="选择开始日期"
-          value-format="YYYY-MM-DD"
-          style="width: 160px"
+          :disabled-date="isPastLeaveDateDisabled"
           @change="onDateChange"
         />
         <el-radio-group v-model="form.startHalf" class="half-radio" @change="onDateChange">
@@ -30,12 +28,10 @@
     <!-- 结束时间 -->
     <el-form-item label="结束时间" prop="endDate">
       <div class="date-half-row">
-        <el-date-picker
+        <LeaveDatePicker
           v-model="form.endDate"
-          type="date"
           placeholder="选择结束日期"
-          value-format="YYYY-MM-DD"
-          style="width: 160px"
+          :disabled-date="disableEndDate"
           @change="onDateChange"
         />
         <el-radio-group v-model="form.endHalf" class="half-radio" @change="onDateChange">
@@ -64,33 +60,55 @@
 
     <!-- 附件 -->
     <el-form-item label="附件上传">
-      <el-upload
-        v-model:file-list="fileList"
-        :auto-upload="false"
-        :limit="5"
-        multiple
-        :accept="'.jpg,.jpeg,.png,.pdf'"
-      >
-        <el-button type="primary" plain size="small">选择文件</el-button>
-      </el-upload>
-      <div style="font-size:12px;color:#909399;margin-top:4px">
-        {{ originalRequest.leave_type_code === 'sick' ? '病假需上传证明文件（必须）' : '可选上传证明材料' }}
+      <div class="attachment-row">
+        <el-upload
+          v-model:file-list="fileList"
+          class="attachment-upload"
+          :auto-upload="false"
+          :show-file-list="false"
+          :limit="5"
+          multiple
+          :accept="'.jpg,.jpeg,.png,.pdf'"
+          :on-exceed="handleExceed"
+        >
+          <el-button type="primary" plain size="small">选择文件</el-button>
+        </el-upload>
+        <span class="attachment-hint">
+          {{ originalRequest.leave_type_code === 'sick' ? '病假需上传证明文件（必须）' : '可选上传证明材料' }}
+        </span>
+      </div>
+      <LeaveFileCards :items="selectedFileCards" @remove="removeSelectedFile" />
+
+      <div v-if="existingAttachmentsLoading" class="attachment-loading">正在读取已上传附件...</div>
+      <div v-else-if="existingAttachmentCards.length > 0" class="existing-attachments">
+        <div class="attachment-subtitle">已上传附件</div>
+        <LeaveFileCards :items="existingAttachmentCards" />
       </div>
     </el-form-item>
 
     <el-form-item>
-      <el-button type="primary" :loading="submitting" @click="handleSubmit">重新提交</el-button>
+      <el-button type="primary" :loading="submitting" @click="handleSubmit">{{ submitButtonText }}</el-button>
       <el-button @click="emit('cancel')">取消</el-button>
     </el-form-item>
   </el-form>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules, UploadUserFile } from 'element-plus'
-import { calculateDays, resubmitRequest as apiResubmit, type LeaveRequest } from '@/utils/leaveApi'
+import LeaveDatePicker from './LeaveDatePicker.vue'
+import LeaveFileCards from './LeaveFileCards.vue'
+import {
+  calculateDays,
+  getAttachmentUrl,
+  getRequestDetail,
+  resubmitRequest as apiResubmit,
+  type LeaveAttachment,
+  type LeaveRequest,
+} from '@/utils/leaveApi'
+import { formatLocalDateValue, isLeaveEndDateDisabled, isPastLeaveDateDisabled } from '@/utils/leaveDate'
 
 const props = defineProps<{
   originalRequest: LeaveRequest
@@ -106,20 +124,83 @@ const submitting = ref(false)
 const calculatedDays = ref<number | null>(null)
 const calculating = ref(false)
 const fileList = ref<UploadUserFile[]>([])
+const existingAttachments = ref<LeaveAttachment[]>([])
+const existingAttachmentsLoading = ref(false)
 let calcTimer: ReturnType<typeof setTimeout> | null = null
 
+const isDraft = computed(() => props.originalRequest.status === 'draft')
+const formNotice = computed(() => isDraft.value
+  ? `该申请已撤回并保存为草稿，重新提交后将进入审批。申请编号：${props.originalRequest.request_no}`
+  : `原申请已被驳回，请修改后重新提交。原申请编号：${props.originalRequest.request_no}`
+)
+const submitButtonText = computed(() => isDraft.value ? '提交草稿' : '重新提交')
+const selectedFileCards = computed(() => fileList.value.map((file, index) => ({
+  key: getUploadFileKey(file, index),
+  name: file.name,
+  size: file.size ?? file.raw?.size ?? null,
+  previewFile: file.raw,
+  previewUrl: file.raw ? undefined : file.url,
+  removable: true,
+})))
+const existingAttachmentCards = computed(() => existingAttachments.value.map(attachment => ({
+  key: attachment.id,
+  name: attachment.file_name,
+  size: attachment.file_size,
+  previewUrl: getAttachmentUrl(attachment.id),
+  downloadUrl: getAttachmentUrl(attachment.id),
+})))
+
+const today = formatLocalDateValue()
+const initialStartDate = props.originalRequest.start_date >= today ? props.originalRequest.start_date : ''
+const initialEndDate = initialStartDate && props.originalRequest.end_date >= initialStartDate
+  ? props.originalRequest.end_date
+  : ''
+
 const form = ref({
-  startDate: props.originalRequest.start_date,
+  startDate: initialStartDate,
   startHalf: props.originalRequest.start_half as 'morning' | 'afternoon',
-  endDate: props.originalRequest.end_date,
+  endDate: initialEndDate,
   endHalf: props.originalRequest.end_half as 'morning' | 'afternoon',
   reason: props.originalRequest.reason,
 })
 
+const NO_REASON_TYPES = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
+const reasonRequired = !NO_REASON_TYPES.includes(props.originalRequest.leave_type_code)
+
 const rules: FormRules = {
   startDate: [{ required: true, message: '请选择开始日期', trigger: 'change' }],
   endDate: [{ required: true, message: '请选择结束日期', trigger: 'change' }],
-  reason: [{ required: true, min: 5, message: '请假事由至少5个字符', trigger: 'blur' }],
+  reason: reasonRequired
+    ? [{ required: true, message: '请填写请假事由', trigger: 'blur' }]
+    : [],
+}
+
+function disableEndDate(time: Date): boolean {
+  return isLeaveEndDateDisabled(time, form.value.startDate)
+}
+
+function getUploadFileKey(file: UploadUserFile, index: number): string {
+  return String(file.uid ?? `${file.name}-${file.size ?? 0}-${index}`)
+}
+
+function removeSelectedFile(key: string | number) {
+  fileList.value = fileList.value.filter((file, index) => getUploadFileKey(file, index) !== String(key))
+}
+
+function handleExceed() {
+  ElMessage.warning('最多上传5个文件')
+}
+
+async function loadExistingAttachments() {
+  existingAttachmentsLoading.value = true
+  try {
+    const detail = await getRequestDetail(props.originalRequest.id)
+    existingAttachments.value = detail.attachments || []
+  } catch {
+    existingAttachments.value = []
+  } finally {
+    existingAttachmentsLoading.value = false
+  }
 }
 
 function onDateChange() {
@@ -145,6 +226,7 @@ function onDateChange() {
 
 // 初始计算
 onDateChange()
+onMounted(loadExistingAttachments)
 
 async function handleSubmit() {
   await formRef.value?.validate(async (valid) => {
@@ -179,4 +261,35 @@ async function handleSubmit() {
 .duration-value { font-size: 22px; font-weight: 700; color: #409eff; }
 .duration-unit { font-size: 14px; color: #606266; }
 .duration-placeholder { color: #c0c4cc; font-size: 14px; }
+.attachment-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+.attachment-upload {
+  flex-shrink: 0;
+}
+.attachment-hint {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 18px;
+}
+.attachment-loading {
+  margin-top: 10px;
+  color: #909399;
+  font-size: 12px;
+}
+.existing-attachments {
+  width: 100%;
+  margin-top: 12px;
+}
+.attachment-subtitle {
+  color: #606266;
+  font-size: 12px;
+  line-height: 18px;
+}
 </style>

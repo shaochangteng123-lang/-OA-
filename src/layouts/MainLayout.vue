@@ -65,7 +65,11 @@
     <!-- 侧边栏 - 固定浮动 -->
     <aside
       class="app-sidebar"
-      :class="{ 'is-collapsed': sidebarCollapsed, 'is-hovering': isHovering, 'is-pinned': isPinned }"
+      :class="{
+        'is-collapsed': sidebarCollapsed,
+        'is-hovering': isHovering,
+        'is-pinned': isPinned,
+      }"
       @mouseenter="handleMouseEnter"
       @mouseleave="handleMouseLeave"
     >
@@ -79,8 +83,27 @@
       <!-- 导航菜单 -->
       <el-scrollbar class="sidebar-menu-scrollbar">
         <nav class="sidebar-menu">
+          <!-- BOSS经营区 -->
+          <SidebarGroup
+            v-if="isBoss"
+            title="经营管理"
+            :title-collapsed="!groupTitlesVisible"
+            :sidebar-collapsed="sidebarCollapsed"
+            v-model:expanded="groupStates.boss.expanded"
+            group-key="boss"
+          >
+            <SidebarMenuItem
+              path="/boss-dashboard"
+              label="羽隶经营看板"
+              :icon="DataAnalysis"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="羽隶经营看板"
+            />
+          </SidebarGroup>
+
           <!-- 办公区 -->
           <SidebarGroup
+            v-if="!isBoss"
             title="办公区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
@@ -105,7 +128,7 @@
               badge-type="danger"
             />
             <SidebarMenuItem
-              v-if="isGeneralManager || isSuperAdmin"
+              v-if="isAdmin || isGeneralManager"
               path="/team-logs"
               label="团队日志"
               :icon="Notebook"
@@ -118,6 +141,7 @@
 
           <!-- 财务区 -->
           <SidebarGroup
+            v-if="!isBoss"
             title="财务区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
@@ -166,7 +190,9 @@
               :icon="Stamp"
               :collapsed="sidebarCollapsed"
               tooltip-content="审批中心"
-              :badge="gmPendingApprovalCount > 0 ? gmPendingApprovalCount : undefined"
+              :badge="
+                gmPendingApprovalCount > 0 ? gmPendingApprovalCount : undefined
+              "
               badge-type="danger"
             />
             <SidebarMenuItem
@@ -184,13 +210,16 @@
               :icon="Stamp"
               :collapsed="sidebarCollapsed"
               tooltip-content="审批中心"
-              :badge="pendingApprovalCount > 0 ? pendingApprovalCount : undefined"
+              :badge="
+                pendingApprovalCount > 0 ? pendingApprovalCount : undefined
+              "
               badge-type="danger"
             />
           </SidebarGroup>
 
           <!-- 人力资源区 -->
           <SidebarGroup
+            v-if="!isBoss"
             title="人力资源区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
@@ -204,6 +233,8 @@
               :icon="Promotion"
               :collapsed="sidebarCollapsed"
               tooltip-content="入职"
+              :badge="contractExpiryBadge"
+              badge-type="danger"
             />
             <SidebarMenuItem
               path="/probation"
@@ -215,20 +246,13 @@
               badge-type="danger"
             />
             <SidebarMenuItem
-              path="/resignation"
-              label="离职"
-              :icon="SwitchButton"
-              :collapsed="sidebarCollapsed"
-              tooltip-content="离职"
-              :badge="resignationBadge"
-              badge-type="danger"
-            />
-            <SidebarMenuItem
               path="/leave"
               label="请假"
               :icon="Clock"
               :collapsed="sidebarCollapsed"
               tooltip-content="请假"
+              :badge="leaveBadge"
+              badge-type="danger"
             />
             <SidebarMenuItem
               v-if="isGeneralManager"
@@ -236,8 +260,10 @@
               label="审批中心"
               :icon="Stamp"
               :collapsed="sidebarCollapsed"
-              tooltip-content="审批中���"
-              :badge="gmProbationPendingCount > 0 ? gmProbationPendingCount : undefined"
+              tooltip-content="审批中心"
+              :badge="
+                hrApprovalPendingCount > 0 ? hrApprovalPendingCount : undefined
+              "
               badge-type="danger"
             />
             <SidebarMenuItem
@@ -254,6 +280,7 @@
 
           <!-- 项目区 -->
           <SidebarGroup
+            v-if="!isBoss"
             title="项目区"
             :title-collapsed="!groupTitlesVisible"
             :sidebar-collapsed="sidebarCollapsed"
@@ -366,7 +393,14 @@
     />
 
     <!-- 主内容区域 -->
-    <main class="app-main" :class="{ 'sidebar-pinned': isPinned }">
+    <main
+      class="app-main"
+      :class="{
+        'sidebar-pinned': isPinned,
+        'is-full-width-page': isFullWidthPage,
+      }"
+      @transitionend="handleMainTransitionEnd"
+    >
       <router-view v-slot="{ Component }">
         <transition name="fade" mode="out-in">
           <component :is="Component" />
@@ -377,13 +411,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, reactive } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { useAuthStore } from '@/stores/auth'
-import { usePendingStore } from '@/stores/pending'
-import { ElMessage } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
-import { api } from '@/utils/api'
+import { ref, computed, onMounted, onUnmounted, reactive, watch } from "vue";
+import { useRouter, useRoute } from "vue-router";
+import { useAuthStore } from "@/stores/auth";
+import { usePendingStore } from "@/stores/pending";
+import { ElMessage, ElNotification } from "element-plus";
+import type { FormInstance, FormRules } from "element-plus";
+import { api } from "@/utils/api";
+import { getContractExpiryReminder } from "@/utils/contractReminder";
 import {
   Calendar,
   FolderOpened,
@@ -402,347 +437,432 @@ import {
   Briefcase,
   UserFilled,
   Promotion,
-  SwitchButton,
   List,
   Clock,
   Stamp,
-} from '@element-plus/icons-vue'
-import SidebarHeader from './components/SidebarHeader.vue'
-import SidebarMenuItem from './components/SidebarMenuItem.vue'
-import SidebarGroup from './components/SidebarGroup.vue'
-import TopBar from './components/TopBar.vue'
+} from "@element-plus/icons-vue";
+import SidebarHeader from "./components/SidebarHeader.vue";
+import SidebarMenuItem from "./components/SidebarMenuItem.vue";
+import SidebarGroup from "./components/SidebarGroup.vue";
+import TopBar from "./components/TopBar.vue";
 
-const router = useRouter()
-const route = useRoute()
-const authStore = useAuthStore()
-const pendingStore = usePendingStore()
+const router = useRouter();
+const route = useRoute();
+const authStore = useAuthStore();
+const pendingStore = usePendingStore();
 
 // ===================== 强制修改密码弹窗 =====================
-const showChangePasswordDialog = computed(() => !!authStore.forceChangePassword)
-const cpFormRef = ref<FormInstance>()
-const cpLoading = ref(false)
-const cpForm = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
+const showChangePasswordDialog = computed(
+  () => !!authStore.forceChangePassword,
+);
+const cpFormRef = ref<FormInstance>();
+const cpLoading = ref(false);
+const cpForm = reactive({
+  currentPassword: "",
+  newPassword: "",
+  confirmPassword: "",
+});
 
 const validateCpConfirm = (_rule: any, value: string, callback: any) => {
-  if (!value) callback(new Error('请确认新密码'))
-  else if (value !== cpForm.newPassword) callback(new Error('两次输入的密码不一致'))
-  else callback()
-}
+  if (!value) callback(new Error("请确认新密码"));
+  else if (value !== cpForm.newPassword)
+    callback(new Error("两次输入的密码不一致"));
+  else callback();
+};
 
 const cpRules: FormRules = {
-  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
-  newPassword: [
-    { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '密码至少6个字符', trigger: 'blur' },
+  currentPassword: [
+    { required: true, message: "请输入当前密码", trigger: "blur" },
   ],
-  confirmPassword: [{ required: true, validator: validateCpConfirm, trigger: 'blur' }],
-}
+  newPassword: [
+    { required: true, message: "请输入新密码", trigger: "blur" },
+    { min: 6, message: "密码至少6个字符", trigger: "blur" },
+  ],
+  confirmPassword: [
+    { required: true, validator: validateCpConfirm, trigger: "blur" },
+  ],
+};
 
 async function handleForceChangePassword() {
-  if (!cpFormRef.value) return
-  try { await cpFormRef.value.validate() } catch { return }
+  if (!cpFormRef.value) return;
   try {
-    cpLoading.value = true
-    await api.post('/api/auth/change-password', {
+    await cpFormRef.value.validate();
+  } catch {
+    return;
+  }
+  try {
+    cpLoading.value = true;
+    await api.post("/api/auth/change-password", {
       currentPassword: cpForm.currentPassword,
       newPassword: cpForm.newPassword,
-    })
-    ElMessage.success('密码修改成功，请用新密码重新登录')
-    await api.post('/api/auth/logout')
-    authStore.user = null
-    window.location.href = '/login?changed=1'
+    });
+    ElMessage.success("密码修改成功，请用新密码重新登录");
+    await api.post("/api/auth/logout");
+    authStore.user = null;
+    window.location.href = "/login?changed=1";
   } catch (err: any) {
-    ElMessage.error(err.response?.data?.message || '密码修改失败')
+    ElMessage.error(err.response?.data?.message || "密码修改失败");
   } finally {
-    cpLoading.value = false
+    cpLoading.value = false;
   }
 }
 
 // 点 X 关闭弹窗 → 直接退出登录
 async function handleCancelChangePassword() {
   try {
-    await api.post('/api/auth/logout')
-  } catch {}
-  authStore.user = null
-  window.location.href = '/login'
+    await api.post("/api/auth/logout");
+  } catch {
+    // 即使退出接口失败，也要清理本地登录态。
+  }
+  authStore.user = null;
+  window.location.href = "/login";
 }
 // ============================================================
 
 // 侧边栏折叠状态 - 默认折叠，默认不锁定
-const sidebarCollapsed = ref(true)
-const isHovering = ref(false)
-const isPinned = ref(false)
-const groupTitlesVisible = ref(false) // 分组标题独立控制
-let collapseTimer: number | null = null
+const sidebarCollapsed = ref(true);
+const isHovering = ref(false);
+const isPinned = ref(false);
+const groupTitlesVisible = ref(false); // 分组标题独立控制
+let collapseTimer: number | null = null;
 
 // 分组折叠状态管理
 interface GroupState {
-  expanded: boolean
+  expanded: boolean;
 }
 
 const groupStates = reactive<Record<string, GroupState>>({
+  boss: { expanded: true },
   office: { expanded: false },
   finance: { expanded: false },
   hr: { expanded: false },
   project: { expanded: false },
   system: { expanded: false },
-})
+});
 
 // 待审批数量（从 pendingStore 获取）
-const pendingApprovalCount = computed(() => pendingStore.counts.approvalPending)
-const gmPendingApprovalCount = computed(() => pendingStore.counts.gmApprovalPending)
-const gmProbationPendingCount = computed(() => pendingStore.counts.probationPending)
+const pendingApprovalCount = computed(
+  () => pendingStore.counts.approvalPending,
+);
+const gmPendingApprovalCount = computed(
+  () => pendingStore.counts.gmApprovalPending,
+);
+const hrApprovalPendingCount = computed(() => {
+  return (
+    (pendingStore.counts.probationPending || 0) +
+    (pendingStore.counts.leaveApprovalPending || 0)
+  );
+});
 
 const unreadLogCommentsBadge = computed(() => {
-  const count = pendingStore.counts.unreadLogComments
-  return count > 0 ? count : undefined
-})
+  const count = pendingStore.counts.unreadLogComments;
+  return count > 0 ? count : undefined;
+});
 const unreadTeamLogRepliesBadge = computed(() => {
-  const count = pendingStore.counts.unreadTeamLogReplies
-  return count > 0 ? count : undefined
-})
+  const count = pendingStore.counts.unreadTeamLogReplies;
+  return count > 0 ? count : undefined;
+});
+
+const contractExpiryBadge = computed(() => {
+  const reminder = getContractExpiryReminder(
+    pendingStore.counts.myContractEndDate,
+    pendingStore.counts.myEmploymentStatus,
+  );
+  return reminder.shouldRemind ? 1 : undefined;
+});
 
 // 是否是管理员
 const isAdmin = computed(() => {
-  return authStore.user?.role === 'super_admin' || authStore.user?.role === 'admin'
-})
-
-// 是否是系统管理员
-const isSuperAdmin = computed(() => {
-  return authStore.user?.role === 'super_admin'
-})
+  return (
+    authStore.user?.role === "super_admin" || authStore.user?.role === "admin"
+  );
+});
 
 // 是否是总经理
 const isGeneralManager = computed(() => {
-  return authStore.user?.role === 'general_manager'
-})
+  return authStore.user?.role === "general_manager";
+});
+
+// 是否是BOSS
+const isBoss = computed(() => {
+  return authStore.user?.role === "boss";
+});
 
 // 计算各分组是否有待办事项
 const officeGroupHasBadge = computed(() => {
-  const counts = pendingStore.counts
-  return counts.unreadLogComments > 0 || counts.unreadTeamLogReplies > 0
-})
+  const counts = pendingStore.counts;
+  return counts.unreadLogComments > 0 || counts.unreadTeamLogReplies > 0;
+});
 
 const financeGroupHasBadge = computed(() => {
-  const counts = pendingStore.counts
+  const counts = pendingStore.counts;
   // 用户的报销待确认
-  const userReimbursement = counts.myReimbursementBasic + counts.myReimbursementLarge + counts.myReimbursementBusiness
+  const userReimbursement =
+    counts.myReimbursementBasic +
+    counts.myReimbursementLarge +
+    counts.myReimbursementBusiness;
   // 用户的报销已驳回
-  const userRejected = (counts.myReimbursementBasicRejected || 0) + (counts.myReimbursementLargeRejected || 0) + (counts.myReimbursementBusinessRejected || 0)
+  const userRejected =
+    (counts.myReimbursementBasicRejected || 0) +
+    (counts.myReimbursementLargeRejected || 0) +
+    (counts.myReimbursementBusinessRejected || 0);
   // 管理员的审批待办
-  const adminApproval = isAdmin.value ? counts.approvalPending : 0
+  const adminApproval = isAdmin.value ? counts.approvalPending : 0;
   // 总经理的审批待办
-  const gmApproval = isGeneralManager.value ? counts.gmApprovalPending : 0
-  return userReimbursement > 0 || userRejected > 0 || adminApproval > 0 || gmApproval > 0
-})
+  const gmApproval = isGeneralManager.value ? counts.gmApprovalPending : 0;
+  return (
+    userReimbursement > 0 ||
+    userRejected > 0 ||
+    adminApproval > 0 ||
+    gmApproval > 0
+  );
+});
 
 const hrGroupHasBadge = computed(() => {
-  const counts = pendingStore.counts
+  const counts = pendingStore.counts;
   // 用户的转正待提交
-  const userProbation = counts.myProbationPending
-  // 用户的离职待办
-  const userResignation = (counts.myResignationPending || 0) + (counts.myHandoverPending || 0)
-  // 管理员的转正待审批
-  const adminProbation = isAdmin.value ? counts.probationPending : 0
-  // 管理员的离职待审批
-  const adminResignation = isAdmin.value ? (counts.resignationPending || 0) : 0
-  // 总经理的转正待审批
-  const gmProbation = isGeneralManager.value ? counts.probationPending : 0
-  return userProbation || userResignation > 0 || adminProbation > 0 || adminResignation > 0 || gmProbation > 0
-})
+  const userProbation = counts.myProbationPending;
+  // 用户被驳回后仍待修改重提的请假
+  const userLeaveRejected = counts.myLeaveRejected || 0;
+  // 用户尚未查看的请假审批通过结果
+  const userLeaveApproved = counts.myLeaveApproved || 0;
+  const contractExpiry = contractExpiryBadge.value !== undefined;
+  const adminProbation = isAdmin.value
+    ? (counts.probationDueSoon || 0) +
+      (counts.probationSignaturePending || 0) +
+      (counts.probationArchivePending || 0)
+    : 0;
+  const generalManagerProbation = isGeneralManager.value
+    ? counts.probationPending || 0
+    : 0;
+  const leaveApproval = isGeneralManager.value
+    ? counts.leaveApprovalPending || 0
+    : 0;
+  const adminResignation = isAdmin.value ? counts.resignationPending || 0 : 0;
+  return (
+    userProbation ||
+    userLeaveRejected > 0 ||
+    userLeaveApproved > 0 ||
+    contractExpiry ||
+    adminProbation > 0 ||
+    generalManagerProbation > 0 ||
+    leaveApproval > 0 ||
+    adminResignation > 0
+  );
+});
 
 // 计算各个报销类型的待办数量（包含待确认收款和已驳回）
 const basicReimbursementBadge = computed(() => {
-  const pending = pendingStore.counts.myReimbursementBasic || 0
-  const rejected = pendingStore.counts.myReimbursementBasicRejected || 0
-  const total = pending + rejected
-  return total > 0 ? total : undefined
-})
+  const pending = pendingStore.counts.myReimbursementBasic || 0;
+  const rejected = pendingStore.counts.myReimbursementBasicRejected || 0;
+  const total = pending + rejected;
+  return total > 0 ? total : undefined;
+});
 
 const largeReimbursementBadge = computed(() => {
-  const pending = pendingStore.counts.myReimbursementLarge || 0
-  const rejected = pendingStore.counts.myReimbursementLargeRejected || 0
-  const total = pending + rejected
-  return total > 0 ? total : undefined
-})
+  const pending = pendingStore.counts.myReimbursementLarge || 0;
+  const rejected = pendingStore.counts.myReimbursementLargeRejected || 0;
+  const total = pending + rejected;
+  return total > 0 ? total : undefined;
+});
 
 const businessReimbursementBadge = computed(() => {
-  const pending = pendingStore.counts.myReimbursementBusiness || 0
-  const rejected = pendingStore.counts.myReimbursementBusinessRejected || 0
-  const total = pending + rejected
-  return total > 0 ? total : undefined
-})
+  const pending = pendingStore.counts.myReimbursementBusiness || 0;
+  const rejected = pendingStore.counts.myReimbursementBusinessRejected || 0;
+  const total = pending + rejected;
+  return total > 0 ? total : undefined;
+});
 
 const probationBadge = computed(() => {
-  if (isAdmin.value && pendingStore.counts.probationPending > 0) {
-    return pendingStore.counts.probationPending
-  }
-  if (pendingStore.counts.myProbationPending) {
-    return 1
-  }
-  return undefined
-})
+  return pendingStore.counts.myProbationPending ? 1 : undefined;
+});
 
-const resignationBadge = computed(() => {
-  // 管理员待审批（排除自己的申请，已在后端过滤）
-  const adminPending = isAdmin.value ? (pendingStore.counts.resignationPending || 0) : 0
-  // 自己作为离职人/交接人的待办
-  const myPending = (pendingStore.counts.myResignationPending || 0) + (pendingStore.counts.myHandoverPending || 0)
-  const total = adminPending + myPending
-  return total > 0 ? total : undefined
-})
+const leaveBadge = computed(() => {
+  const rejected = pendingStore.counts.myLeaveRejected || 0;
+  const approved = pendingStore.counts.myLeaveApproved || 0;
+  const total = rejected + approved;
+  return total > 0 ? total : undefined;
+});
 
-// 管理员「员工数据」菜单待办：转正待审批 + 离职待审批（含自己的申请）
+watch(
+  () => pendingStore.counts.myLeaveApproved,
+  (count, previousCount) => {
+    if (count <= 0 || count <= (previousCount || 0)) return;
+    ElNotification({
+      title: "请假审批通过",
+      message: `您有 ${count} 条请假申请已审批通过，点击查看`,
+      type: "success",
+      duration: 6000,
+      onClick: () => {
+        void router.push("/leave");
+      },
+    });
+  },
+);
+
 const employeeDataBadge = computed(() => {
-  if (!isAdmin.value) return undefined
-  // resignationPending 已排除自己，再加上自己的离职待办
-  const resignationTotal = (pendingStore.counts.resignationPending || 0) + (pendingStore.counts.myResignationPending || 0)
-  const total = (pendingStore.counts.probationPending || 0) + resignationTotal
-  return total > 0 ? total : undefined
-})
+  const count = isAdmin.value
+    ? (pendingStore.counts.probationDueSoon || 0) +
+      (pendingStore.counts.probationSignaturePending || 0) +
+      (pendingStore.counts.probationArchivePending || 0) +
+      (pendingStore.counts.resignationPending || 0)
+    : 0;
+  return count > 0 ? count : undefined;
+});
 
 // 页面标题
 const pageTitle = computed(() => {
   const routeTitles: Record<string, string> = {
-    '/': '今日日志',
-    '/history': '历史日志',
-    '/calendar': '日历',
-    '/basic-reimbursement': '',
-    '/basic-reimbursement/create': '', // 不显示标题
-    '/large-reimbursement': '',
-    '/large-reimbursement/create': '', // 不显示标题
-    '/business-reimbursement': '',
-    '/business-reimbursement/create': '', // 不显示标题
-    '/reimbursement-statistics': '', // 不显示标题
-    '/reimbursement-management': '', // 不显示标题
-    '/onboarding': '',
-    '/probation': '',
-    '/resignation': '',
-    '/employee-data': '',
-    '/leave': '',
-    '/projects': '项目管理',
-    '/project-initiation': '项目立项',
-    '/project-progress': '项目进度',
-    '/project-archive': '项目封存',
-    '/presets': '预设方案',
-    '/blocks': '预设板块',
-    '/events': '事件库',
-    '/departments': '部门管理',
-    '/users': '用户管理',
-    '/settings': '个人设置',
-    '/approval': '', // 不显示标题
-    '/system-settings': '系统设置',
-    '/user-settings': '用户设置',
-  }
+    "/": "今日日志",
+    "/boss-dashboard": "羽隶经营看板",
+    "/history": "历史日志",
+    "/calendar": "日历",
+    "/basic-reimbursement": "",
+    "/basic-reimbursement/create": "", // 不显示标题
+    "/large-reimbursement": "",
+    "/large-reimbursement/create": "", // 不显示标题
+    "/business-reimbursement": "",
+    "/business-reimbursement/create": "", // 不显示标题
+    "/reimbursement-statistics": "", // 不显示标题
+    "/reimbursement-management": "", // 不显示标题
+    "/onboarding": "",
+    "/probation": "",
+    "/resignation": "",
+    "/employee-data": "",
+    "/leave": "",
+    "/projects": "项目管理",
+    "/project-initiation": "项目立项",
+    "/project-progress": "项目进度",
+    "/project-archive": "项目封存",
+    "/presets": "预设方案",
+    "/blocks": "预设板块",
+    "/events": "事件库",
+    "/departments": "部门管理",
+    "/users": "用户管理",
+    "/settings": "个人设置",
+    "/approval": "", // 不显示标题
+    "/system-settings": "系统设置",
+    "/user-settings": "用户设置",
+  };
 
   // 检查是否是报销单详情页面（带 ID 参数的路由）
   if (route.path.match(/^\/(basic|large|business)-reimbursement\/.+$/)) {
-    return ''
+    return "";
   }
 
-  return routeTitles[route.path] !== undefined ? routeTitles[route.path] : ''
-})
+  return routeTitles[route.path] !== undefined ? routeTitles[route.path] : "";
+});
+
+const isFullWidthPage = computed(() => route.path === "/gm-probation-approval");
+
+function handleMainTransitionEnd(event: { propertyName: string }) {
+  if (event.propertyName === "margin-left") {
+    window.dispatchEvent(new Event("resize"));
+  }
+}
 
 // 切换锁定状态
 const toggleSidebar = () => {
-  isPinned.value = !isPinned.value
+  isPinned.value = !isPinned.value;
   if (isPinned.value) {
     // 锁定时，展开并保持展开
-    sidebarCollapsed.value = false
-    groupTitlesVisible.value = true
-    isHovering.value = false
+    sidebarCollapsed.value = false;
+    groupTitlesVisible.value = true;
+    isHovering.value = false;
     // 清除可能存在的折叠定时器
     if (collapseTimer) {
-      clearTimeout(collapseTimer)
-      collapseTimer = null
+      clearTimeout(collapseTimer);
+      collapseTimer = null;
     }
   } else {
     // 取消锁定时，不立即折叠，保持展开状态
     // 用户移开鼠标后会自动折叠
-    isHovering.value = true
+    isHovering.value = true;
   }
-  localStorage.setItem('sidebar-pinned', String(isPinned.value))
-}
+  localStorage.setItem("sidebar-pinned", String(isPinned.value));
+};
 
 // 处理退出登录
 const handleLogout = async () => {
   try {
     // 清除侧边栏锁定状态，确保下次登录时侧边栏是折叠的
-    localStorage.removeItem('sidebar-pinned')
-    await authStore.logout()
-    router.push('/login')
-    ElMessage.success('已退出登录')
+    localStorage.removeItem("sidebar-pinned");
+    await authStore.logout();
+    router.push("/login");
+    ElMessage.success("已退出登录");
   } catch (error) {
-    ElMessage.error('退出登录失败')
+    ElMessage.error("退出登录失败");
   }
-}
+};
 
 // 处理设置
 const handleSettings = () => {
-  router.push('/settings')
-}
+  router.push("/settings");
+};
 
 // 处理主题切换
 const handleToggleTheme = () => {
-  ElMessage.info('主题切换功能即将推出')
-}
+  ElMessage.info("主题切换功能即将推出");
+};
 
 // 处理鼠标悬停 - 立即展开，延迟折叠
 const handleMouseEnter = () => {
   // 如果已锁定，不响应悬停
-  if (isPinned.value) return
+  if (isPinned.value) return;
 
   // 清除可能存在的折叠定时器
   if (collapseTimer) {
-    clearTimeout(collapseTimer)
-    collapseTimer = null
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
   }
 
   // 立即展开
-  isHovering.value = true
-  sidebarCollapsed.value = false
-  groupTitlesVisible.value = true
-}
+  isHovering.value = true;
+  sidebarCollapsed.value = false;
+  groupTitlesVisible.value = true;
+};
 
 const handleMouseLeave = () => {
   // 如果已锁定，不响应离开
-  if (isPinned.value) return
+  if (isPinned.value) return;
 
   // 立即隐藏分组标题（显示横线）
-  groupTitlesVisible.value = false
+  groupTitlesVisible.value = false;
 
   // 延迟400ms后才收起侧边栏宽度和折叠内容
   collapseTimer = window.setTimeout(() => {
-    isHovering.value = false
-    sidebarCollapsed.value = true
-    collapseTimer = null
-  }, 400)
-}
+    isHovering.value = false;
+    sidebarCollapsed.value = true;
+    collapseTimer = null;
+  }, 400);
+};
 
 // 组件挂载
 onMounted(() => {
   // 从 localStorage 读取锁定状态，如果没有保存过，默认为 false（不锁定）
-  const savedPinned = localStorage.getItem('sidebar-pinned')
-  isPinned.value = savedPinned === 'true'
+  const savedPinned = localStorage.getItem("sidebar-pinned");
+  isPinned.value = savedPinned === "true";
 
   // 根据锁定状态设置侧边栏：锁定时展开，不锁定时折叠
-  sidebarCollapsed.value = !isPinned.value
-  groupTitlesVisible.value = isPinned.value
+  sidebarCollapsed.value = !isPinned.value;
+  groupTitlesVisible.value = isPinned.value;
 
-  // 启动待办事项轮询（统一管理所有待办数量）
-  pendingStore.fetchPendingCounts()
-  pendingStore.startPolling()
-})
+  // BOSS角色没有业务待办，不启动待办轮询。
+  if (!isBoss.value) {
+    pendingStore.fetchPendingCounts();
+    pendingStore.startPolling();
+  }
+});
 
 onUnmounted(() => {
   // 清理定时器
   if (collapseTimer) {
-    clearTimeout(collapseTimer)
-    collapseTimer = null
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
   }
   // 停止待办事项轮询
-  pendingStore.stopPolling()
-})
+  pendingStore.stopPolling();
+});
 </script>
 
 <style scoped>
@@ -764,7 +884,8 @@ onUnmounted(() => {
   border-right: 1px solid #e5e7eb;
   display: flex;
   flex-direction: column;
-  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+  transition:
+    width 0.5s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.3s ease;
   z-index: 10;
   overflow: hidden;
@@ -774,7 +895,8 @@ onUnmounted(() => {
 .app-sidebar.is-hovering:not(.is-pinned) {
   width: 220px;
   z-index: 100;
-  box-shadow: 4px 0 20px rgba(79, 70, 229, 0.08),
+  box-shadow:
+    4px 0 20px rgba(79, 70, 229, 0.08),
     2px 0 8px rgba(0, 0, 0, 0.04);
   border-right-color: rgba(79, 70, 229, 0.2);
 }
@@ -799,6 +921,7 @@ onUnmounted(() => {
 .app-main {
   --yl-main-padding-y: 24px;
   --yl-main-padding-x: 45px;
+  width: calc(100% - 64px);
   margin-top: 60px;
   margin-left: 64px;
   min-height: calc(100vh - 60px);
@@ -806,11 +929,18 @@ onUnmounted(() => {
   overflow-x: hidden;
   background-color: #ffffff;
   padding: var(--yl-main-padding-y) var(--yl-main-padding-x);
-  max-width: none;
-  transition: margin-left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: calc(100% - 64px);
+  transition:
+    width 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+    max-width 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-left 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   /* 优化模块34：隐藏滚动条但保持滚动功能 */
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE 10+ */
+}
+
+.app-main.is-full-width-page {
+  --yl-main-padding-x: 0px;
 }
 
 /* 优化模块34：隐藏Webkit浏览器滚动条 */
@@ -820,7 +950,9 @@ onUnmounted(() => {
 
 /* 锁定状态下主内容区域调整 */
 .app-main.sidebar-pinned {
+  width: calc(100% - 220px);
   margin-left: 220px;
+  max-width: calc(100% - 220px);
 }
 
 /* 路由切换动画 */

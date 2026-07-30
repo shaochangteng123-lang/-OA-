@@ -156,6 +156,8 @@ function getRoleTagType(role?: string): ElementPlusTagType {
   const roleMap: Record<string, ElementPlusTagType> = {
     super_admin: 'danger',
     admin: 'warning',
+    general_manager: 'info',
+    boss: 'danger',
     user: 'primary',
     guest: 'info',
   }
@@ -166,6 +168,8 @@ function getRoleText(role?: string) {
   const roleMap: Record<string, string> = {
     super_admin: '超级管理员',
     admin: '管理员',
+    general_manager: '总经理',
+    boss: 'BOSS',
     user: '普通用户',
     guest: '访客',
   }

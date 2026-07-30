@@ -70,6 +70,21 @@ describe("人事档案自动分类", () => {
     ).toBe("id_card");
   });
 
+  it("保密协议标题漏识别时根据正文组合确认边界", () => {
+    const result = classifyEmployeeDocumentPageStartText(
+      "员工整套档案.pdf",
+      [
+        "甲乙双方根据有关规定，就甲方商业秘密保密事项达成如下协议：",
+        "一、保密内容",
+        "甲方的交易秘密、经营秘密和技术秘密",
+        "二、保密范围",
+      ].join("\n"),
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.documentType).toBe("nda");
+  });
+
   it("材料正文提到其他文件时不误判为新边界", () => {
     const result = classifyEmployeeDocumentPageStartText(
       "员工整套档案.pdf",

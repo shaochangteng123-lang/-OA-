@@ -10,6 +10,12 @@ export interface PendingCounts {
   gmApprovalPending: number
   // Admin: 转正待审批
   probationPending: number
+  // 当前用户：轮到本人签署的转正申请
+  probationSignaturePending: number
+  // Admin: 实习期到期前 30 天提醒
+  probationDueSoon: number
+  // Admin: 转正审批完成但尚未上传正式盖章档案
+  probationArchivePending: number
   // 用户: 报销待确认收款（按类型）
   myReimbursementBasic: number
   myReimbursementLarge: number
@@ -23,8 +29,18 @@ export interface PendingCounts {
   // 用户: 离职待办
   myResignationPending: number
   myHandoverPending: number
-  // 管理员: 离职待审批
+  // 用户: 当前劳动合同信息（用于资料同步与到期提醒）
+  myHireDate: string | null
+  myContractEndDate: string | null
+  myEmploymentStatus: string | null
+  // 管理员/超级管理员：离职档案待完善或待确认
   resignationPending: number
+  // 总经理：分配给本人的请假待审批
+  leaveApprovalPending: number
+  // 用户: 请假被驳回后待修改重提
+  myLeaveRejected: number
+  // 用户: 尚未查看的请假审批通过结果
+  myLeaveApproved: number
   // 用户: 未读日志评论
   unreadLogComments: number
   // GM/Admin: 未读团队日志回复
@@ -36,6 +52,9 @@ export const usePendingStore = defineStore('pending', () => {
     approvalPending: 0,
     gmApprovalPending: 0,
     probationPending: 0,
+    probationSignaturePending: 0,
+    probationDueSoon: 0,
+    probationArchivePending: 0,
     myReimbursementBasic: 0,
     myReimbursementLarge: 0,
     myReimbursementBusiness: 0,
@@ -45,9 +64,15 @@ export const usePendingStore = defineStore('pending', () => {
     myProbationPending: false,
     myResignationPending: 0,
     myHandoverPending: 0,
+    myHireDate: null,
+    myContractEndDate: null,
+    myEmploymentStatus: null,
     resignationPending: 0,
+    leaveApprovalPending: 0,
+    myLeaveRejected: 0,
+    myLeaveApproved: 0,
     unreadLogComments: 0,
-    unreadTeamLogReplies: 0,
+    unreadTeamLogReplies: 0
   })
 
   const loading = ref(false)
@@ -99,6 +124,6 @@ export const usePendingStore = defineStore('pending', () => {
     fetchPendingCounts,
     refreshPendingCounts,
     startPolling,
-    stopPolling,
+    stopPolling
   }
 })

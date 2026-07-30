@@ -500,11 +500,6 @@ const progressDocs = ref<WorklogAttachment[]>([])
 
 const isAdmin = computed(() => ['super_admin', 'admin', 'general_manager'].includes(authStore.user?.role || ''))
 
-const ownerNameDisplay = computed(() => {
-  const u = props.users.find(u => u.id === form.ownerUserId)
-  return u ? `${u.name}${u.position ? '（' + u.position + '）' : ''}` : form.ownerUserId
-})
-
 const selectedMatterStandardDays = computed(() => {
   if (!form.matter) return null
   const item = props.dicts.matters.find(m => m.name === form.matter)

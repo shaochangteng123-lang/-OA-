@@ -17,6 +17,12 @@
         <el-descriptions-item label="当前状态">
           <el-tag :type="statusTagType(request.status)">{{ statusLabel(request.status) }}</el-tag>
         </el-descriptions-item>
+        <el-descriptions-item label="审批人">
+          {{ formatPerson(request.approver_position, request.approver_real_name || request.approver_name || '总经理') }}
+        </el-descriptions-item>
+        <el-descriptions-item label="抄送对象">
+          {{ formatCcRecipient(request) }}
+        </el-descriptions-item>
         <el-descriptions-item label="请假事由" :span="2">{{ request.reason }}</el-descriptions-item>
       </el-descriptions>
     </div>
@@ -32,29 +38,6 @@
       {{ request.reject_reason }}
     </el-alert>
 
-    <!-- 附件列表 -->
-    <div v-if="request.attachments && request.attachments.length > 0" class="attachments-section">
-      <div class="section-title">附件（{{ request.attachments.length }}个）</div>
-      <div class="attachment-list">
-        <div
-          v-for="att in request.attachments"
-          :key="att.id"
-          class="attachment-item"
-        >
-          <el-icon><Document /></el-icon>
-          <span class="att-name">{{ att.file_name }}</span>
-          <span class="att-size" v-if="att.file_size">{{ formatFileSize(att.file_size) }}</span>
-          <a
-            :href="`/api/leave/attachments/${att.id}/download`"
-            target="_blank"
-            class="att-download"
-          >
-            下载
-          </a>
-        </div>
-      </div>
-    </div>
-
     <!-- 审批时间线 -->
     <div class="timeline-section">
       <div class="section-title">审批进度</div>
@@ -67,11 +50,28 @@
           placement="top"
         >
           <div class="timeline-content">
-            <span class="operator">{{ log.operator_name }}</span>
-            <el-tag size="small" :type="logTagType(log.action)" style="margin: 0 6px">
-              {{ actionLabel(log.action) }}
-            </el-tag>
-            <span v-if="log.comment" class="log-comment">{{ log.comment }}</span>
+            <div class="timeline-person-row">
+              <span class="operator">
+                {{ formatLogPerson(log) }}
+              </span>
+              <el-tag size="small" :type="logTagType(log.action)">
+                {{ actionLabel(log.action) }}
+              </el-tag>
+            </div>
+            <div
+              v-if="getLogComment(log)"
+              class="log-comment"
+              :class="{ 'reject-comment': log.action === 'reject' }"
+            >
+              <span class="comment-label">{{ log.action === 'reject' ? '驳回原因' : '备注' }}：</span>
+              {{ getLogComment(log) }}
+            </div>
+            <div v-if="getLogAttachmentCards(log).length > 0" class="timeline-attachments">
+              <div class="attachment-batch-title">
+                本次上传附件（{{ getLogAttachmentCards(log).length }}个）
+              </div>
+              <LeaveFileCards :items="getLogAttachmentCards(log)" />
+            </div>
           </div>
         </el-timeline-item>
 
@@ -83,17 +83,21 @@
           placement="top"
         >
           <div class="timeline-content">
-            <span class="operator">{{ request.approver_name || '审批人' }}</span>
-            <el-tag size="small" type="warning" style="margin: 0 6px">待审批</el-tag>
+            <div class="timeline-person-row">
+              <span class="operator">
+                {{ formatPerson(request.approver_position, request.approver_real_name || request.approver_name || '审批人') }}
+              </span>
+              <el-tag size="small" type="warning">待审批</el-tag>
+            </div>
           </div>
         </el-timeline-item>
       </el-timeline>
     </div>
 
-    <!-- 底部操作（驳回时显示重新提交按钮） -->
+    <!-- 底部操作（草稿或驳回时显示重新提交按钮） -->
     <div v-if="showResubmit" class="bottom-actions">
       <el-button type="primary" @click="emit('resubmit', request.id)">
-        修改并重新提交
+        {{ request.status === 'draft' ? '编辑草稿并重新提交' : '修改并重新提交' }}
       </el-button>
     </div>
   </div>
@@ -101,8 +105,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import { Document } from '@element-plus/icons-vue'
-import type { LeaveRequestDetail } from '@/utils/leaveApi'
+import LeaveFileCards from './LeaveFileCards.vue'
+import { getAttachmentUrl } from '@/utils/leaveApi'
+import { formatBeijingDateTime } from '@/utils/date'
+import type { LeaveApprovalLog, LeaveRequestDetail } from '@/utils/leaveApi'
 
 const props = defineProps<{
   request: LeaveRequestDetail
@@ -114,11 +120,36 @@ const emit = defineEmits<{
 }>()
 
 const showResubmit = computed(() => {
-  return props.isOwner && props.request.status === 'rejected'
+  return props.isOwner && ['draft', 'rejected'].includes(props.request.status)
+})
+
+const attachmentCardsByRequest = computed(() => {
+  const groups = new Map<string, Array<{
+    key: string
+    name: string
+    size: number | null
+    previewUrl: string
+    downloadUrl: string
+  }>>()
+
+  for (const attachment of props.request.attachments) {
+    const cards = groups.get(attachment.leave_request_id) || []
+    cards.push({
+      key: attachment.id,
+      name: attachment.file_name,
+      size: attachment.file_size,
+      previewUrl: getAttachmentUrl(attachment.id),
+      downloadUrl: getAttachmentUrl(attachment.id),
+    })
+    groups.set(attachment.leave_request_id, cards)
+  }
+
+  return groups
 })
 
 function statusLabel(status: string): string {
   const map: Record<string, string> = {
+    draft: '草稿',
     pending: '审批中',
     approved: '已批准',
     rejected: '已驳回',
@@ -129,6 +160,7 @@ function statusLabel(status: string): string {
 
 function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' | undefined {
   const map: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
+    draft: 'info',
     pending: 'warning',
     approved: 'success',
     rejected: 'danger',
@@ -142,7 +174,7 @@ function actionLabel(action: string): string {
     submit: '提交申请',
     approve: '审批通过',
     reject: '驳回',
-    cancel: '撤销',
+    cancel: '撤回为草稿',
     resubmit: '重新提交',
   }
   return map[action] || action
@@ -171,15 +203,37 @@ function logItemType(action: string): 'primary' | 'success' | 'warning' | 'dange
 }
 
 function formatTime(iso: string): string {
-  if (!iso) return ''
-  return iso.replace('T', ' ').substring(0, 16)
+  return formatBeijingDateTime(iso)
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+function formatPerson(position: string | null | undefined, name: string): string {
+  return position ? `${position} ${name}` : name
 }
+
+function formatCcRecipient(request: LeaveRequestDetail): string {
+  const role = request.cc_recipient_role?.trim()
+  const name = request.cc_recipient_name?.trim()
+  if (role && name) return `${role} ${name}`
+  return role || name || '管理员'
+}
+
+function formatLogPerson(log: LeaveApprovalLog): string {
+  const name = log.operator_real_name || log.operator_name
+  if (log.operator_id === props.request.user_id) return name
+  return formatPerson(log.operator_position, name)
+}
+
+function getLogComment(log: LeaveApprovalLog): string {
+  const comment = log.comment?.trim() || ''
+  if (log.action === 'resubmit' && comment === '重新提交') return ''
+  return comment
+}
+
+function getLogAttachmentCards(log: LeaveApprovalLog) {
+  if (log.action !== 'submit' && log.action !== 'resubmit') return []
+  return attachmentCardsByRequest.value.get(log.leave_request_id) || []
+}
+
 </script>
 
 <style scoped>
@@ -194,7 +248,7 @@ function formatFileSize(bytes: number): string {
   font-weight: 700;
   color: #409eff;
 }
-.attachments-section, .timeline-section {
+.timeline-section {
   margin-top: 16px;
 }
 .section-title {
@@ -205,52 +259,39 @@ function formatFileSize(bytes: number): string {
   padding-bottom: 6px;
   border-bottom: 1px solid #f0f0f0;
 }
-.attachment-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.attachment-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: #f8f9fa;
-  border-radius: 4px;
+.timeline-content {
   font-size: 13px;
 }
-.att-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.att-size {
-  color: #909399;
-  font-size: 12px;
-}
-.att-download {
-  color: #409eff;
-  text-decoration: none;
-  white-space: nowrap;
-}
-.att-download:hover {
-  text-decoration: underline;
-}
-.timeline-content {
+.timeline-person-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
-  font-size: 13px;
+  gap: 8px;
 }
 .operator {
   font-weight: 600;
   color: #303133;
 }
 .log-comment {
+  margin-top: 6px;
   color: #606266;
-  font-style: italic;
+  line-height: 20px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.comment-label {
+  font-weight: 600;
+}
+.reject-comment {
+  color: #f56c6c;
+}
+.timeline-attachments {
+  margin-top: 10px;
+}
+.attachment-batch-title {
+  color: #606266;
+  font-size: 12px;
+  line-height: 18px;
 }
 .bottom-actions {
   margin-top: 16px;

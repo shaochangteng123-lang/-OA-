@@ -6,6 +6,16 @@
         <el-tab-pane label="员工基础信息" name="profile">
           <div class="profile-section">
             <el-alert
+              v-if="contractExpiryReminder.shouldRemind"
+              class="contract-expiry-alert"
+              type="error"
+              :closable="false"
+              show-icon
+              :title="contractExpiryAlertTitle"
+              :description="contractExpiryAlertDescription"
+            />
+
+            <el-alert
               v-if="profileData?.status === 'submitted'"
               type="success"
               :closable="false"
@@ -166,13 +176,14 @@
                   </el-col>
                   <el-col :span="8">
                     <el-form-item label="入职日期" prop="hireDate">
-                      <el-date-picker
-                        v-model="formData.hireDate"
-                        type="date"
-                        placeholder="请选择入职日期"
-                        format="YYYY-MM-DD"
-                        value-format="YYYY-MM-DD"
-                      />
+                      <el-tooltip
+                        content="入职日期来自第一份劳动合同；未识别到合同期限时不显示"
+                        placement="top"
+                      >
+                        <div class="readonly-field-display" role="textbox" aria-readonly="true">
+                          {{ formData.hireDate || '暂无入职日期' }}
+                        </div>
+                      </el-tooltip>
                     </el-form-item>
                   </el-col>
                   <el-col :span="8">
@@ -186,7 +197,7 @@
                   </el-col>
                 </el-row>
                 <el-row :gutter="24">
-                  <el-col :span="8">
+                  <el-col :span="7">
                     <el-form-item label="职位" prop="position">
                       <el-tooltip content="职位由管理员分配，如需修改请联系管理员" placement="top">
                         <el-select v-model="formData.position" placeholder="请先选择部门" disabled style="width: 100%">
@@ -195,7 +206,7 @@
                       </el-tooltip>
                     </el-form-item>
                   </el-col>
-                  <el-col :span="8">
+                  <el-col :span="7">
                     <el-form-item label="员工状态" prop="employmentStatus">
                       <el-tooltip content="员工状态由管理员设置，如需修改请联系管理员" placement="top">
                         <el-select v-model="formData.employmentStatus" placeholder="请选择员工状态" style="width: 100%" disabled>
@@ -205,6 +216,29 @@
                           <el-option label="休假中" value="on_leave" />
                         </el-select>
                       </el-tooltip>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="10">
+                    <el-form-item label="劳动合同">
+                      <div class="contract-period-display" role="textbox" aria-readonly="true">
+                        {{ laborContractPeriodDisplay }}
+                      </div>
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+                <el-row :gutter="24">
+                  <el-col :span="12">
+                    <el-form-item label="合同模板期限">
+                      <div class="readonly-field-display" role="textbox" aria-readonly="true">
+                        {{ contractTemplatePeriodDisplay }}
+                      </div>
+                    </el-form-item>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-form-item label="模板试用期">
+                      <div class="readonly-field-display" role="textbox" aria-readonly="true">
+                        {{ probationTemplatePeriodDisplay }}
+                      </div>
                     </el-form-item>
                   </el-col>
                 </el-row>
@@ -280,6 +314,9 @@
                         编号：{{ formData.employeeNo }}
                       </span>
                     </div>
+                    <div v-if="row.id === 'contract'" class="contract-template-date-status">
+                      合同期限：{{ contractTemplatePeriodDisplay }}；试用期：{{ probationTemplatePeriodDisplay }}
+                    </div>
                     <div v-if="row.children && row.children.length > 0" class="file-children">
                       <div v-for="(child, index) in row.children" :key="index" class="child-item">
                         {{ index + 1 }}. {{ child }}
@@ -299,19 +336,28 @@
                           type="primary"
                           size="small"
                           :icon="View"
-                          @click="handlePreview(file)"
+                          @click="handlePreview(file, row.id)"
                         >
                           预览
                         </el-button>
-                        <el-button
-                          link
-                          type="success"
-                          size="small"
-                          :icon="Download"
-                          @click="handleDownload(file)"
+                        <el-tooltip
+                          :disabled="row.id !== 'contract' || hasContractTemplatePeriod"
+                          content="下载已锁定，请等待管理员设置合同期限后下载"
+                          placement="top"
                         >
-                          下载
-                        </el-button>
+                          <span class="download-button-trigger">
+                            <el-button
+                              link
+                              type="success"
+                              size="small"
+                              :icon="Download"
+                              :disabled="row.id === 'contract' && !hasContractTemplatePeriod"
+                              @click="handleDownload(file, row.id)"
+                            >
+                              下载
+                            </el-button>
+                          </span>
+                        </el-tooltip>
                       </div>
                     </div>
                     <!-- 无文件时显示提示 -->
@@ -321,13 +367,23 @@
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="查看原文件" min-width="280">
+                <el-table-column label="查看原文件" min-width="560">
                   <template #default="{ row }">
                     <!-- 显示管理员为该员工上传的档案文件 -->
                     <div v-if="getMyDocumentsByType(row.id).length > 0" class="my-docs-list">
                       <div v-for="doc in getMyDocumentsByType(row.id)" :key="doc.id" class="my-doc-item">
                         <el-icon class="doc-icon"><Document /></el-icon>
                         <span class="doc-name">{{ doc.file_name }}</span>
+                        <template v-if="row.id === 'contract'">
+                          <el-tag
+                            size="small"
+                            :type="getMyContractStatusType(doc)"
+                            effect="plain"
+                          >
+                            {{ getMyContractStatusText(doc) }}
+                          </el-tag>
+                          <span class="my-contract-term">{{ formatMyContractTerm(doc) }}</span>
+                        </template>
                         <span class="doc-size">{{ formatFileSize(doc.file_size) }}</span>
                         <el-button
                           link
@@ -359,38 +415,26 @@
       </el-tabs>
     </el-card>
 
-    <!-- 文件预览对话框 -->
-    <el-dialog
-      v-model="previewDialogVisible"
-      :title="previewFile?.name || '文件预览'"
-      width="800px"
-      destroy-on-close
-    >
-      <div class="preview-content">
-        <div v-if="isImageFile(previewFile?.name)" class="image-preview">
-          <img :src="previewFile?.url" :alt="previewFile?.name" />
-        </div>
-        <div v-else class="file-preview-tip">
-          <el-icon :size="64" color="#909399"><Document /></el-icon>
-          <p>{{ previewFile?.name }}</p>
-          <p class="tip-text">该文件类型不支持在线预览，请下载后查看</p>
-          <el-button type="primary" :icon="Download" @click="handleDownload(previewFile!)">
-            下载文件
-          </el-button>
-        </div>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch, nextTick, computed } from 'vue'
+import { ref, reactive, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Document, Download, View, Clock } from '@element-plus/icons-vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useAuthStore } from '@/stores/auth'
+import { usePendingStore } from '@/stores/pending'
 import { api } from '@/utils/api'
+import { formatContractDate, getContractExpiryReminder } from '@/utils/contractReminder'
+
+interface OnboardingTemplateFile {
+  id: string
+  name: string
+  previewUrl: string
+  downloadUrl: string
+}
 
 // 员工档案文件类型
 interface MyDocument {
@@ -403,12 +447,16 @@ interface MyDocument {
   mime_type: string | null
   uploaded_by: string
   uploaded_by_name: string | null
+  contract_start_date: string | null
+  contract_end_date: string | null
+  probation_end_date: string | null
   created_at: string
 }
 
 // 使用共享的 store
 const onboardingStore = useOnboardingStore()
 const authStore = useAuthStore()
+const pendingStore = usePendingStore()
 const router = useRouter()
 
 // Tab 切换
@@ -515,7 +563,6 @@ const formRules: FormRules = {
   education: [{ required: true, message: '请选择学历', trigger: 'change' }],
   school: [{ required: true, message: '请输入毕业院校', trigger: 'blur' }],
   major: [{ required: true, message: '请输入所学专业', trigger: 'blur' }],
-  hireDate: [{ required: true, message: '请选择入职日期', trigger: 'change' }],
   bankAccountName: [{ required: true, message: '请输入收款人姓名', trigger: 'blur' }],
   bankAccountPhone: [{ required: true, message: '请输入收款人手机号', trigger: 'blur' }],
   bankName: [{ required: true, message: '请输入开户行', trigger: 'blur' }],
@@ -544,8 +591,8 @@ watch(() => formData.department, () => {
 })
 
 // 获取当前用户的员工信息
-const fetchProfile = async () => {
-  loading.value = true
+const fetchProfile = async (silent = false) => {
+  if (!silent) loading.value = true
   try {
     const res = await api.get('/api/employees/my-profile')
     if (res.data.success && res.data.data) {
@@ -584,7 +631,7 @@ const fetchProfile = async () => {
   } catch (error) {
     console.error('获取员工信息失败:', error)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -645,9 +692,6 @@ const handleSave = async () => {
       education: formData.education || null,
       school: formData.school || null,
       major: formData.major || null,
-      hire_date: formData.hireDate || null,
-      department: formData.department || null,
-      position: formData.position || null,
       bank_account_name: formData.bankAccountName || null,
       bank_account_phone: formData.bankAccountPhone || null,
       bank_name: formData.bankName || null,
@@ -710,9 +754,6 @@ const handleSubmit = async () => {
       education: formData.education || null,
       school: formData.school || null,
       major: formData.major || null,
-      hire_date: formData.hireDate || null,
-      department: formData.department || null,
-      position: formData.position || null,
       bank_account_name: formData.bankAccountName || null,
       bank_account_phone: formData.bankAccountPhone || null,
       bank_name: formData.bankName || null,
@@ -739,27 +780,40 @@ const handleSubmit = async () => {
   }
 }
 
-// 预览对话框
-const previewDialogVisible = ref(false)
-const previewFile = ref<{ id: string; name: string; url: string } | null>(null)
-
-// 判断是否为图片文件
-const isImageFile = (filename?: string) => {
-  if (!filename) return false
-  const ext = filename.split('.').pop()?.toLowerCase()
-  return ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext || '')
-}
-
 // 预览文件
-const handlePreview = (file: { id: string; name: string; url: string }) => {
-  // 直接在新窗口打开预览
-  window.open(file.url, '_blank')
+const handlePreview = (
+  file: OnboardingTemplateFile,
+  fileType?: string,
+) => {
+  if (fileType !== 'contract') {
+    const previewWindow = window.open(file.previewUrl, '_blank')
+    if (previewWindow) previewWindow.opener = null
+    return
+  }
+
+  const previewRoute = router.resolve({
+    name: 'OnboardingTemplatePreview',
+    params: { templateId: file.id },
+  })
+  const previewWindow = window.open(previewRoute.href, '_blank')
+  if (!previewWindow) {
+    ElMessage.warning('浏览器阻止了预览页面，请允许此页面打开新窗口')
+    return
+  }
+  previewWindow.opener = null
 }
 
 // 下载文件
-const handleDownload = async (file: { id: string; name: string; url: string }) => {
+const handleDownload = async (
+  file: OnboardingTemplateFile,
+  fileType?: string,
+) => {
+  if (fileType === 'contract' && !hasContractTemplatePeriod.value) {
+    ElMessage.warning('下载已锁定，请等待管理员设置合同期限后下载')
+    return
+  }
   try {
-    const res = await api.get(file.url, { responseType: 'blob' })
+    const res = await api.get(file.downloadUrl, { responseType: 'blob' })
     const url = window.URL.createObjectURL(new Blob([res.data]))
     const link = document.createElement('a')
     link.href = url
@@ -770,7 +824,29 @@ const handleDownload = async (file: { id: string; name: string; url: string }) =
     window.URL.revokeObjectURL(url)
     ElMessage.success(`下载成功：${file.name}`)
   } catch (error) {
-    ElMessage.error('下载失败')
+    let message = '下载失败'
+    const responseData = (
+      error as { response?: { data?: unknown } }
+    ).response?.data
+    if (responseData instanceof Blob) {
+      try {
+        const payload = JSON.parse(await responseData.text())
+        message = payload.message || message
+      } catch {
+        // 非 JSON 错误响应继续使用通用提示。
+      }
+    } else if (
+      responseData
+      && typeof responseData === 'object'
+      && 'message' in responseData
+      && typeof responseData.message === 'string'
+    ) {
+      message = responseData.message
+    }
+    if (fileType === 'contract') {
+      await fetchProfile(true)
+    }
+    ElMessage.error(message)
   }
 }
 
@@ -779,6 +855,80 @@ const handleDownload = async (file: { id: string; name: string; url: string }) =
 // 用户档案文件列表
 const myDocuments = ref<MyDocument[]>([])
 const myDocumentsLoading = ref(false)
+
+const contractDocuments = computed(() => {
+  return myDocuments.value
+    .filter(doc => doc.document_type === 'contract')
+    .sort((left, right) => {
+      const endDateCompare = (right.contract_end_date || '').localeCompare(left.contract_end_date || '')
+      return endDateCompare || right.created_at.localeCompare(left.created_at)
+    })
+})
+
+const currentContractEndDate = computed(() => {
+  return (profileData.value?.contract_end_date as string | null) || null
+})
+
+const currentContractDocument = computed(() => {
+  const matchingContract = currentContractEndDate.value
+    ? contractDocuments.value.find(doc => doc.contract_end_date === currentContractEndDate.value)
+    : null
+  return matchingContract || contractDocuments.value[0] || null
+})
+
+const laborContractPeriodDisplay = computed(() => {
+  if (myDocumentsLoading.value) return '正在读取劳动合同...'
+  if (currentContractDocument.value?.contract_start_date) {
+    return `${formatContractDate(currentContractDocument.value.contract_start_date)} 至 ${formatContractDate(currentContractDocument.value.contract_end_date)}`
+  }
+  if (contractDocuments.value.length > 0) return '合同期限未识别'
+  return '暂无劳动合同'
+})
+
+const hasContractTemplatePeriod = computed(() => {
+  return Boolean(
+    profileData.value?.contract_template_start_date
+    && profileData.value?.contract_template_end_date,
+  )
+})
+
+const contractTemplatePeriodDisplay = computed(() => {
+  if (!hasContractTemplatePeriod.value) return '等待管理员设置'
+  return `${formatContractDate(profileData.value.contract_template_start_date)} 至 ${formatContractDate(profileData.value.contract_template_end_date)}`
+})
+
+const probationTemplatePeriodDisplay = computed(() => {
+  if (!hasContractTemplatePeriod.value) return '等待管理员设置'
+  const startDate = profileData.value?.probation_template_start_date
+  const endDate = profileData.value?.probation_template_end_date
+  if (!startDate || !endDate) return '无试用期'
+  return `${formatContractDate(startDate)} 至 ${formatContractDate(endDate)}`
+})
+
+const contractExpiryReminder = computed(() => {
+  return getContractExpiryReminder(
+    currentContractEndDate.value,
+    profileData.value?.employment_status,
+  )
+})
+
+const contractExpiryAlertTitle = computed(() => {
+  const dateText = formatContractDate(currentContractEndDate.value)
+  if (contractExpiryReminder.value.status === 'expired') {
+    return `您的劳动合同已于 ${dateText} 到期，已逾期 ${Math.abs(contractExpiryReminder.value.daysRemaining || 0)} 天`
+  }
+  if (contractExpiryReminder.value.status === 'today') {
+    return '您的劳动合同将于今天到期'
+  }
+  return `您的劳动合同将于 ${dateText} 到期，剩余 ${contractExpiryReminder.value.daysRemaining} 天`
+})
+
+const contractExpiryAlertDescription = computed(() => {
+  if (contractExpiryReminder.value.status === 'upcoming') {
+    return '请提前联系管理员办理劳动合同续签。'
+  }
+  return '请尽快联系管理员办理劳动合同续签。'
+})
 
 // 文档类型映射（与入职文件类型对应）
 const documentTypeMap: Record<string, string> = {
@@ -801,7 +951,23 @@ const getMyDocumentsByType = (fileTypeId: string) => {
     .filter(([_, mappedType]) => mappedType === fileTypeId)
     .map(([docType]) => docType)
 
+  if (fileTypeId === 'contract') return contractDocuments.value
   return myDocuments.value.filter(doc => matchingDocTypes.includes(doc.document_type))
+}
+
+const isCurrentMyContract = (doc: MyDocument) => currentContractDocument.value?.id === doc.id
+
+const getMyContractStatusText = (doc: MyDocument) => (
+  isCurrentMyContract(doc) ? '当前合同' : '历史合同'
+)
+
+const getMyContractStatusType = (doc: MyDocument) => (
+  isCurrentMyContract(doc) ? 'success' : 'info'
+)
+
+const formatMyContractTerm = (doc: MyDocument) => {
+  if (!doc.contract_start_date || !doc.contract_end_date) return '期限未识别'
+  return `${doc.contract_start_date} 至 ${doc.contract_end_date}`
 }
 
 // 获取用户的档案文件
@@ -816,6 +982,85 @@ const fetchMyDocuments = async () => {
     console.error('获取档案文件失败:', error)
   } finally {
     myDocumentsLoading.value = false
+  }
+}
+
+watch(
+  () => [
+    pendingStore.counts.myHireDate,
+    pendingStore.counts.myContractEndDate,
+    pendingStore.counts.myEmploymentStatus,
+  ] as const,
+  ([hireDate, contractEndDate, employmentStatus], [previousHireDate, previousContractEndDate]) => {
+    if (!profileData.value) return
+    profileData.value.hire_date = hireDate
+    formData.hireDate = hireDate || ''
+    profileData.value.contract_end_date = contractEndDate
+    if (employmentStatus) {
+      profileData.value.employment_status = employmentStatus
+    }
+    if (hireDate !== previousHireDate || contractEndDate !== previousContractEndDate) {
+      void fetchMyDocuments()
+    }
+  },
+)
+
+const CONTRACT_TEMPLATE_STATUS_REFRESH_MS = 3000
+let contractTemplateStatusTimer: number | null = null
+let contractTemplateStatusRefreshing = false
+
+const refreshContractTemplateStatus = async () => {
+  if (
+    activeTab.value !== 'files'
+    || document.visibilityState !== 'visible'
+    || contractTemplateStatusRefreshing
+  ) return
+
+  contractTemplateStatusRefreshing = true
+  const wasDownloadEnabled = hasContractTemplatePeriod.value
+  try {
+    await fetchProfile(true)
+    if (wasDownloadEnabled && !hasContractTemplatePeriod.value) {
+      await fetchMyDocuments()
+    }
+  } finally {
+    contractTemplateStatusRefreshing = false
+  }
+}
+
+const stopContractTemplateStatusRefresh = () => {
+  if (contractTemplateStatusTimer === null) return
+  window.clearInterval(contractTemplateStatusTimer)
+  contractTemplateStatusTimer = null
+}
+
+const startContractTemplateStatusRefresh = () => {
+  stopContractTemplateStatusRefresh()
+  void refreshContractTemplateStatus()
+  contractTemplateStatusTimer = window.setInterval(
+    () => void refreshContractTemplateStatus(),
+    CONTRACT_TEMPLATE_STATUS_REFRESH_MS,
+  )
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'files') {
+    startContractTemplateStatusRefresh()
+    void fetchMyDocuments()
+  } else {
+    stopContractTemplateStatusRefresh()
+  }
+})
+
+const handleWindowFocus = () => {
+  if (activeTab.value !== 'files') return
+  void refreshContractTemplateStatus()
+  void fetchMyDocuments()
+}
+
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    handleWindowFocus()
   }
 }
 
@@ -856,6 +1101,8 @@ onMounted(async () => {
   fetchProfile()
   fetchMyDocuments()
   onboardingStore.fetchTemplates()
+  window.addEventListener('focus', handleWindowFocus)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 
   // 入职信息未提交时弹窗提示
   if (!authStore.hasCompletedOnboarding) {
@@ -869,6 +1116,12 @@ onMounted(async () => {
       }
     )
   }
+})
+
+onBeforeUnmount(() => {
+  stopContractTemplateStatusRefresh()
+  window.removeEventListener('focus', handleWindowFocus)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
@@ -923,7 +1176,11 @@ onMounted(async () => {
 
 /* 员工信息表单样式 */
 .profile-section {
-  padding: 0 20px;
+  padding: 0;
+}
+
+.contract-expiry-alert {
+  margin-bottom: 20px;
 }
 
 /* 表单对齐样式 */
@@ -962,6 +1219,22 @@ onMounted(async () => {
 .profile-form :deep(.el-date-editor.el-input) {
   width: 100%;
   display: inline-flex;
+}
+
+.contract-period-display,
+.readonly-field-display {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 11px;
+  color: var(--el-disabled-text-color, #a8abb2);
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background-color: var(--el-disabled-bg-color, #f5f7fa);
+  border: 1px solid var(--el-disabled-border-color, #e4e7ed);
+  border-radius: var(--el-input-border-radius, 4px);
 }
 
 .form-section {
@@ -1022,6 +1295,13 @@ onMounted(async () => {
   border-radius: 4px;
 }
 
+.contract-template-date-status {
+  margin-top: 6px;
+  color: #606266;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .file-children {
   margin-top: 8px;
   padding: 8px 16px;
@@ -1049,6 +1329,10 @@ onMounted(async () => {
   background-color: #f0f9eb;
   border-radius: 6px;
   border: 1px solid #e1f3d8;
+}
+
+.download-button-trigger {
+  display: inline-flex;
 }
 
 .file-icon {
@@ -1124,6 +1408,13 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
+.my-contract-term {
+  color: #606266;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .no-doc-tip {
   padding: 12px 16px;
   text-align: center;
@@ -1149,39 +1440,4 @@ onMounted(async () => {
   font-size: 14px;
 }
 
-/* 预览对话框样式 */
-.preview-content {
-  min-height: 300px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.image-preview {
-  max-width: 100%;
-  max-height: 500px;
-  overflow: auto;
-}
-
-.image-preview img {
-  max-width: 100%;
-  height: auto;
-}
-
-.file-preview-tip {
-  text-align: center;
-  color: #909399;
-}
-
-.file-preview-tip p {
-  margin: 16px 0;
-  font-size: 16px;
-  color: #303133;
-}
-
-.file-preview-tip .tip-text {
-  font-size: 14px;
-  color: #909399;
-  margin-bottom: 20px;
-}
 </style>

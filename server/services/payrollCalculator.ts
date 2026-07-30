@@ -25,6 +25,7 @@ export interface PayrollBreakdown {
 
 export type PayrollAmountField =
   | "monthly_salary"
+  | "housing_fund_base"
   | "contribution_base"
   | "company_pension"
   | "company_medical"
@@ -45,8 +46,13 @@ export type PayrollAmountField =
   | "individual_income_tax"
   | "net_salary";
 
+export type PayrollTotals = Record<PayrollAmountField, string> & {
+  cost_total: string;
+};
+
 export const PAYROLL_AMOUNT_FIELDS: PayrollAmountField[] = [
   "monthly_salary",
+  "housing_fund_base",
   "contribution_base",
   "company_pension",
   "company_medical",
@@ -152,6 +158,29 @@ function formatDecimal(value: ExactDecimal, minimumFractionDigits = 2): string {
   return `${sign}${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
 }
 
+function roundDecimal(
+  value: ExactDecimal,
+  fractionDigits: number,
+): ExactDecimal {
+  const normalized = normalizeDecimal(value);
+  if (normalized.scale <= fractionDigits) return normalized;
+
+  const divisor = powerOfTen(normalized.scale - fractionDigits);
+  const negative = normalized.units < 0n;
+  const absoluteUnits = negative ? -normalized.units : normalized.units;
+  const quotient = absoluteUnits / divisor;
+  const remainder = absoluteUnits % divisor;
+  const roundedUnits = quotient + (remainder * 2n >= divisor ? 1n : 0n);
+  return normalizeDecimal({
+    units: negative ? -roundedUnits : roundedUnits,
+    scale: fractionDigits,
+  });
+}
+
+function formatMoney(value: ExactDecimal): string {
+  return formatDecimal(roundDecimal(value, 2), 2);
+}
+
 function addMany(values: ExactDecimal[]): ExactDecimal {
   return values.reduce(addDecimals, parseDecimal("0"));
 }
@@ -191,51 +220,80 @@ export function multiplyPayrollAmountByInteger(
 
 export function calculatePayrollBreakdown(
   monthlySalaryValue: string,
+  housingFundBaseValue: string,
   contributionBaseValue: string,
   individualIncomeTaxValue: string,
 ): PayrollBreakdown {
   const monthlySalary = parseDecimal(
     normalizePayrollAmount(monthlySalaryValue),
   );
+  const housingFundBase = parseDecimal(
+    normalizePayrollAmount(housingFundBaseValue),
+  );
   const contributionBase = parseDecimal(
     normalizePayrollAmount(contributionBaseValue),
   );
-  const individualIncomeTax = parseDecimal(
-    normalizePayrollAmount(individualIncomeTaxValue),
+  const individualIncomeTax = roundDecimal(
+    parseDecimal(normalizePayrollAmount(individualIncomeTaxValue)),
+    2,
   );
 
-  const companyPension = multiplyByPowerOfTenRate(contributionBase, 16n, 2);
-  const companyMedical = multiplyByPowerOfTenRate(contributionBase, 98n, 3);
-  const companyUnemployment = multiplyByPowerOfTenRate(contributionBase, 5n, 3);
-  const companyInjury = multiplyByPowerOfTenRate(contributionBase, 4n, 3);
+  // 社保和公积金按税务缴费口径逐项精确到分，再计算个人及全员合计。
+  const companyPension = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 16n, 2),
+    2,
+  );
+  const companyMedical = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 98n, 3),
+    2,
+  );
+  const companyUnemployment = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 5n, 3),
+    2,
+  );
+  const companyInjury = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 4n, 3),
+    2,
+  );
   const companySocialTotal = addMany([
     companyPension,
     companyMedical,
     companyUnemployment,
     companyInjury,
   ]);
-  const companyHousingFund = multiplyByPowerOfTenRate(monthlySalary, 6n, 2);
+  const companyHousingFund = roundDecimal(
+    multiplyByPowerOfTenRate(housingFundBase, 6n, 2),
+    2,
+  );
   const companyPaidTotal = addDecimals(companySocialTotal, companyHousingFund);
 
-  const personalPension = multiplyByPowerOfTenRate(contributionBase, 8n, 2);
+  const personalPension = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 8n, 2),
+    2,
+  );
   const personalMedical =
     compareDecimals(contributionBase, parseDecimal("0")) > 0
-      ? addDecimals(
-          multiplyByPowerOfTenRate(contributionBase, 2n, 2),
-          parseDecimal("3"),
+      ? roundDecimal(
+          addDecimals(
+            multiplyByPowerOfTenRate(contributionBase, 2n, 2),
+            parseDecimal("3"),
+          ),
+          2,
         )
       : parseDecimal("0");
-  const personalUnemployment = multiplyByPowerOfTenRate(
-    contributionBase,
-    5n,
-    3,
+  const personalUnemployment = roundDecimal(
+    multiplyByPowerOfTenRate(contributionBase, 5n, 3),
+    2,
   );
   const personalSocialTotal = addMany([
     personalPension,
     personalMedical,
     personalUnemployment,
   ]);
-  const personalHousingFund = multiplyByPowerOfTenRate(monthlySalary, 6n, 2);
+  const personalHousingFund = roundDecimal(
+    multiplyByPowerOfTenRate(housingFundBase, 6n, 2),
+    2,
+  );
 
   const withheldSocial = addDecimals(companySocialTotal, personalSocialTotal);
   const withheldHousingFund = addDecimals(
@@ -256,23 +314,23 @@ export function calculatePayrollBreakdown(
   );
 
   return {
-    company_pension: formatDecimal(companyPension),
-    company_medical: formatDecimal(companyMedical),
-    company_unemployment: formatDecimal(companyUnemployment),
-    company_injury: formatDecimal(companyInjury),
-    company_social_total: formatDecimal(companySocialTotal),
-    company_housing_fund: formatDecimal(companyHousingFund),
-    company_paid_total: formatDecimal(companyPaidTotal),
-    withheld_social: formatDecimal(withheldSocial),
-    withheld_housing_fund: formatDecimal(withheldHousingFund),
-    withheld_tax: formatDecimal(individualIncomeTax),
-    withheld_total: formatDecimal(withheldTotal),
-    personal_pension: formatDecimal(personalPension),
-    personal_medical: formatDecimal(personalMedical),
-    personal_unemployment: formatDecimal(personalUnemployment),
-    personal_social_total: formatDecimal(personalSocialTotal),
-    personal_housing_fund: formatDecimal(personalHousingFund),
-    net_salary: formatDecimal(netSalary),
+    company_pension: formatMoney(companyPension),
+    company_medical: formatMoney(companyMedical),
+    company_unemployment: formatMoney(companyUnemployment),
+    company_injury: formatMoney(companyInjury),
+    company_social_total: formatMoney(companySocialTotal),
+    company_housing_fund: formatMoney(companyHousingFund),
+    company_paid_total: formatMoney(companyPaidTotal),
+    withheld_social: formatMoney(withheldSocial),
+    withheld_housing_fund: formatMoney(withheldHousingFund),
+    withheld_tax: formatMoney(individualIncomeTax),
+    withheld_total: formatMoney(withheldTotal),
+    personal_pension: formatMoney(personalPension),
+    personal_medical: formatMoney(personalMedical),
+    personal_unemployment: formatMoney(personalUnemployment),
+    personal_social_total: formatMoney(personalSocialTotal),
+    personal_housing_fund: formatMoney(personalHousingFund),
+    net_salary: formatMoney(netSalary),
   };
 }
 
@@ -357,12 +415,18 @@ export function calculateAutomaticMonthlySalary(
 
 export function calculatePayrollTotals(
   rows: Array<Record<PayrollAmountField, string>>,
-): Record<PayrollAmountField, string> {
-  const totals = {} as Record<PayrollAmountField, string>;
+): PayrollTotals {
+  const totals = {} as PayrollTotals;
   for (const field of PAYROLL_AMOUNT_FIELDS) {
-    totals[field] = formatDecimal(
+    totals[field] = formatMoney(
       addMany(rows.map((row) => parseDecimal(row[field] || "0"))),
     );
   }
+  totals.cost_total = formatMoney(
+    addDecimals(
+      parseDecimal(totals.withheld_total),
+      parseDecimal(totals.net_salary),
+    ),
+  );
   return totals;
 }

@@ -2093,9 +2093,12 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
     const monthEnd = monthEndDate.toISOString().slice(0, 10)
     const daysInMonth = monthEndDate.getDate()
 
-    // 获取所有活跃用户（排除 guest 和 super_admin）
+    // 获取所有活跃用户（排除访客、超级管理员和纯看板BOSS账号）
     const allUsers = await db.all<{ id: string; name: string; position: string | null; role: string }>(
-      `SELECT id, name, position, role FROM users WHERE role NOT IN ('guest', 'super_admin') ORDER BY name`,
+      `SELECT id, name, position, role
+       FROM users
+       WHERE role NOT IN ('guest', 'super_admin', 'boss')
+       ORDER BY name`,
     )
 
     // 查询该月的节假日/调休数据

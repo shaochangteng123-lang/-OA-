@@ -1,140 +1,181 @@
-import { Pool, Client, types, type PoolClient } from 'pg'
+import { Pool, Client, types, type PoolClient } from "pg";
 
 // 统一 PostgreSQL 数值类型解析，避免前后端把字符串当 number 使用
-const PG_INT8_OID = 20
-const PG_NUMERIC_OID = 1700
+const PG_INT8_OID = 20;
+const PG_NUMERIC_OID = 1700;
 
-types.setTypeParser(PG_INT8_OID, (value: string) => Number(value))
-types.setTypeParser(PG_NUMERIC_OID, (value: string) => Number(value))
+types.setTypeParser(PG_INT8_OID, (value: string) => Number(value));
+types.setTypeParser(PG_NUMERIC_OID, (value: string) => Number(value));
 
-const connectionString = process.env.DATABASE_URL ||
-  `postgresql://${process.env.DB_USER || 'postgres'}:${process.env.DB_PASSWORD || 'postgres'}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || '5432'}/${process.env.DB_NAME || 'yulilog_worklog'}`
+const connectionString =
+  process.env.DATABASE_URL ||
+  `postgresql://${process.env.DB_USER || "postgres"}:${process.env.DB_PASSWORD || "postgres"}@${process.env.DB_HOST || "localhost"}:${process.env.DB_PORT || "5432"}/${process.env.DB_NAME || "yulilog_worklog"}`;
 
-console.log('📦 数据库连接:', connectionString.replace(/:[^:@]+@/, ':****@'))
+console.log("📦 数据库连接:", connectionString.replace(/:[^:@]+@/, ":****@"));
 
 export const pool = new Pool({
   connectionString,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-})
+});
 
 // 捕获空闲连接错误，防止进程崩溃
-pool.on('error', (err) => {
-  console.error('PostgreSQL 连接池错误（已捕获）:', err.message)
-})
+pool.on("error", (err) => {
+  console.error("PostgreSQL 连接池错误（已捕获）:", err.message);
+});
 
 // 全局未捕获错误处理，防止 pg client error 导致进程崩溃
-process.on('uncaughtException', (err) => {
-  if (err.message?.includes('Connection terminated') || (err as any).code === '08P01') {
-    console.error('PostgreSQL 连接异常（已捕获，进程继续运行）:', err.message)
-    return
+process.on("uncaughtException", (err) => {
+  if (
+    err.message?.includes("Connection terminated") ||
+    (err as any).code === "08P01"
+  ) {
+    console.error("PostgreSQL 连接异常（已捕获，进程继续运行）:", err.message);
+    return;
   }
-  console.error('未捕获异常:', err)
-  process.exit(1)
-})
+  console.error("未捕获异常:", err);
+  process.exit(1);
+});
 
 function convertPlaceholders(sql: string): string {
-  let index = 0
+  let index = 0;
   // 1. 替换 ? 为 $N
-  let result = sql.replace(/\?/g, () => `$${++index}`)
+  let result = sql.replace(/\?/g, () => `$${++index}`);
   // 2. 给驼峰别名自动加双引号（PostgreSQL 会把未引用的标识符转为小写）
-  result = result.replace(/\bAS\s+([a-z][a-zA-Z]*[A-Z][a-zA-Z]*)\b/gi, (_, alias) => `AS "${alias}"`)
-  return result
+  result = result.replace(
+    /\bAS\s+([a-z][a-zA-Z]*[A-Z][a-zA-Z]*)\b/gi,
+    (_, alias) => `AS "${alias}"`,
+  );
+  return result;
 }
 
 export const db = {
   async get<T = any>(sql: string, ...params: any[]): Promise<T | undefined> {
     try {
-      const result = await pool.query(convertPlaceholders(sql), params)
-      return result.rows[0] as T | undefined
+      const result = await pool.query(convertPlaceholders(sql), params);
+      return result.rows[0] as T | undefined;
     } catch (err: any) {
-      console.error('❌ db.get 失败:', { sql: sql.substring(0, 100), params, error: err.message, code: err.code })
-      throw err
+      console.error("❌ db.get 失败:", {
+        sql: sql.substring(0, 100),
+        params,
+        error: err.message,
+        code: err.code,
+      });
+      throw err;
     }
   },
 
   async all<T = any>(sql: string, ...params: any[]): Promise<T[]> {
     try {
-      const result = await pool.query(convertPlaceholders(sql), params)
-      return result.rows as T[]
+      const result = await pool.query(convertPlaceholders(sql), params);
+      return result.rows as T[];
     } catch (err: any) {
-      console.error('❌ db.all 失败:', { sql: sql.substring(0, 100), params, error: err.message, code: err.code })
-      throw err
+      console.error("❌ db.all 失败:", {
+        sql: sql.substring(0, 100),
+        params,
+        error: err.message,
+        code: err.code,
+      });
+      throw err;
     }
   },
 
   async run(sql: string, ...params: any[]): Promise<{ changes: number }> {
     try {
-      const result = await pool.query(convertPlaceholders(sql), params)
-      return { changes: result.rowCount ?? 0 }
+      const result = await pool.query(convertPlaceholders(sql), params);
+      return { changes: result.rowCount ?? 0 };
     } catch (err: any) {
-      console.error('❌ db.run 失败:', { sql: sql.substring(0, 100), params, error: err.message, code: err.code })
-      throw err
+      console.error("❌ db.run 失败:", {
+        sql: sql.substring(0, 100),
+        params,
+        error: err.message,
+        code: err.code,
+      });
+      throw err;
     }
   },
 
   async exec(sql: string): Promise<void> {
-    await pool.query(sql)
+    await pool.query(sql);
   },
 
   async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-    const client = await pool.connect()
+    const client = await pool.connect();
     try {
-      await client.query('BEGIN')
-      const result = await fn(client)
-      await client.query('COMMIT')
-      client.release()
-      return result
+      await client.query("BEGIN");
+      const result = await fn(client);
+      await client.query("COMMIT");
+      client.release();
+      return result;
     } catch (error) {
-      try { await client.query('ROLLBACK') } catch {}
-      client.release(true) // 销毁连接
-      throw error
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // 原事务错误优先返回，回滚失败时销毁当前连接。
+      }
+      client.release(true); // 销毁连接
+      throw error;
     }
   },
 
   prepare(sql: string) {
-    const pgSql = convertPlaceholders(sql)
+    const pgSql = convertPlaceholders(sql);
     return {
       async get<T = any>(...params: any[]): Promise<T | undefined> {
         try {
-          const result = await pool.query(pgSql, params)
-          return result.rows[0] as T | undefined
+          const result = await pool.query(pgSql, params);
+          return result.rows[0] as T | undefined;
         } catch (err: any) {
-          console.error('❌ prepare.get 失败:', { sql: pgSql.substring(0, 100), params, error: err.message, code: err.code })
-          throw err
+          console.error("❌ prepare.get 失败:", {
+            sql: pgSql.substring(0, 100),
+            params,
+            error: err.message,
+            code: err.code,
+          });
+          throw err;
         }
       },
       async all<T = any>(...params: any[]): Promise<T[]> {
         try {
-          const result = await pool.query(pgSql, params)
-          return result.rows as T[]
+          const result = await pool.query(pgSql, params);
+          return result.rows as T[];
         } catch (err: any) {
-          console.error('❌ prepare.all 失败:', { sql: pgSql.substring(0, 100), params, error: err.message, code: err.code })
-          throw err
+          console.error("❌ prepare.all 失败:", {
+            sql: pgSql.substring(0, 100),
+            params,
+            error: err.message,
+            code: err.code,
+          });
+          throw err;
         }
       },
       async run(...params: any[]): Promise<{ changes: number }> {
         try {
-          const result = await pool.query(pgSql, params)
-          return { changes: result.rowCount ?? 0 }
+          const result = await pool.query(pgSql, params);
+          return { changes: result.rowCount ?? 0 };
         } catch (err: any) {
-          console.error('❌ prepare.run 失败:', { sql: pgSql.substring(0, 100), params, error: err.message, code: err.code })
-          throw err
+          console.error("❌ prepare.run 失败:", {
+            sql: pgSql.substring(0, 100),
+            params,
+            error: err.message,
+            code: err.code,
+          });
+          throw err;
         }
       },
-    }
+    };
   },
 
   pool,
-}
+};
 
 export async function initDatabase() {
-  console.log('🔧 初始化 PostgreSQL 数据库表...')
+  console.log("🔧 初始化 PostgreSQL 数据库表...");
 
   // 使用独立连接（不经过连接池）执行 DDL，避免污染池中连接
-  const ddlClient = new Client({ connectionString })
-  await ddlClient.connect()
+  const ddlClient = new Client({ connectionString });
+  await ddlClient.connect();
   try {
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -145,8 +186,8 @@ export async function initDatabase() {
       email TEXT,
       mobile TEXT,
       avatar_url TEXT,
-      role TEXT NOT NULL DEFAULT 'user',
-      status TEXT NOT NULL DEFAULT 'active',
+      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest')),
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
       department TEXT,
       position TEXT,
       created_at TEXT NOT NULL,
@@ -158,7 +199,27 @@ export async function initDatabase() {
       bank_account_number TEXT,
       employee_no TEXT
     )
-  `)
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS user_signatures (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      signature_path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS user_delegated_signatures (
+      user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      represented_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      represented_user_name TEXT NOT NULL,
+      signature_path TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS projects (
@@ -179,7 +240,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS worklogs (
@@ -194,7 +255,7 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL,
       UNIQUE(date, user_id)
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS government_departments (
@@ -207,7 +268,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS event_library (
@@ -222,7 +283,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS event_presets (
@@ -236,7 +297,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS user_preferences (
@@ -248,7 +309,7 @@ export async function initDatabase() {
       calendar_view_mode TEXT DEFAULT 'week',
       week_display_days INTEGER DEFAULT 7
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS user_activities (
@@ -261,7 +322,7 @@ export async function initDatabase() {
       user_agent TEXT,
       timestamp TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS drafts (
@@ -273,7 +334,7 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL,
       UNIQUE(date, user_id)
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS block_categories (
@@ -285,7 +346,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS event_blocks (
@@ -297,7 +358,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS calendar_events (
@@ -315,7 +376,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS holidays (
@@ -328,7 +389,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS payment_batches (
@@ -343,7 +404,7 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL,
       remark TEXT
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursements (
@@ -381,7 +442,7 @@ export async function initDatabase() {
       reimbursement_month TEXT,
       payment_batch_id TEXT
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS payment_batch_items (
@@ -391,7 +452,7 @@ export async function initDatabase() {
       amount NUMERIC(12,2) NOT NULL,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursement_invoices (
@@ -411,7 +472,7 @@ export async function initDatabase() {
       file_hash TEXT,
       is_deduction INTEGER NOT NULL DEFAULT 0
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS approval_flows (
@@ -423,7 +484,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursement_deductions (
@@ -436,7 +497,7 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL,
       UNIQUE(user_id, year, month)
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS approval_instances (
@@ -453,7 +514,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS approval_records (
@@ -465,7 +526,7 @@ export async function initDatabase() {
       comment TEXT,
       action_time TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS employee_profiles (
@@ -489,6 +550,15 @@ export async function initDatabase() {
       address TEXT,
       hire_date TEXT,
       contract_end_date TEXT,
+      contract_template_start_date TEXT,
+      contract_template_end_date TEXT,
+      probation_template_start_date TEXT,
+      probation_template_end_date TEXT,
+      last_contract_template_start_date TEXT,
+      last_contract_template_end_date TEXT,
+      last_probation_template_start_date TEXT,
+      last_probation_template_end_date TEXT,
+      last_contract_template_position TEXT,
       department TEXT,
       position TEXT,
       status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted')),
@@ -498,15 +568,18 @@ export async function initDatabase() {
       bank_account_phone TEXT,
       bank_name TEXT,
       bank_account_number TEXT,
-      employment_status TEXT DEFAULT 'active'
+      employment_status TEXT DEFAULT 'active' CHECK(employment_status IN ('active', 'probation', 'resigned', 'on_leave'))
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS employee_documents (
       id TEXT PRIMARY KEY,
       employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
-      document_type TEXT NOT NULL,
+      document_type TEXT NOT NULL CHECK(document_type IN (
+        'invitation', 'application', 'contract', 'nda', 'declaration', 'asset_handover',
+        'id_card', 'health_report', 'diploma', 'bank_card', 'other'
+      )),
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
       file_size INTEGER,
@@ -516,9 +589,10 @@ export async function initDatabase() {
       contract_start_date TEXT,
       contract_end_date TEXT,
       contract_recognized_at TEXT,
+      probation_end_date TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS employee_salary_profiles (
@@ -529,7 +603,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS payroll_records (
@@ -538,17 +612,97 @@ export async function initDatabase() {
       payroll_month TEXT NOT NULL CHECK(payroll_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
       automatic_salary NUMERIC NOT NULL DEFAULT 0 CHECK(automatic_salary >= 0),
       monthly_salary NUMERIC NOT NULL DEFAULT 0 CHECK(monthly_salary >= 0),
+      housing_fund_base NUMERIC NOT NULL DEFAULT 0 CHECK(housing_fund_base >= 0),
       contribution_base NUMERIC NOT NULL DEFAULT 0 CHECK(contribution_base >= 0),
       individual_income_tax NUMERIC NOT NULL DEFAULT 0 CHECK(individual_income_tax >= 0),
       monthly_salary_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
+      housing_fund_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
       contribution_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
       tax_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
+      version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
       updated_by TEXT REFERENCES users(id),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(employee_id, payroll_month)
     )
-  `)
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS payroll_change_logs (
+      id TEXT PRIMARY KEY,
+      payroll_record_id TEXT NOT NULL REFERENCES payroll_records(id) ON DELETE CASCADE,
+      employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      payroll_month TEXT NOT NULL,
+      field_name TEXT NOT NULL CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax')),
+      old_value NUMERIC NOT NULL CHECK(old_value >= 0),
+      new_value NUMERIC NOT NULL CHECK(new_value >= 0),
+      changed_by TEXT NOT NULL REFERENCES users(id),
+      changed_at TEXT NOT NULL
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS human_cost_receipts (
+      id TEXT PRIMARY KEY,
+      payroll_month TEXT NOT NULL CHECK(payroll_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      category TEXT NOT NULL CHECK(category IN ('social_security', 'housing_fund', 'income_tax', 'net_salary')),
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER NOT NULL CHECK(file_size > 0),
+      mime_type TEXT NOT NULL CHECK(mime_type IN ('application/pdf', 'image/jpeg', 'image/png')),
+      file_hash TEXT NOT NULL,
+      recognized_amount NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK(recognized_amount >= 0),
+      recognition_status TEXT NOT NULL DEFAULT 'processing'
+        CHECK(recognition_status IN ('processing', 'recognized', 'partial', 'failed')),
+      recognized_item_count INTEGER NOT NULL DEFAULT 0 CHECK(recognized_item_count >= 0),
+      total_item_count INTEGER NOT NULL DEFAULT 0 CHECK(total_item_count >= 0),
+      ignored_item_count INTEGER NOT NULL DEFAULT 0 CHECK(ignored_item_count >= 0),
+      recognition_version INTEGER NOT NULL DEFAULT 1 CHECK(recognition_version >= 1),
+      recognition_error TEXT,
+      uploaded_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(payroll_month, category, file_hash)
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS payroll_tax_detail_files (
+      id TEXT PRIMARY KEY,
+      payroll_month TEXT NOT NULL UNIQUE
+        CHECK(payroll_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER NOT NULL CHECK(file_size > 0),
+      mime_type TEXT NOT NULL
+        CHECK(mime_type IN ('application/pdf', 'image/jpeg', 'image/png')),
+      recognized_count INTEGER NOT NULL CHECK(recognized_count >= 0),
+      zero_count INTEGER NOT NULL CHECK(zero_count >= 0),
+      missing_employee_names JSONB NOT NULL DEFAULT '[]'::jsonb,
+      unreadable_employee_names JSONB NOT NULL DEFAULT '[]'::jsonb,
+      page_count INTEGER NOT NULL CHECK(page_count >= 1),
+      uploaded_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS human_cost_receipt_items (
+      id TEXT PRIMARY KEY,
+      receipt_id TEXT NOT NULL REFERENCES human_cost_receipts(id) ON DELETE CASCADE,
+      employee_id TEXT REFERENCES employee_profiles(id) ON DELETE SET NULL,
+      payee_name TEXT NOT NULL,
+      payee_account TEXT NOT NULL,
+      amount NUMERIC(14,2) NOT NULL CHECK(amount > 0),
+      proof_no TEXT,
+      page_no INTEGER NOT NULL CHECK(page_no >= 1),
+      position TEXT NOT NULL CHECK(position IN ('full', 'top', 'bottom')),
+      match_status TEXT NOT NULL CHECK(match_status IN ('matched', 'unmatched', 'ambiguous')),
+      created_at TEXT NOT NULL,
+      UNIQUE(receipt_id, page_no, position)
+    )
+  `);
 
     // 超级管理员是系统维护账号，不属于公司人力成本统计范围。
     await ddlClient.query(`
@@ -557,39 +711,74 @@ export async function initDatabase() {
     WHERE pr.employee_id = ep.id
       AND ep.user_id = u.id
       AND u.role = 'super_admin'
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS probation_confirmations (
       id TEXT PRIMARY KEY,
       employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
-      hire_date TEXT NOT NULL,
-      probation_end_date TEXT NOT NULL,
-      status TEXT DEFAULT 'pending',
+      hire_date TEXT,
+      probation_end_date TEXT,
+      status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'submitted', 'approved', 'rejected')),
+      form_version INTEGER NOT NULL DEFAULT 0,
+      review_stage TEXT NOT NULL DEFAULT 'employee' CHECK(review_stage IN ('employee', 'supervisor', 'hr', 'general_manager', 'completed')),
+      conversion_type TEXT NOT NULL DEFAULT 'normal' CHECK(conversion_type IN ('normal', 'early', 'extended', 'other')),
+      conversion_type_other TEXT,
+      self_statement TEXT,
+      applicant_name_snapshot TEXT,
+      department_snapshot TEXT,
+      position_snapshot TEXT,
+      supervisor_id TEXT REFERENCES users(id),
       submit_time TEXT,
       approve_time TEXT,
       approver_id TEXT REFERENCES users(id),
       approver_comment TEXT,
       application_comment TEXT,
+      formal_document_generated_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS probation_documents (
       id TEXT PRIMARY KEY,
-      confirmation_id TEXT NOT NULL REFERENCES probation_confirmations(id) ON DELETE CASCADE,
-      document_type TEXT NOT NULL,
+      confirmation_id TEXT REFERENCES probation_confirmations(id) ON DELETE CASCADE,
+      employee_id TEXT REFERENCES employee_profiles(id) ON DELETE CASCADE,
+      document_type TEXT NOT NULL CHECK(document_type = 'application'),
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
       file_size INTEGER,
       mime_type TEXT,
       uploaded_by TEXT NOT NULL REFERENCES users(id),
       uploaded_by_name TEXT,
+      source_type TEXT NOT NULL DEFAULT 'uploaded' CHECK(source_type IN ('uploaded', 'generated', 'official')),
+      form_version INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS probation_signature_records (
+      id TEXT PRIMARY KEY,
+      confirmation_id TEXT NOT NULL REFERENCES probation_confirmations(id) ON DELETE CASCADE,
+      form_version INTEGER NOT NULL,
+      stage TEXT NOT NULL CHECK(stage IN ('employee', 'supervisor', 'hr', 'general_manager')),
+      signer_id TEXT NOT NULL REFERENCES users(id),
+      signer_name TEXT NOT NULL,
+      signer_role TEXT NOT NULL,
+      signer_department TEXT,
+      signer_position TEXT,
+      signature_path TEXT NOT NULL,
+      signature_type TEXT NOT NULL DEFAULT 'personal' CHECK(signature_type IN ('personal', 'general_manager')),
+      signature_owner_name TEXT NOT NULL,
+      opinion TEXT,
+      decision TEXT NOT NULL CHECK(decision IN ('submit', 'approve', 'reject')),
+      signed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(confirmation_id, form_version, stage)
+    )
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS probation_templates (
@@ -603,19 +792,19 @@ export async function initDatabase() {
       uploaded_by_name TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS resignation_requests (
       id TEXT PRIMARY KEY,
       employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
-      employee_user_id TEXT NOT NULL REFERENCES users(id),
-      handover_user_id TEXT NOT NULL REFERENCES users(id),
+      employee_user_id TEXT REFERENCES users(id),
+      handover_user_id TEXT REFERENCES users(id),
       handover_name TEXT,
       resign_type TEXT NOT NULL CHECK(resign_type IN ('voluntary', 'contract_end', 'dismissal')),
       resign_date TEXT NOT NULL,
       reason TEXT,
-      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected')),
+      status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending_confirmation', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected')),
       employee_confirm_time TEXT,
       handover_confirm_time TEXT,
       submit_time TEXT,
@@ -623,17 +812,24 @@ export async function initDatabase() {
       approver_id TEXT REFERENCES users(id),
       approver_comment TEXT,
       reject_target TEXT,
+      created_by TEXT REFERENCES users(id),
+      created_by_name TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       UNIQUE(employee_id)
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS resignation_documents (
       id TEXT PRIMARY KEY,
       request_id TEXT NOT NULL REFERENCES resignation_requests(id) ON DELETE CASCADE,
-      document_type TEXT NOT NULL CHECK(document_type IN ('application_form', 'handover_form', 'handover_form_employee', 'handover_form_handover', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement')),
+      document_type TEXT NOT NULL CHECK(document_type IN (
+        'application_form', 'handover_form', 'handover_form_employee', 'handover_form_handover',
+        'termination_proof', 'asset_handover', 'compensation_agreement',
+        'expense_settlement_agreement', 'termination_agreement',
+        'employee_handover_form', 'settlement_confirmation', 'resignation_certificate'
+      )),
       uploader_role TEXT NOT NULL CHECK(uploader_role IN ('employee', 'handover', 'admin')),
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
@@ -642,14 +838,19 @@ export async function initDatabase() {
       uploaded_by TEXT NOT NULL REFERENCES users(id),
       uploaded_by_name TEXT,
       created_at TEXT NOT NULL,
-      is_current INTEGER NOT NULL DEFAULT 1
+      is_current INTEGER NOT NULL DEFAULT 1 CHECK(is_current IN (0, 1))
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS resignation_templates (
       id TEXT PRIMARY KEY,
-      template_type TEXT NOT NULL CHECK(template_type IN ('application_form', 'handover_form', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement', 'partner_dividend_settlement')),
+      template_type TEXT NOT NULL CHECK(template_type IN (
+        'application_form', 'handover_form', 'termination_proof', 'asset_handover',
+        'compensation_agreement', 'expense_settlement_agreement',
+        'partner_dividend_settlement', 'termination_agreement',
+        'employee_handover_form', 'settlement_confirmation', 'resignation_certificate'
+      )),
       name TEXT NOT NULL,
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
@@ -659,7 +860,23 @@ export async function initDatabase() {
       uploaded_by_name TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS resignation_template_drafts (
+      id TEXT PRIMARY KEY,
+      request_id TEXT NOT NULL REFERENCES resignation_requests(id) ON DELETE CASCADE,
+      template_type TEXT NOT NULL,
+      template_id TEXT NOT NULL REFERENCES resignation_templates(id) ON DELETE CASCADE,
+      content_html TEXT NOT NULL,
+      overlay_json TEXT,
+      updated_by TEXT NOT NULL REFERENCES users(id),
+      updated_by_name TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(request_id, template_type)
+    )
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS resignation_audit_logs (
@@ -671,12 +888,12 @@ export async function initDatabase() {
       comment TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS onboarding_templates (
       id TEXT PRIMARY KEY,
-      file_type TEXT NOT NULL,
+      file_type TEXT NOT NULL CHECK(file_type IN ('invitation', 'application', 'contract', 'nda', 'declaration', 'asset')),
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
       file_size INTEGER,
@@ -685,7 +902,7 @@ export async function initDatabase() {
       uploaded_by_name TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursement_scopes (
@@ -698,7 +915,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursement_deduction_invoices (
@@ -711,7 +928,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       file_hash TEXT
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS department_position_configs (
@@ -719,7 +936,7 @@ export async function initDatabase() {
       config_json TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     // ==================== 请假管理相关表 ====================
 
@@ -736,7 +953,7 @@ export async function initDatabase() {
       is_active BOOLEAN DEFAULT TRUE,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS leave_balances (
@@ -744,14 +961,16 @@ export async function initDatabase() {
       user_id TEXT NOT NULL REFERENCES users(id),
       leave_type_code TEXT NOT NULL REFERENCES leave_type_configs(code),
       year INTEGER NOT NULL,
-      total_days NUMERIC(5,1) NOT NULL,
-      used_days NUMERIC(5,1) NOT NULL DEFAULT 0,
-      pending_days NUMERIC(5,1) NOT NULL DEFAULT 0,
+      total_days NUMERIC(5,1) NOT NULL CHECK(total_days >= 0),
+      used_days NUMERIC(5,1) NOT NULL DEFAULT 0 CHECK(used_days >= 0),
+      pending_days NUMERIC(5,1) NOT NULL DEFAULT 0 CHECK(pending_days >= 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      UNIQUE(user_id, leave_type_code, year)
+      UNIQUE(user_id, leave_type_code, year),
+      CHECK(year BETWEEN 2000 AND 2200),
+      CHECK(used_days + pending_days <= total_days)
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS leave_requests (
@@ -763,18 +982,19 @@ export async function initDatabase() {
       leave_type_code TEXT NOT NULL REFERENCES leave_type_configs(code),
       leave_type_name TEXT NOT NULL,
       start_date TEXT NOT NULL,
-      start_half TEXT NOT NULL,
+      start_half TEXT NOT NULL CHECK(start_half IN ('morning', 'afternoon')),
       end_date TEXT NOT NULL,
-      end_half TEXT NOT NULL,
-      total_days NUMERIC(5,1) NOT NULL,
+      end_half TEXT NOT NULL CHECK(end_half IN ('morning', 'afternoon')),
+      total_days NUMERIC(5,1) NOT NULL CHECK(total_days > 0),
       balance_allocations_json TEXT,
       balance_reserved BOOLEAN NOT NULL DEFAULT FALSE,
       reason TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('draft', 'pending', 'approved', 'rejected', 'cancelled')),
       approver_id TEXT REFERENCES users(id),
       approver_name TEXT,
       reject_reason TEXT,
       approved_at TEXT,
+      approval_notice_unread BOOLEAN NOT NULL DEFAULT FALSE,
       rejected_at TEXT,
       cancelled_at TEXT,
       submitted_at TEXT NOT NULL,
@@ -783,29 +1003,33 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS balance_allocations_json TEXT
-    `)
+    `);
 
     await ddlClient.query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS balance_reserved BOOLEAN
-    `)
+    `);
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS approval_notice_unread BOOLEAN NOT NULL DEFAULT FALSE
+    `);
     await ddlClient.query(`
       UPDATE leave_requests lr
       SET balance_reserved = ltc.requires_balance_check
       FROM leave_type_configs ltc
       WHERE lr.leave_type_code = ltc.code
         AND lr.balance_reserved IS NULL
-    `)
+    `);
     await ddlClient.query(`
       ALTER TABLE leave_requests ALTER COLUMN balance_reserved SET DEFAULT FALSE;
       UPDATE leave_requests SET balance_reserved = FALSE WHERE balance_reserved IS NULL;
       ALTER TABLE leave_requests ALTER COLUMN balance_reserved SET NOT NULL;
-    `)
+    `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS leave_attachments (
@@ -818,7 +1042,7 @@ export async function initDatabase() {
       uploaded_by TEXT NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS leave_approval_logs (
@@ -830,7 +1054,7 @@ export async function initDatabase() {
       comment TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
     await ddlClient.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
@@ -895,6 +1119,11 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_approval_records_approver ON approval_records(approver_id);
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_user_id ON employee_profiles(user_id);
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_employee_no ON employee_profiles(employee_no);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_profiles_user_id
+      ON employee_profiles(user_id) WHERE user_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_employee_profiles_employee_no
+      ON employee_profiles(employee_no) WHERE employee_no IS NOT NULL AND BTRIM(employee_no) <> '';
+    CREATE INDEX IF NOT EXISTS idx_employee_profiles_id_number ON employee_profiles(id_number);
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_status ON employee_profiles(status);
     CREATE INDEX IF NOT EXISTS idx_employee_profiles_department ON employee_profiles(department);
     CREATE INDEX IF NOT EXISTS idx_employee_documents_employee_id ON employee_documents(employee_id);
@@ -902,6 +1131,13 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_employee_salary_profiles_source_document ON employee_salary_profiles(source_document_id);
     CREATE INDEX IF NOT EXISTS idx_payroll_records_month ON payroll_records(payroll_month);
     CREATE INDEX IF NOT EXISTS idx_payroll_records_employee ON payroll_records(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_payroll_change_logs_record ON payroll_change_logs(payroll_record_id);
+    CREATE INDEX IF NOT EXISTS idx_payroll_change_logs_employee_month ON payroll_change_logs(employee_id, payroll_month);
+    CREATE INDEX IF NOT EXISTS idx_human_cost_receipts_month_category ON human_cost_receipts(payroll_month, category);
+    CREATE INDEX IF NOT EXISTS idx_human_cost_receipts_status ON human_cost_receipts(recognition_status);
+    CREATE INDEX IF NOT EXISTS idx_human_cost_receipt_items_receipt ON human_cost_receipt_items(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_human_cost_receipt_items_employee ON human_cost_receipt_items(employee_id);
+    CREATE INDEX IF NOT EXISTS idx_payroll_tax_detail_files_month ON payroll_tax_detail_files(payroll_month);
     CREATE UNIQUE INDEX IF NOT EXISTS uq_probation_confirmations_employee_id ON probation_confirmations(employee_id);
     CREATE INDEX IF NOT EXISTS idx_probation_confirmations_status ON probation_confirmations(status);
     CREATE INDEX IF NOT EXISTS idx_probation_documents_confirmation_id ON probation_documents(confirmation_id);
@@ -912,6 +1148,7 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_resignation_documents_request_id ON resignation_documents(request_id);
     CREATE INDEX IF NOT EXISTS idx_resignation_documents_type ON resignation_documents(document_type);
     CREATE INDEX IF NOT EXISTS idx_resignation_templates_type ON resignation_templates(template_type);
+    CREATE INDEX IF NOT EXISTS idx_resignation_template_drafts_request ON resignation_template_drafts(request_id);
     CREATE INDEX IF NOT EXISTS idx_onboarding_templates_file_type ON onboarding_templates(file_type);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_parent_id ON reimbursement_scopes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursement_scopes_sort_order ON reimbursement_scopes(sort_order);
@@ -919,9 +1156,10 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_leave_requests_status ON leave_requests(status);
     CREATE INDEX IF NOT EXISTS idx_leave_requests_approver_id ON leave_requests(approver_id);
     CREATE INDEX IF NOT EXISTS idx_leave_requests_dates ON leave_requests(start_date, end_date);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_approval_notice ON leave_requests(user_id, status, approval_notice_unread);
     CREATE INDEX IF NOT EXISTS idx_leave_balances_user_year ON leave_balances(user_id, year);
     CREATE INDEX IF NOT EXISTS idx_leave_approval_logs_req_id ON leave_approval_logs(leave_request_id);
-  `)
+  `);
 
     // ==================== 项目日志模块相关表（v2） ====================
 
@@ -935,7 +1173,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 项目类型字典
     await ddlClient.query(`
@@ -947,7 +1185,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 办理事项字典（含标准办理天数，用于甘特图和超期预警）
     await ddlClient.query(`
@@ -960,7 +1198,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 合同付款状态字典
     await ddlClient.query(`
@@ -972,7 +1210,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 项目主表（v2 结构化项目日志）
     await ddlClient.query(`
@@ -994,7 +1232,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 日志主表（一日多条，每条绑定一个项目 + 一个办理事项）
     await ddlClient.query(`
@@ -1016,7 +1254,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 日志进展记录表（时间线追加）
     await ddlClient.query(`
@@ -1028,7 +1266,7 @@ export async function initDatabase() {
         created_by_name TEXT NOT NULL,
         created_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 日志附件表（图片 + 文档）
     await ddlClient.query(`
@@ -1043,7 +1281,7 @@ export async function initDatabase() {
         uploaded_by TEXT NOT NULL REFERENCES users(id),
         created_at TEXT NOT NULL
       )
-    `)
+    `);
 
     // 项目日志模块权限白名单（周报下载等精细权限）
     await ddlClient.query(`
@@ -1054,7 +1292,7 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         UNIQUE(permission_code, user_id)
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE INDEX IF NOT EXISTS idx_worklog_projects_owner ON worklog_projects(owner_user_id);
@@ -1067,7 +1305,7 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_worklog_attachments_entry ON worklog_attachments(entry_id);
       CREATE INDEX IF NOT EXISTS idx_worklog_permissions_code ON worklog_permissions(permission_code);
       CREATE INDEX IF NOT EXISTS idx_worklog_progress_entry ON worklog_progress_notes(entry_id);
-    `)
+    `);
 
     // 合同进度跟踪表
     await ddlClient.query(`
@@ -1081,7 +1319,7 @@ export async function initDatabase() {
         created_by_name TEXT NOT NULL,
         created_at TEXT NOT NULL
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE TABLE IF NOT EXISTS worklog_contract_attachments (
@@ -1095,12 +1333,12 @@ export async function initDatabase() {
         uploaded_by TEXT NOT NULL REFERENCES users(id),
         created_at TEXT NOT NULL
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE INDEX IF NOT EXISTS idx_worklog_contract_progress_project ON worklog_contract_progress(project_id);
       CREATE INDEX IF NOT EXISTS idx_worklog_contract_attachments_progress ON worklog_contract_attachments(progress_id);
-    `)
+    `);
 
     // 今日日志（纯文本）
     await ddlClient.query(`
@@ -1116,7 +1354,7 @@ export async function initDatabase() {
         updated_at TEXT NOT NULL,
         UNIQUE(log_date, user_id)
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE TABLE IF NOT EXISTS daily_log_attachments (
@@ -1130,7 +1368,7 @@ export async function initDatabase() {
         uploaded_by TEXT NOT NULL REFERENCES users(id),
         created_at TEXT NOT NULL
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE TABLE IF NOT EXISTS weekly_summaries (
@@ -1142,23 +1380,23 @@ export async function initDatabase() {
         generated_at TEXT NOT NULL,
         UNIQUE(user_id, week_start)
       )
-    `)
+    `);
 
     await ddlClient.query(`
       CREATE INDEX IF NOT EXISTS idx_daily_logs_user_date ON daily_logs(user_id, log_date);
       CREATE INDEX IF NOT EXISTS idx_daily_log_attachments_log ON daily_log_attachments(daily_log_id);
       CREATE INDEX IF NOT EXISTS idx_weekly_summaries_user ON weekly_summaries(user_id, week_start);
-    `)
+    `);
 
     // 数据库迁移：添加 is_deduction 字段
     try {
       await ddlClient.query(`
         ALTER TABLE reimbursement_invoices
         ADD COLUMN IF NOT EXISTS is_deduction INTEGER NOT NULL DEFAULT 0
-      `)
-      console.log('✅ 数据库迁移：is_deduction 字段检查完成')
+      `);
+      console.log("✅ 数据库迁移：is_deduction 字段检查完成");
     } catch (error: any) {
-      console.log('ℹ️  is_deduction 字段已存在或迁移失败:', error.message)
+      console.log("ℹ️  is_deduction 字段已存在或迁移失败:", error.message);
     }
 
     // 数据库迁移：新建 payment_proof_hashes 表，每张付款回单哈希单独一行，防止单张回单跨批次重放
@@ -1171,25 +1409,29 @@ export async function initDatabase() {
           batch_id TEXT NOT NULL,
           created_at TEXT NOT NULL
         )
-      `)
+      `);
 
       // 兼容旧表：检查 proof_no 列是否存在，不存在则添加（同时处理旧字段 transaction_id）
       const proofNoCheck = await ddlClient.query(`
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'payment_proof_hashes' AND column_name = 'proof_no'
-      `)
+      `);
       if (proofNoCheck.rows.length === 0) {
         // 检查是否有旧字段 transaction_id，有则重命名
         const oldColCheck = await ddlClient.query(`
           SELECT column_name FROM information_schema.columns
           WHERE table_name = 'payment_proof_hashes' AND column_name = 'transaction_id'
-        `)
+        `);
         if (oldColCheck.rows.length > 0) {
-          await ddlClient.query(`ALTER TABLE payment_proof_hashes RENAME COLUMN transaction_id TO proof_no`)
-          console.log('✅ 数据库迁移：transaction_id 重命名为 proof_no')
+          await ddlClient.query(
+            `ALTER TABLE payment_proof_hashes RENAME COLUMN transaction_id TO proof_no`,
+          );
+          console.log("✅ 数据库迁移：transaction_id 重命名为 proof_no");
         } else {
-          await ddlClient.query(`ALTER TABLE payment_proof_hashes ADD COLUMN proof_no TEXT`)
-          console.log('✅ 数据库迁移：payment_proof_hashes 添加 proof_no 字段')
+          await ddlClient.query(
+            `ALTER TABLE payment_proof_hashes ADD COLUMN proof_no TEXT`,
+          );
+          console.log("✅ 数据库迁移：payment_proof_hashes 添加 proof_no 字段");
         }
       }
 
@@ -1198,11 +1440,11 @@ export async function initDatabase() {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_proof_no
         ON payment_proof_hashes (proof_no)
         WHERE proof_no IS NOT NULL
-      `)
+      `);
 
-      console.log('✅ 数据库迁移：payment_proof_hashes 表检查完成')
+      console.log("✅ 数据库迁移：payment_proof_hashes 表检查完成");
     } catch (error: any) {
-      console.log('ℹ️  payment_proof_hashes 迁移失败:', error.message)
+      console.log("ℹ️  payment_proof_hashes 迁移失败:", error.message);
     }
 
     // 数据库迁移：新建 user_uploaded_files 表，替代 session 存储临时上传的发票文件
@@ -1216,14 +1458,14 @@ export async function initDatabase() {
           created_at TEXT NOT NULL,
           UNIQUE(user_id, file_path)
         )
-      `)
+      `);
       await ddlClient.query(`
         CREATE INDEX IF NOT EXISTS idx_user_uploaded_files_user_id
         ON user_uploaded_files (user_id)
-      `)
-      console.log('✅ 数据库迁移：user_uploaded_files 表检查完成')
+      `);
+      console.log("✅ 数据库迁移：user_uploaded_files 表检查完成");
     } catch (error: any) {
-      console.log('ℹ️  user_uploaded_files 迁移失败:', error.message)
+      console.log("ℹ️  user_uploaded_files 迁移失败:", error.message);
     }
 
     // 数据库迁移：employee_profiles 添加 contract_end_date 字段
@@ -1231,13 +1473,36 @@ export async function initDatabase() {
       const contractEndCol = await ddlClient.query(`
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'employee_profiles' AND column_name = 'contract_end_date'
-      `)
+      `);
       if (contractEndCol.rows.length === 0) {
-        await ddlClient.query(`ALTER TABLE employee_profiles ADD COLUMN contract_end_date TEXT`)
-        console.log('✅ 数据库迁移：employee_profiles 添加 contract_end_date 字段')
+        await ddlClient.query(
+          `ALTER TABLE employee_profiles ADD COLUMN contract_end_date TEXT`,
+        );
+        console.log(
+          "✅ 数据库迁移：employee_profiles 添加 contract_end_date 字段",
+        );
       }
     } catch (error: any) {
-      console.log('ℹ️  contract_end_date 迁移失败:', error.message)
+      console.log("ℹ️  contract_end_date 迁移失败:", error.message);
+    }
+
+    // 数据库迁移：员工合同模板拟定日期
+    try {
+      await ddlClient.query(`
+        ALTER TABLE employee_profiles
+          ADD COLUMN IF NOT EXISTS contract_template_start_date TEXT,
+          ADD COLUMN IF NOT EXISTS contract_template_end_date TEXT,
+          ADD COLUMN IF NOT EXISTS probation_template_start_date TEXT,
+          ADD COLUMN IF NOT EXISTS probation_template_end_date TEXT,
+          ADD COLUMN IF NOT EXISTS last_contract_template_start_date TEXT,
+          ADD COLUMN IF NOT EXISTS last_contract_template_end_date TEXT,
+          ADD COLUMN IF NOT EXISTS last_probation_template_start_date TEXT,
+          ADD COLUMN IF NOT EXISTS last_probation_template_end_date TEXT,
+          ADD COLUMN IF NOT EXISTS last_contract_template_position TEXT
+      `);
+      console.log("✅ 数据库迁移：员工合同模板日期字段检查完成");
+    } catch (error: any) {
+      console.log("ℹ️  员工合同模板日期字段迁移失败:", error.message);
     }
 
     // 数据库迁移：劳动合同档案保存识别出的合同期限
@@ -1246,12 +1511,47 @@ export async function initDatabase() {
         ALTER TABLE employee_documents
           ADD COLUMN IF NOT EXISTS contract_start_date TEXT,
           ADD COLUMN IF NOT EXISTS contract_end_date TEXT,
-          ADD COLUMN IF NOT EXISTS contract_recognized_at TEXT
-      `)
+          ADD COLUMN IF NOT EXISTS contract_recognized_at TEXT,
+          ADD COLUMN IF NOT EXISTS probation_end_date TEXT
+      `);
+      await ddlClient.query(`
+        ALTER TABLE probation_confirmations
+          ALTER COLUMN hire_date DROP NOT NULL,
+          ALTER COLUMN probation_end_date DROP NOT NULL
+      `);
       await ddlClient.query(`
         CREATE INDEX IF NOT EXISTS idx_employee_documents_contract_end
         ON employee_documents (employee_id, contract_end_date)
-      `)
+      `);
+      await ddlClient.query(`
+        CREATE INDEX IF NOT EXISTS idx_employee_documents_probation_end
+        ON employee_documents (employee_id, probation_end_date)
+      `);
+      await ddlClient.query(`
+        UPDATE employee_profiles ep
+        SET last_contract_template_start_date = latest.contract_start_date,
+            last_contract_template_end_date = latest.contract_end_date,
+            last_probation_template_start_date = CASE
+              WHEN latest.probation_end_date IS NOT NULL THEN latest.contract_start_date
+              ELSE NULL
+            END,
+            last_probation_template_end_date = latest.probation_end_date,
+            last_contract_template_position = NULLIF(BTRIM(ep.position), '')
+        FROM (
+          SELECT DISTINCT ON (employee_id)
+            employee_id,
+            contract_start_date,
+            contract_end_date,
+            probation_end_date
+          FROM employee_documents
+          WHERE document_type = 'contract'
+            AND contract_start_date IS NOT NULL
+            AND contract_end_date IS NOT NULL
+          ORDER BY employee_id, contract_end_date DESC, created_at DESC
+        ) latest
+        WHERE latest.employee_id = ep.id
+          AND ep.last_contract_template_start_date IS NULL
+      `);
       const inferredContractCleanup = await ddlClient.query(`
         UPDATE employee_profiles ep
         SET contract_end_date = NULL
@@ -1267,13 +1567,142 @@ export async function initDatabase() {
               AND ed.document_type = 'contract'
               AND ed.contract_end_date IS NOT NULL
           )
-      `)
+      `);
       if ((inferredContractCleanup.rowCount ?? 0) > 0) {
-        console.log(`✅ 已清理 ${inferredContractCleanup.rowCount} 条由入职日期推算的旧合同到期时间`)
+        console.log(
+          `✅ 已清理 ${inferredContractCleanup.rowCount} 条由入职日期推算的旧合同到期时间`,
+        );
       }
-      console.log('✅ 数据库迁移：劳动合同期限字段检查完成')
+
+      const recognizedContractDateSync = await ddlClient.query(`
+        WITH recognized_contracts AS (
+          SELECT
+            employee_id,
+            contract_start_date,
+            contract_end_date,
+            probation_end_date,
+            created_at
+          FROM employee_documents
+          WHERE document_type = 'contract'
+            AND contract_start_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+            AND contract_end_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        ),
+        contract_dates AS (
+          SELECT DISTINCT ON (employee_id)
+            employee_id,
+            MIN(contract_start_date) OVER (PARTITION BY employee_id) AS hire_date,
+            contract_end_date,
+            FIRST_VALUE(probation_end_date) OVER (
+              PARTITION BY employee_id
+              ORDER BY contract_start_date ASC, created_at ASC
+            ) AS probation_end_date
+          FROM recognized_contracts
+          ORDER BY employee_id, contract_end_date DESC, created_at DESC
+        )
+        UPDATE employee_profiles ep
+        SET
+          hire_date = contract_dates.hire_date,
+          contract_end_date = contract_dates.contract_end_date
+        FROM contract_dates
+        WHERE ep.id = contract_dates.employee_id
+          AND (
+            ep.hire_date IS DISTINCT FROM contract_dates.hire_date
+            OR ep.contract_end_date IS DISTINCT FROM contract_dates.contract_end_date
+          )
+      `);
+      if ((recognizedContractDateSync.rowCount ?? 0) > 0) {
+        console.log(
+          `✅ 已按劳动合同同步 ${recognizedContractDateSync.rowCount} 名员工的入职及合同到期日期`,
+        );
+      }
+
+      const missingContractDateCleanup = await ddlClient.query(`
+        UPDATE employee_profiles ep
+        SET
+          hire_date = NULL,
+          contract_end_date = NULL
+        WHERE (ep.hire_date IS NOT NULL OR ep.contract_end_date IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM employee_documents ed
+            WHERE ed.employee_id = ep.id
+              AND ed.document_type = 'contract'
+              AND ed.contract_start_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+              AND ed.contract_end_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+          )
+      `);
+      if ((missingContractDateCleanup.rowCount ?? 0) > 0) {
+        console.log(
+          `✅ 已清理 ${missingContractDateCleanup.rowCount} 名无合同依据员工的历史日期`,
+        );
+      }
+
+      const probationDateSync = await ddlClient.query(`
+        WITH recognized_contracts AS (
+          SELECT
+            employee_id,
+            contract_start_date,
+            contract_end_date,
+            probation_end_date,
+            created_at
+          FROM employee_documents
+          WHERE document_type = 'contract'
+            AND contract_start_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+            AND contract_end_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+        ),
+        contract_dates AS (
+          SELECT DISTINCT ON (employee_id)
+            employee_id,
+            MIN(contract_start_date) OVER (PARTITION BY employee_id) AS hire_date,
+            FIRST_VALUE(probation_end_date) OVER (
+              PARTITION BY employee_id
+              ORDER BY contract_start_date ASC, created_at ASC
+            ) AS probation_end_date
+          FROM recognized_contracts
+          ORDER BY employee_id, contract_end_date DESC, created_at DESC
+        )
+        UPDATE probation_confirmations pc
+        SET
+          hire_date = contract_dates.hire_date,
+          probation_end_date = contract_dates.probation_end_date,
+          updated_at = NOW()::text
+        FROM contract_dates
+        WHERE pc.employee_id = contract_dates.employee_id
+          AND (
+            pc.hire_date IS DISTINCT FROM contract_dates.hire_date
+            OR pc.probation_end_date IS DISTINCT FROM contract_dates.probation_end_date
+          )
+      `);
+      if ((probationDateSync.rowCount ?? 0) > 0) {
+        console.log(
+          `✅ 已按劳动合同同步 ${probationDateSync.rowCount} 条转正记录日期`,
+        );
+      }
+
+      const missingContractProbationCleanup = await ddlClient.query(`
+        UPDATE probation_confirmations pc
+        SET
+          hire_date = NULL,
+          probation_end_date = NULL,
+          updated_at = NOW()::text
+        WHERE (pc.hire_date IS NOT NULL OR pc.probation_end_date IS NOT NULL)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM employee_documents ed
+            WHERE ed.employee_id = pc.employee_id
+              AND ed.document_type = 'contract'
+              AND ed.contract_start_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+              AND ed.contract_end_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
+          )
+      `);
+      if ((missingContractProbationCleanup.rowCount ?? 0) > 0) {
+        console.log(
+          `✅ 已清理 ${missingContractProbationCleanup.rowCount} 条无合同依据转正记录的历史日期`,
+        );
+      }
+      console.log("✅ 数据库迁移：劳动合同期限字段检查完成");
     } catch (error: any) {
-      console.log('ℹ️  劳动合同期限字段迁移失败:', error.message)
+      console.log("ℹ️  劳动合同期限字段迁移失败:", error.message);
     }
 
     // 数据库迁移：新建 probation_history 表，记录管理员将员工改回实习期时的历史转正记录
@@ -1295,32 +1724,91 @@ export async function initDatabase() {
           reset_by TEXT REFERENCES users(id),
           reset_at TEXT NOT NULL,
           new_hire_date TEXT,
+          form_version INTEGER NOT NULL DEFAULT 0,
+          review_stage TEXT NOT NULL DEFAULT 'employee',
+          approval_records_json TEXT NOT NULL DEFAULT '[]',
+          signature_history_json TEXT NOT NULL DEFAULT '[]',
           created_at TEXT NOT NULL
         )
-      `)
+      `);
+      await ddlClient.query(`
+        ALTER TABLE probation_history
+          ADD COLUMN IF NOT EXISTS form_version INTEGER NOT NULL DEFAULT 0,
+          ADD COLUMN IF NOT EXISTS review_stage TEXT NOT NULL DEFAULT 'employee',
+          ADD COLUMN IF NOT EXISTS approval_records_json TEXT NOT NULL DEFAULT '[]',
+          ADD COLUMN IF NOT EXISTS signature_history_json TEXT NOT NULL DEFAULT '[]'
+      `);
       await ddlClient.query(`
         CREATE INDEX IF NOT EXISTS idx_probation_history_employee_id
         ON probation_history (employee_id)
-      `)
-      console.log('✅ 数据库迁移：probation_history 表检查完成')
+      `);
+      console.log("✅ 数据库迁移：probation_history 表检查完成");
     } catch (error: any) {
-      console.log('ℹ️  probation_history 迁移失败:', error.message)
+      console.log("ℹ️  probation_history 迁移失败:", error.message);
     }
 
-    // 数据库迁移：更新 resignation_templates 的 template_type CHECK 约束，支持全部 7 种模板类型
+    // 数据库迁移：更新离职模板与档案约束，支持管理员维护的五类离职材料。
     try {
+      await ddlClient.query(`
+        ALTER TABLE resignation_requests
+        ADD COLUMN IF NOT EXISTS created_by TEXT REFERENCES users(id)
+      `);
+      await ddlClient.query(`
+        ALTER TABLE resignation_requests
+        ADD COLUMN IF NOT EXISTS created_by_name TEXT
+      `);
+      await ddlClient.query(`
+        ALTER TABLE resignation_requests
+        ALTER COLUMN employee_user_id DROP NOT NULL
+      `);
+      await ddlClient.query(`
+        ALTER TABLE resignation_requests
+        ALTER COLUMN handover_user_id DROP NOT NULL
+      `);
       await ddlClient.query(`
         ALTER TABLE resignation_templates
         DROP CONSTRAINT IF EXISTS resignation_templates_template_type_check
-      `)
+      `);
       await ddlClient.query(`
         ALTER TABLE resignation_templates
         ADD CONSTRAINT resignation_templates_template_type_check
-        CHECK(template_type IN ('application_form', 'handover_form', 'termination_proof', 'asset_handover', 'compensation_agreement', 'expense_settlement_agreement', 'partner_dividend_settlement'))
-      `)
-      console.log('✅ 数据库迁移：resignation_templates template_type 约束已更新')
+        CHECK(template_type IN (
+          'application_form', 'handover_form', 'termination_proof', 'asset_handover',
+          'compensation_agreement', 'expense_settlement_agreement',
+          'partner_dividend_settlement', 'termination_agreement',
+          'employee_handover_form', 'settlement_confirmation', 'resignation_certificate'
+        ))
+      `);
+      console.log(
+        "✅ 数据库迁移：resignation_templates template_type 约束已更新",
+      );
     } catch (error: any) {
-      console.log('ℹ️  resignation_templates 约束迁移失败:', error.message)
+      console.log("ℹ️  resignation_templates 约束迁移失败:", error.message);
+    }
+
+    try {
+      await ddlClient.query(`
+        ALTER TABLE resignation_template_drafts
+        ADD COLUMN IF NOT EXISTS template_id TEXT REFERENCES resignation_templates(id) ON DELETE CASCADE
+      `);
+      await ddlClient.query(`
+        ALTER TABLE resignation_template_drafts
+        ADD COLUMN IF NOT EXISTS overlay_json TEXT
+      `);
+      await ddlClient.query(`
+        UPDATE resignation_template_drafts draft
+        SET template_id = (
+          SELECT template.id
+          FROM resignation_templates template
+          WHERE template.template_type = draft.template_type
+          ORDER BY template.created_at DESC
+          LIMIT 1
+        )
+        WHERE draft.template_id IS NULL
+      `);
+      console.log("✅ 数据库迁移：离职模板草稿版本及原版叠加字段检查完成");
+    } catch (error: any) {
+      console.log("ℹ️  离职模板草稿版本字段迁移失败:", error.message);
     }
 
     // 数据库迁移：扩展 resignation_documents.document_type 的 CHECK 约束
@@ -1334,55 +1822,67 @@ export async function initDatabase() {
         FROM pg_constraint
         WHERE conrelid = 'resignation_documents'::regclass
           AND conname = 'resignation_documents_document_type_check'
-      `)
+      `);
 
       if (constraintCheck.rows.length > 0) {
-        const currentDef = constraintCheck.rows[0].def as string
-        // 如果约束中不包含 'handover_form_employee'，说明是旧约束，需要更新
-        if (!currentDef.includes('handover_form_employee')) {
+        const currentDef = constraintCheck.rows[0].def as string;
+        if (!currentDef.includes("resignation_certificate")) {
           // 先将旧类型数据迁移为新类型
           await ddlClient.query(`
             UPDATE resignation_documents SET document_type = 'handover_form_employee'
             WHERE document_type = 'handover_form' AND uploader_role = 'employee'
-          `)
+          `);
           await ddlClient.query(`
             UPDATE resignation_documents SET document_type = 'handover_form_handover'
             WHERE document_type = 'handover_form' AND uploader_role = 'handover'
-          `)
+          `);
 
           // 删除旧约束，添加新约束
           await ddlClient.query(`
             ALTER TABLE resignation_documents DROP CONSTRAINT resignation_documents_document_type_check
-          `)
+          `);
           await ddlClient.query(`
             ALTER TABLE resignation_documents ADD CONSTRAINT resignation_documents_document_type_check
             CHECK (document_type IN (
               'application_form', 'handover_form',
               'handover_form_employee', 'handover_form_handover',
               'termination_proof', 'asset_handover',
-              'compensation_agreement', 'expense_settlement_agreement'
+              'compensation_agreement', 'expense_settlement_agreement',
+              'termination_agreement', 'employee_handover_form',
+              'settlement_confirmation', 'resignation_certificate'
             ))
-          `)
-          console.log('✅ 数据库迁移：resignation_documents document_type 约束已更新')
+          `);
+          console.log(
+            "✅ 数据库迁移：resignation_documents document_type 约束已更新",
+          );
         }
       }
     } catch (error: any) {
-      console.log('ℹ️  resignation_documents document_type 约束迁移:', error.message)
+      console.log(
+        "ℹ️  resignation_documents document_type 约束迁移:",
+        error.message,
+      );
     }
 
-  // DDL 完成，销毁初始化连接，确保后续查询用干净的连接
+    // DDL 完成，销毁初始化连接，确保后续查询用干净的连接
   } finally {
-    await ddlClient.end()
+    await ddlClient.end();
   }
 
-  const migrated = await db.run(`UPDATE reimbursements SET status = 'approved', updated_at = NOW()::text WHERE status = 'paying'`)
+  const migrated = await db.run(
+    `UPDATE reimbursements SET status = 'approved', updated_at = NOW()::text WHERE status = 'paying'`,
+  );
   if (migrated.changes > 0) {
-    console.log(`✅ 已将 ${migrated.changes} 条 paying 状态记录迁移为 approved`)
+    console.log(
+      `✅ 已将 ${migrated.changes} 条 paying 状态记录迁移为 approved`,
+    );
   }
 
-  const existingScopes = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM reimbursement_scopes')
+  const existingScopes = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM reimbursement_scopes",
+  );
   if (Number(existingScopes?.count || 0) === 0) {
-    const now = new Date().toISOString()
+    const now = new Date().toISOString();
     await db.run(
       `INSERT INTO reimbursement_scopes (id, parent_id, name, value, sort_order, is_active, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?),
@@ -1391,17 +1891,60 @@ export async function initDatabase() {
               (?, ?, ?, ?, ?, ?, ?, ?),
               (?, ?, ?, ?, ?, ?, ?, ?),
               (?, ?, ?, ?, ?, ?, ?, ?)`,
-      'scope_1', null, '公司内部', 'company_internal', 1, true, now, now,
-      'scope_2', null, '海淀区', 'haidian', 2, true, now, now,
-      'scope_3', null, '朝阳区', 'chaoyang', 3, true, now, now,
-      'scope_2_1', 'scope_2', 'GJDW', 'haidian_gjdw', 1, true, now, now,
-      'scope_2_2', 'scope_2', 'WFAH', 'haidian_wfah', 2, true, now, now,
-      'scope_3_1', 'scope_3', 'GJDW', 'chaoyang_gjdw', 1, true, now, now,
-    )
-    console.log('✅ 初始化默认报销范围配置')
+      "scope_1",
+      null,
+      "公司内部",
+      "company_internal",
+      1,
+      true,
+      now,
+      now,
+      "scope_2",
+      null,
+      "海淀区",
+      "haidian",
+      2,
+      true,
+      now,
+      now,
+      "scope_3",
+      null,
+      "朝阳区",
+      "chaoyang",
+      3,
+      true,
+      now,
+      now,
+      "scope_2_1",
+      "scope_2",
+      "GJDW",
+      "haidian_gjdw",
+      1,
+      true,
+      now,
+      now,
+      "scope_2_2",
+      "scope_2",
+      "WFAH",
+      "haidian_wfah",
+      2,
+      true,
+      now,
+      now,
+      "scope_3_1",
+      "scope_3",
+      "GJDW",
+      "chaoyang_gjdw",
+      1,
+      true,
+      now,
+      now,
+    );
+    console.log("✅ 初始化默认报销范围配置");
   }
 
-  const employeeNumberSyncResult = await db.run(`
+  const employeeNumberSyncResult = await db.run(
+    `
     UPDATE employee_profiles ep
     SET employee_no = u.employee_no,
         updated_at = CASE
@@ -1413,25 +1956,412 @@ export async function initDatabase() {
       AND u.employee_no IS NOT NULL
       AND BTRIM(u.employee_no) <> ''
       AND COALESCE(ep.employee_no, '') <> COALESCE(u.employee_no, '')
-  `, new Date().toISOString())
+  `,
+    new Date().toISOString(),
+  );
   if (employeeNumberSyncResult.changes > 0) {
-    console.log(`✅ 已同步 ${employeeNumberSyncResult.changes} 份员工档案的员工编号`)
+    console.log(
+      `✅ 已同步 ${employeeNumberSyncResult.changes} 份员工档案的员工编号`,
+    );
   }
 
-  const existingConfig = await db.get<{ id: string }>('SELECT id FROM department_position_configs WHERE id = ?', 'default')
+  // 工资接口依赖版本字段；该迁移必须独立成功，不能被其他历史脏数据回滚。
+  await db.run(
+    `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS housing_fund_base NUMERIC`,
+  );
+  await db.run(
+    `UPDATE payroll_records
+     SET housing_fund_base = monthly_salary
+     WHERE housing_fund_base IS NULL`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ALTER COLUMN housing_fund_base SET DEFAULT 0`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ALTER COLUMN housing_fund_base SET NOT NULL`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS housing_fund_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE`,
+  );
+  await db.run(
+    `ALTER TABLE human_cost_receipts ADD COLUMN IF NOT EXISTS ignored_item_count INTEGER NOT NULL DEFAULT 0`,
+  );
+  await db.run(
+    `ALTER TABLE human_cost_receipts ADD COLUMN IF NOT EXISTS recognition_version INTEGER NOT NULL DEFAULT 1`,
+  );
+
+  // 允许直接创建为在职的员工补录转正申请表，不伪造转正审批记录。
+  await db.run(`
+    ALTER TABLE probation_documents
+    ADD COLUMN IF NOT EXISTS employee_id TEXT REFERENCES employee_profiles(id) ON DELETE CASCADE
+  `);
+  await db.run(`
+    UPDATE probation_documents pd
+    SET employee_id = pc.employee_id
+    FROM probation_confirmations pc
+    WHERE pd.confirmation_id = pc.id
+      AND pd.employee_id IS NULL
+  `);
+  await db.run(
+    `ALTER TABLE probation_documents ALTER COLUMN confirmation_id DROP NOT NULL`,
+  );
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_probation_documents_employee_id
+    ON probation_documents(employee_id)
+  `);
+
+  // 在线转正申请单：表单版本、分级签署状态与正式文件来源。
+  await db.run(`
+    ALTER TABLE probation_confirmations
+      ADD COLUMN IF NOT EXISTS form_version INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS review_stage TEXT NOT NULL DEFAULT 'employee',
+      ADD COLUMN IF NOT EXISTS conversion_type TEXT NOT NULL DEFAULT 'normal',
+      ADD COLUMN IF NOT EXISTS conversion_type_other TEXT,
+      ADD COLUMN IF NOT EXISTS self_statement TEXT,
+      ADD COLUMN IF NOT EXISTS applicant_name_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS department_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS position_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS supervisor_id TEXT REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS formal_document_generated_at TEXT
+  `);
+  await db.run(`
+    UPDATE probation_confirmations
+    SET review_stage = CASE
+      WHEN status = 'approved' THEN 'completed'
+      WHEN status = 'submitted' THEN 'general_manager'
+      ELSE 'employee'
+    END
+    WHERE form_version = 0
+  `);
+  await db.run(`
+    ALTER TABLE probation_documents
+      ADD COLUMN IF NOT EXISTS source_type TEXT NOT NULL DEFAULT 'uploaded',
+      ADD COLUMN IF NOT EXISTS form_version INTEGER NOT NULL DEFAULT 0
+  `);
+  await db.run(`
+    CREATE TABLE IF NOT EXISTS probation_signature_records (
+      id TEXT PRIMARY KEY,
+      confirmation_id TEXT NOT NULL REFERENCES probation_confirmations(id) ON DELETE CASCADE,
+      form_version INTEGER NOT NULL,
+      stage TEXT NOT NULL,
+      signer_id TEXT NOT NULL REFERENCES users(id),
+      signer_name TEXT NOT NULL,
+      signer_role TEXT NOT NULL,
+      signer_department TEXT,
+      signer_position TEXT,
+      signature_path TEXT NOT NULL,
+      signature_type TEXT NOT NULL DEFAULT 'personal',
+      signature_owner_name TEXT,
+      opinion TEXT,
+      decision TEXT NOT NULL,
+      signed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(confirmation_id, form_version, stage)
+    )
+  `);
+  await db.run(`
+    ALTER TABLE probation_signature_records
+      ADD COLUMN IF NOT EXISTS signature_type TEXT NOT NULL DEFAULT 'personal',
+      ADD COLUMN IF NOT EXISTS signature_owner_name TEXT
+  `);
+  await db.run(`
+    UPDATE probation_signature_records
+    SET signature_owner_name = signer_name
+    WHERE signature_owner_name IS NULL
+  `);
+  await db.run(`
+    ALTER TABLE probation_signature_records
+    ALTER COLUMN signature_owner_name SET NOT NULL
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_probation_signature_records_confirmation
+    ON probation_signature_records(confirmation_id, form_version, stage)
+  `);
+  await db.run(`
+    CREATE INDEX IF NOT EXISTS idx_probation_confirmations_review_stage
+    ON probation_confirmations(status, review_stage, supervisor_id)
+  `);
+
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET status = 'approved',
+        approve_time = COALESCE(pc.approve_time, pc.updated_at),
+        approver_comment = COALESCE(pc.approver_comment, '历史在职数据兼容迁移')
+    FROM employee_profiles ep
+    WHERE pc.employee_id = ep.id
+      AND ep.employment_status = 'active'
+      AND pc.status = 'pending'
+      AND pc.submit_time IS NULL
+  `);
+  await db.run(`
+    UPDATE probation_confirmations
+    SET review_stage = 'completed'
+    WHERE status = 'approved'
+      AND form_version = 0
+      AND review_stage <> 'completed'
+  `);
+
+  const constraintMigrations = [
+    {
+      name: "用户角色",
+      statements: [
+        `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`,
+        `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK(role IN ('super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest'))`,
+      ],
+    },
+    {
+      name: "用户状态",
+      statements: [
+        `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_status_check`,
+        `ALTER TABLE users ADD CONSTRAINT users_status_check CHECK(status IN ('active', 'inactive'))`,
+      ],
+    },
+    {
+      name: "员工状态",
+      statements: [
+        `ALTER TABLE employee_profiles DROP CONSTRAINT IF EXISTS employee_profiles_employment_status_check`,
+        `ALTER TABLE employee_profiles ADD CONSTRAINT employee_profiles_employment_status_check CHECK(employment_status IN ('active', 'probation', 'resigned', 'on_leave'))`,
+      ],
+    },
+    {
+      name: "员工档案类型",
+      statements: [
+        `ALTER TABLE employee_documents DROP CONSTRAINT IF EXISTS employee_documents_document_type_check`,
+        `ALTER TABLE employee_documents ADD CONSTRAINT employee_documents_document_type_check CHECK(document_type IN ('invitation', 'application', 'contract', 'nda', 'declaration', 'asset_handover', 'id_card', 'health_report', 'diploma', 'bank_card', 'other'))`,
+      ],
+    },
+    {
+      name: "转正状态",
+      statements: [
+        `ALTER TABLE probation_confirmations DROP CONSTRAINT IF EXISTS probation_confirmations_status_check`,
+        `ALTER TABLE probation_confirmations ADD CONSTRAINT probation_confirmations_status_check CHECK(status IN ('pending', 'submitted', 'approved', 'rejected'))`,
+        `ALTER TABLE probation_confirmations DROP CONSTRAINT IF EXISTS probation_confirmations_review_stage_check`,
+        `ALTER TABLE probation_confirmations ADD CONSTRAINT probation_confirmations_review_stage_check CHECK(review_stage IN ('employee', 'supervisor', 'hr', 'general_manager', 'completed'))`,
+        `ALTER TABLE probation_confirmations DROP CONSTRAINT IF EXISTS probation_confirmations_conversion_type_check`,
+        `ALTER TABLE probation_confirmations ADD CONSTRAINT probation_confirmations_conversion_type_check CHECK(conversion_type IN ('normal', 'early', 'extended', 'other'))`,
+      ],
+    },
+    {
+      name: "转正文档类型",
+      statements: [
+        `ALTER TABLE probation_documents DROP CONSTRAINT IF EXISTS probation_documents_document_type_check`,
+        `ALTER TABLE probation_documents ADD CONSTRAINT probation_documents_document_type_check CHECK(document_type = 'application')`,
+        `ALTER TABLE probation_documents DROP CONSTRAINT IF EXISTS probation_documents_owner_check`,
+        `ALTER TABLE probation_documents ADD CONSTRAINT probation_documents_owner_check CHECK(confirmation_id IS NOT NULL OR employee_id IS NOT NULL)`,
+        `ALTER TABLE probation_documents DROP CONSTRAINT IF EXISTS probation_documents_source_type_check`,
+        `ALTER TABLE probation_documents ADD CONSTRAINT probation_documents_source_type_check CHECK(source_type IN ('uploaded', 'generated', 'official'))`,
+        `ALTER TABLE probation_signature_records DROP CONSTRAINT IF EXISTS probation_signature_records_stage_check`,
+        `ALTER TABLE probation_signature_records ADD CONSTRAINT probation_signature_records_stage_check CHECK(stage IN ('employee', 'supervisor', 'hr', 'general_manager'))`,
+        `ALTER TABLE probation_signature_records DROP CONSTRAINT IF EXISTS probation_signature_records_decision_check`,
+        `ALTER TABLE probation_signature_records ADD CONSTRAINT probation_signature_records_decision_check CHECK(decision IN ('submit', 'approve', 'reject'))`,
+        `ALTER TABLE probation_signature_records DROP CONSTRAINT IF EXISTS probation_signature_records_signature_type_check`,
+        `ALTER TABLE probation_signature_records ADD CONSTRAINT probation_signature_records_signature_type_check CHECK(signature_type IN ('personal', 'general_manager'))`,
+      ],
+    },
+    {
+      name: "入职模板类型",
+      statements: [
+        `ALTER TABLE onboarding_templates DROP CONSTRAINT IF EXISTS onboarding_templates_file_type_check`,
+        `ALTER TABLE onboarding_templates ADD CONSTRAINT onboarding_templates_file_type_check CHECK(file_type IN ('invitation', 'application', 'contract', 'nda', 'declaration', 'asset'))`,
+      ],
+    },
+    {
+      name: "离职文档版本",
+      statements: [
+        `ALTER TABLE resignation_documents DROP CONSTRAINT IF EXISTS resignation_documents_is_current_check`,
+        `ALTER TABLE resignation_documents ADD CONSTRAINT resignation_documents_is_current_check CHECK(is_current IN (0, 1))`,
+      ],
+    },
+    {
+      name: "请假申请状态",
+      statements: [
+        `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_status_check`,
+        `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_status_allowed_check`,
+        `ALTER TABLE leave_requests ADD CONSTRAINT leave_requests_status_allowed_check CHECK(status IN ('draft', 'pending', 'approved', 'rejected', 'cancelled'))`,
+      ],
+    },
+    {
+      name: "请假半天边界",
+      statements: [
+        `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_half_day_check`,
+        `ALTER TABLE leave_requests ADD CONSTRAINT leave_requests_half_day_check CHECK(start_half IN ('morning', 'afternoon') AND end_half IN ('morning', 'afternoon'))`,
+      ],
+    },
+    {
+      name: "请假天数",
+      statements: [
+        `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_total_days_positive_check`,
+        `ALTER TABLE leave_requests ADD CONSTRAINT leave_requests_total_days_positive_check CHECK(total_days > 0)`,
+      ],
+    },
+    {
+      name: "假期余额",
+      statements: [
+        `ALTER TABLE leave_balances DROP CONSTRAINT IF EXISTS leave_balances_values_check`,
+        `ALTER TABLE leave_balances ADD CONSTRAINT leave_balances_values_check CHECK(year BETWEEN 2000 AND 2200 AND total_days >= 0 AND used_days >= 0 AND pending_days >= 0 AND used_days + pending_days <= total_days)`,
+      ],
+    },
+    {
+      name: "工资版本",
+      statements: [
+        `ALTER TABLE payroll_records DROP CONSTRAINT IF EXISTS payroll_records_version_check`,
+        `ALTER TABLE payroll_records ADD CONSTRAINT payroll_records_version_check CHECK(version >= 1)`,
+      ],
+    },
+    {
+      name: "工资公积金缴费基数",
+      statements: [
+        `ALTER TABLE payroll_records DROP CONSTRAINT IF EXISTS payroll_records_housing_fund_base_check`,
+        `ALTER TABLE payroll_records ADD CONSTRAINT payroll_records_housing_fund_base_check CHECK(housing_fund_base >= 0)`,
+      ],
+    },
+    {
+      name: "工资变更日志字段",
+      statements: [
+        `ALTER TABLE payroll_change_logs DROP CONSTRAINT IF EXISTS payroll_change_logs_field_name_check`,
+        `ALTER TABLE payroll_change_logs ADD CONSTRAINT payroll_change_logs_field_name_check CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax'))`,
+      ],
+    },
+    {
+      name: "人力成本回单忽略笔数",
+      statements: [
+        `ALTER TABLE human_cost_receipts DROP CONSTRAINT IF EXISTS human_cost_receipts_ignored_item_count_check`,
+        `ALTER TABLE human_cost_receipts ADD CONSTRAINT human_cost_receipts_ignored_item_count_check CHECK(ignored_item_count >= 0)`,
+      ],
+    },
+    {
+      name: "人力成本回单识别版本",
+      statements: [
+        `ALTER TABLE human_cost_receipts DROP CONSTRAINT IF EXISTS human_cost_receipts_recognition_version_check`,
+        `ALTER TABLE human_cost_receipts ADD CONSTRAINT human_cost_receipts_recognition_version_check CHECK(recognition_version >= 1)`,
+      ],
+    },
+  ];
+  for (const migration of constraintMigrations) {
+    try {
+      await db.transaction(async (client) => {
+        for (const statement of migration.statements)
+          await client.query(statement);
+      });
+    } catch (error: any) {
+      console.log(`ℹ️  人事模块${migration.name}约束迁移:`, error.message);
+    }
+  }
+  console.log("✅ 数据库迁移：人事状态、假期余额和工资版本约束已检查");
+
+  // 管理员在人事转正档案上传的盖章文件独立标记为正式归档件。
+  try {
+    const directOfficialDocuments = await db.run(`
+      UPDATE probation_documents pd
+      SET source_type = 'official'
+      FROM users u
+      WHERE pd.uploaded_by = u.id
+        AND pd.confirmation_id IS NULL
+        AND pd.source_type = 'uploaded'
+        AND u.role IN ('admin', 'super_admin')
+    `);
+    const workflowOfficialDocuments = await db.run(`
+      UPDATE probation_documents pd
+      SET source_type = 'official',
+          form_version = pc.form_version
+      FROM users u, probation_confirmations pc
+      WHERE pd.uploaded_by = u.id
+        AND pd.confirmation_id = pc.id
+        AND pd.source_type = 'uploaded'
+        AND pc.status = 'approved'
+        AND u.role IN ('admin', 'super_admin')
+    `);
+    const migratedOfficialDocuments =
+      directOfficialDocuments.changes + workflowOfficialDocuments.changes;
+    if (migratedOfficialDocuments > 0) {
+      console.log(
+        `✅ 已将 ${migratedOfficialDocuments} 份管理员转正档案标记为正式盖章文件`,
+      );
+    }
+  } catch (error: any) {
+    console.log("ℹ️  转正正式盖章文件迁移:", error.message);
+  }
+
+  // 旧版撤回记录使用 cancelled，新版统一转为可重新提交、可永久删除的草稿。
+  try {
+    const migratedLeaveDrafts = await db.run(
+      `UPDATE leave_requests
+       SET status = 'draft',
+           balance_reserved = FALSE,
+           cancelled_at = COALESCE(cancelled_at, updated_at, created_at),
+           updated_at = ?
+       WHERE status = 'cancelled'`,
+      new Date().toISOString(),
+    );
+    if (migratedLeaveDrafts.changes > 0) {
+      console.log(
+        `✅ 已将 ${migratedLeaveDrafts.changes} 条历史已撤销请假迁移为草稿`,
+      );
+    }
+  } catch (error: any) {
+    console.log("ℹ️  请假历史草稿迁移:", error.message);
+  }
+
+  // 请假仅由总经理审批，将历史待办转给申请人之外的可用总经理。
+  try {
+    const leaveApproverMigration = await db.run(
+      `
+      WITH preferred_approvers AS (
+        SELECT lr.id AS request_id, approver.id AS approver_id, approver.name AS approver_name
+        FROM leave_requests lr
+        CROSS JOIN LATERAL (
+          SELECT u.id, u.name
+          FROM users u
+          WHERE u.status = 'active'
+            AND u.id != lr.user_id
+            AND u.role = 'general_manager'
+          ORDER BY u.created_at ASC, u.id ASC
+          LIMIT 1
+        ) approver
+        WHERE lr.status = 'pending'
+      )
+      UPDATE leave_requests lr
+      SET approver_id = preferred.approver_id,
+          approver_name = preferred.approver_name,
+          updated_at = ?
+      FROM preferred_approvers preferred
+      WHERE lr.id = preferred.request_id
+        AND (
+          lr.approver_id IS DISTINCT FROM preferred.approver_id
+          OR lr.approver_name IS DISTINCT FROM preferred.approver_name
+        )
+    `,
+      new Date().toISOString(),
+    );
+    if (leaveApproverMigration.changes > 0) {
+      console.log(
+        `✅ 已将 ${leaveApproverMigration.changes} 条历史请假待办转交总经理`,
+      );
+    }
+  } catch (error: any) {
+    console.log("ℹ️  请假审批人迁移:", error.message);
+  }
+
+  const existingConfig = await db.get<{ id: string }>(
+    "SELECT id FROM department_position_configs WHERE id = ?",
+    "default",
+  );
   if (!existingConfig) {
     const defaultConfig = {
-      '行政部': ['行政主管', '行政专员', '财务', '出纳'],
-      '项目部': ['项目经理', '员工'],
-    }
-    const now = new Date().toISOString()
+      行政部: ["行政主管", "行政专员", "财务", "出纳"],
+      项目部: ["项目经理", "员工"],
+    };
+    const now = new Date().toISOString();
     await db.run(
-      'INSERT INTO department_position_configs (id, config_json, updated_at) VALUES (?, ?, ?)',
-      'default',
+      "INSERT INTO department_position_configs (id, config_json, updated_at) VALUES (?, ?, ?)",
+      "default",
       JSON.stringify(defaultConfig),
-      now
-    )
-    console.log('✅ 初始化默认部门职位配置')
+      now,
+    );
+    console.log("✅ 初始化默认部门职位配置");
   }
 
   // 数据库迁移：resignation_documents 添加 is_current 字段
@@ -1439,13 +2369,15 @@ export async function initDatabase() {
     const colCheck = await db.get<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'resignation_documents' AND column_name = 'is_current'
-    `)
+    `);
     if (!colCheck) {
-      await db.run(`ALTER TABLE resignation_documents ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1`)
-      console.log('✅ 数据库迁移：resignation_documents 添加 is_current 字段')
+      await db.run(
+        `ALTER TABLE resignation_documents ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1`,
+      );
+      console.log("✅ 数据库迁移：resignation_documents 添加 is_current 字段");
     }
   } catch (error: any) {
-    console.log('ℹ️  is_current 字段迁移:', error.message)
+    console.log("ℹ️  is_current 字段迁移:", error.message);
   }
 
   // 数据库迁移：resignation_requests 添加 reject_target 字段，记录驳回对象
@@ -1453,90 +2385,216 @@ export async function initDatabase() {
     const rejectTargetCheck = await db.get<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'resignation_requests' AND column_name = 'reject_target'
-    `)
+    `);
     if (!rejectTargetCheck) {
-      await db.run(`ALTER TABLE resignation_requests ADD COLUMN reject_target TEXT`)
-      console.log('✅ 数据库迁移：resignation_requests 添加 reject_target 字段')
+      await db.run(
+        `ALTER TABLE resignation_requests ADD COLUMN reject_target TEXT`,
+      );
+      console.log(
+        "✅ 数据库迁移：resignation_requests 添加 reject_target 字段",
+      );
     }
   } catch (error: any) {
-    console.log('ℹ️  reject_target 字段迁移:', error.message)
+    console.log("ℹ️  reject_target 字段迁移:", error.message);
   }
 
-  // 数据库迁移：resignation_requests 的 status CHECK 约束增加 handover_rejected
+  // 数据库迁移：离职档案齐全后进入待确认状态，管理员确认后才完成离职
   try {
     await db.run(`
       ALTER TABLE resignation_requests DROP CONSTRAINT IF EXISTS resignation_requests_status_check
-    `)
+    `);
     await db.run(`
       ALTER TABLE resignation_requests ADD CONSTRAINT resignation_requests_status_check
-      CHECK(status IN ('draft', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected'))
-    `)
-    console.log('✅ 数据库迁移：resignation_requests status 约束已更新')
+      CHECK(status IN ('draft', 'pending_confirmation', 'submitted', 'handover_confirmed', 'mutual_confirmed', 'approved', 'rejected', 'handover_rejected'))
+    `);
+    await db.run(`
+      UPDATE resignation_requests rr
+      SET status = 'pending_confirmation'
+      WHERE rr.status = 'draft'
+        AND (
+          SELECT COUNT(DISTINCT rd.document_type)
+          FROM resignation_documents rd
+          WHERE rd.request_id = rr.id
+            AND rd.is_current = 1
+            AND rd.document_type IN (
+              'termination_agreement',
+              'employee_handover_form',
+              'settlement_confirmation',
+              'compensation_agreement',
+              'resignation_certificate'
+            )
+        ) = 5
+    `);
+    await db.run(`
+      UPDATE resignation_requests rr
+      SET status = 'draft'
+      WHERE rr.status = 'pending_confirmation'
+        AND (
+          SELECT COUNT(DISTINCT rd.document_type)
+          FROM resignation_documents rd
+          WHERE rd.request_id = rr.id
+            AND rd.is_current = 1
+            AND rd.document_type IN (
+              'termination_agreement',
+              'employee_handover_form',
+              'settlement_confirmation',
+              'compensation_agreement',
+              'resignation_certificate'
+            )
+        ) < 5
+    `);
+    console.log("✅ 数据库迁移：resignation_requests status 约束已更新");
   } catch (error: any) {
-    console.log('ℹ️  resignation_requests status 约束迁移:', error.message)
+    console.log("ℹ️  resignation_requests status 约束迁移:", error.message);
   }
 
   // 初始化假期类型配置
-  const existingLeaveTypes = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM leave_type_configs')
+  const existingLeaveTypes = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM leave_type_configs",
+  );
   if (Number(existingLeaveTypes?.count || 0) === 0) {
-    const now = new Date().toISOString()
+    const now = new Date().toISOString();
     const leaveTypes = [
-      { id: 'lt_annual', code: 'annual', name: '年假', requires_attachment: false, requires_balance_check: true, default_days: 5, description: '法定年假，根据工龄计算：工龄<1年无年假，1-10年5天，10-20年10天，20年以上15天', sort_order: 1 },
-      { id: 'lt_personal', code: 'personal', name: '带薪事假', requires_attachment: false, requires_balance_check: true, default_days: 3, description: '个人原因请假，每年默认3天带薪额度', sort_order: 2 },
-      { id: 'lt_sick', code: 'sick', name: '病假', requires_attachment: true, requires_balance_check: true, default_days: 30, description: '因病请假，需提供三甲医院病历或假条', sort_order: 3 },
-      { id: 'lt_compensatory', code: 'compensatory', name: '调休假', requires_attachment: false, requires_balance_check: true, default_days: 0, description: '加班后的调休，由管理员手动调整余额', sort_order: 4 },
-      { id: 'lt_marriage', code: 'marriage', name: '婚假', requires_attachment: false, requires_balance_check: true, default_days: 3, description: '法定婚假3天', sort_order: 5 },
-      { id: 'lt_maternity', code: 'maternity', name: '产假', requires_attachment: false, requires_balance_check: true, default_days: 98, description: '法定产假98天', sort_order: 6 },
-      { id: 'lt_paternity', code: 'paternity', name: '陪产假', requires_attachment: false, requires_balance_check: true, default_days: 15, description: '法定陪产假15天', sort_order: 7 },
-    ]
+      {
+        id: "lt_annual",
+        code: "annual",
+        name: "年假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 5,
+        description:
+          "所有员工每年默认5天年假，满10年上调至10天，满20年上调至15天",
+        sort_order: 1,
+      },
+      {
+        id: "lt_personal",
+        code: "personal",
+        name: "带薪事假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 3,
+        description: "个人原因请假，每年默认3天带薪额度",
+        sort_order: 2,
+      },
+      {
+        id: "lt_sick",
+        code: "sick",
+        name: "病假",
+        requires_attachment: true,
+        requires_balance_check: true,
+        default_days: 30,
+        description: "因病请假，需提供三甲医院病历或假条",
+        sort_order: 3,
+      },
+      {
+        id: "lt_compensatory",
+        code: "compensatory",
+        name: "调休假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 0,
+        description: "加班后的调休，由管理员手动调整余额",
+        sort_order: 4,
+      },
+      {
+        id: "lt_marriage",
+        code: "marriage",
+        name: "婚假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 3,
+        description: "法定婚假3天",
+        sort_order: 5,
+      },
+      {
+        id: "lt_maternity",
+        code: "maternity",
+        name: "产假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 98,
+        description: "法定产假98天",
+        sort_order: 6,
+      },
+      {
+        id: "lt_paternity",
+        code: "paternity",
+        name: "陪产假",
+        requires_attachment: false,
+        requires_balance_check: true,
+        default_days: 15,
+        description: "法定陪产假15天",
+        sort_order: 7,
+      },
+    ];
     for (const lt of leaveTypes) {
       await db.run(
         `INSERT INTO leave_type_configs (id, code, name, requires_attachment, requires_balance_check, default_days, description, sort_order, is_active, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, true, ?)`,
-        lt.id, lt.code, lt.name, lt.requires_attachment, lt.requires_balance_check, lt.default_days, lt.description, lt.sort_order, now
-      )
+        lt.id,
+        lt.code,
+        lt.name,
+        lt.requires_attachment,
+        lt.requires_balance_check,
+        lt.default_days,
+        lt.description,
+        lt.sort_order,
+        now,
+      );
     }
-    console.log('✅ 初始化假期类型配置（7种）')
+    console.log("✅ 初始化假期类型配置（7种）");
+  }
+
+  const annualDescriptionMigration = await db.run(
+    `UPDATE leave_type_configs
+     SET description = '所有员工每年默认5天年假，满10年上调至10天，满20年上调至15天'
+     WHERE code = 'annual'
+       AND description = '法定年假，根据工龄计算：工龄<1年无年假，1-10年5天，10-20年10天，20年以上15天'`,
+  );
+  if (annualDescriptionMigration.changes > 0) {
+    console.log("✅ 数据库迁移：年假基础额度说明已更新");
   }
 
   // 将旧版“999 天且不校验余额”的事假哨兵配置迁移为每年 3 天带薪事假。
   try {
     await db.transaction(async (client) => {
       const legacyConfigResult = await client.query<{
-        default_days: number
-        requires_balance_check: boolean
+        default_days: number;
+        requires_balance_check: boolean;
       }>(
         `SELECT default_days, requires_balance_check
          FROM leave_type_configs
          WHERE code = 'personal'
-         FOR UPDATE`
-      )
-      const legacyConfig = legacyConfigResult.rows[0]
+         FOR UPDATE`,
+      );
+      const legacyConfig = legacyConfigResult.rows[0];
       if (
         legacyConfig &&
         Number(legacyConfig.default_days) === 999 &&
         legacyConfig.requires_balance_check === false
       ) {
-        const now = new Date().toISOString()
+        const now = new Date().toISOString();
         await client.query(
           `UPDATE leave_type_configs
            SET name = '带薪事假', requires_balance_check = true, default_days = 3,
                description = '个人原因请假，每年默认3天带薪额度'
-           WHERE code = 'personal'`
-        )
+           WHERE code = 'personal'`,
+        );
         const balanceResult = await client.query(
           `UPDATE leave_balances
            SET total_days = 3, updated_at = $1
            WHERE leave_type_code = 'personal'
              AND total_days = 999
              AND used_days + pending_days <= 3`,
-          [now]
-        )
-        console.log(`✅ 数据库迁移：带薪事假旧配置已修正，同步 ${balanceResult.rowCount ?? 0} 条余额`)
+          [now],
+        );
+        console.log(
+          `✅ 数据库迁移：带薪事假旧配置已修正，同步 ${balanceResult.rowCount ?? 0} 条余额`,
+        );
       }
-    })
+    });
   } catch (error: any) {
-    console.log('ℹ️  带薪事假旧配置迁移:', error.message)
+    console.log("ℹ️  带薪事假旧配置迁移:", error.message);
   }
 
   // 数据库迁移：users 表添加 force_change_password 字段
@@ -1544,15 +2602,17 @@ export async function initDatabase() {
     const colCheck = await db.get<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'users' AND column_name = 'force_change_password'
-    `)
+    `);
     if (!colCheck) {
-      await db.run(`ALTER TABLE users ADD COLUMN force_change_password BOOLEAN NOT NULL DEFAULT false`)
-      console.log('✅ 数据库迁移：users 添加 force_change_password 字段')
+      await db.run(
+        `ALTER TABLE users ADD COLUMN force_change_password BOOLEAN NOT NULL DEFAULT false`,
+      );
+      console.log("✅ 数据库迁移：users 添加 force_change_password 字段");
     } else {
-      console.log('✅ 数据库迁移：force_change_password 字段已存在')
+      console.log("✅ 数据库迁移：force_change_password 字段已存在");
     }
   } catch (error: any) {
-    console.log('ℹ️  force_change_password 字段迁移:', error.message)
+    console.log("ℹ️  force_change_password 字段迁移:", error.message);
   }
 
   // 数据库迁移：reimbursements 表添加 paid_time 和 paid_by 字段，并更新 status 约束
@@ -1560,23 +2620,27 @@ export async function initDatabase() {
     const paidTimeCheck = await db.get<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'reimbursements' AND column_name = 'paid_time'
-    `)
+    `);
     if (!paidTimeCheck) {
-      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_time TEXT`)
-      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_by TEXT`)
-      console.log('✅ 数据库迁移：reimbursements 添加 paid_time 和 paid_by 字段')
+      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_time TEXT`);
+      await db.run(`ALTER TABLE reimbursements ADD COLUMN paid_by TEXT`);
+      console.log(
+        "✅ 数据库迁移：reimbursements 添加 paid_time 和 paid_by 字段",
+      );
     }
     // 更新 status CHECK 约束以支持 paid 状态
     await db.run(`
       ALTER TABLE reimbursements DROP CONSTRAINT IF EXISTS reimbursements_status_check
-    `)
+    `);
     await db.run(`
       ALTER TABLE reimbursements ADD CONSTRAINT reimbursements_status_check
       CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paid', 'payment_uploaded', 'completed', 'rejected'))
-    `)
-    console.log('✅ 数据库迁移：reimbursements status 约束已更新（新增 paid 状态）')
+    `);
+    console.log(
+      "✅ 数据库迁移：reimbursements status 约束已更新（新增 paid 状态）",
+    );
   } catch (error: any) {
-    console.log('ℹ️  reimbursements paid 字段迁移:', error.message)
+    console.log("ℹ️  reimbursements paid 字段迁移:", error.message);
   }
 
   // 数据库迁移：worklog_projects 表添加甲方项目负责人字段
@@ -1584,14 +2648,20 @@ export async function initDatabase() {
     const clientContactCheck = await db.get<{ column_name: string }>(`
       SELECT column_name FROM information_schema.columns
       WHERE table_name = 'worklog_projects' AND column_name = 'client_contact_name'
-    `)
+    `);
     if (!clientContactCheck) {
-      await db.run(`ALTER TABLE worklog_projects ADD COLUMN client_contact_name TEXT NOT NULL DEFAULT ''`)
-      await db.run(`ALTER TABLE worklog_projects ADD COLUMN client_contact_phone TEXT NOT NULL DEFAULT ''`)
-      console.log('✅ 数据库迁移：worklog_projects 添加 client_contact_name 和 client_contact_phone 字段')
+      await db.run(
+        `ALTER TABLE worklog_projects ADD COLUMN client_contact_name TEXT NOT NULL DEFAULT ''`,
+      );
+      await db.run(
+        `ALTER TABLE worklog_projects ADD COLUMN client_contact_phone TEXT NOT NULL DEFAULT ''`,
+      );
+      console.log(
+        "✅ 数据库迁移：worklog_projects 添加 client_contact_name 和 client_contact_phone 字段",
+      );
     }
   } catch (error: any) {
-    console.log('ℹ️  worklog_projects 甲方联系人字段迁移:', error.message)
+    console.log("ℹ️  worklog_projects 甲方联系人字段迁移:", error.message);
   }
 
   // 工行回单自动化处理表
@@ -1608,7 +2678,7 @@ export async function initDatabase() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
-  `)
+  `);
 
   await db.run(`
     CREATE TABLE IF NOT EXISTS bank_receipts (
@@ -1631,7 +2701,7 @@ export async function initDatabase() {
       matched_at TEXT,
       created_at TEXT NOT NULL
     )
-  `)
+  `);
 
   // 数据修正迁移：修复 total_amount 与发票核减不一致的历史数据
   // 背景：旧版代码存储的是原始发票总额，新版代码存储的是扣减核减后的净额
@@ -1656,55 +2726,80 @@ export async function initDatabase() {
       ) subq
       WHERE reimbursements.id = subq.id
         AND ABS(reimbursements.total_amount - subq.net_amount) > 0.005
-    `)
+    `);
     if (fixResult.changes > 0) {
-      console.log(`✅ 数据修正：已修复 ${fixResult.changes} 条 total_amount 与发票核减不一致的报销单`)
+      console.log(
+        `✅ 数据修正：已修复 ${fixResult.changes} 条 total_amount 与发票核减不一致的报销单`,
+      );
     }
   } catch (error: any) {
-    console.log('ℹ️  total_amount 数据修正跳过:', error.message)
+    console.log("ℹ️  total_amount 数据修正跳过:", error.message);
   }
 
   // 数据库迁移：worklog_attachments file_kind 约束扩展（screenshot/photo）
   try {
     await db.run(`
       ALTER TABLE worklog_attachments DROP CONSTRAINT IF EXISTS worklog_attachments_file_kind_check
-    `)
+    `);
     await db.run(`
       ALTER TABLE worklog_attachments ADD CONSTRAINT worklog_attachments_file_kind_check
       CHECK(file_kind IN ('image', 'screenshot', 'photo', 'document'))
-    `)
+    `);
     // 将旧的 image 数据迁移为 photo（项目现场照片）
-    await db.run(`UPDATE worklog_attachments SET file_kind = 'photo' WHERE file_kind = 'image'`)
+    await db.run(
+      `UPDATE worklog_attachments SET file_kind = 'photo' WHERE file_kind = 'image'`,
+    );
   } catch (error: any) {
-    console.log('ℹ️  worklog_attachments file_kind 约束迁移:', error.message)
+    console.log("ℹ️  worklog_attachments file_kind 约束迁移:", error.message);
   }
 
   // 数据库迁移：将已有 work_note 迁移到 worklog_progress_notes
   try {
-    const migrated = await db.get<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM worklog_progress_notes`)
+    const migrated = await db.get<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM worklog_progress_notes`,
+    );
     if (migrated && migrated.cnt === 0) {
-      const rows = await db.all<{ id: string; work_note: string; user_id: string; user_name: string; created_at: string }>(
+      const rows = await db.all<{
+        id: string;
+        work_note: string;
+        user_id: string;
+        user_name: string;
+        created_at: string;
+      }>(
         `SELECT id, work_note, user_id, user_name, created_at FROM worklog_entries WHERE work_note IS NOT NULL AND work_note != ''`,
-      )
+      );
       for (const r of rows) {
         await db.run(
           `INSERT INTO worklog_progress_notes (id, entry_id, content, created_by, created_by_name, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-          `mig_${r.id}`, r.id, r.work_note, r.user_id, r.user_name, r.created_at,
-        )
+          `mig_${r.id}`,
+          r.id,
+          r.work_note,
+          r.user_id,
+          r.user_name,
+          r.created_at,
+        );
       }
-      if (rows.length > 0) console.log(`✅ 已迁移 ${rows.length} 条 work_note 到 worklog_progress_notes`)
+      if (rows.length > 0)
+        console.log(
+          `✅ 已迁移 ${rows.length} 条 work_note 到 worklog_progress_notes`,
+        );
     }
   } catch (error: any) {
-    console.log('ℹ️  work_note 迁移跳过:', error.message)
+    console.log("ℹ️  work_note 迁移跳过:", error.message);
   }
 
   // 数据库迁移：worklog_attachments 新增 progress_note_id 列
   try {
-    await db.run(`ALTER TABLE worklog_attachments ADD COLUMN IF NOT EXISTS progress_note_id TEXT REFERENCES worklog_progress_notes(id) ON DELETE SET NULL`)
-    console.log('✅ 数据库迁移：progress_note_id 字段检查完成')
+    await db.run(
+      `ALTER TABLE worklog_attachments ADD COLUMN IF NOT EXISTS progress_note_id TEXT REFERENCES worklog_progress_notes(id) ON DELETE SET NULL`,
+    );
+    console.log("✅ 数据库迁移：progress_note_id 字段检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  progress_note_id 迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  progress_note_id 迁移跳过:", error.message);
     }
   }
 
@@ -1720,7 +2815,7 @@ export async function initDatabase() {
       )
       WHERE a.progress_note_id IS NULL
         AND EXISTS (SELECT 1 FROM worklog_progress_notes n WHERE n.entry_id = a.entry_id AND n.created_at >= a.created_at)
-    `)
+    `);
     // 仍有未匹配的（附件时间晚于所有进展），关联到最后一条进展
     await db.run(`
       UPDATE worklog_attachments a
@@ -1731,75 +2826,124 @@ export async function initDatabase() {
       )
       WHERE a.progress_note_id IS NULL
         AND EXISTS (SELECT 1 FROM worklog_progress_notes n WHERE n.entry_id = a.entry_id)
-    `)
+    `);
   } catch (error: any) {
-    console.log('ℹ️  旧附件关联迁移跳过:', error.message)
+    console.log("ℹ️  旧附件关联迁移跳过:", error.message);
   }
 
   // 数据库迁移：worklog_entries 新增 client_contact_name / client_contact_phone 快照列
   try {
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_name TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_phone TEXT`)
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_name TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_contact_phone TEXT`,
+    );
     // 回填已有日志
     await db.run(`
       UPDATE worklog_entries SET
         client_contact_name = (SELECT client_contact_name FROM worklog_projects WHERE id = worklog_entries.project_id),
         client_contact_phone = (SELECT client_contact_phone FROM worklog_projects WHERE id = worklog_entries.project_id)
       WHERE client_contact_name IS NULL
-    `)
-    console.log('✅ 数据库迁移：worklog_entries client_contact 快照字段检查完成')
+    `);
+    console.log(
+      "✅ 数据库迁移：worklog_entries client_contact 快照字段检查完成",
+    );
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  client_contact 快照迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  client_contact 快照迁移跳过:", error.message);
     }
   }
 
   // 数据库迁移：worklog_projects 新增合同跟踪字段
   try {
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_status TEXT`)
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_total_amount NUMERIC`)
-    console.log('✅ 数据库迁移：worklog_projects 合同跟踪字段检查完成')
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_status TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS contract_total_amount NUMERIC`,
+    );
+    console.log("✅ 数据库迁移：worklog_projects 合同跟踪字段检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  合同跟踪字段迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  合同跟踪字段迁移跳过:", error.message);
     }
   }
 
   // 数据库迁移：worklog_entries 新增 next_follow_up_date 字段（预计下次跟进时间）
   try {
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS next_follow_up_date TEXT`)
-    console.log('✅ 数据库迁移：worklog_entries next_follow_up_date 字段检查完成')
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS next_follow_up_date TEXT`,
+    );
+    console.log(
+      "✅ 数据库迁移：worklog_entries next_follow_up_date 字段检查完成",
+    );
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  next_follow_up_date 迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  next_follow_up_date 迁移跳过:", error.message);
     }
   }
 
   // 数据库迁移：worklog_projects 新增办理机构字段
   try {
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_bureau TEXT`)
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_department TEXT`)
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`)
-    await db.run(`ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`)
-    console.log('✅ 数据库迁移：worklog_projects 办理机构字段检查完成')
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_bureau TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_department TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_projects ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`,
+    );
+    console.log("✅ 数据库迁移：worklog_projects 办理机构字段检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  办理机构字段迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  办理机构字段迁移跳过:", error.message);
     }
   }
 
   // 数据库迁移：worklog_entries 新增 client_name 条目级覆盖字段
   try {
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_name TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_bureau TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_department TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`)
-    await db.run(`ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS project_type TEXT`)
-    console.log('✅ 数据库迁移：worklog_entries 条目级覆盖字段检查完成')
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS client_name TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_bureau TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_department TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_name TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS agency_contact_phone TEXT`,
+    );
+    await db.run(
+      `ALTER TABLE worklog_entries ADD COLUMN IF NOT EXISTS project_type TEXT`,
+    );
+    console.log("✅ 数据库迁移：worklog_entries 条目级覆盖字段检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists') && !error.message?.includes('duplicate column')) {
-      console.log('ℹ️  entries 覆盖字段迁移跳过:', error.message)
+    if (
+      !error.message?.includes("already exists") &&
+      !error.message?.includes("duplicate column")
+    ) {
+      console.log("ℹ️  entries 覆盖字段迁移跳过:", error.message);
     }
   }
 
@@ -1813,12 +2957,14 @@ export async function initDatabase() {
         content TEXT NOT NULL DEFAULT '',
         submitted_at TEXT NOT NULL
       )
-    `)
-    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_submissions_user_date ON daily_log_submissions(user_id, log_date)`)
-    console.log('✅ 数据库迁移：daily_log_submissions 表检查完成')
+    `);
+    await db.run(
+      `CREATE INDEX IF NOT EXISTS idx_daily_log_submissions_user_date ON daily_log_submissions(user_id, log_date)`,
+    );
+    console.log("✅ 数据库迁移：daily_log_submissions 表检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists')) {
-      console.log('ℹ️  daily_log_submissions 迁移跳过:', error.message)
+    if (!error.message?.includes("already exists")) {
+      console.log("ℹ️  daily_log_submissions 迁移跳过:", error.message);
     }
   }
 
@@ -1832,32 +2978,54 @@ export async function initDatabase() {
         content TEXT NOT NULL,
         created_at TEXT NOT NULL
       )
-    `)
-    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_comments_submission ON daily_log_comments(submission_id)`)
+    `);
+    await db.run(
+      `CREATE INDEX IF NOT EXISTS idx_daily_log_comments_submission ON daily_log_comments(submission_id)`,
+    );
     // 添加 read_at 列（标记员工是否已读评论）
     try {
-      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN read_at TEXT DEFAULT NULL`)
-    } catch { /* 列已存在则忽略 */ }
+      await db.run(
+        `ALTER TABLE daily_log_comments ADD COLUMN read_at TEXT DEFAULT NULL`,
+      );
+    } catch {
+      /* 列已存在则忽略 */
+    }
     // 添加 reply_to 列（回复某条评论）
     try {
-      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN reply_to TEXT DEFAULT NULL`)
-    } catch { /* 列已存在则忽略 */ }
+      await db.run(
+        `ALTER TABLE daily_log_comments ADD COLUMN reply_to TEXT DEFAULT NULL`,
+      );
+    } catch {
+      /* 列已存在则忽略 */
+    }
     // 添加 withdrawn_at 列（撤回评论）
     try {
-      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN withdrawn_at TEXT DEFAULT NULL`)
-    } catch { /* 列已存在则忽略 */ }
+      await db.run(
+        `ALTER TABLE daily_log_comments ADD COLUMN withdrawn_at TEXT DEFAULT NULL`,
+      );
+    } catch {
+      /* 列已存在则忽略 */
+    }
     // 添加 due_date 列（总经理设置的完成期限）
     try {
-      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN due_date TEXT DEFAULT NULL`)
-    } catch { /* 列已存在则忽略 */ }
+      await db.run(
+        `ALTER TABLE daily_log_comments ADD COLUMN due_date TEXT DEFAULT NULL`,
+      );
+    } catch {
+      /* 列已存在则忽略 */
+    }
     // 添加 completed_at 列（员工标记完成时间）
     try {
-      await db.run(`ALTER TABLE daily_log_comments ADD COLUMN completed_at TEXT DEFAULT NULL`)
-    } catch { /* 列已存在则忽略 */ }
-    console.log('✅ 数据库迁移：daily_log_comments 表检查完成')
+      await db.run(
+        `ALTER TABLE daily_log_comments ADD COLUMN completed_at TEXT DEFAULT NULL`,
+      );
+    } catch {
+      /* 列已存在则忽略 */
+    }
+    console.log("✅ 数据库迁移：daily_log_comments 表检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists')) {
-      console.log('ℹ️  daily_log_comments 迁移跳过:', error.message)
+    if (!error.message?.includes("already exists")) {
+      console.log("ℹ️  daily_log_comments 迁移跳过:", error.message);
     }
   }
 
@@ -1874,19 +3042,25 @@ export async function initDatabase() {
         updated_at TEXT NOT NULL,
         UNIQUE(submission_id, seq)
       )
-    `)
-    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_supplements_submission ON daily_log_supplements(submission_id)`)
-    console.log('✅ 数据库迁移：daily_log_supplements 表检查完成')
+    `);
+    await db.run(
+      `CREATE INDEX IF NOT EXISTS idx_daily_log_supplements_submission ON daily_log_supplements(submission_id)`,
+    );
+    console.log("✅ 数据库迁移：daily_log_supplements 表检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists')) {
-      console.log('ℹ️  daily_log_supplements 迁移跳过:', error.message)
+    if (!error.message?.includes("already exists")) {
+      console.log("ℹ️  daily_log_supplements 迁移跳过:", error.message);
     }
   }
 
   // 数据库迁移：weekly_summaries 添加 locked_at 字段
   try {
-    await db.run(`ALTER TABLE weekly_summaries ADD COLUMN locked_at TEXT DEFAULT NULL`)
-  } catch { /* 列已存在则忽略 */ }
+    await db.run(
+      `ALTER TABLE weekly_summaries ADD COLUMN locked_at TEXT DEFAULT NULL`,
+    );
+  } catch {
+    /* 列已存在则忽略 */
+  }
 
   // 数据库迁移：创建 weekly_summary_supplements 表（周报补充记录）
   try {
@@ -1900,12 +3074,14 @@ export async function initDatabase() {
         created_at TEXT NOT NULL,
         UNIQUE(weekly_summary_id, seq)
       )
-    `)
-    await db.run(`CREATE INDEX IF NOT EXISTS idx_weekly_summary_supplements ON weekly_summary_supplements(weekly_summary_id)`)
-    console.log('✅ 数据库迁移：weekly_summary_supplements 表检查完成')
+    `);
+    await db.run(
+      `CREATE INDEX IF NOT EXISTS idx_weekly_summary_supplements ON weekly_summary_supplements(weekly_summary_id)`,
+    );
+    console.log("✅ 数据库迁移：weekly_summary_supplements 表检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists')) {
-      console.log('ℹ️  weekly_summary_supplements 迁移跳过:', error.message)
+    if (!error.message?.includes("already exists")) {
+      console.log("ℹ️  weekly_summary_supplements 迁移跳过:", error.message);
     }
   }
 
@@ -1919,107 +3095,153 @@ export async function initDatabase() {
         sort_order INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       )
-    `)
-    await db.run(`CREATE INDEX IF NOT EXISTS idx_daily_log_phrases_user ON daily_log_phrases(user_id)`)
-    console.log('✅ 数据库迁移：daily_log_phrases 表检查完成')
+    `);
+    await db.run(
+      `CREATE INDEX IF NOT EXISTS idx_daily_log_phrases_user ON daily_log_phrases(user_id)`,
+    );
+    console.log("✅ 数据库迁移：daily_log_phrases 表检查完成");
   } catch (error: any) {
-    if (!error.message?.includes('already exists')) {
-      console.log('ℹ️  daily_log_phrases 迁移跳过:', error.message)
+    if (!error.message?.includes("already exists")) {
+      console.log("ℹ️  daily_log_phrases 迁移跳过:", error.message);
     }
   }
 
   // ==================== 项目日志模块字典 seed ====================
-  await seedWorklogDicts()
-  await seedWorklogPermissions()
+  await seedWorklogDicts();
+  await seedWorklogPermissions();
 
-  console.log('✅ PostgreSQL 数据库表初始化完成')
+  console.log("✅ PostgreSQL 数据库表初始化完成");
 }
 
 /**
  * 初始化项目日志模块字典：首次运行时插入默认值，已存在则跳过
  */
 async function seedWorklogDicts() {
-  const now = new Date().toISOString()
+  const now = new Date().toISOString();
 
   const districts = [
-    '东城区', '西城区', '朝阳区', '海淀区', '丰台区', '石景山区',
-    '门头沟区', '房山区', '通州区', '顺义区', '昌平区', '大兴区',
-    '怀柔区', '平谷区', '密云区', '延庆区',
-  ]
-  const districtCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_districts')
+    "东城区",
+    "西城区",
+    "朝阳区",
+    "海淀区",
+    "丰台区",
+    "石景山区",
+    "门头沟区",
+    "房山区",
+    "通州区",
+    "顺义区",
+    "昌平区",
+    "大兴区",
+    "怀柔区",
+    "平谷区",
+    "密云区",
+    "延庆区",
+  ];
+  const districtCount = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM worklog_districts",
+  );
   if (Number(districtCount?.count || 0) === 0) {
     for (let i = 0; i < districts.length; i++) {
       await db.run(
         `INSERT INTO worklog_districts (id, name, sort_order, is_active, created_at, updated_at)
          VALUES (?, ?, ?, TRUE, ?, ?)`,
-        `district_${i + 1}`, districts[i], i + 1, now, now,
-      )
+        `district_${i + 1}`,
+        districts[i],
+        i + 1,
+        now,
+        now,
+      );
     }
-    console.log(`✅ 初始化日志字典：行政区 ${districts.length} 个`)
+    console.log(`✅ 初始化日志字典：行政区 ${districts.length} 个`);
   }
 
-  const projectTypes = ['新建项目', '公共公益项目']
-  const ptCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_project_types')
+  const projectTypes = ["新建项目", "公共公益项目"];
+  const ptCount = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM worklog_project_types",
+  );
   if (Number(ptCount?.count || 0) === 0) {
     for (let i = 0; i < projectTypes.length; i++) {
       await db.run(
         `INSERT INTO worklog_project_types (id, name, sort_order, is_active, created_at, updated_at)
          VALUES (?, ?, ?, TRUE, ?, ?)`,
-        `ptype_${i + 1}`, projectTypes[i], i + 1, now, now,
-      )
+        `ptype_${i + 1}`,
+        projectTypes[i],
+        i + 1,
+        now,
+        now,
+      );
     }
-    console.log(`✅ 初始化日志字典：项目类型 ${projectTypes.length} 个`)
+    console.log(`✅ 初始化日志字典：项目类型 ${projectTypes.length} 个`);
   }
 
   // 办理事项 + 标准办理天数（根据工程咨询行业经验值设置，管理员可后台调整）
   const matters: Array<[string, number]> = [
-    ['征地批复', 60],
-    ['征地结案', 30],
-    ['多规合一初审意见', 30],
-    ['多规合一协同意见函', 20],
-    ['建设项目选址意见书和用地预审', 45],
-    ['建设工程规划许可证', 30],
-    ['建筑工程施工许可证', 20],
-    ['临时用地批复', 30],
-    ['临时建设工程规划许可证', 20],
-    ['建设工程规划核验意见（变电站）', 30],
-    ['建设工程规划核验备案意见（隧道）', 30],
-    ['建设工程消防验收意见书', 30],
-    ['建设工程竣工验收备案意见', 30],
-    ['权籍调查', 45],
-    ['楼门牌证明信', 10],
-    ['划拨批复', 45],
-    ['划拨决定书', 30],
-    ['不动产权证书（土地）', 30],
-    ['不动产权证书（房产）', 30],
-  ]
-  const matterCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_matters')
+    ["征地批复", 60],
+    ["征地结案", 30],
+    ["多规合一初审意见", 30],
+    ["多规合一协同意见函", 20],
+    ["建设项目选址意见书和用地预审", 45],
+    ["建设工程规划许可证", 30],
+    ["建筑工程施工许可证", 20],
+    ["临时用地批复", 30],
+    ["临时建设工程规划许可证", 20],
+    ["建设工程规划核验意见（变电站）", 30],
+    ["建设工程规划核验备案意见（隧道）", 30],
+    ["建设工程消防验收意见书", 30],
+    ["建设工程竣工验收备案意见", 30],
+    ["权籍调查", 45],
+    ["楼门牌证明信", 10],
+    ["划拨批复", 45],
+    ["划拨决定书", 30],
+    ["不动产权证书（土地）", 30],
+    ["不动产权证书（房产）", 30],
+  ];
+  const matterCount = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM worklog_matters",
+  );
   if (Number(matterCount?.count || 0) === 0) {
     for (let i = 0; i < matters.length; i++) {
-      const [name, days] = matters[i]
+      const [name, days] = matters[i];
       await db.run(
         `INSERT INTO worklog_matters (id, name, standard_days, sort_order, is_active, created_at, updated_at)
          VALUES (?, ?, ?, ?, TRUE, ?, ?)`,
-        `matter_${i + 1}`, name, days, i + 1, now, now,
-      )
+        `matter_${i + 1}`,
+        name,
+        days,
+        i + 1,
+        now,
+        now,
+      );
     }
-    console.log(`✅ 初始化日志字典：办理事项 ${matters.length} 项`)
+    console.log(`✅ 初始化日志字典：办理事项 ${matters.length} 项`);
   }
 
   const contractStatuses = [
-    '未签合同', '已签合同未付款', '已付首款', '已付进度款',
-    '已开票未收款', '已结清',
-  ]
-  const csCount = await db.get<{ count: string }>('SELECT COUNT(*) as count FROM worklog_contract_statuses')
+    "未签合同",
+    "已签合同未付款",
+    "已付首款",
+    "已付进度款",
+    "已开票未收款",
+    "已结清",
+  ];
+  const csCount = await db.get<{ count: string }>(
+    "SELECT COUNT(*) as count FROM worklog_contract_statuses",
+  );
   if (Number(csCount?.count || 0) === 0) {
     for (let i = 0; i < contractStatuses.length; i++) {
       await db.run(
         `INSERT INTO worklog_contract_statuses (id, name, sort_order, is_active, created_at, updated_at)
          VALUES (?, ?, ?, TRUE, ?, ?)`,
-        `cstatus_${i + 1}`, contractStatuses[i], i + 1, now, now,
-      )
+        `cstatus_${i + 1}`,
+        contractStatuses[i],
+        i + 1,
+        now,
+        now,
+      );
     }
-    console.log(`✅ 初始化日志字典：合同付款状态 ${contractStatuses.length} 个`)
+    console.log(
+      `✅ 初始化日志字典：合同付款状态 ${contractStatuses.length} 个`,
+    );
   }
 }
 
@@ -2028,29 +3250,33 @@ async function seedWorklogDicts() {
  * 用户不存在时静默跳过，后续可通过后台接口手动添加
  */
 async function seedWorklogPermissions() {
-  const now = new Date().toISOString()
-  const targetNames = ['于贵臣', '刘行']
+  const now = new Date().toISOString();
+  const targetNames = ["于贵臣", "刘行"];
   const users = await db.all<{ id: string; name: string }>(
     `SELECT id, name FROM users WHERE name = ANY($1::text[])`,
     targetNames,
-  )
+  );
 
-  let added = 0
+  let added = 0;
   for (const u of users) {
     const exist = await db.get(
       `SELECT id FROM worklog_permissions WHERE permission_code = ? AND user_id = ?`,
-      'download_weekly_report', u.id,
-    )
+      "download_weekly_report",
+      u.id,
+    );
     if (!exist) {
       await db.run(
         `INSERT INTO worklog_permissions (id, permission_code, user_id, created_at)
          VALUES (?, ?, ?, ?)`,
-        `wp_${u.id}_weekly`, 'download_weekly_report', u.id, now,
-      )
-      added++
+        `wp_${u.id}_weekly`,
+        "download_weekly_report",
+        u.id,
+        now,
+      );
+      added++;
     }
   }
   if (added > 0) {
-    console.log(`✅ 初始化周报下载白名单：新增 ${added} 人（于贵臣、刘行等）`)
+    console.log(`✅ 初始化周报下载白名单：新增 ${added} 人（于贵臣、刘行等）`);
   }
 }

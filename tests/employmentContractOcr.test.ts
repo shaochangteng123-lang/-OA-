@@ -11,6 +11,7 @@ describe("劳动合同期限识别", () => {
     expect(result).toEqual({
       contractStartDate: "2025-06-16",
       contractEndDate: "2026-06-15",
+      probationEndDate: null,
       message: "劳动合同期限识别成功",
     });
   });

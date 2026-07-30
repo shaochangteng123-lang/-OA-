@@ -27,3 +27,27 @@ export function formatReimbursementMonth(monthStr: string): string {
   const [year, month] = monthStr.split('-')
   return `${year}年${month}月`
 }
+
+// 基础报销每月 1500 元交通额度匹配关键字
+export const TRANSPORT_FUEL_CATEGORY_KEYWORDS = [
+  '运输',
+  '交通',
+  '汽油',
+  '柴油',
+  '通行费',
+  '交通卡',
+  '一卡通',
+  '公交卡',
+  '地铁卡',
+  '乘车卡',
+  'transport',
+  'gas',
+  'diesel',
+] as const
+
+export function isTransportFuelCategory(category?: string | null): boolean {
+  const normalizedCategory = (category || '').toLowerCase()
+  return TRANSPORT_FUEL_CATEGORY_KEYWORDS.some(keyword =>
+    normalizedCategory.includes(keyword.toLowerCase())
+  )
+}

@@ -15,7 +15,9 @@ export const useAuthStore = defineStore('auth', () => {
   // 员工信息状态
   const profileStatus = ref<ProfileStatus>('none')
   // 是否已完成入职信息填写（已提交状态）
-  const hasCompletedOnboarding = computed(() => profileStatus.value === 'submitted')
+  const hasCompletedOnboarding = computed(
+    () => user.value?.role === 'boss' || profileStatus.value === 'submitted',
+  )
 
   // 检查会话
   async function checkSession() {
@@ -23,8 +25,12 @@ export const useAuthStore = defineStore('auth', () => {
       const response = await api.get('/api/auth/user')
       if (response.data.success && response.data.data) {
         user.value = response.data.data
-        // 检查会话成功后，获取员工信息状态
-        await fetchProfileStatus()
+        // BOSS账号仅用于经营看板，不建立员工档案。
+        if (user.value?.role === 'boss') {
+          profileStatus.value = 'none'
+        } else {
+          await fetchProfileStatus()
+        }
         return true
       }
       return false
@@ -41,6 +47,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   // 获取员工信息状态
   async function fetchProfileStatus() {
+    if (user.value?.role === 'boss') {
+      profileStatus.value = 'none'
+      return
+    }
+
     try {
       const response = await api.get('/api/employees/my-profile')
       if (response.data.success && response.data.data) {
@@ -62,6 +73,7 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       await api.post('/api/auth/logout')
       user.value = null
+      profileStatus.value = 'none'
       window.location.href = '/login'
     } catch (error) {
       console.error('登出失败:', error)

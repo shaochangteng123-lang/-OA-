@@ -50,15 +50,8 @@
         </el-table-column>
         <el-table-column label="员工状态" width="110" align="center">
           <template #default="{ row }">
-            <el-tag :type="getEmploymentStatusTagType(row.employmentStatus)" size="small">
-              {{ getEmploymentStatusText(row.employmentStatus) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="员工状态" width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getEmploymentStatusTagType(row.employmentStatus)" size="small">
-              {{ getEmploymentStatusText(row.employmentStatus) }}
+            <el-tag :type="getEmploymentStatusTagType(row.employmentStatus, row.role)" size="small">
+              {{ getEmploymentStatusText(row.employmentStatus, row.role) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -114,96 +107,99 @@
     <!-- 创建用户对话框 -->
     <el-dialog v-model="createDialogVisible" title="创建用户" width="500px" :close-on-click-modal="false">
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-width="100px">
-        <el-form-item label="员工编号" prop="employeeNo">
-          <el-input
-            v-model="createForm.employeeNo"
-            maxlength="13"
-            placeholder="例如 YULI-CS027"
-            @blur="createForm.employeeNo = normalizeEmployeeNoInput(createForm.employeeNo)"
-          />
-        </el-form-item>
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="createForm.username" placeholder="使用员工姓名，即为显示名称" />
+          <el-input
+            v-model="createForm.username"
+            :placeholder="isCreatingBoss ? '输入BOSS账号名称' : '使用员工姓名，即为显示名称'"
+          />
         </el-form-item>
         <el-form-item label="密码" prop="password">
           <el-input v-model="createForm.password" type="password" placeholder="至少6个字符" show-password />
-        </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="createForm.email" placeholder="输入有效邮箱" />
-        </el-form-item>
-        <el-form-item label="手机号" prop="mobile">
-          <el-input v-model="createForm.mobile" placeholder="11位手机号" maxlength="11" />
-        </el-form-item>
-        <el-form-item label="部门" prop="department">
-          <el-select v-model="createForm.department" placeholder="请选择部门" style="width: 100%">
-            <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="职位" prop="position">
-          <el-select v-model="createForm.position" placeholder="请先选择部门" :disabled="!createForm.department" style="width: 100%">
-            <el-option v-for="pos in getPositions(createForm.department)" :key="pos" :label="pos" :value="pos" />
-          </el-select>
         </el-form-item>
         <el-form-item label="角色" prop="role">
           <el-select v-model="createForm.role" style="width: 100%">
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
+            <el-option label="BOSS" value="boss" />
             <el-option label="普通用户" value="user" />
             <el-option label="访客" value="guest" />
           </el-select>
         </el-form-item>
-        <el-form-item label="员工状态" prop="employmentStatus">
-          <el-select v-model="createForm.employmentStatus" style="width: 100%">
-            <el-option label="实习期" value="probation" />
-            <el-option label="在职" value="active" />
-            <el-option label="已离职" value="resigned" />
-          </el-select>
-        </el-form-item>
+        <template v-if="!isCreatingBoss">
+          <el-form-item label="员工编号">
+            <el-input
+              :model-value="nextEmployeeNo"
+              :placeholder="employeeNumberLoading ? '正在获取编号...' : '编号获取失败'"
+              disabled
+            />
+          </el-form-item>
+          <el-form-item label="邮箱" prop="email">
+            <el-input v-model="createForm.email" placeholder="输入有效邮箱" />
+          </el-form-item>
+          <el-form-item label="手机号" prop="mobile">
+            <el-input v-model="createForm.mobile" placeholder="11位手机号" maxlength="11" />
+          </el-form-item>
+          <el-form-item label="部门" prop="department">
+            <el-select v-model="createForm.department" placeholder="请选择部门" style="width: 100%">
+              <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="职位" prop="position">
+            <el-select v-model="createForm.position" placeholder="请先选择部门" :disabled="!createForm.department" style="width: 100%">
+              <el-option v-for="pos in getPositions(createForm.department)" :key="pos" :label="pos" :value="pos" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="员工状态" prop="employmentStatus">
+            <el-select v-model="createForm.employmentStatus" style="width: 100%">
+              <el-option label="实习期" value="probation" />
+              <el-option label="在职" value="active" />
+            </el-select>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="createDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createLoading" @click="handleCreateUser">创建</el-button>
+        <el-button
+          type="primary"
+          :loading="createLoading"
+          :disabled="!isCreatingBoss && (employeeNumberLoading || !nextEmployeeNo)"
+          @click="handleCreateUser"
+        >
+          创建
+        </el-button>
       </template>
     </el-dialog>
 
     <!-- 编辑用户对话框 -->
     <el-dialog v-model="editDialogVisible" title="编辑用户" width="500px" :close-on-click-modal="false">
+      <el-alert
+        v-if="editingResigned"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="可重新激活该账号供本人登录，但离职档案不能改回在职；员工返聘时请创建新账号。"
+        style="margin-bottom: 16px"
+      />
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-width="100px">
-        <el-form-item label="员工编号" prop="employeeNo">
-          <el-input
-            v-model="editForm.employeeNo"
-            maxlength="13"
-            placeholder="例如 YULI-CS027"
-            @blur="editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)"
-          />
-        </el-form-item>
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="editForm.username" placeholder="仅字母、数字、下划线" />
+          <el-input
+            v-model="editForm.username"
+            :placeholder="isEditingBoss ? '输入BOSS账号名称' : '使用员工姓名，即为显示名称'"
+          />
         </el-form-item>
         <el-form-item label="密码" prop="password">
           <el-input v-model="editForm.password" type="password" placeholder="不修改请留空" show-password />
         </el-form-item>
-        <el-form-item label="邮箱" prop="email">
-          <el-input v-model="editForm.email" placeholder="输入有效邮箱" />
-        </el-form-item>
-        <el-form-item label="手机号" prop="mobile">
-          <el-input v-model="editForm.mobile" placeholder="11位手机号" maxlength="11" />
-        </el-form-item>
-        <el-form-item label="部门" prop="department">
-          <el-select v-model="editForm.department" placeholder="请选择部门" clearable style="width: 100%">
-            <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="职位" prop="position">
-          <el-select v-model="editForm.position" placeholder="请先选择部门" :disabled="!editForm.department" clearable style="width: 100%">
-            <el-option v-for="pos in getPositions(editForm.department)" :key="pos" :label="pos" :value="pos" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="角色" prop="role">
-          <el-select v-model="editForm.role" style="width: 100%">
+          <el-select
+            v-model="editForm.role"
+            :disabled="editingOriginalRole === 'boss'"
+            style="width: 100%"
+          >
             <el-option v-if="authStore.user?.role === 'super_admin'" label="超级管理员" value="super_admin" />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
+            <el-option v-if="editingOriginalRole === 'boss'" label="BOSS" value="boss" />
             <el-option label="普通用户" value="user" />
             <el-option label="访客" value="guest" />
           </el-select>
@@ -214,13 +210,43 @@
             <el-option label="停用" value="inactive" />
           </el-select>
         </el-form-item>
-        <el-form-item label="员工状态" prop="employmentStatus">
-          <el-select v-model="editForm.employmentStatus" style="width: 100%">
-            <el-option label="实习期" value="probation" />
-            <el-option label="在职" value="active" />
-            <el-option label="已离职" value="resigned" />
-          </el-select>
-        </el-form-item>
+        <template v-if="requiresEditingEmployeeProfile">
+          <el-form-item label="员工编号" prop="employeeNo">
+            <el-input
+              v-model="editForm.employeeNo"
+              maxlength="13"
+              placeholder="例如 YULI-CS027"
+              @blur="editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)"
+            />
+          </el-form-item>
+          <el-form-item label="邮箱" prop="email">
+            <el-input v-model="editForm.email" placeholder="输入有效邮箱" />
+          </el-form-item>
+          <el-form-item label="手机号" prop="mobile">
+            <el-input v-model="editForm.mobile" placeholder="11位手机号" maxlength="11" />
+          </el-form-item>
+          <el-form-item label="部门" prop="department">
+            <el-select v-model="editForm.department" placeholder="请选择部门" clearable style="width: 100%">
+              <el-option v-for="dept in departments" :key="dept" :label="dept" :value="dept" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="职位" prop="position">
+            <el-select v-model="editForm.position" placeholder="请先选择部门" :disabled="!editForm.department" clearable style="width: 100%">
+              <el-option v-for="pos in getPositions(editForm.department)" :key="pos" :label="pos" :value="pos" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="员工状态" prop="employmentStatus">
+            <el-select
+              v-model="editForm.employmentStatus"
+              :disabled="editingResigned"
+              style="width: 100%"
+            >
+              <el-option label="实习期" value="probation" />
+              <el-option label="在职" value="active" />
+              <el-option v-if="editingResigned" label="已离职" value="resigned" />
+            </el-select>
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="editDialogVisible = false">取消</el-button>
@@ -371,8 +397,9 @@ const paginatedUsers = computed(() => {
 const createDialogVisible = ref(false)
 const createFormRef = ref<FormInstance>()
 const createLoading = ref(false)
+const employeeNumberLoading = ref(false)
+const nextEmployeeNo = ref('')
 const createForm = reactive({
-  employeeNo: '',
   username: '',
   password: '',
   email: '',
@@ -382,6 +409,7 @@ const createForm = reactive({
   position: '',
   employmentStatus: 'probation',
 })
+const isCreatingBoss = computed(() => createForm.role === 'boss')
 
 const normalizeEmployeeNoInput = (value: string) => value.trim().toUpperCase().replace(/\s+/g, '')
 
@@ -420,10 +448,7 @@ const validateChineseName = (_rule: unknown, value: string, callback: (error?: E
   }
 }
 
-const createRules: FormRules = {
-  employeeNo: [
-    { required: true, validator: validateEmployeeNo, trigger: 'blur' },
-  ],
+const createRules = computed<FormRules>(() => ({
   username: [
     { required: true, validator: validateChineseName, trigger: 'blur' },
   ],
@@ -431,31 +456,35 @@ const createRules: FormRules = {
     { required: true, message: '请输入密码', trigger: 'blur' },
     { min: 6, message: '密码至少6个字符', trigger: 'blur' },
   ],
-  email: [
-    { required: true, message: '请输入邮箱', trigger: 'blur' },
-    { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
-  ],
-  mobile: [
-    { required: true, validator: validateMobile, trigger: 'blur' },
-  ],
-  department: [
-    { required: true, message: '请选择部门', trigger: 'change' },
-  ],
-  position: [
-    { required: true, message: '请选择职位', trigger: 'change' },
-  ],
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
   ],
-  employmentStatus: [
-    { required: true, message: '请选择员工状态', trigger: 'change' },
-  ],
-}
+  ...(isCreatingBoss.value ? {} : {
+    email: [
+      { required: true, message: '请输入邮箱', trigger: 'blur' },
+      { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
+    ],
+    mobile: [
+      { required: true, validator: validateMobile, trigger: 'blur' },
+    ],
+    department: [
+      { required: true, message: '请选择部门', trigger: 'change' },
+    ],
+    position: [
+      { required: true, message: '请选择职位', trigger: 'change' },
+    ],
+    employmentStatus: [
+      { required: true, message: '请选择员工状态', trigger: 'change' },
+    ],
+  }),
+}))
 
 // 编辑用户相关
 const editDialogVisible = ref(false)
 const editFormRef = ref<FormInstance>()
 const editLoading = ref(false)
+const editingResigned = ref(false)
+const editingOriginalRole = ref('')
 const editForm = reactive({
   id: '',
   employeeNo: '',
@@ -474,6 +503,34 @@ const editForm = reactive({
   bankName: '',
   bankAccountNumber: '',
 })
+const isEditingBoss = computed(() => editForm.role === 'boss')
+const isEditingSystemAdmin = computed(() => editForm.role === 'super_admin')
+const requiresEditingEmployeeProfile = computed(
+  () => !isEditingBoss.value && !isEditingSystemAdmin.value,
+)
+
+const validateEditUsername = (
+  rule: unknown,
+  value: string,
+  callback: (error?: Error) => void,
+) => {
+  if (!isEditingSystemAdmin.value) {
+    validateChineseName(rule, value, callback)
+    return
+  }
+
+  if (!value) {
+    callback(new Error('请输入用户名'))
+  } else if (value.length < 2) {
+    callback(new Error('用户名至少2个字符'))
+  } else if (value.length > 50) {
+    callback(new Error('用户名不能超过50个字符'))
+  } else if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(value)) {
+    callback(new Error('用户名只能包含汉字、字母、数字和下划线'))
+  } else {
+    callback()
+  }
+}
 
 // 编辑表单手机号验证器（可选）
 const validateEditMobile = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
@@ -497,25 +554,9 @@ const validateEditBankAccount = (_rule: unknown, value: string, callback: (error
   }
 }
 
-const editRules: FormRules = {
-  employeeNo: [
-    { required: true, validator: validateEmployeeNo, trigger: 'blur' },
-  ],
+const editRules = computed<FormRules>(() => ({
   username: [
-    { required: true, validator: validateChineseName, trigger: 'blur' },
-  ],
-  email: [
-    { required: true, message: '请输入邮箱', trigger: 'blur' },
-    { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
-  ],
-  mobile: [
-    { required: true, validator: validateMobile, trigger: 'blur' },
-  ],
-  department: [
-    { required: true, message: '请选择部门', trigger: 'change' },
-  ],
-  position: [
-    { required: true, message: '请选择职位', trigger: 'change' },
+    { required: true, validator: validateEditUsername, trigger: 'blur' },
   ],
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
@@ -523,16 +564,34 @@ const editRules: FormRules = {
   status: [
     { required: true, message: '请选择状态', trigger: 'change' },
   ],
-  employmentStatus: [
-    { required: true, message: '请选择员工状态', trigger: 'change' },
-  ],
-  bankAccountPhone: [
-    { validator: validateEditMobile, trigger: 'blur' },
-  ],
-  bankAccountNumber: [
-    { validator: validateEditBankAccount, trigger: 'blur' },
-  ],
-}
+  ...(requiresEditingEmployeeProfile.value ? {
+    employeeNo: [
+      { required: true, validator: validateEmployeeNo, trigger: 'blur' },
+    ],
+    email: [
+      { required: true, message: '请输入邮箱', trigger: 'blur' },
+      { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
+    ],
+    mobile: [
+      { required: true, validator: validateMobile, trigger: 'blur' },
+    ],
+    department: [
+      { required: true, message: '请选择部门', trigger: 'change' },
+    ],
+    position: [
+      { required: true, message: '请选择职位', trigger: 'change' },
+    ],
+    employmentStatus: [
+      { required: true, message: '请选择员工状态', trigger: 'change' },
+    ],
+    bankAccountPhone: [
+      { validator: validateEditMobile, trigger: 'blur' },
+    ],
+    bankAccountNumber: [
+      { validator: validateEditBankAccount, trigger: 'blur' },
+    ],
+  } : {}),
+}))
 
 // 重置密码相关
 const resetPasswordVisible = ref(false)
@@ -582,6 +641,7 @@ function getRoleTagType(role: string): ElementPlusTagType {
     super_admin: 'danger',
     admin: 'warning',
     general_manager: 'info',
+    boss: 'danger',
     user: 'primary',
     guest: 'info',
   }
@@ -594,6 +654,7 @@ function getRoleText(role: string) {
     super_admin: '超级管理员',
     admin: '管理员',
     general_manager: '总经理',
+    boss: 'BOSS',
     user: '普通用户',
     guest: '访客',
   }
@@ -601,7 +662,8 @@ function getRoleText(role: string) {
 }
 
 // 员工状态标签颜色
-function getEmploymentStatusTagType(status: string): ElementPlusTagType {
+function getEmploymentStatusTagType(status: string, role?: string): ElementPlusTagType {
+  if (role === 'boss' || role === 'super_admin') return 'info'
   const map: Record<string, ElementPlusTagType> = {
     active: 'success',
     probation: 'warning',
@@ -612,7 +674,8 @@ function getEmploymentStatusTagType(status: string): ElementPlusTagType {
 }
 
 // 员工状态文本
-function getEmploymentStatusText(status: string) {
+function getEmploymentStatusText(status: string, role?: string) {
+  if (role === 'boss' || role === 'super_admin') return '不适用'
   const map: Record<string, string> = {
     active: '在职',
     probation: '试用期',
@@ -649,6 +712,10 @@ watch(() => createForm.department, () => {
   createForm.position = ''
 })
 
+watch(() => createForm.role, () => {
+  nextTick(() => createFormRef.value?.clearValidate())
+})
+
 // 编辑表单填充时跳过 watcher
 const isEditFormPopulating = ref(false)
 
@@ -658,9 +725,12 @@ watch(() => editForm.department, () => {
   editForm.position = ''
 })
 
+watch(() => editForm.role, () => {
+  nextTick(() => editFormRef.value?.clearValidate())
+})
+
 // 显示创建对话框
-function showCreateDialog() {
-  createForm.employeeNo = ''
+async function showCreateDialog() {
   createForm.username = ''
   createForm.password = ''
   createForm.email = ''
@@ -669,7 +739,28 @@ function showCreateDialog() {
   createForm.department = ''
   createForm.position = ''
   createForm.employmentStatus = 'probation'
+  nextEmployeeNo.value = ''
   createDialogVisible.value = true
+  employeeNumberLoading.value = true
+
+  try {
+    const [, employeeNumberResponse] = await Promise.all([
+      loadDeptPositionConfig(),
+      api.get('/api/users/next-employee-number'),
+    ])
+    const employeeNo = employeeNumberResponse.data?.data?.employeeNo
+    if (!employeeNumberResponse.data?.success || typeof employeeNo !== 'string' || !employeeNo) {
+      throw new Error('接口未返回员工编号')
+    }
+    nextEmployeeNo.value = employeeNo
+  } catch (error: unknown) {
+    const responseMessage = (
+      error as { response?: { data?: { message?: string } } }
+    ).response?.data?.message
+    ElMessage.error(responseMessage || '获取员工编号失败')
+  } finally {
+    employeeNumberLoading.value = false
+  }
 }
 
 // 创建用户
@@ -684,8 +775,14 @@ async function handleCreateUser() {
 
   try {
     createLoading.value = true
-    createForm.employeeNo = normalizeEmployeeNoInput(createForm.employeeNo)
-    const res = await api.post('/api/users/create', createForm)
+    const payload = isCreatingBoss.value
+      ? {
+          username: createForm.username,
+          password: createForm.password,
+          role: createForm.role,
+        }
+      : { ...createForm }
+    const res = await api.post('/api/users/create', payload)
     if (res.data.success) {
       ElMessage.success('用户创建成功')
       createDialogVisible.value = false
@@ -699,7 +796,8 @@ async function handleCreateUser() {
 }
 
 // 编辑用户
-function editUser(user: UserType) {
+async function editUser(user: UserType) {
+  await loadDeptPositionConfig()
   isEditFormPopulating.value = true
   editForm.id = user.id
   editForm.employeeNo = user.employeeNo || ''
@@ -708,6 +806,7 @@ function editUser(user: UserType) {
   editForm.password = ''
   editForm.email = user.email || ''
   editForm.mobile = (user as any).mobile || ''
+  editingOriginalRole.value = user.role
   editForm.role = user.role
   editForm.status = user.status
   editForm.department = user.department || ''
@@ -717,6 +816,7 @@ function editUser(user: UserType) {
   editForm.bankName = (user as any).bankName || ''
   editForm.bankAccountNumber = (user as any).bankAccountNumber || ''
   editForm.employmentStatus = (user as any).employmentStatus || 'probation'
+  editingResigned.value = editForm.employmentStatus === 'resigned'
   editDialogVisible.value = true
   nextTick(() => {
     isEditFormPopulating.value = false
@@ -735,25 +835,33 @@ async function handleEditUser() {
 
   try {
     editLoading.value = true
-    editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)
-    const res = await api.post('/api/users', {
+    if (requiresEditingEmployeeProfile.value) {
+      editForm.employeeNo = normalizeEmployeeNoInput(editForm.employeeNo)
+    }
+    const accountPayload = {
       id: editForm.id,
-      employeeNo: editForm.employeeNo,
       username: editForm.username,
       name: editForm.name,
       password: editForm.password || undefined,
-      email: editForm.email || null,
-      mobile: editForm.mobile || null,
       role: editForm.role,
       status: editForm.status,
-      department: editForm.department || null,
-      position: editForm.position || null,
-      bankAccountName: editForm.bankAccountName || null,
-      bankAccountPhone: editForm.bankAccountPhone || null,
-      bankName: editForm.bankName || null,
-      bankAccountNumber: editForm.bankAccountNumber || null,
-      employmentStatus: editForm.employmentStatus,
-    })
+    }
+    const payload = requiresEditingEmployeeProfile.value
+      ? {
+          ...accountPayload,
+          employeeNo: editForm.employeeNo,
+          email: editForm.email || null,
+          mobile: editForm.mobile || null,
+          department: editForm.department || null,
+          position: editForm.position || null,
+          bankAccountName: editForm.bankAccountName || null,
+          bankAccountPhone: editForm.bankAccountPhone || null,
+          bankName: editForm.bankName || null,
+          bankAccountNumber: editForm.bankAccountNumber || null,
+          employmentStatus: editForm.employmentStatus,
+        }
+      : accountPayload
+    const res = await api.post('/api/users', payload)
     if (res.data.success) {
       ElMessage.success('保存成功')
       editDialogVisible.value = false
@@ -815,6 +923,7 @@ async function handleResetPassword() {
 
 // 显示部门管理对话框
 async function showDepartmentDialog() {
+  await loadDeptPositionConfig()
   localDeptPositionMap.value = JSON.parse(JSON.stringify(deptPositionMap.value))
   departmentDialogVisible.value = true
 }
@@ -827,15 +936,16 @@ function showAddDepartmentDialog() {
 
 // 添加部门
 function addDepartment() {
-  if (!addDepartmentForm.name.trim()) {
+  const departmentName = addDepartmentForm.name.trim()
+  if (!departmentName) {
     ElMessage.warning('请输入部门名称')
     return
   }
-  if (localDeptPositionMap.value[addDepartmentForm.name]) {
+  if (localDeptPositionMap.value[departmentName]) {
     ElMessage.warning('部门已存在')
     return
   }
-  localDeptPositionMap.value[addDepartmentForm.name] = []
+  localDeptPositionMap.value[departmentName] = []
   addDepartmentVisible.value = false
   ElMessage.success('部门添加成功')
 }
@@ -861,16 +971,17 @@ function showAddPositionInput() {
 
 // 添加职位
 function addPosition() {
-  if (!newPositionName.value.trim()) {
+  const positionName = newPositionName.value.trim()
+  if (!positionName) {
     ElMessage.warning('请输入职位名称')
     return
   }
   const positions = localDeptPositionMap.value[currentDepartment.value] || []
-  if (positions.includes(newPositionName.value)) {
+  if (positions.includes(positionName)) {
     ElMessage.warning('职位已存在')
     return
   }
-  positions.push(newPositionName.value)
+  positions.push(positionName)
   localDeptPositionMap.value[currentDepartment.value] = positions
   addPositionInputVisible.value = false
   ElMessage.success('职位添加成功')
@@ -900,7 +1011,9 @@ async function saveDepartmentChanges() {
       departmentPositionMap: localDeptPositionMap.value
     })
     if (res.data.success) {
-      deptPositionMap.value = JSON.parse(JSON.stringify(localDeptPositionMap.value))
+      deptPositionMap.value = JSON.parse(JSON.stringify(
+        res.data.data || localDeptPositionMap.value,
+      ))
       ElMessage.success('保存成功')
       departmentDialogVisible.value = false
     }

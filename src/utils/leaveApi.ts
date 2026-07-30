@@ -39,11 +39,16 @@ export interface LeaveRequest {
   end_half: 'morning' | 'afternoon'
   total_days: number
   reason: string
-  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  status: 'draft' | 'pending' | 'approved' | 'rejected' | 'cancelled'
   approver_id: string | null
   approver_name: string | null
+  approver_real_name?: string | null
+  approver_position?: string | null
+  cc_recipient_role?: string | null
+  cc_recipient_name?: string | null
   reject_reason: string | null
   approved_at: string | null
+  approval_notice_unread?: boolean
   rejected_at: string | null
   cancelled_at: string | null
   submitted_at: string
@@ -51,6 +56,11 @@ export interface LeaveRequest {
   original_id: string | null
   created_at: string
   updated_at: string
+  remaining_days?: number | null
+  remaining_leave_days?: number | null
+  return_to_work_date?: string | null
+  return_to_work_half?: 'morning' | 'afternoon' | null
+  leave_timing_status?: 'not_applicable' | 'upcoming' | 'on_leave' | 'returned'
 }
 
 export interface LeaveApprovalLog {
@@ -58,26 +68,48 @@ export interface LeaveApprovalLog {
   leave_request_id: string
   operator_id: string
   operator_name: string
+  operator_real_name?: string | null
+  operator_position?: string | null
   action: 'submit' | 'approve' | 'reject' | 'cancel' | 'resubmit'
   comment: string | null
   created_at: string
+  version?: number
+  request_no?: string
 }
 
 export interface LeaveAttachment {
   id: string
+  leave_request_id: string
   file_name: string
   file_size: number | null
   mime_type: string | null
   created_at: string
+  version?: number
+  request_no?: string
 }
 
 export interface LeaveRequestDetail extends LeaveRequest {
+  root_request_no: string
+  version_count: number
   attachments: LeaveAttachment[]
   logs: LeaveApprovalLog[]
 }
 
 export interface LeaveRequestListResponse {
   list: LeaveRequest[]
+  total: number
+  page: number
+  pageSize: number
+}
+
+export interface LeaveReviewHistoryItem extends LeaveRequest {
+  review_action: 'approve' | 'reject'
+  review_comment: string | null
+  reviewed_at: string
+}
+
+export interface LeaveReviewHistoryResponse {
+  list: LeaveReviewHistoryItem[]
   total: number
   page: number
   pageSize: number
@@ -135,17 +167,22 @@ export async function getRequestDetail(id: string): Promise<LeaveRequestDetail> 
   return res.data.data
 }
 
+// 确认已查看全部请假审批通过提醒
+export async function markApprovedLeaveNoticesRead(): Promise<void> {
+  await api.post('/api/leave/requests/approved/mark-read')
+}
+
 // 下载附件（返回 URL）
 export function getAttachmentUrl(attachmentId: string): string {
   return `/api/leave/attachments/${attachmentId}/download`
 }
 
-// 撤销申请
+// 撤回申请并转为草稿
 export async function cancelRequest(id: string): Promise<void> {
   await api.post(`/api/leave/requests/${id}/cancel`)
 }
 
-// 驳回后重新提交
+// 草稿或驳回申请重新提交
 export async function resubmitRequest(id: string, formData: FormData): Promise<{ id: string; requestNo: string }> {
   const res = await api.post(`/api/leave/requests/${id}/resubmit`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
@@ -153,11 +190,25 @@ export async function resubmitRequest(id: string, formData: FormData): Promise<{
   return res.data.data
 }
 
+// 永久删除草稿及其历史记录
+export async function deleteDraftRequest(id: string): Promise<void> {
+  await api.delete(`/api/leave/requests/${id}`)
+}
+
 // ==================== 审批端 ====================
 
 // 获取待我审批列表
 export async function getPendingRequests(): Promise<LeaveRequest[]> {
   const res = await api.get('/api/leave/pending')
+  return res.data.data
+}
+
+// 获取当前总经理已处理的审批记录
+export async function getReviewedRequests(params?: {
+  page?: number
+  pageSize?: number
+}): Promise<LeaveReviewHistoryResponse> {
+  const res = await api.get('/api/leave/reviewed', { params })
   return res.data.data
 }
 

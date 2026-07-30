@@ -2,6 +2,10 @@ import { Router } from 'express'
 import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth, requireAdmin } from '../middleware/auth.js'
+import {
+  normalizeDepartmentPositionMap,
+  parseStoredDepartmentPositionMap,
+} from '../utils/department-position.js'
 
 const router = Router()
 
@@ -12,17 +16,10 @@ router.get('/org-options', requireAuth, async (_req, res) => {
       | { config_json: string }
       | undefined
 
-    if (!config) {
-      return res.json({
-        success: true,
-        data: {
-          '行政部': ['行政主管', '行政专员', '财务', '出纳'],
-          '项目部': ['项目经理', '员工'],
-        },
-      })
-    }
-
-    res.json({ success: true, data: JSON.parse(config.config_json) })
+    res.json({
+      success: true,
+      data: parseStoredDepartmentPositionMap(config?.config_json),
+    })
   } catch (error) {
     console.error('获取部门职位配置失败:', error)
     res.status(500).json({ success: false, message: '获取部门职位配置失败' })
@@ -32,10 +29,11 @@ router.get('/org-options', requireAuth, async (_req, res) => {
 // 更新部门职位配置（仅管理员）- 必须在 /:id 路由之前
 router.post('/org-options', requireAdmin, async (req, res) => {
   try {
-    const { departmentPositionMap } = req.body
-    if (!departmentPositionMap || typeof departmentPositionMap !== 'object') {
-      return res.status(400).json({ success: false, message: '无效的部门职位数据' })
+    const normalized = normalizeDepartmentPositionMap(req.body.departmentPositionMap)
+    if (!normalized.data) {
+      return res.status(400).json({ success: false, message: normalized.error })
     }
+    const departmentPositionMap = normalized.data
 
     const now = new Date().toISOString()
     const existing = await db.prepare('SELECT id FROM department_position_configs WHERE id = ?').get('default')
@@ -54,7 +52,11 @@ router.post('/org-options', requireAdmin, async (req, res) => {
       )
     }
 
-    res.json({ success: true, message: '部门职位配置已更新' })
+    res.json({
+      success: true,
+      message: '部门职位配置已更新',
+      data: departmentPositionMap,
+    })
   } catch (error) {
     console.error('更新部门职位配置失败:', error)
     res.status(500).json({ success: false, message: '更新失败' })

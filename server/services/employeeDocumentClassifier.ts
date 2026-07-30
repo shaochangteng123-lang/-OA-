@@ -188,7 +188,7 @@ function toHalfWidth(value: string): string {
 function normalizeFilename(value: string): string {
   return toHalfWidth(value)
     .replace(/\.pdf$/i, "")
-    .replace(/[\s._\-—（）()【】\[\]]+/g, "")
+    .replace(/[\s._\-—（）()【】[\]]+/g, "")
     .toLowerCase();
 }
 
@@ -278,6 +278,46 @@ export function classifyEmployeeDocumentPageStartText(
   const headingLines = normalizePageHeadingLines(pageText);
 
   const hasCompositePageStart = (type: EmployeeDocumentType): boolean => {
+    if (type === "invitation") {
+      return (
+        /年保障薪酬/.test(normalizedContent) &&
+        /月保障薪酬|月度税前工资/.test(normalizedContent)
+      );
+    }
+    if (type === "application") {
+      return (
+        /紧急联系人/.test(normalizedContent) &&
+        /个人基本信息/.test(normalizedContent) &&
+        /入职部门|拟入职部门/.test(normalizedContent)
+      );
+    }
+    if (type === "contract") {
+      return (
+        /合同期限/.test(normalizedContent) &&
+        /甲方/.test(normalizedContent) &&
+        /乙方/.test(normalizedContent) &&
+        /劳动合同法|劳动关系/.test(normalizedContent)
+      );
+    }
+    if (type === "nda") {
+      return (
+        /保密内容/.test(normalizedContent) &&
+        /保密范围/.test(normalizedContent) &&
+        /商业秘密|保密事项|保密义务/.test(normalizedContent)
+      );
+    }
+    if (type === "declaration") {
+      return (
+        /本人郑重声明/.test(normalizedContent) &&
+        /声明人/.test(normalizedContent)
+      );
+    }
+    if (type === "asset_handover") {
+      return (
+        /电脑领用|办公电脑|笔记本电脑/.test(normalizedContent) &&
+        /设备编号|资产编号|管理办法/.test(normalizedContent)
+      );
+    }
     if (type === "id_card") {
       return (
         /居民身份证/.test(normalizedContent) &&
@@ -296,6 +336,12 @@ export function classifyEmployeeDocumentPageStartText(
         /证书编号|准予毕业|学历证书查询网址|修完.{0,30}课程/.test(
           normalizedContent,
         )
+      );
+    }
+    if (type === "health_report") {
+      return (
+        /体检结论|检查结论/.test(normalizedContent) &&
+        /主检医师|体检机构|检查项目/.test(normalizedContent)
       );
     }
     return false;
@@ -511,6 +557,7 @@ export async function detectEmployeeDocumentPageBoundary(
   }
 
   const dpi = 220;
+  let uncertainImageBoundary: EmployeeDocumentPageBoundary | null = null;
   try {
     const recognizedText = await recognizePdfPageImage(
       pdfPath,
@@ -518,9 +565,30 @@ export async function detectEmployeeDocumentPageBoundary(
       dpi,
     );
     const boundary = inspectText(recognizedText, "image");
-    if (boundary) return boundary;
+    if (boundary?.kind === "document") return boundary;
+    if (boundary?.kind === "unsupported") {
+      uncertainImageBoundary = boundary;
+    }
   } catch {
     console.warn(`人事档案第${pageNumber}页图片识别失败，分辨率：${dpi}`);
+  }
+
+  if (uncertainImageBoundary) {
+    const retryDpi = 300;
+    try {
+      const recognizedText = await recognizePdfPageImage(
+        pdfPath,
+        pageNumber,
+        retryDpi,
+      );
+      const boundary = inspectText(recognizedText, "image");
+      if (boundary) return boundary;
+    } catch {
+      console.warn(
+        `人事档案第${pageNumber}页图片复核失败，分辨率：${retryDpi}`,
+      );
+    }
+    return uncertainImageBoundary;
   }
 
   return { kind: "none", documentType: null, label: null, source: null };

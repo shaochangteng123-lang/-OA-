@@ -1,5 +1,13 @@
 <template>
-  <el-form ref="formRef" :model="form" :rules="rules" label-width="90px" class="leave-request-form">
+  <el-form
+    :key="formResetKey"
+    ref="formRef"
+    :model="form"
+    :rules="rules"
+    :validate-on-rule-change="false"
+    label-width="90px"
+    class="leave-request-form"
+  >
     <!-- 假期类型 -->
     <el-form-item label="假期类型" prop="leaveTypeCode">
       <el-select
@@ -27,13 +35,10 @@
     <!-- 开始时间 -->
     <el-form-item label="开始时间" prop="startDate">
       <div class="date-half-row">
-        <el-date-picker
+        <LeaveDatePicker
           v-model="form.startDate"
-          type="date"
           placeholder="选择开始日期"
-          value-format="YYYY-MM-DD"
-          :disabled-date="disableStartDate"
-          style="width: 160px"
+          :disabled-date="isPastLeaveDateDisabled"
           @change="onDateChange"
         />
         <el-radio-group v-model="form.startHalf" class="half-radio" @change="onDateChange">
@@ -46,13 +51,10 @@
     <!-- 结束时间 -->
     <el-form-item label="结束时间" prop="endDate">
       <div class="date-half-row">
-        <el-date-picker
+        <LeaveDatePicker
           v-model="form.endDate"
-          type="date"
           placeholder="选择结束日期"
-          value-format="YYYY-MM-DD"
           :disabled-date="disableEndDate"
-          style="width: 160px"
           @change="onDateChange"
         />
         <el-radio-group v-model="form.endHalf" class="half-radio" @change="onDateChange">
@@ -96,6 +98,7 @@
           ref="uploadRef"
           v-model:file-list="fileList"
           :auto-upload="false"
+          :show-file-list="false"
           :limit="5"
           multiple
           :accept="'.jpg,.jpeg,.png,.pdf'"
@@ -107,6 +110,7 @@
             选择文件
           </el-button>
         </el-upload>
+        <LeaveFileCards :items="selectedFileCards" @remove="removeSelectedFile" />
         <div class="upload-warn">
           <el-icon><WarningFilled /></el-icon>
           需上传三甲医院病历或假条，否则无法提交
@@ -131,11 +135,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { InfoFilled, Loading, Upload, WarningFilled } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules, UploadUserFile } from 'element-plus'
+import LeaveDatePicker from './LeaveDatePicker.vue'
+import LeaveFileCards from './LeaveFileCards.vue'
 import { getLeaveTypes, calculateDays, submitLeaveRequest, type LeaveTypeConfig } from '@/utils/leaveApi'
+import { isLeaveEndDateDisabled, isPastLeaveDateDisabled } from '@/utils/leaveDate'
 
 const emit = defineEmits<{
   (e: 'submitted'): void
@@ -143,6 +150,7 @@ const emit = defineEmits<{
 
 const formRef = ref<FormInstance>()
 const uploadRef = ref()
+const formResetKey = ref(0)
 const leaveTypes = ref<LeaveTypeConfig[]>([])
 const submitting = ref(false)
 const calculatedDays = ref<number | null>(null)
@@ -151,24 +159,37 @@ const fileList = ref<UploadUserFile[]>([])
 
 let calcTimer: ReturnType<typeof setTimeout> | null = null
 
-const form = ref({
-  leaveTypeCode: '',
-  startDate: '',
-  startHalf: 'morning' as 'morning' | 'afternoon',
-  endDate: '',
-  endHalf: 'afternoon' as 'morning' | 'afternoon',
-  reason: '',
-})
+function createInitialForm() {
+  return {
+    leaveTypeCode: '',
+    startDate: '',
+    startHalf: 'morning' as 'morning' | 'afternoon',
+    endDate: '',
+    endHalf: 'afternoon' as 'morning' | 'afternoon',
+    reason: '',
+  }
+}
+
+const form = ref(createInitialForm())
 
 const selectedType = computed(() => {
   return leaveTypes.value.find(t => t.code === form.value.leaveTypeCode) || null
 })
 
+const selectedFileCards = computed(() => fileList.value.map((file, index) => ({
+  key: getUploadFileKey(file, index),
+  name: file.name,
+  size: file.size ?? file.raw?.size ?? null,
+  previewFile: file.raw,
+  previewUrl: file.raw ? undefined : file.url,
+  removable: true,
+})))
+
 // 不需要填写事由的假期类型
 const NO_REASON_TYPES = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
 
 const reasonRequired = computed(() => {
-  if (!form.value.leaveTypeCode) return true
+  if (!form.value.leaveTypeCode) return false
   return !NO_REASON_TYPES.includes(form.value.leaveTypeCode)
 })
 
@@ -177,22 +198,12 @@ const rules = computed<FormRules>(() => ({
   startDate: [{ required: true, message: '请选择开始日期', trigger: 'change' }],
   endDate: [{ required: true, message: '请选择结束日期', trigger: 'change' }],
   reason: reasonRequired.value
-    ? [
-        { required: true, message: '请填写请假事由', trigger: 'blur' },
-        { min: 5, message: '请假事由至少5个字符', trigger: 'blur' },
-      ]
+    ? [{ required: true, message: '请填写请假事由', trigger: 'blur' }]
     : [],
 }))
 
-function disableStartDate(time: Date): boolean {
-  return time.getTime() < Date.now() - 90 * 24 * 3600 * 1000
-}
-
 function disableEndDate(time: Date): boolean {
-  if (form.value.startDate) {
-    return time.getTime() < new Date(form.value.startDate).getTime() - 86400000
-  }
-  return time.getTime() < Date.now() - 90 * 24 * 3600 * 1000
+  return isLeaveEndDateDisabled(time, form.value.startDate)
 }
 
 function handleTypeChange() {
@@ -229,51 +240,70 @@ function handleExceed() {
   ElMessage.warning('最多上传5个文件')
 }
 
-async function handleSubmit() {
-  await formRef.value?.validate(async (valid) => {
-    if (!valid) return
-
-    if (selectedType.value?.requires_attachment && fileList.value.length === 0) {
-      ElMessage.warning(`${selectedType.value.name}需要上传证明文件`)
-      return
-    }
-
-    if (!calculatedDays.value || calculatedDays.value <= 0) {
-      ElMessage.warning('请假时长不能为0，所选时间段全为休息日')
-      return
-    }
-
-    submitting.value = true
-    try {
-      const formData = new FormData()
-      formData.append('leaveTypeCode', form.value.leaveTypeCode)
-      formData.append('startDate', form.value.startDate)
-      formData.append('startHalf', form.value.startHalf)
-      formData.append('endDate', form.value.endDate)
-      formData.append('endHalf', form.value.endHalf)
-      formData.append('reason', form.value.reason)
-
-      for (const file of fileList.value) {
-        if (file.raw) formData.append('attachments', file.raw)
-      }
-
-      await submitLeaveRequest(formData)
-      ElMessage.success('请假申请已提交，等待审批')
-      handleReset()
-      emit('submitted')
-    } catch (err: any) {
-      ElMessage.error(err?.response?.data?.message || '提交失败，请重试')
-    } finally {
-      submitting.value = false
-    }
-  })
+function getUploadFileKey(file: UploadUserFile, index: number): string {
+  return String(file.uid ?? `${file.name}-${file.size ?? 0}-${index}`)
 }
 
-function handleReset() {
-  formRef.value?.resetFields()
-  form.value = { leaveTypeCode: '', startDate: '', startHalf: 'morning', endDate: '', endHalf: 'afternoon', reason: '' }
+function removeSelectedFile(key: string | number) {
+  fileList.value = fileList.value.filter((file, index) => getUploadFileKey(file, index) !== String(key))
+}
+
+async function handleSubmit() {
+  if (!formRef.value) return
+  try {
+    await formRef.value.validate()
+  } catch {
+    return
+  }
+
+  if (selectedType.value?.requires_attachment && fileList.value.length === 0) {
+    ElMessage.warning(`${selectedType.value.name}需要上传证明文件`)
+    return
+  }
+
+  if (!calculatedDays.value || calculatedDays.value <= 0) {
+    ElMessage.warning('请假时长不能为0，所选时间段全为休息日')
+    return
+  }
+
+  submitting.value = true
+  try {
+    const formData = new FormData()
+    formData.append('leaveTypeCode', form.value.leaveTypeCode)
+    formData.append('startDate', form.value.startDate)
+    formData.append('startHalf', form.value.startHalf)
+    formData.append('endDate', form.value.endDate)
+    formData.append('endHalf', form.value.endHalf)
+    formData.append('reason', form.value.reason)
+
+    for (const file of fileList.value) {
+      if (file.raw) formData.append('attachments', file.raw)
+    }
+
+    await submitLeaveRequest(formData)
+    ElMessage.success('请假申请已提交，等待审批')
+    await handleReset()
+    emit('submitted')
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.message || '提交失败，请重试')
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function handleReset() {
+  if (calcTimer) {
+    clearTimeout(calcTimer)
+    calcTimer = null
+  }
+  Object.assign(form.value, createInitialForm())
   fileList.value = []
+  uploadRef.value?.clearFiles()
   calculatedDays.value = null
+  calculating.value = false
+  formResetKey.value += 1
+  await nextTick()
+  formRef.value?.clearValidate()
 }
 
 // 初始化加载假期类型
