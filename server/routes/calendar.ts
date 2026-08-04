@@ -3,6 +3,7 @@ import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
 import { requireAuth } from '../middleware/auth.js'
 import type { CalendarEvent } from '../types/database.js'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -17,12 +18,16 @@ router.get('/events', requireAuth, async (req, res) => {
 
     // 如果请求查看其他用户的日历
     if (requestedUserId && requestedUserId !== currentUserId) {
-      // 检查权限：只有 super_admin 和 admin 可以查看他人日历
+      // 检查权限：管理员及系统管理员等价角色可以查看他人日历。
       const currentUser = await db
         .prepare('SELECT role FROM users WHERE id = ?')
         .get(currentUserId) as { role: string } | undefined
 
-      if (!currentUser || !['super_admin', 'admin'].includes(currentUser.role)) {
+      if (
+        !currentUser ||
+        (currentUser.role !== 'admin' &&
+          !isSystemAdminEquivalentRole(currentUser.role))
+      ) {
         return res.status(403).json({
           success: false,
           message: '无权查看他人日历',

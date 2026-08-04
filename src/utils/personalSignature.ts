@@ -1,10 +1,11 @@
 import { api } from "@/utils/api";
 
-export type PersonalSignatureType = "personal" | "general_manager";
+export type PersonalSignatureType = "personal";
 
-interface PersonalSignatureStatus {
+export interface PersonalSignatureStatus {
   signatureType: PersonalSignatureType;
   ownerName: string;
+  locked: boolean;
   hasSignature: boolean;
   updatedAt: string | null;
 }
@@ -21,6 +22,11 @@ export interface PersonalSignatureData {
   updatedAt: string | null;
 }
 
+export interface PersonalSignatureState {
+  status: PersonalSignatureStatus;
+  signature: PersonalSignatureData | null;
+}
+
 function arrayBufferToPngDataUrl(buffer: ArrayBuffer) {
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
@@ -33,43 +39,42 @@ function arrayBufferToPngDataUrl(buffer: ArrayBuffer) {
   return `data:image/png;base64,${globalThis.btoa(binary)}`;
 }
 
-export async function loadPersonalSignature(
-  signatureType: PersonalSignatureType = "personal",
-): Promise<PersonalSignatureData | null> {
+export async function loadPersonalSignatureState(): Promise<PersonalSignatureState> {
   const statusResponse = await api.get<PersonalSignatureStatusResponse>(
     "/api/auth/signature",
-    { params: { type: signatureType } },
+    { params: { type: "personal" } },
   );
   const status = statusResponse.data.data;
-  if (!statusResponse.data.success || !status.hasSignature) return null;
+  if (!statusResponse.data.success || !status.hasSignature) {
+    return { status, signature: null };
+  }
 
   const imageResponse = await api.get<ArrayBuffer>(
     "/api/auth/signature/image",
     {
-      params: { type: signatureType },
+      params: { type: "personal" },
       responseType: "arraybuffer",
     },
   );
   return {
-    signatureType: status.signatureType,
-    ownerName: status.ownerName,
-    dataUrl: arrayBufferToPngDataUrl(imageResponse.data),
-    updatedAt: status.updatedAt,
+    status,
+    signature: {
+      signatureType: status.signatureType,
+      ownerName: status.ownerName,
+      dataUrl: arrayBufferToPngDataUrl(imageResponse.data),
+      updatedAt: status.updatedAt,
+    },
   };
 }
 
-export async function savePersonalSignature(
-  signatureDataUrl: string,
-  signatureType: PersonalSignatureType = "personal",
-) {
-  await api.post("/api/auth/signature", { signatureDataUrl, signatureType });
-  return loadPersonalSignature(signatureType);
+export async function loadPersonalSignature(): Promise<PersonalSignatureData | null> {
+  return (await loadPersonalSignatureState()).signature;
 }
 
-export async function deletePersonalSignature(
-  signatureType: PersonalSignatureType = "personal",
-) {
-  await api.delete("/api/auth/signature", {
-    params: { type: signatureType },
+export async function savePersonalSignature(signatureDataUrl: string) {
+  await api.post("/api/auth/signature", {
+    signatureDataUrl,
+    signatureType: "personal",
   });
+  return loadPersonalSignature();
 }

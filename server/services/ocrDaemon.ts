@@ -16,7 +16,7 @@ const __dirname = path.dirname(__filename);
 let daemonProcess: ChildProcess | null = null;
 let daemonReady = false;
 
-// 响应缓冲区和请求队列
+// 响应缓冲区
 let stdoutBuffer = "";
 
 export interface PaddleOcrLine {
@@ -36,14 +36,92 @@ interface PaddleOcrWorkerReady {
   error?: string;
 }
 
-let requestQueue: Array<{
+export const OCR_INFRASTRUCTURE_ERROR_CODE =
+  "OCR_INFRASTRUCTURE_ERROR" as const;
+
+export type OcrInfrastructureFailureReason =
+  | "daemon_start_failed"
+  | "daemon_unexpected_exit"
+  | "daemon_unavailable"
+  | "daemon_write_failed"
+  | "daemon_timeout"
+  | "daemon_shutdown"
+  | "worker_error";
+
+/**
+ * 表示识别基础设施不可用，而不是图片中没有识别到目标内容。
+ */
+export class OcrInfrastructureError extends Error {
+  readonly code = OCR_INFRASTRUCTURE_ERROR_CODE;
+  readonly reason: OcrInfrastructureFailureReason;
+  readonly retryable: boolean;
+  readonly cause?: unknown;
+
+  constructor(
+    message: string,
+    options: {
+      reason: OcrInfrastructureFailureReason;
+      retryable?: boolean;
+      cause?: unknown;
+    },
+  ) {
+    super(message);
+    this.name = "OcrInfrastructureError";
+    this.reason = options.reason;
+    this.retryable = options.retryable ?? false;
+    this.cause = options.cause;
+  }
+}
+
+/**
+ * 同时按类型和稳定错误码判断，兼容热更新后存在两个模块实例的情况。
+ */
+export function isOcrInfrastructureError(
+  error: unknown,
+): error is OcrInfrastructureError {
+  if (error instanceof OcrInfrastructureError) return true;
+  if (!error || typeof error !== "object") return false;
+  return (
+    "code" in error &&
+    (error as { code?: unknown }).code === OCR_INFRASTRUCTURE_ERROR_CODE
+  );
+}
+
+interface ActiveOcrRequest {
   resolve: (value: PaddleOcrResult) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
-}> = [];
+}
+
+// 常驻进程一次只处理一张图片，因此这里只允许存在一个活动请求。
+let activeRequest: ActiveOcrRequest | null = null;
+
+// 所有调用共享同一条串行链，排队时间不计入单张图片的识别超时。
+let serialDispatchTail: Promise<void> = Promise.resolve();
 
 // 启动锁，防止并发启动多个进程
 let startingPromise: Promise<void> | null = null;
+
+// 记录主动关闭的进程，避免把正常清理误判为意外退出。
+const expectedExitProcesses = new WeakSet<ChildProcess>();
+let shuttingDown = false;
+
+function enqueueSerial<T>(task: () => Promise<T>): Promise<T> {
+  const result = serialDispatchTail.then(task, task);
+  serialDispatchTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function rejectActiveRequest(error: OcrInfrastructureError): void {
+  const request = activeRequest;
+  if (!request) return;
+  activeRequest = null;
+  clearTimeout(request.timer);
+  request.reject(error);
+}
 
 /**
  * 获取 PaddleOCR worker 脚本路径
@@ -87,18 +165,24 @@ function handleStdoutData(
     try {
       const data = JSON.parse(trimmed);
 
-      // ready 信号
+      // 就绪信号
       if ("ready" in data) {
         onReady(data as PaddleOcrWorkerReady);
         continue;
       }
 
-      // OCR 响应 - 按 FIFO 顺序匹配
-      const req = requestQueue.shift();
+      // 串行模式下，响应只会对应当前唯一的活动请求。
+      const req = activeRequest;
       if (req) {
+        activeRequest = null;
         clearTimeout(req.timer);
         if (data.error) {
-          req.reject(new Error(`PaddleOCR 识别失败: ${data.error}`));
+          req.reject(
+            new OcrInfrastructureError(
+              `PaddleOCR 识别进程返回错误: ${data.error}`,
+              { reason: "worker_error" },
+            ),
+          );
         } else {
           req.resolve({
             lines: Array.isArray(data.lines) ? data.lines : [],
@@ -115,116 +199,208 @@ function handleStdoutData(
 }
 
 /**
+ * 停止指定进程并同步清空当前状态。
+ */
+function stopProcess(
+  processToStop: ChildProcess,
+  signal: NodeJS.Signals,
+): void {
+  expectedExitProcesses.add(processToStop);
+  if (daemonProcess === processToStop) {
+    daemonProcess = null;
+    daemonReady = false;
+    stdoutBuffer = "";
+  }
+  if (!processToStop.killed) {
+    processToStop.kill(signal);
+  }
+}
+
+/**
  * 启动常驻进程
  */
 async function startDaemon(): Promise<void> {
-  // 如果已经在启动中，等待启动完成
-  if (startingPromise) {
-    await startingPromise;
-    return;
+  if (shuttingDown) {
+    throw new OcrInfrastructureError("PaddleOCR 常驻进程已关闭", {
+      reason: "daemon_shutdown",
+    });
   }
 
   // 如果已经就绪，直接返回
   if (daemonProcess && daemonReady) return;
 
-  startingPromise = new Promise<void>((resolve, reject) => {
-    const workerPath = getWorkerPath();
-    const pythonCmd = getPythonCmd();
+  if (!startingPromise) {
+    startingPromise = new Promise<void>((resolve, reject) => {
+      const workerPath = getWorkerPath();
+      const pythonCmd = getPythonCmd();
 
-    console.log("🐍 启动 PaddleOCR 常驻进程...");
+      console.log("🐍 启动 PaddleOCR 常驻进程...");
 
-    // 清空状态
-    stdoutBuffer = "";
-    requestQueue = [];
+      // 清空上一个进程残留的响应片段。
+      stdoutBuffer = "";
 
-    // -u 参数禁用 Python 的 stdout/stderr 缓冲，确保管道通信不丢行
-    const proc = spawn(pythonCmd, ["-u", workerPath, "--daemon"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      // 显式传入环境变量，禁用联网检查，避免网络超时；同时允许内存自动增长
-      env: {
-        ...process.env,
-        PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True",
-        FLAGS_allocator_strategy: "auto_growth",
-        // 使进程忽略 SIGTERM（tsx watch 热重载时会发送 SIGTERM 给子进程）
-        // Python 侧在 --daemon 模式下已通过 signal.signal 捕获处理
-      },
-    });
+      // 禁用输出缓冲，保证进程间通信按行及时送达。
+      const proc = spawn(pythonCmd, ["-u", workerPath, "--daemon"], {
+        stdio: ["pipe", "pipe", "pipe"],
+        // 禁用联网检查，同时允许内存按需增长。
+        env: {
+          ...process.env,
+          PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True",
+          FLAGS_allocator_strategy: "auto_growth",
+        },
+      });
 
-    daemonProcess = proc;
+      daemonProcess = proc;
 
-    // 读取 stderr 日志（不影响 stdout 通信）
-    // 过滤 PaddleOCR 初始化时的常规信息日志，但保留错误和警告
-    proc.stderr?.on("data", (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (!msg) return;
-      const isRoutineLog =
-        /^(DEBUG|INFO)\b/.test(msg) ||
-        (msg.includes("ppocr") &&
-          !msg.includes("Error") &&
-          !msg.includes("error") &&
-          !msg.includes("fail"));
-      if (!isRoutineLog) {
-        console.error("🐍 OCR stderr:", msg);
-      }
-    });
-
-    let gotReady = false;
-    // 首次启动需要下载/加载模型，延长超时至 180 秒
-    const startTimeout = setTimeout(() => {
-      if (!gotReady) {
-        cleanup("SIGKILL");
-        reject(new Error("PaddleOCR 常驻进程启动超时（180秒）"));
-      }
-    }, 180000);
-
-    // 直接监听 stdout 的 data 事件，比 readline 更可靠
-    proc.stdout!.on("data", (chunk: Buffer) => {
-      handleStdoutData(chunk.toString(), (data) => {
-        if (gotReady) return; // 忽略重复 ready
-        gotReady = true;
-        clearTimeout(startTimeout);
-
-        if (data.ready) {
-          daemonReady = true;
-          console.log(`✅ PaddleOCR 常驻进程就绪（引擎: ${data.engine}）`);
-          resolve();
-        } else {
-          cleanup("SIGKILL");
-          reject(new Error(`PaddleOCR 常驻进程启动失败: ${data.error}`));
+      // 过滤初始化阶段的常规日志，但保留错误和警告。
+      proc.stderr?.on("data", (data: Buffer) => {
+        const msg = data.toString().trim();
+        if (!msg) return;
+        const isRoutineLog =
+          /^(DEBUG|INFO)\b/.test(msg) ||
+          (msg.includes("ppocr") &&
+            !msg.includes("Error") &&
+            !msg.includes("error") &&
+            !msg.includes("fail"));
+        if (!isRoutineLog) {
+          console.error("🐍 OCR 错误输出:", msg);
         }
       });
-    });
 
-    proc.on("exit", (code: number | null) => {
-      console.log(`🐍 PaddleOCR 常驻进程退出 (code: ${code})`);
-      if (daemonProcess === proc) {
-        daemonProcess = null;
-        daemonReady = false;
-        stdoutBuffer = "";
-      }
-      // 拒绝所有 pending 的请求
-      for (const req of requestQueue) {
-        clearTimeout(req.timer);
-        req.reject(new Error("PaddleOCR 常驻进程意外退出"));
-      }
-      requestQueue = [];
-    });
+      let startSettled = false;
+      let gotReady = false;
 
-    proc.on("error", (err: Error) => {
-      console.error("🐍 PaddleOCR 常驻进程错误:", err);
-      if (daemonProcess === proc) {
-        daemonProcess = null;
-        daemonReady = false;
-        stdoutBuffer = "";
-      }
-      reject(err);
-    });
-  });
+      const settleStartFailure = (
+        error: OcrInfrastructureError,
+        shouldStop = true,
+      ): void => {
+        if (startSettled) return;
+        startSettled = true;
+        clearTimeout(startTimeout);
+        if (shouldStop) stopProcess(proc, "SIGKILL");
+        reject(error);
+      };
 
+      // 首次启动需要加载模型，启动超时单独计算。
+      const startTimeout = setTimeout(() => {
+        settleStartFailure(
+          new OcrInfrastructureError("PaddleOCR 常驻进程启动超时（180秒）", {
+            reason: "daemon_start_failed",
+          }),
+        );
+      }, 180000);
+
+      // 直接按数据块监听输出，再由缓冲区拆分完整行。
+      proc.stdout!.on("data", (chunk: Buffer) => {
+        if (daemonProcess !== proc) return;
+        handleStdoutData(chunk.toString(), (data) => {
+          if (gotReady || startSettled) return;
+          gotReady = true;
+
+          if (data.ready) {
+            startSettled = true;
+            clearTimeout(startTimeout);
+            daemonReady = true;
+            console.log(`✅ PaddleOCR 常驻进程就绪（引擎: ${data.engine}）`);
+            resolve();
+          } else {
+            settleStartFailure(
+              new OcrInfrastructureError(
+                `PaddleOCR 常驻进程启动失败: ${data.error}`,
+                { reason: "daemon_start_failed" },
+              ),
+            );
+          }
+        });
+      });
+
+      proc.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        const expectedExit = expectedExitProcesses.has(proc);
+        expectedExitProcesses.delete(proc);
+        console.log(
+          `🐍 PaddleOCR 常驻进程退出（退出码: ${code}，信号: ${signal ?? "无"}）`,
+        );
+        if (daemonProcess === proc) {
+          daemonProcess = null;
+          daemonReady = false;
+          stdoutBuffer = "";
+        }
+
+        if (!startSettled) {
+          settleStartFailure(
+            new OcrInfrastructureError(
+              expectedExit
+                ? "PaddleOCR 常驻进程在启动期间被关闭"
+                : "PaddleOCR 常驻进程在启动期间意外退出",
+              {
+                reason: expectedExit
+                  ? "daemon_shutdown"
+                  : "daemon_unexpected_exit",
+                retryable: !expectedExit,
+              },
+            ),
+            false,
+          );
+          return;
+        }
+
+        if (!expectedExit) {
+          rejectActiveRequest(
+            new OcrInfrastructureError("PaddleOCR 常驻进程意外退出", {
+              reason: "daemon_unexpected_exit",
+              retryable: true,
+            }),
+          );
+        }
+      });
+
+      proc.on("error", (err: Error) => {
+        console.error("🐍 PaddleOCR 常驻进程错误:", err);
+        if (startSettled) {
+          if (daemonProcess !== proc) return;
+          rejectActiveRequest(
+            new OcrInfrastructureError("PaddleOCR 常驻进程运行异常", {
+              reason: "daemon_unavailable",
+              cause: err,
+            }),
+          );
+          stopProcess(proc, "SIGKILL");
+          return;
+        }
+        settleStartFailure(
+          new OcrInfrastructureError("PaddleOCR 常驻进程启动失败", {
+            reason: "daemon_start_failed",
+            cause: err,
+          }),
+        );
+      });
+
+      proc.stdin?.on("error", (err: Error) => {
+        if (daemonProcess !== proc || !gotReady) return;
+        rejectActiveRequest(
+          new OcrInfrastructureError("无法向 PaddleOCR 常驻进程发送请求", {
+            reason: "daemon_write_failed",
+            cause: err,
+          }),
+        );
+        stopProcess(proc, "SIGKILL");
+      });
+    });
+  }
+
+  const currentStartingPromise = startingPromise;
   try {
-    await startingPromise;
+    await currentStartingPromise;
+  } catch (error) {
+    if (isOcrInfrastructureError(error)) throw error;
+    throw new OcrInfrastructureError("PaddleOCR 常驻进程启动失败", {
+      reason: "daemon_start_failed",
+      cause: error,
+    });
   } finally {
-    startingPromise = null;
+    if (startingPromise === currentStartingPromise) {
+      startingPromise = null;
+    }
   }
 }
 
@@ -236,14 +412,11 @@ function cleanup(signal: NodeJS.Signals = "SIGTERM"): void {
   stdoutBuffer = "";
   const processToStop = daemonProcess;
   daemonProcess = null;
-  if (processToStop && !processToStop.killed) {
-    processToStop.kill(signal);
-  }
+  if (processToStop) stopProcess(processToStop, signal);
 }
 
 /**
  * 调用 OCR 识别（通过常驻进程）
- * 如果常驻进程不可用，自动回退到单次调用模式
  */
 export async function callPaddleOcr(filePath: string): Promise<string> {
   return (await callPaddleOcrDetailed(filePath)).fullText;
@@ -255,62 +428,103 @@ export async function callPaddleOcr(filePath: string): Promise<string> {
 export async function callPaddleOcrDetailed(
   filePath: string,
 ): Promise<PaddleOcrResult> {
-  try {
-    // 确保常驻进程已启动
-    await startDaemon();
-  } catch (err) {
-    console.warn("⚠️ 常驻进程启动失败，回退到单次调用模式:", err);
-    return callPaddleOcrOnceDetailed(filePath);
+  return enqueueSerial(() => callPaddleOcrWithRetry(filePath));
+}
+
+async function callPaddleOcrWithRetry(
+  filePath: string,
+): Promise<PaddleOcrResult> {
+  const maximumAttempts = 2;
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    try {
+      return await dispatchPaddleOcrRequest(filePath);
+    } catch (error) {
+      const canRetry =
+        attempt < maximumAttempts &&
+        isOcrInfrastructureError(error) &&
+        error.retryable &&
+        !shuttingDown;
+      if (!canRetry) throw error;
+
+      console.warn(
+        `⚠️ PaddleOCR 常驻进程意外退出，正在重试当前图片（第 ${attempt + 1} 次）`,
+      );
+    }
   }
 
-  if (!daemonProcess || !daemonReady) {
-    return callPaddleOcrOnceDetailed(filePath);
+  throw new OcrInfrastructureError("PaddleOCR 重试后仍不可用", {
+    reason: "daemon_unexpected_exit",
+  });
+}
+
+async function dispatchPaddleOcrRequest(
+  filePath: string,
+): Promise<PaddleOcrResult> {
+  await startDaemon();
+
+  const processForRequest = daemonProcess;
+  if (
+    !processForRequest ||
+    !daemonReady ||
+    !processForRequest.stdin ||
+    processForRequest.stdin.destroyed ||
+    !processForRequest.stdin.writable
+  ) {
+    throw new OcrInfrastructureError("PaddleOCR 常驻进程当前不可用", {
+      reason: "daemon_unavailable",
+      // 只可能发生在进程就绪后、请求写入前的极短退出窗口，此时旧进程已经结束。
+      retryable: true,
+    });
+  }
+
+  if (activeRequest) {
+    throw new OcrInfrastructureError("PaddleOCR 存在未完成的识别请求", {
+      reason: "daemon_unavailable",
+    });
   }
 
   return new Promise<PaddleOcrResult>((resolve, reject) => {
     const timer = setTimeout(() => {
-      // 从队列中移除超时的请求
-      const idx = requestQueue.findIndex((r) => r.timer === timer);
-      if (idx !== -1) requestQueue.splice(idx, 1);
-      // 超时说明常驻进程可能卡住了，重启它
+      if (activeRequest !== requestState) return;
+      activeRequest = null;
       console.warn("⚠️ PaddleOCR 识别超时（180秒），重启常驻进程");
-      // Python 工作进程会忽略普通 SIGTERM；超时时必须强制结束，
-      // 防止旧模型未释放又启动新模型，挤占后端服务资源。
-      cleanup("SIGKILL");
-      reject(new Error("PaddleOCR 识别超时（180秒）"));
+      stopProcess(processForRequest, "SIGKILL");
+      reject(
+        new OcrInfrastructureError("PaddleOCR 识别超时（180秒）", {
+          reason: "daemon_timeout",
+        }),
+      );
     }, 180000);
 
-    requestQueue.push({ resolve, reject, timer });
+    const requestState: ActiveOcrRequest = { resolve, reject, timer };
+    activeRequest = requestState;
 
-    const request = JSON.stringify({ image_path: filePath }) + "\n";
-    daemonProcess!.stdin!.write(request);
+    const requestPayload = JSON.stringify({ image_path: filePath }) + "\n";
+    try {
+      processForRequest.stdin!.write(requestPayload, (error) => {
+        if (!error || activeRequest !== requestState) return;
+        activeRequest = null;
+        clearTimeout(timer);
+        stopProcess(processForRequest, "SIGKILL");
+        reject(
+          new OcrInfrastructureError("无法向 PaddleOCR 常驻进程发送请求", {
+            reason: "daemon_write_failed",
+            cause: error,
+          }),
+        );
+      });
+    } catch (error) {
+      activeRequest = null;
+      clearTimeout(timer);
+      stopProcess(processForRequest, "SIGKILL");
+      reject(
+        new OcrInfrastructureError("无法向 PaddleOCR 常驻进程发送请求", {
+          reason: "daemon_write_failed",
+          cause: error,
+        }),
+      );
+    }
   });
-}
-
-async function callPaddleOcrOnceDetailed(
-  filePath: string,
-): Promise<PaddleOcrResult> {
-  const { execFile } = await import("child_process");
-  const { promisify } = await import("util");
-  const execFileAsync = promisify(execFile);
-
-  const workerPath = getWorkerPath();
-  const pythonCmd = getPythonCmd();
-
-  const { stdout } = await execFileAsync(pythonCmd, [workerPath, filePath], {
-    timeout: 60000,
-    maxBuffer: 10 * 1024 * 1024,
-  });
-
-  const result = JSON.parse(stdout.trim());
-  if (result.error) {
-    throw new Error(`PaddleOCR 识别失败: ${result.error}`);
-  }
-
-  return {
-    lines: Array.isArray(result.lines) ? result.lines : [],
-    fullText: typeof result.fullText === "string" ? result.fullText : "",
-  };
 }
 
 /**
@@ -318,6 +532,12 @@ async function callPaddleOcrOnceDetailed(
  */
 export function shutdownOcrDaemon(): void {
   console.log("🐍 关闭 PaddleOCR 常驻进程...");
+  shuttingDown = true;
+  rejectActiveRequest(
+    new OcrInfrastructureError("PaddleOCR 常驻进程已关闭", {
+      reason: "daemon_shutdown",
+    }),
+  );
   cleanup("SIGKILL");
 }
 

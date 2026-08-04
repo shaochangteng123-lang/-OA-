@@ -15,6 +15,7 @@ import {
 import { db } from "../db/index.js";
 import { isAdminLike } from "../utils/worklog-auth.js";
 import { sendConvertedPdf, CONVERTIBLE_EXT } from "../utils/doc-preview.js";
+import { isSystemAdminEquivalentRole } from "../utils/boss-role.js";
 
 const router = express.Router();
 
@@ -49,7 +50,8 @@ router.get("/invoices/*", requireAuth, async (req, res) => {
     // 如果数据库中找到记录，检查权限
     if (invoice) {
       const user = await db.get("SELECT role FROM users WHERE id = ?", userId);
-      const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+      const isAdmin =
+        user?.role === "admin" || isSystemAdminEquivalentRole(user?.role);
       const isGMForBusiness =
         user?.role === "general_manager" && invoice.type === "business";
 
@@ -129,7 +131,8 @@ router.get("/payment-proofs/*", requireAuth, async (req, res) => {
 
     // 检查权限：必须是文件所有者、管理员，或总经理（仅限商务报销）
     const user = await db.get("SELECT role FROM users WHERE id = ?", userId);
-    const isAdmin = user?.role === "admin" || user?.role === "super_admin";
+    const isAdmin =
+      user?.role === "admin" || isSystemAdminEquivalentRole(user?.role);
     const isGMForBusiness =
       user?.role === "general_manager" && proof.type === "business";
 
@@ -165,7 +168,7 @@ router.get("/bank-receipts/*", requireAuth, async (req, res) => {
     const user = await db.get("SELECT role FROM users WHERE id = ?", userId);
     const isAdmin =
       user?.role === "admin" ||
-      user?.role === "super_admin" ||
+      isSystemAdminEquivalentRole(user?.role) ||
       user?.role === "general_manager";
 
     // 非管理员/总经理：检查该回单是否属于自己的报销单

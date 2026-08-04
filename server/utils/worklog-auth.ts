@@ -1,7 +1,7 @@
 import { db } from '../db/index.js'
 
 // 可查看全部项目日志的角色：总经理和系统管理员
-export const VIEW_ALL_ROLES = ['super_admin', 'general_manager'] as const
+export const VIEW_ALL_ROLES = ['super_admin', 'chairman', 'general_manager'] as const
 
 // 兼容旧引用
 export const ADMIN_ROLES = VIEW_ALL_ROLES

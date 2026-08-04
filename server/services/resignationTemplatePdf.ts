@@ -21,6 +21,7 @@ const NUMBER_FONT_FAMILY =
 const AUTO_FILL_FONT_SIZE = 16;
 const AUTO_FILL_MIN_HEIGHT = 25;
 const AUTO_FILL_HORIZONTAL_MARGIN = 2.5;
+const AUTO_FILL_GLYPH_SAFETY_MARGIN = 1.5;
 const AUTO_FILL_VERTICAL_MARGIN = 2.5;
 const AUTO_FILL_TEMPLATE_BASELINE_GAP = 2.5;
 const MIN_TEMPLATE_FONT_SIZE = 7;
@@ -157,6 +158,7 @@ interface TextBox {
   maxLines?: number;
   preserveFontHeight?: boolean;
   fitProportionally?: boolean;
+  glyphSafetyX?: number;
 }
 
 interface DateParts {
@@ -1469,8 +1471,7 @@ export function alignResignationTemplateFieldsToTextWords(
         exactOnLine(employeeLine, "：") ||
         idLabel;
       const closeParenthesis =
-        exactOnLine(employeeLine, "）") ||
-        containingOnLine(employeeLine, "）");
+        exactOnLine(employeeLine, "）") || containingOnLine(employeeLine, "）");
       placeInSlot("employeeName", employeeLabel, openParenthesis || idLabel);
       if (closeParenthesis) {
         placeInSlot("idNumber", idSeparator, closeParenthesis);
@@ -1565,8 +1566,7 @@ export function alignResignationTemplateFieldsToTextWords(
         containingOnLine(employeeLine, "（身份证号");
       const idSeparator = exactOnLine(employeeLine, "：") || idLabel;
       const closeParenthesis =
-        exactOnLine(employeeLine, "）") ||
-        containingOnLine(employeeLine, "）");
+        exactOnLine(employeeLine, "）") || containingOnLine(employeeLine, "）");
       placeInSlot("employeeName", employeeAnchor, openParenthesis || idLabel);
       if (closeParenthesis) {
         placeInSlot("idNumber", idSeparator, closeParenthesis);
@@ -1616,8 +1616,7 @@ export function alignResignationTemplateFieldsToTextWords(
         containingOnLine(employeeLine, "（身份证号");
       const idSeparator = exactOnLine(employeeLine, "：") || idLabel;
       const closeParenthesis =
-        exactOnLine(employeeLine, "）") ||
-        containingOnLine(employeeLine, "）");
+        exactOnLine(employeeLine, "）") || containingOnLine(employeeLine, "）");
       placeInSlot("employeeName", employeeAnchor, openParenthesis || idLabel);
       if (closeParenthesis) {
         placeInSlot("idNumber", idSeparator, closeParenthesis);
@@ -2144,7 +2143,9 @@ function renderTextPng(text: string, box: TextBox): Buffer {
 
   const paddingX = (box.paddingX ?? box.padding ?? 2) * RASTER_SCALE;
   const paddingY = (box.paddingY ?? box.padding ?? 2) * RASTER_SCALE;
+  const glyphSafetyX = Math.max(0, box.glyphSafetyX || 0) * RASTER_SCALE;
   const contentWidth = Math.max(1, canvas.width - paddingX * 2);
+  const fitContentWidth = Math.max(1, contentWidth - glyphSafetyX * 2);
   const contentHeight = Math.max(1, canvas.height - paddingY * 2);
   let fontSize = box.fontSize * RASTER_SCALE;
   const applyFont = () => {
@@ -2155,7 +2156,7 @@ function renderTextPng(text: string, box: TextBox): Buffer {
     (!box.preserveFontHeight || box.fitProportionally) &&
     fontSize > 7 * RASTER_SCALE &&
     !text.includes("\n") &&
-    context.measureText(text).width > contentWidth
+    context.measureText(text).width > fitContentWidth
   ) {
     fontSize -= 0.35 * RASTER_SCALE;
     applyFont();
@@ -2170,7 +2171,7 @@ function renderTextPng(text: string, box: TextBox): Buffer {
   const lines = (
     box.preserveFontHeight
       ? text.replace(/\r\n/g, "\n").split("\n")
-      : splitTextLines(context, text, contentWidth)
+      : splitTextLines(context, text, fitContentWidth)
   ).slice(0, box.maxLines || 20);
   const fontMetrics = context.measureText("国Ag0123456789");
   const fontAscent = fontMetrics.actualBoundingBoxAscent || fontSize * 0.82;
@@ -2192,17 +2193,19 @@ function renderTextPng(text: string, box: TextBox): Buffer {
     const linePadding = paddingX === 0 ? 0 : RASTER_SCALE;
     const sourceWidth = measured + linePadding * 2;
     const horizontalScale =
-      box.preserveFontHeight && sourceWidth > contentWidth
-        ? contentWidth / sourceWidth
+      box.preserveFontHeight && sourceWidth > fitContentWidth
+        ? fitContentWidth / sourceWidth
         : 1;
     const displayedWidth =
       horizontalScale < 1 ? sourceWidth * horizontalScale : measured;
-    let x = paddingX;
+    let x = paddingX + glyphSafetyX;
     if (box.align === "center") {
       x = paddingX + Math.max(0, (contentWidth - displayedWidth) / 2);
     }
     if (box.align === "right") {
-      x = paddingX + Math.max(0, contentWidth - displayedWidth);
+      x =
+        paddingX +
+        Math.max(glyphSafetyX, contentWidth - displayedWidth - glyphSafetyX);
     }
     const baselineY = startY + index * lineHeight + fontAscent;
     if (horizontalScale < 1) {
@@ -2322,6 +2325,7 @@ export async function renderResignationTemplatePdf(
       maxLines: 1,
       preserveFontHeight: true,
       fitProportionally: true,
+      glyphSafetyX: AUTO_FILL_GLYPH_SAFETY_MARGIN,
     });
   }
 

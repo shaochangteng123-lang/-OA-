@@ -10,6 +10,7 @@ import sharp from "sharp";
 import { callPaddleOcr } from "./ocrDaemon.js";
 import { db } from "../db/index.js";
 import { nanoid } from "nanoid";
+import { recipientMatches } from "../utils/bank-receipt-match.js";
 
 export interface BankReceiptOcrResult {
   payee: string; // 收款人
@@ -309,65 +310,6 @@ export function parseRemark(remark: string): ParsedRemark {
 // ==================== 匹配逻辑 ====================
 
 /**
- * 检查收款账号是否匹配（和 verify-proof 逻辑一致）
- */
-function accountMatches(expected: string, ocr: string): boolean {
-  const e = expected.replace(/\s+/g, "");
-  const o = ocr.replace(/\s+/g, "");
-  if (!e || !o) return false;
-  if (e === o) return true;
-  if (e.endsWith(o) || o.endsWith(e)) return true;
-  // 首位OCR误识别容错
-  if (e.length === o.length && e.slice(1) === o.slice(1)) return true;
-  return false;
-}
-
-/**
- * 检查收款人姓名是否匹配（和 verify-proof 逻辑一致）
- */
-function nameMatches(
-  expected: string,
-  ocrPayee: string,
-  rawText: string,
-): boolean {
-  if (!expected) return false;
-  const name = expected.trim();
-
-  // 在OCR提取的收款人字段中匹配
-  if (ocrPayee && ocrPayee !== "付款" && ocrPayee !== "收款") {
-    if (ocrPayee === name || ocrPayee.includes(name)) return true;
-    // 模糊匹配（容一个字OCR误识别）
-    if (name.length >= 2) {
-      for (let i = 0; i < name.length; i++) {
-        const partial = name
-          .split("")
-          .filter((_, idx) => idx !== i)
-          .join("");
-        if (ocrPayee.includes(partial)) return true;
-      }
-    }
-  }
-
-  // 在原始文本备注之前的区域查找
-  if (rawText) {
-    const rawBeforeMemo = rawText.split(/备注|附言|客户附言/)[0];
-    const rawNoSpace = rawBeforeMemo.replace(/\s+/g, "");
-    if (rawNoSpace.includes(name)) return true;
-    if (name.length >= 2) {
-      for (let i = 0; i < name.length; i++) {
-        const partial = name
-          .split("")
-          .filter((_, idx) => idx !== i)
-          .join("");
-        if (rawNoSpace.includes(partial)) return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-/**
  * 回溯算法：从候选列表中找出金额之和等于 target 的子集（转为整数分避免浮点误差）
  * 约束：子集内所有报销单必须是同一报销类型（基础/大额/商务）
  * 返回匹配的 ID 列表，找不到返回 null
@@ -475,17 +417,12 @@ async function matchReimbursement(
 
       // 只要批次内有一笔报销的收款人匹配，就认为整个批次都是这个人的
       const personMatched = batchItems.some((item) => {
-        const acctOk = item.bank_account_number
-          ? accountMatches(item.bank_account_number, ocr.payeeAccount || "")
-          : false;
-        const nameOk = item.bank_account_name
-          ? nameMatches(
-              item.bank_account_name,
-              ocr.payee || "",
-              ocr.rawText || "",
-            )
-          : false;
-        return acctOk || nameOk;
+        return recipientMatches(
+          item.bank_account_name || "",
+          item.bank_account_number || "",
+          ocr.payee || "",
+          ocr.payeeAccount || "",
+        );
       });
 
       if (personMatched) {
@@ -532,13 +469,12 @@ async function matchReimbursement(
 
   // 过滤：收款账号或姓名匹配（确认是同一个人）
   const matched = candidates.filter((c) => {
-    const acctOk = c.bank_account_number
-      ? accountMatches(c.bank_account_number, ocr.payeeAccount || "")
-      : false;
-    const nameOk = c.bank_account_name
-      ? nameMatches(c.bank_account_name, ocr.payee || "", ocr.rawText || "")
-      : false;
-    return acctOk || nameOk;
+    return recipientMatches(
+      c.bank_account_name || "",
+      c.bank_account_number || "",
+      ocr.payee || "",
+      ocr.payeeAccount || "",
+    );
   });
 
   if (matched.length === 0) return null;

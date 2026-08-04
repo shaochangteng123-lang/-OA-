@@ -147,20 +147,6 @@
             >
               <span>{{ personalSignatureLoading ? "调用中" : "签名" }}</span>
             </button>
-            <button
-              v-else-if="
-                mode === 'hr' &&
-                row.stage === 'general_manager' &&
-                !signatureForStage('general_manager')
-              "
-              type="button"
-              class="signature-trigger next-stage-trigger"
-              :style="boxStyle(251, row.signatureTop - 2, 86, 34)"
-              aria-label="总经理审批签名将在提交人事部意见后开放"
-              @click="handleFutureGeneralManagerSignatureClick"
-            >
-              <span>下一环节</span>
-            </button>
 
             <template v-if="signatureDateForStage(row.stage)">
               <span
@@ -184,7 +170,7 @@
             </template>
           </template>
 
-          <template v-if="generalManagerSignature">
+          <template v-if="finalApprovalDate">
             <div
               class="overlay-text centered conclusion-text"
               :style="[
@@ -216,48 +202,24 @@
               class="signature-date-part"
               :style="dateBoxStyle(386, CONCLUSION_DATE_TOP, 33)"
             >
-              {{ dateParts(generalManagerSignature.signed_at).year }}
+              {{ dateParts(finalApprovalDate).year }}
             </span>
             <span
               class="signature-date-part"
               :style="dateBoxStyle(433, CONCLUSION_DATE_TOP, 20)"
             >
-              {{ dateParts(generalManagerSignature.signed_at).month }}
+              {{ dateParts(finalApprovalDate).month }}
             </span>
             <span
               class="signature-date-part"
               :style="dateBoxStyle(468, CONCLUSION_DATE_TOP, 20)"
             >
-              {{ dateParts(generalManagerSignature.signed_at).day }}
+              {{ dateParts(finalApprovalDate).day }}
             </span>
           </template>
         </div>
       </div>
     </div>
-
-    <el-dialog
-      v-model="signatureChoiceVisible"
-      title="选择本次使用的签名"
-      width="460px"
-      append-to-body
-      :close-on-click-modal="false"
-    >
-      <div class="signature-choice-list">
-        <button
-          v-for="choice in signatureChoices"
-          :key="choice.signatureType"
-          type="button"
-          class="signature-choice"
-          @click="selectSignature(choice)"
-        >
-          <img :src="choice.dataUrl" :alt="`${choice.ownerName}电子签名`" />
-          <span>
-            <strong>{{ signatureTypeLabel(choice.signatureType) }}</strong>
-            <small>{{ choice.ownerName }}</small>
-          </span>
-        </button>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
@@ -267,10 +229,8 @@ import dayjs from "dayjs";
 import * as pdfjsLib from "pdfjs-dist";
 import { ElMessage } from "element-plus";
 import { api } from "@/utils/api";
-import { useAuthStore } from "@/stores/auth";
 import {
   loadPersonalSignature,
-  type PersonalSignatureData,
   type PersonalSignatureType,
 } from "@/utils/personalSignature";
 
@@ -287,7 +247,7 @@ interface ProbationTemplateSignature {
   id: string;
   stage: EditableStage;
   signer_name: string;
-  signature_type?: PersonalSignatureType;
+  signature_type?: "personal" | "general_manager";
   signature_owner_name?: string;
   opinion: string | null;
   decision: "submit" | "approve" | "reject";
@@ -334,7 +294,6 @@ const emit = defineEmits<{
   (event: "ready", value: boolean): void;
 }>();
 
-const authStore = useAuthStore();
 const TEMPLATE_WIDTH = 595.3;
 const TEMPLATE_HEIGHT = 841.9;
 const CONCLUSION_DATE_TOP = 737;
@@ -344,8 +303,6 @@ const loading = ref(true);
 const errorMessage = ref("");
 const sheetScale = ref(1);
 const personalSignatureLoading = ref(false);
-const signatureChoiceVisible = ref(false);
-const signatureChoices = ref<PersonalSignatureData[]>([]);
 let resizeObserver: InstanceType<typeof globalThis.ResizeObserver> | null =
   null;
 let renderGeneration = 0;
@@ -393,7 +350,7 @@ const reviewStages = [
   { value: "hr" as const, label: "人事部意见", opinionTop: 502 },
   {
     value: "general_manager" as const,
-    label: "总经理审批意见",
+    label: "董事长审批意见",
     opinionTop: 584,
   },
 ];
@@ -419,7 +376,7 @@ const signatureRows = [
   },
   {
     stage: "general_manager" as const,
-    label: "总经理",
+    label: "董事长",
     signatureTop: 625,
     dateTop: 634,
   },
@@ -450,8 +407,8 @@ const visibleSignatures = computed(() =>
     : props.signatures.filter((item) => item.decision !== "reject"),
 );
 const employeeSignature = computed(() => signatureForStage("employee"));
-const generalManagerSignature = computed(() =>
-  signatureForStage("general_manager"),
+const finalApprovalDate = computed(() =>
+  signatureDateForStage("general_manager"),
 );
 const applicationDate = computed(() => {
   if (employeeSignature.value) return employeeSignature.value.signed_at;
@@ -542,29 +499,12 @@ async function handleSignatureClick() {
 
   personalSignatureLoading.value = true;
   try {
-    const signatureTypes: PersonalSignatureType[] = [
-      "personal",
-      ...(["admin", "super_admin"].includes(authStore.user?.role || "")
-        ? (["general_manager"] as const)
-        : []),
-    ];
-    const choices = (
-      await Promise.all(
-        signatureTypes.map((signatureType) =>
-          loadPersonalSignature(signatureType),
-        ),
-      )
-    ).filter(
-      (signature): signature is PersonalSignatureData => signature !== null,
-    );
-
-    if (!choices.length) {
+    const signature = await loadPersonalSignature();
+    if (!signature) {
       ElMessage.warning("请先前往个人设置上传个人电子签名");
-    } else if (choices.length === 1) {
-      selectSignature(choices[0]);
     } else {
-      signatureChoices.value = choices;
-      signatureChoiceVisible.value = true;
+      emit("update:signatureType", "personal");
+      emit("update:signatureDataUrl", signature.dataUrl);
     }
   } catch (error) {
     console.error("加载个人电子签名失败:", error);
@@ -572,20 +512,6 @@ async function handleSignatureClick() {
   } finally {
     personalSignatureLoading.value = false;
   }
-}
-
-function signatureTypeLabel(signatureType: PersonalSignatureType) {
-  return signatureType === "personal" ? "本人签名" : "总经理签名";
-}
-
-function handleFutureGeneralManagerSignatureClick() {
-  ElMessage.info("请先提交人事部意见，页面随后会自动进入总经理审批并开放签名");
-}
-
-function selectSignature(signature: PersonalSignatureData) {
-  emit("update:signatureType", signature.signatureType);
-  emit("update:signatureDataUrl", signature.dataUrl);
-  signatureChoiceVisible.value = false;
 }
 
 function updateScale() {
@@ -870,68 +796,6 @@ onBeforeUnmount(() => {
 .signature-trigger:hover {
   border-color: #409eff;
   background: rgb(236 245 255 / 34%);
-}
-
-.next-stage-trigger {
-  color: #909399;
-  border-color: #c0c4cc;
-  background: rgb(245 247 250 / 76%);
-}
-
-.next-stage-trigger:hover {
-  color: #606266;
-  border-color: #909399;
-  background: rgb(245 247 250 / 45%);
-}
-
-.signature-choice-list {
-  display: grid;
-  gap: 12px;
-}
-
-.signature-choice {
-  display: grid;
-  grid-template-columns: 150px 1fr;
-  min-height: 76px;
-  padding: 10px 12px;
-  color: #303133;
-  border: 1px solid #dcdfe6;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  text-align: left;
-  transition:
-    border-color 0.15s ease,
-    background-color 0.15s ease;
-}
-
-.signature-choice:hover {
-  border-color: #409eff;
-  background: #f5f9ff;
-}
-
-.signature-choice img {
-  width: 138px;
-  height: 54px;
-  object-fit: contain;
-}
-
-.signature-choice span {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.signature-choice strong,
-.signature-choice small {
-  display: block;
-}
-
-.signature-choice small {
-  margin-top: 5px;
-  color: #909399;
 }
 
 .signature-date-part {

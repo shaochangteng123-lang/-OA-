@@ -2,8 +2,8 @@
 
 import { api } from "../src/utils/api";
 import {
-  deletePersonalSignature,
   loadPersonalSignature,
+  loadPersonalSignatureState,
   savePersonalSignature,
 } from "../src/utils/personalSignature";
 
@@ -11,14 +11,12 @@ jest.mock("../src/utils/api", () => ({
   api: {
     get: jest.fn(),
     post: jest.fn(),
-    delete: jest.fn(),
   },
 }));
 
 const mockedApi = api as unknown as {
   get: jest.Mock;
   post: jest.Mock;
-  delete: jest.Mock;
 };
 
 describe("个人电子签名", () => {
@@ -33,6 +31,7 @@ describe("个人电子签名", () => {
         data: {
           signatureType: "personal",
           ownerName: "测试员工",
+          locked: false,
           hasSignature: false,
           updatedAt: null,
         },
@@ -54,6 +53,7 @@ describe("个人电子签名", () => {
           data: {
             signatureType: "personal",
             ownerName: "测试员工",
+            locked: true,
             hasSignature: true,
             updatedAt: "2026-07-24T08:00:00.000Z",
           },
@@ -88,6 +88,7 @@ describe("个人电子签名", () => {
           data: {
             signatureType: "personal",
             ownerName: "测试员工",
+            locked: true,
             hasSignature: true,
             updatedAt: "2026-07-24T09:00:00.000Z",
           },
@@ -107,45 +108,30 @@ describe("个人电子签名", () => {
     expect(result?.updatedAt).toBe("2026-07-24T09:00:00.000Z");
   });
 
-  it("删除当前账号保存的签名", async () => {
-    mockedApi.delete.mockResolvedValueOnce({ data: { success: true } });
-
-    await deletePersonalSignature();
-    expect(mockedApi.delete).toHaveBeenCalledWith("/api/auth/signature", {
-      params: { type: "personal" },
-    });
-  });
-
-  it("管理员可独立保存并读取总经理签名", async () => {
-    mockedApi.post.mockResolvedValueOnce({ data: { success: true } });
-    mockedApi.get
-      .mockResolvedValueOnce({
+  it("已确认但图片缺失时仍返回锁定状态", async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      data: {
+        success: true,
         data: {
-          success: true,
-          data: {
-            signatureType: "general_manager",
-            ownerName: "测试总经理",
-            hasSignature: true,
-            updatedAt: "2026-07-24T10:00:00.000Z",
-          },
+          signatureType: "personal",
+          ownerName: "测试员工",
+          locked: true,
+          hasSignature: false,
+          updatedAt: null,
         },
-      })
-      .mockResolvedValueOnce({
-        data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]).buffer,
-      });
-
-    const result = await savePersonalSignature(
-      "data:image/png;base64,iVBORw==",
-      "general_manager",
-    );
-
-    expect(mockedApi.post).toHaveBeenCalledWith("/api/auth/signature", {
-      signatureDataUrl: "data:image/png;base64,iVBORw==",
-      signatureType: "general_manager",
+      },
     });
-    expect(result).toMatchObject({
-      signatureType: "general_manager",
-      ownerName: "测试总经理",
+
+    await expect(loadPersonalSignatureState()).resolves.toEqual({
+      status: {
+        signatureType: "personal",
+        ownerName: "测试员工",
+        locked: true,
+        hasSignature: false,
+        updatedAt: null,
+      },
+      signature: null,
     });
+    expect(mockedApi.get).toHaveBeenCalledTimes(1);
   });
 });

@@ -24,6 +24,7 @@ import type {
 } from '../types/database.js'
 import { nanoid } from 'nanoid'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -212,7 +213,11 @@ async function hasResignationManagementAccess(userId: string): Promise<boolean> 
   const user = await db.prepare(`
     SELECT role, status FROM users WHERE id = ?
   `).get(userId) as { role: string; status: string } | undefined
-  return user?.status === 'active' && ['admin', 'general_manager', 'super_admin'].includes(user.role)
+  return user?.status === 'active' && (
+    user.role === 'admin' ||
+    user.role === 'general_manager' ||
+    isSystemAdminEquivalentRole(user.role)
+  )
 }
 
 function canEmployeeEditDocuments(request: ResignationRequest): boolean {
@@ -1666,7 +1671,7 @@ router.get('/handover-candidates', requireAuth, async (req, res) => {
     const candidates = await db.prepare(`
       SELECT id, name, department, position
       FROM users
-      WHERE status = 'active' AND role IN ('user', 'admin', 'general_manager', 'super_admin') AND id != ?
+      WHERE status = 'active' AND role IN ('user', 'admin', 'general_manager') AND id != ?
       ORDER BY name ASC
     `).all(req.session.userId) as Array<{ id: string; name: string; department: string | null; position: string | null }>
 

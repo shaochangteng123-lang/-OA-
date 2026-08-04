@@ -39,46 +39,42 @@
             <el-icon><EditPen /></el-icon>
             <span>电子签名</span>
             <el-tag
-              v-if="savedSignatureCount"
+              v-if="signatureLocked"
               class="signature-status"
               type="success"
               effect="light"
             >
-              已保存 {{ savedSignatureCount }} 份
+              已确认并锁定
             </el-tag>
           </div>
         </template>
 
         <div class="signature-profile-list">
-          <section
-            v-for="profile in signatureProfiles"
-            :key="profile.type"
-            class="personal-signature-panel"
-          >
+          <section class="personal-signature-panel">
             <div class="signature-profile-heading">
               <div>
-                <h3>{{ profile.title }}</h3>
-                <p>{{ profile.description }}</p>
+                <h3>本人签名</h3>
+                <p>用于本人参与的转正申请或审批环节</p>
               </div>
               <el-tag
-                v-if="profile.signature"
+                v-if="personalSignature"
                 type="success"
                 effect="plain"
                 size="small"
               >
-                {{ profile.signature.ownerName }}
+                {{ personalSignature.ownerName }}
               </el-tag>
             </div>
 
             <div class="personal-signature-preview">
               <img
-                v-if="profile.signature"
-                :src="profile.signature.dataUrl"
-                :alt="`${profile.title}电子签名`"
+                v-if="personalSignature"
+                :src="personalSignature.dataUrl"
+                alt="本人电子签名"
               />
               <el-empty
                 v-else
-                :description="`尚未保存${profile.title}`"
+                description="尚未保存本人签名"
                 :image-size="58"
               />
             </div>
@@ -87,23 +83,15 @@
               <el-button
                 type="primary"
                 :icon="Upload"
-                @click="openSignatureDialog(profile.type)"
+                :disabled="signatureLocked"
+                @click="openSignatureDialog"
               >
-                {{ profile.signature ? "更换签名" : "上传签名" }}
-              </el-button>
-              <el-button
-                v-if="profile.signature"
-                type="danger"
-                plain
-                :icon="Delete"
-                @click="handleDeleteSignature(profile.type)"
-              >
-                删除签名
+                {{ signatureLocked ? "签名已锁定" : "上传签名" }}
               </el-button>
             </div>
 
-            <p v-if="profile.signature?.updatedAt" class="signature-updated">
-              更新时间：{{ formatSignatureTime(profile.signature.updatedAt) }}
+            <p v-if="personalSignature?.updatedAt" class="signature-updated">
+              确认时间：{{ formatSignatureTime(personalSignature.updatedAt) }}
             </p>
           </section>
         </div>
@@ -182,18 +170,16 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
-import { Delete, EditPen, Lock, Upload, User } from "@element-plus/icons-vue";
+import { EditPen, Lock, Upload, User } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { useAuthStore } from "@/stores/auth";
 import { api } from "@/utils/api";
 import ElectronicSignaturePicker from "@/components/common/ElectronicSignaturePicker.vue";
 import {
-  deletePersonalSignature,
-  loadPersonalSignature,
+  loadPersonalSignatureState,
   savePersonalSignature,
   type PersonalSignatureData,
-  type PersonalSignatureType,
 } from "@/utils/personalSignature";
 
 const authStore = useAuthStore();
@@ -204,55 +190,9 @@ const signatureLoading = ref(false);
 const signatureSaving = ref(false);
 const signatureDialogVisible = ref(false);
 const personalSignature = ref<PersonalSignatureData | null>(null);
-const generalManagerSignature = ref<PersonalSignatureData | null>(null);
-const editingSignatureType = ref<PersonalSignatureType>("personal");
-
-interface SignatureProfileItem {
-  type: PersonalSignatureType;
-  title: string;
-  description: string;
-  signature: PersonalSignatureData | null;
-}
-
-const canManageGeneralManagerSignature = computed(() =>
-  ["admin", "super_admin"].includes(authStore.user?.role || ""),
-);
+const signatureLocked = ref(false);
 const isBoss = computed(() => authStore.user?.role === "boss");
-const savedSignatureCount = computed(
-  () =>
-    Number(Boolean(personalSignature.value)) +
-    Number(
-      canManageGeneralManagerSignature.value &&
-        Boolean(generalManagerSignature.value),
-    ),
-);
-const signatureProfiles = computed(() => {
-  const profiles: SignatureProfileItem[] = [
-    {
-      type: "personal" as const,
-      title: "本人签名",
-      description: "用于本人参与的转正申请或审批环节",
-      signature: personalSignature.value,
-    },
-  ];
-  if (canManageGeneralManagerSignature.value) {
-    profiles.push({
-      type: "general_manager",
-      title: "总经理签名",
-      description: "由管理员代管，仅用于转正签署时选择调用",
-      signature: generalManagerSignature.value,
-    });
-  }
-  return profiles;
-});
-const signatureDialogTitle = computed(() => {
-  const isGeneralManager = editingSignatureType.value === "general_manager";
-  const signature = isGeneralManager
-    ? generalManagerSignature.value
-    : personalSignature.value;
-  const title = isGeneralManager ? "总经理电子签名" : "本人电子签名";
-  return `${signature ? "更换" : "上传"}${title}`;
-});
+const signatureDialogTitle = "上传本人电子签名";
 
 // 密码表单
 const passwordForm = reactive({
@@ -296,6 +236,7 @@ function getRoleTagType(
 ): "success" | "warning" | "danger" | "info" {
   const roleMap: Record<string, "success" | "warning" | "danger" | "info"> = {
     super_admin: "danger",
+    chairman: "danger",
     admin: "warning",
     general_manager: "danger",
     boss: "danger",
@@ -309,6 +250,7 @@ function getRoleTagType(
 function getRoleLabel(role: string): string {
   const roleMap: Record<string, string> = {
     super_admin: "超级管理员",
+    chairman: "董事长",
     admin: "管理员",
     general_manager: "总经理",
     boss: "BOSS",
@@ -335,14 +277,9 @@ function getRequestErrorMessage(error: unknown, fallback: string) {
 async function fetchPersonalSignature() {
   signatureLoading.value = true;
   try {
-    const [personal, generalManager] = await Promise.all([
-      loadPersonalSignature("personal"),
-      canManageGeneralManagerSignature.value
-        ? loadPersonalSignature("general_manager")
-        : Promise.resolve(null),
-    ]);
-    personalSignature.value = personal;
-    generalManagerSignature.value = generalManager;
+    const state = await loadPersonalSignatureState();
+    personalSignature.value = state.signature;
+    signatureLocked.value = state.status.locked;
   } catch (error: unknown) {
     ElMessage.error(getRequestErrorMessage(error, "获取电子签名失败"));
   } finally {
@@ -350,66 +287,40 @@ async function fetchPersonalSignature() {
   }
 }
 
-function openSignatureDialog(signatureType: PersonalSignatureType) {
-  editingSignatureType.value = signatureType;
+function openSignatureDialog() {
+  if (signatureLocked.value) {
+    ElMessage.info("个人电子签名确认后已锁定，不能重复上传");
+    return;
+  }
   signatureDialogVisible.value = true;
 }
 
-function setSignature(
-  signatureType: PersonalSignatureType,
-  signature: PersonalSignatureData | null,
-) {
-  if (signatureType === "general_manager") {
-    generalManagerSignature.value = signature;
-  } else {
-    personalSignature.value = signature;
-  }
-}
-
 async function handleSaveSignature(dataUrl: string) {
+  try {
+    await ElMessageBox.confirm(
+      "请确认签名方向和笔迹完整。确认后不能再次上传、更换或删除。",
+      "确认并锁定本人签名",
+      {
+        confirmButtonText: "确认并锁定",
+        cancelButtonText: "返回检查",
+        type: "warning",
+      },
+    );
+  } catch {
+    return;
+  }
+
   signatureSaving.value = true;
   try {
-    const saved = await savePersonalSignature(
-      dataUrl,
-      editingSignatureType.value,
-    );
-    setSignature(editingSignatureType.value, saved);
+    const saved = await savePersonalSignature(dataUrl);
+    personalSignature.value = saved;
+    signatureLocked.value = true;
     signatureDialogVisible.value = false;
-    ElMessage.success(
-      editingSignatureType.value === "personal"
-        ? "本人电子签名已保存"
-        : "总经理电子签名已保存",
-    );
+    ElMessage.success("本人电子签名已确认并锁定");
   } catch (error: unknown) {
     ElMessage.error(getRequestErrorMessage(error, "保存电子签名失败"));
   } finally {
     signatureSaving.value = false;
-  }
-}
-
-async function handleDeleteSignature(signatureType: PersonalSignatureType) {
-  const title =
-    signatureType === "personal" ? "本人电子签名" : "总经理电子签名";
-  try {
-    await ElMessageBox.confirm(
-      `确认删除已保存的${title}？历史签署文件不会受到影响。`,
-      `删除${title}`,
-      {
-        confirmButtonText: "确认删除",
-        cancelButtonText: "取消",
-        type: "warning",
-      },
-    );
-    signatureLoading.value = true;
-    await deletePersonalSignature(signatureType);
-    setSignature(signatureType, null);
-    ElMessage.success(`${title}已删除`);
-  } catch (error: unknown) {
-    if (error !== "cancel" && error !== "close") {
-      ElMessage.error(getRequestErrorMessage(error, "删除电子签名失败"));
-    }
-  } finally {
-    signatureLoading.value = false;
   }
 }
 

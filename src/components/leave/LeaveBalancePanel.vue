@@ -8,13 +8,22 @@
         v-for="balance in balances"
         :key="balance.leave_type_code"
         class="balance-card"
-        :class="{ 'balance-card--warning': isLow(balance) }"
+        :class="{
+          'balance-card--warning': isLow(balance),
+          'balance-card--locked': balance.is_available === false,
+        }"
       >
         <div class="balance-card__name">{{ balance.leave_type_name }}</div>
         <div class="balance-card__value">
-          <template v-if="!balance.requires_balance_check">
-            <span class="value-used">{{ balance.used_days }}</span>
-            <span class="value-unit">天已用</span>
+          <el-tooltip
+            v-if="balance.is_available === false"
+            :content="balance.unavailable_reason || '当前不可申请'"
+            placement="top"
+          >
+            <span class="value-locked">已锁定</span>
+          </el-tooltip>
+          <template v-else-if="!balance.requires_balance_check">
+            <span class="value-unlimited">不限额度</span>
           </template>
           <template v-else>
             <span class="value-available">{{ balance.available_days }}</span>
@@ -40,7 +49,11 @@ const loading = ref(true)
 
 // 余额不足提示（低于总额的20%且可用少于1天）
 function isLow(balance: LeaveBalance): boolean {
-  if (!balance.requires_balance_check || balance.total_days === 0) return false
+  if (
+    balance.is_available === false ||
+    !balance.requires_balance_check ||
+    balance.total_days === 0
+  ) return false
   return balance.available_days < 1
 }
 
@@ -89,6 +102,10 @@ defineExpose({ refresh: fetchBalances })
   background: #fff7e6;
   border-color: #faad14;
 }
+.balance-card--locked {
+  background: #f5f7fa;
+  border-color: #c0c4cc;
+}
 .balance-card__name {
   font-size: 12px;
   color: #909399;
@@ -112,9 +129,13 @@ defineExpose({ refresh: fetchBalances })
   color: #909399;
   margin-left: 2px;
 }
-.value-used {
-  font-size: 20px;
+.value-unlimited {
+  color: #606266;
+  font-size: 14px;
+}
+.value-locked {
   color: #909399;
+  font-size: 14px;
 }
 .balance-card__pending {
   font-size: 11px;

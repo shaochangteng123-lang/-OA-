@@ -4,27 +4,72 @@ import fs from 'fs'
 import path from 'path'
 import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
-import { requireAuth, requireAdmin, requireGeneralManager } from '../middleware/auth.js'
+import { requireAuth, requireAdmin, requireLeaveApprover } from '../middleware/auth.js'
 import { nanoid } from 'nanoid'
 import {
   calculateLeaveDays,
   calculateLeaveDaysByYear,
   calculateAnnualLeaveEntitlement,
+  calculateLeavePeriodByDays,
+  getNextWorkingLeaveHalf,
+  splitLeavePeriodByDays,
   type LeaveHalf,
+  type LeavePeriod,
   type LeaveYearAllocation,
 } from '../services/leaveCalculator.js'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 import { parsePagination } from '../utils/pagination.js'
 import { validateLeavePeriod } from '../utils/leave.js'
+import { addLeaveCalendarDays } from '../utils/leave-period.js'
 import {
   hardDeleteLeaveDraftChain,
   LeaveDraftDeleteError,
 } from '../services/leaveDraftCleanup.js'
 import { enrichLeaveRequestsWithSchedule } from '../services/leaveSchedule.js'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
+import {
+  getLeaveApproverUnavailableMessage,
+  getRequiredLeaveApproverRole,
+  isLeaveApproverRole,
+} from '../utils/leave-approval.js'
+import {
+  getLeaveRequestNoPattern,
+  getNextLeaveRequestNo,
+} from '../utils/leave-request-number.js'
 
 const router = Router()
 
 const MAX_LEAVE_BALANCE_DAYS = 999.5
+const MAX_COMBINED_LEAVE_SEGMENTS = 8
+const NO_REASON_LEAVE_TYPES = [
+  'annual',
+  'marriage',
+  'bereavement',
+  'compensatory',
+  'maternity',
+  'paternity',
+]
+const FIXED_BALANCE_LEAVE_TYPES = new Set([
+  'annual',
+  'personal',
+  'sick',
+  'bereavement',
+  'compensatory',
+  'marriage',
+  'maternity',
+  'paternity',
+])
+
+type LeaveApplicationKind = 'normal' | 'combined' | 'extension' | 'supplement'
+
+interface LeaveTypeConfigRow {
+  id: string
+  code: string
+  name: string
+  requires_attachment: boolean
+  requires_balance_check: boolean
+  default_days: number | null
+}
 
 class LeaveOperationError extends Error {
   constructor(
@@ -59,6 +104,7 @@ function parseLeaveBalanceDays(value: unknown): number | null {
 function getRoleDisplayName(role: string): string {
   const roleNames: Record<string, string> = {
     super_admin: '超级管理员',
+    chairman: '董事长',
     admin: '管理员',
     general_manager: '总经理',
     employee: '员工',
@@ -298,21 +344,25 @@ const uploadLeaveAttachment = multer({
 // ==================== 工具函数 ====================
 
 /**
- * 请假统一由总经理审批；申请人本人不能成为审批人。
+ * 普通员工请假由总经理审批；总经理请假由董事长审批。
  */
 async function findApprover(applicantUserId: string): Promise<{ id: string; name: string } | null> {
+  const applicant = await db
+    .prepare(`SELECT role FROM users WHERE id = ?`)
+    .get<{ role: string }>(applicantUserId)
+  const approverRole = getRequiredLeaveApproverRole(applicant?.role)
   const approver = await db
     .prepare(
       `
     SELECT id, name FROM users
-    WHERE role = 'general_manager'
+    WHERE role = ?
       AND id != ?
       AND status = 'active'
     ORDER BY created_at ASC, id ASC
     LIMIT 1
   `
     )
-    .get<{ id: string; name: string }>(applicantUserId)
+    .get<{ id: string; name: string }>(approverRole, applicantUserId)
 
   return approver || null
 }
@@ -356,7 +406,7 @@ async function assertNoOverlappingLeave(
 }
 
 /**
- * 生成请假申请编号：LR-YYYY-NNNNN
+ * 生成请假申请编号：QJ-YYYY-NNNNN
  */
 async function generateRequestNo(client: PoolClient): Promise<string> {
   const year = new Date().getFullYear()
@@ -365,16 +415,165 @@ async function generateRequestNo(client: PoolClient): Promise<string> {
     `SELECT request_no FROM leave_requests
      WHERE request_no LIKE $1
      ORDER BY request_no DESC LIMIT 1`,
-    [`LR-${year}-%`]
+    [getLeaveRequestNoPattern(year)]
   )
-  const lastReq = lastRequestResult.rows[0]
+  return getNextLeaveRequestNo(year, lastRequestResult.rows[0]?.request_no)
+}
 
-  let seq = 1
-  if (lastReq?.request_no) {
-    const match = lastReq.request_no.match(/LR-\d{4}-(\d+)/)
-    if (match) seq = parseInt(match[1], 10) + 1
+interface PendingLeaveRequestInput {
+  requestId: string
+  userId: string
+  applicantName: string
+  applicantDepartment: string | null
+  typeConfig: LeaveTypeConfigRow
+  period: LeavePeriod
+  allocations: LeaveYearAllocation[]
+  reason: string
+  approver: { id: string; name: string }
+  applicationKind: LeaveApplicationKind
+  combinationGroupId?: string | null
+  parentRequestId?: string | null
+  logComment?: string | null
+  now: string
+}
+
+async function createPendingLeaveRequest(
+  client: PoolClient,
+  input: PendingLeaveRequestInput
+): Promise<{ id: string; requestNo: string }> {
+  await assertNoOverlappingLeave(
+    client,
+    input.userId,
+    input.period.startDate,
+    input.period.startHalf,
+    input.period.endDate,
+    input.period.endHalf
+  )
+
+  const requestNo = await generateRequestNo(client)
+  if (input.typeConfig.requires_balance_check) {
+    await reserveLeaveBalances(
+      client,
+      input.userId,
+      input.typeConfig.code,
+      input.typeConfig.name,
+      input.allocations,
+      input.now
+    )
   }
-  return `LR-${year}-${String(seq).padStart(5, '0')}`
+
+  await client.query(
+    `INSERT INTO leave_requests (
+       id, request_no, user_id, applicant_name, applicant_department,
+       leave_type_code, leave_type_name, start_date, start_half, end_date, end_half,
+       total_days, balance_allocations_json, balance_reserved, reason, status,
+       approver_id, approver_name, submitted_at, application_kind,
+       combination_group_id, parent_request_id, created_at, updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',
+       $16,$17,$18,$19,$20,$21,$22,$23
+     )`,
+    [
+      input.requestId,
+      requestNo,
+      input.userId,
+      input.applicantName,
+      input.applicantDepartment,
+      input.typeConfig.code,
+      input.typeConfig.name,
+      input.period.startDate,
+      input.period.startHalf,
+      input.period.endDate,
+      input.period.endHalf,
+      input.period.days,
+      JSON.stringify(input.allocations),
+      input.typeConfig.requires_balance_check,
+      input.reason,
+      input.approver.id,
+      input.approver.name,
+      input.now,
+      input.applicationKind,
+      input.combinationGroupId || null,
+      input.parentRequestId || null,
+      input.now,
+      input.now,
+    ]
+  )
+
+  await client.query(
+    `INSERT INTO leave_approval_logs (
+       id, leave_request_id, operator_id, operator_name, action, comment, created_at
+     ) VALUES ($1,$2,$3,$4,'submit',$5,$6)`,
+    [
+      nanoid(),
+      input.requestId,
+      input.userId,
+      input.applicantName,
+      input.logComment || null,
+      input.now,
+    ]
+  )
+
+  return { id: input.requestId, requestNo }
+}
+
+function cleanupLeaveUploadPaths(files: Express.Multer.File[], createdPaths: string[]) {
+  const paths = new Set([...files.map(file => file.path), ...createdPaths])
+  for (const filePath of paths) {
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    } catch {
+      // 清理失败不覆盖原始业务错误。
+    }
+  }
+}
+
+async function persistLeaveAttachments(
+  client: PoolClient,
+  files: Express.Multer.File[],
+  requestIds: string[],
+  userId: string,
+  now: string,
+  createdPaths: string[]
+) {
+  for (const file of files) {
+    const uploadedAt = fs.statSync(file.path).mtime
+    const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8')
+    let sourcePath = file.path
+
+    for (let index = 0; index < requestIds.length; index += 1) {
+      const requestId = requestIds[index]
+      const newDir = ensureDatedUploadDirectory('leave-attachments', uploadedAt, requestId)
+      const extension = path.extname(file.path)
+      const newPath = path.join(newDir, `${nanoid()}-${Date.now()}${extension}`)
+
+      if (index === 0) {
+        if (sourcePath !== newPath) fs.renameSync(sourcePath, newPath)
+        file.path = newPath
+        sourcePath = newPath
+      } else {
+        fs.copyFileSync(sourcePath, newPath)
+      }
+      createdPaths.push(newPath)
+
+      await client.query(
+        `INSERT INTO leave_attachments (
+           id, leave_request_id, file_name, file_path, file_size,
+           mime_type, uploaded_by, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [
+          nanoid(),
+          requestId,
+          originalName,
+          toStoredUploadPath(newPath, true),
+          file.size,
+          file.mimetype,
+          userId,
+          now,
+        ]
+      )
+    }
+  }
 }
 
 /**
@@ -514,6 +713,160 @@ async function getGenderExcludedTypes(userId: string): Promise<string[]> {
   return []
 }
 
+interface MarriageLeaveEligibility {
+  isAvailable: boolean
+  unavailableReason: string | null
+}
+
+function getMarriageLeaveUnavailableReason(status: string): string {
+  return status === 'pending'
+    ? '该身份证号已有审批中的婚假申请'
+    : '该身份证号已使用过婚假，婚假每人只能申请一次'
+}
+
+async function getMarriageLeaveEligibility(userId: string): Promise<MarriageLeaveEligibility> {
+  const profile = await db
+    .prepare(
+      `SELECT UPPER(BTRIM(id_number)) AS id_number
+       FROM employee_profiles
+       WHERE user_id = ?
+         AND id_number IS NOT NULL
+         AND BTRIM(id_number) <> ''
+       ORDER BY CASE WHEN status = 'submitted' THEN 0 ELSE 1 END, updated_at DESC
+       LIMIT 1`
+    )
+    .get<{ id_number: string }>(userId)
+
+  if (!profile?.id_number) {
+    return {
+      isAvailable: false,
+      unavailableReason: '基础信息中未填写身份证号，暂不能申请婚假',
+    }
+  }
+
+  const existingRequest = await db
+    .prepare(
+      `SELECT lr.status
+       FROM leave_requests lr
+       WHERE lr.leave_type_code = 'marriage'
+         AND lr.status IN ('pending', 'approved')
+         AND EXISTS (
+           SELECT 1
+           FROM employee_profiles ep
+           WHERE ep.user_id = lr.user_id
+             AND UPPER(BTRIM(ep.id_number)) = ?
+         )
+       ORDER BY CASE lr.status WHEN 'approved' THEN 0 ELSE 1 END
+       LIMIT 1`
+    )
+    .get<{ status: string }>(profile.id_number)
+
+  return existingRequest
+    ? {
+        isAvailable: false,
+        unavailableReason: getMarriageLeaveUnavailableReason(existingRequest.status),
+      }
+    : { isAvailable: true, unavailableReason: null }
+}
+
+async function assertMarriageLeaveAvailable(client: PoolClient, userId: string) {
+  const profileResult = await client.query<{ id_number: string }>(
+    `SELECT UPPER(BTRIM(id_number)) AS id_number
+     FROM employee_profiles
+     WHERE user_id = $1
+       AND id_number IS NOT NULL
+       AND BTRIM(id_number) <> ''
+     ORDER BY CASE WHEN status = 'submitted' THEN 0 ELSE 1 END, updated_at DESC
+     LIMIT 1`,
+    [userId]
+  )
+  const idNumber = profileResult.rows[0]?.id_number
+  if (!idNumber) {
+    throw new LeaveOperationError('基础信息中未填写身份证号，暂不能申请婚假', 409)
+  }
+
+  await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+    `marriage-leave-${idNumber}`,
+  ])
+  const existingResult = await client.query<{ status: string }>(
+    `SELECT lr.status
+     FROM leave_requests lr
+     WHERE lr.leave_type_code = 'marriage'
+       AND lr.status IN ('pending', 'approved')
+       AND EXISTS (
+         SELECT 1
+         FROM employee_profiles ep
+         WHERE ep.user_id = lr.user_id
+           AND UPPER(BTRIM(ep.id_number)) = $1
+       )
+     ORDER BY CASE lr.status WHEN 'approved' THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [idNumber]
+  )
+  const existingRequest = existingResult.rows[0]
+  if (existingRequest) {
+    throw new LeaveOperationError(
+      getMarriageLeaveUnavailableReason(existingRequest.status),
+      409
+    )
+  }
+}
+
+async function assertRelatedLeaveTiming(
+  applicationKind: 'extension' | 'supplement',
+  parentRequestId: string,
+  startDate: string,
+  startHalf: LeaveHalf
+) {
+  const rootRequest = await db
+    .prepare(`SELECT id, request_no, end_date, end_half FROM leave_requests WHERE id = ?`)
+    .get<{
+      id: string
+      request_no: string
+      end_date: string
+      end_half: LeaveHalf
+    }>(parentRequestId)
+  if (!rootRequest) throw new LeaveOperationError('主申请关联信息不完整', 409)
+
+  if (applicationKind === 'extension') {
+    const latestExtension = await db
+      .prepare(
+        `SELECT lr.end_date, lr.end_half
+         FROM leave_requests lr
+         WHERE (
+             lr.id = ?
+             OR (lr.parent_request_id = ? AND lr.application_kind = 'extension')
+           )
+           AND lr.status IN ('pending', 'approved')
+           AND NOT EXISTS (
+             SELECT 1 FROM leave_requests next_version
+             WHERE next_version.original_id = lr.id
+           )
+         ORDER BY
+           lr.end_date DESC,
+           CASE lr.end_half WHEN 'afternoon' THEN 1 ELSE 0 END DESC
+         LIMIT 1`
+      )
+      .get<{ end_date: string; end_half: LeaveHalf }>(parentRequestId, parentRequestId)
+    const expectedStart = latestExtension
+      ? await getNextWorkingLeaveHalf(latestExtension.end_date, latestExtension.end_half)
+      : null
+    if (!expectedStart || startDate !== expectedStart.date || startHalf !== expectedStart.half) {
+      const expectedLabel = expectedStart
+        ? `${expectedStart.date}${expectedStart.half === 'morning' ? '上午' : '下午'}`
+        : '主申请结束后'
+      throw new LeaveOperationError(`续假必须紧接上一段假期，开始时间应为 ${expectedLabel}`, 409)
+    }
+    return
+  }
+
+  const rootEndOrder = `${rootRequest.end_date}-${rootRequest.end_half === 'afternoon' ? '1' : '0'}`
+  const supplementStartOrder = `${startDate}-${startHalf === 'afternoon' ? '1' : '0'}`
+  if (supplementStartOrder <= rootEndOrder) {
+    throw new LeaveOperationError('补假时间必须在主申请结束时间之后', 409)
+  }
+}
+
 // ==================== 通用接口 ====================
 
 // 获取假期类型列表
@@ -544,7 +897,18 @@ router.get('/types', requireAuth, async (req, res) => {
         .all()
     }
 
-    res.json({ success: true, data: types })
+    const marriageEligibility = await getMarriageLeaveEligibility(userId!)
+    const availableTypes = types.map(type => ({
+      ...type,
+      is_available: type.code === 'marriage'
+        ? marriageEligibility.isAvailable
+        : true,
+      unavailable_reason: type.code === 'marriage'
+        ? marriageEligibility.unavailableReason
+        : null,
+    }))
+
+    res.json({ success: true, data: availableTypes })
   } catch (error) {
     console.error('获取假期类型失败:', error)
     res.status(500).json({ success: false, message: '获取假期类型失败' })
@@ -554,13 +918,19 @@ router.get('/types', requireAuth, async (req, res) => {
 // 预计算请假时长（前端填表实时调用）
 router.post('/calculate-days', requireAuth, async (req, res) => {
   try {
-    const { startDate, startHalf, endDate, endHalf } = req.body
+    const { startDate, startHalf, endDate, endHalf, allowPast } = req.body
 
     if (!startDate || !endDate || !startHalf || !endHalf) {
       return res.status(400).json({ success: false, message: '参数不完整' })
     }
 
-    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    const periodError = validateLeavePeriod(
+      startDate,
+      startHalf,
+      endDate,
+      endHalf,
+      allowPast === true ? '0000-01-01' : undefined
+    )
     if (periodError) return res.status(400).json({ success: false, message: periodError })
 
     const days = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
@@ -571,12 +941,133 @@ router.post('/calculate-days', requireAuth, async (req, res) => {
   }
 })
 
+// 根据组合分配总天数自动计算结束时间
+router.post('/calculate-period-by-days', requireAuth, async (req, res) => {
+  try {
+    const { startDate, startHalf, allowPast } = req.body
+    const days = parseLeaveBalanceDays(req.body.days)
+    if (
+      !startDate ||
+      !['morning', 'afternoon'].includes(startHalf) ||
+      days === null ||
+      days <= 0 ||
+      days > 366
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: '请选择开始时间，并填写 0.5 至 366 天的半天倍数组合天数',
+      })
+    }
+
+    const periodError = validateLeavePeriod(
+      startDate,
+      startHalf,
+      startDate,
+      startHalf,
+      allowPast === true ? '0000-01-01' : undefined
+    )
+    if (periodError) return res.status(400).json({ success: false, message: periodError })
+
+    const period = await calculateLeavePeriodByDays(
+      startDate,
+      startHalf,
+      days,
+      addLeaveCalendarDays(startDate, 365)
+    )
+    if (!period) {
+      return res.status(409).json({
+        success: false,
+        message: `单次请假区间不能超过 366 个自然日，当前时段不足以安排 ${days} 个工作日`,
+      })
+    }
+
+    res.json({ success: true, data: period })
+  } catch (error) {
+    console.error('按天数计算请假时间失败:', error)
+    res.status(500).json({ success: false, message: '自动计算结束时间失败' })
+  }
+})
+
+// 根据当前可用余额计算一键请满后的起止时间
+router.post('/calculate-full-period', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const { leaveTypeCode, startDate, startHalf, allowPast } = req.body
+    if (!leaveTypeCode || !startDate || !['morning', 'afternoon'].includes(startHalf)) {
+      return res.status(400).json({ success: false, message: '请先选择假期类型和开始时间' })
+    }
+
+    const periodError = validateLeavePeriod(
+      startDate,
+      startHalf,
+      startDate,
+      startHalf,
+      allowPast === true ? '0000-01-01' : undefined
+    )
+    if (periodError) return res.status(400).json({ success: false, message: periodError })
+
+    const typeConfig = await db
+      .prepare(
+        `SELECT id, code, name, requires_attachment, requires_balance_check, default_days
+         FROM leave_type_configs
+         WHERE code = ? AND is_active = true`
+      )
+      .get<LeaveTypeConfigRow>(leaveTypeCode)
+    if (!typeConfig) {
+      return res.status(400).json({ success: false, message: '假期类型不存在' })
+    }
+    if (!typeConfig.requires_balance_check) {
+      return res.status(400).json({ success: false, message: `${typeConfig.name}没有固定额度，不能一键请满` })
+    }
+
+    const excludedCodes = await getGenderExcludedTypes(userId)
+    if (excludedCodes.includes(leaveTypeCode)) {
+      return res.status(400).json({ success: false, message: '该假期类型不适用于您的性别' })
+    }
+    if (leaveTypeCode === 'marriage') {
+      const marriageEligibility = await getMarriageLeaveEligibility(userId)
+      if (!marriageEligibility.isAvailable) {
+        return res.status(409).json({
+          success: false,
+          message: marriageEligibility.unavailableReason,
+        })
+      }
+    }
+
+    const year = Number(String(startDate).slice(0, 4))
+    const balance = await ensureLeaveBalance(userId, leaveTypeCode, year)
+    const availableDays = Number(balance.total_days) - Number(balance.used_days) - Number(balance.pending_days)
+    if (availableDays <= 0) {
+      return res.status(409).json({ success: false, message: `${year} 年${typeConfig.name}已无可用余额` })
+    }
+
+    const period = await calculateLeavePeriodByDays(
+      startDate,
+      startHalf,
+      availableDays,
+      `${year}-12-31`
+    )
+    if (!period) {
+      return res.status(409).json({
+        success: false,
+        message: `从所选日期到 ${year} 年末不足以请满剩余 ${availableDays} 天，请调整开始日期`,
+      })
+    }
+
+    res.json({ success: true, data: { ...period, availableDays } })
+  } catch (error) {
+    console.error('计算一键请满时间失败:', error)
+    res.status(500).json({ success: false, message: '计算一键请满时间失败' })
+  }
+})
+
 // 查询本人当年假期余额
 router.get('/balances', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId
     const year = new Date().getFullYear()
     const excludedCodes = await getGenderExcludedTypes(userId!)
+    const marriageEligibility = await getMarriageLeaveEligibility(userId!)
 
     let types
     if (excludedCodes.length > 0) {
@@ -624,6 +1115,12 @@ router.get('/balances', requireAuth, async (req, res) => {
         used_days: balance.used_days,
         pending_days: balance.pending_days,
         available_days: Math.max(0, balance.total_days - balance.used_days - balance.pending_days),
+        is_available: type.code === 'marriage'
+          ? marriageEligibility.isAvailable
+          : true,
+        unavailable_reason: type.code === 'marriage'
+          ? marriageEligibility.unavailableReason
+          : null,
       })
     }
 
@@ -645,8 +1142,7 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
     const normalizedReason = String(reason || '').trim()
 
     // 基础校验
-    const NO_REASON_TYPES = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
-    const requiresReason = !NO_REASON_TYPES.includes(leaveTypeCode)
+    const requiresReason = !NO_REASON_LEAVE_TYPES.includes(leaveTypeCode)
     if (
       !leaveTypeCode ||
       !startDate ||
@@ -743,7 +1239,7 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({
         success: false,
-        message: '未找到可用的总经理审批人，请联系管理员配置总经理账号',
+        message: getLeaveApproverUnavailableMessage(req.session.user?.role),
       })
     }
 
@@ -753,6 +1249,9 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
 
     // 使用事务保证原子性
     await db.transaction(async (client) => {
+      if (leaveTypeCode === 'marriage') {
+        await assertMarriageLeaveAvailable(client, userId)
+      }
       await assertNoOverlappingLeave(client, userId, startDate, startHalf, endDate, endHalf)
       requestNo = await generateRequestNo(client)
       if (typeConfig.requires_balance_check) {
@@ -833,6 +1332,213 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
   }
 })
 
+// 提交组合请假：按时间顺序拆成多条独立申请并在同一事务中提交
+router.post(
+  '/requests/combined',
+  requireAuth,
+  uploadLeaveAttachment.array('attachments', 5),
+  async (req, res) => {
+    const uploadedFiles = (req.files as Express.Multer.File[]) || []
+    const createdPaths: string[] = []
+
+    try {
+      const userId = req.session.userId!
+      const { startDate, startHalf, endDate, endHalf } = req.body
+      let rawSegments: unknown
+      try {
+        rawSegments = JSON.parse(String(req.body.segments || '[]'))
+      } catch {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合假期内容格式错误' })
+      }
+
+      if (!Array.isArray(rawSegments) || rawSegments.length < 2) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合请假至少需要两种假期' })
+      }
+      if (rawSegments.length > MAX_COMBINED_LEAVE_SEGMENTS) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: `一次最多组合 ${MAX_COMBINED_LEAVE_SEGMENTS} 种假期`,
+        })
+      }
+
+      const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+      if (periodError) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: periodError })
+      }
+
+      const segments = rawSegments.map((item: any) => ({
+        leaveTypeCode: String(item?.leaveTypeCode || '').trim(),
+        days: Number(item?.days),
+        reason: String(item?.reason || '').trim(),
+      }))
+      const invalidSegment = segments.find(
+        item =>
+          !item.leaveTypeCode ||
+          !Number.isFinite(item.days) ||
+          item.days <= 0 ||
+          !Number.isInteger(item.days * 2) ||
+          item.days > MAX_LEAVE_BALANCE_DAYS ||
+          item.reason.length > 500
+      )
+      if (invalidSegment) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: '每段组合假期都必须选择类型，天数须为半天倍数且事由不超过500字',
+        })
+      }
+
+      const typeCodes = segments.map(item => item.leaveTypeCode)
+      if (new Set(typeCodes).size !== typeCodes.length) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合请假中的假期类型不能重复' })
+      }
+
+      const totalDays = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
+      if (totalDays <= 0) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: '请假时长不能为0（所选时间段全为休息日）',
+        })
+      }
+      const assignedDays = segments.reduce((sum, item) => sum + item.days, 0)
+      if (Math.abs(assignedDays - totalDays) > 0.001) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: `组合假期已分配 ${assignedDays} 天，与所选时段 ${totalDays} 天不一致`,
+        })
+      }
+
+      const placeholders = typeCodes.map(() => '?').join(', ')
+      const typeRows = await db
+        .prepare(
+          `SELECT id, code, name, requires_attachment, requires_balance_check, default_days
+           FROM leave_type_configs
+           WHERE is_active = true AND code IN (${placeholders})`
+        )
+        .all<LeaveTypeConfigRow>(...typeCodes)
+      const typeMap = new Map(typeRows.map(type => [type.code, type]))
+      if (typeMap.size !== typeCodes.length) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合假期中包含不存在或已停用的类型' })
+      }
+
+      const excludedCodes = await getGenderExcludedTypes(userId)
+      const excludedType = typeCodes.find(code => excludedCodes.includes(code))
+      if (excludedType) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合假期中包含不适用于您性别的类型' })
+      }
+
+      for (const segment of segments) {
+        const type = typeMap.get(segment.leaveTypeCode)!
+        if (!NO_REASON_LEAVE_TYPES.includes(type.code) && !segment.reason) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({ success: false, message: `请填写${type.name}的请假事由` })
+        }
+      }
+      const attachmentType = typeRows.find(type => type.requires_attachment)
+      if (attachmentType && uploadedFiles.length === 0) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: `${attachmentType.name}需要上传证明文件`,
+        })
+      }
+
+      const periods = await splitLeavePeriodByDays(
+        startDate,
+        startHalf,
+        endDate,
+        endHalf,
+        segments.map(item => item.days)
+      )
+      const allocations = await Promise.all(
+        periods.map(period =>
+          calculateLeaveDaysByYear(period.startDate, period.startHalf, period.endDate, period.endHalf)
+        )
+      )
+
+      const userInfo = await db
+        .prepare(`SELECT name, department FROM users WHERE id = ?`)
+        .get<{ name: string; department: string | null }>(userId)
+      if (!userInfo) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '用户信息不存在' })
+      }
+      const approver = await findApprover(userId)
+      if (!approver) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: getLeaveApproverUnavailableMessage(req.session.user?.role),
+        })
+      }
+
+      const now = new Date().toISOString()
+      const combinationGroupId = nanoid()
+      const createdRequests: Array<{ id: string; requestNo: string }> = []
+
+      await db.transaction(async client => {
+        if (typeCodes.includes('marriage')) {
+          await assertMarriageLeaveAvailable(client, userId)
+        }
+        for (let index = 0; index < segments.length; index += 1) {
+          const segment = segments[index]
+          const created = await createPendingLeaveRequest(client, {
+            requestId: nanoid(),
+            userId,
+            applicantName: userInfo.name,
+            applicantDepartment: userInfo.department,
+            typeConfig: typeMap.get(segment.leaveTypeCode)!,
+            period: periods[index],
+            allocations: allocations[index],
+            reason: segment.reason,
+            approver,
+            applicationKind: 'combined',
+            combinationGroupId,
+            logComment: `组合请假第 ${index + 1}/${segments.length} 段`,
+            now,
+          })
+          createdRequests.push(created)
+        }
+
+        await persistLeaveAttachments(
+          client,
+          uploadedFiles,
+          createdRequests.map(item => item.id),
+          userId,
+          now,
+          createdPaths
+        )
+      })
+
+      res.json({
+        success: true,
+        message: `组合请假已拆分为 ${createdRequests.length} 条申请`,
+        data: { combinationGroupId, requests: createdRequests },
+      })
+    } catch (error) {
+      console.error('提交组合请假失败:', error)
+      cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+      if (error instanceof LeaveOperationError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message })
+      }
+      const message = error instanceof Error ? error.message : ''
+      if (message.includes('组合假期')) {
+        return res.status(400).json({ success: false, message })
+      }
+      res.status(500).json({ success: false, message: '提交组合请假失败' })
+    }
+  }
+)
+
 // 查询本人申请列表
 router.get('/requests', requireAuth, async (req, res) => {
   try {
@@ -873,20 +1579,25 @@ router.get('/requests', requireAuth, async (req, res) => {
     const { page, pageSize, offset } = pagination
     const listSql = `
       SELECT lr.*, u.name as user_name, au.name as approver_real_name,
-             COALESCE(
-               NULLIF(BTRIM(au.position), ''),
-               NULLIF(BTRIM(aep.position), ''),
-               CASE au.role
-                 WHEN 'super_admin' THEN '超级管理员'
-                 WHEN 'general_manager' THEN '总经理'
-                 WHEN 'admin' THEN '管理员'
-                 ELSE '员工'
-               END
-             ) as approver_position
+             parent_request.request_no as parent_request_no,
+             CASE au.role
+               WHEN 'chairman' THEN '董事长'
+               WHEN 'general_manager' THEN '总经理'
+               ELSE COALESCE(
+                 NULLIF(BTRIM(au.position), ''),
+                 NULLIF(BTRIM(aep.position), ''),
+                 CASE au.role
+                   WHEN 'super_admin' THEN '超级管理员'
+                   WHEN 'admin' THEN '管理员'
+                   ELSE '员工'
+                 END
+               )
+             END as approver_position
       FROM leave_requests lr
       LEFT JOIN users u ON lr.user_id = u.id
       LEFT JOIN users au ON lr.approver_id = au.id
       LEFT JOIN employee_profiles aep ON aep.user_id = au.id
+      LEFT JOIN leave_requests parent_request ON parent_request.id = lr.parent_request_id
       ${whereSql}
       ORDER BY lr.submitted_at DESC, lr.created_at DESC, lr.request_no DESC
       LIMIT ? OFFSET ?
@@ -928,6 +1639,443 @@ router.post('/requests/approved/mark-read', requireAuth, async (req, res) => {
   }
 })
 
+// 员工查看驳回详情后，将对应提醒标记为已读
+router.post('/requests/:id/rejected/mark-read', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId
+    await db.run(
+      `UPDATE leave_requests
+       SET rejection_notice_unread = FALSE
+       WHERE id = ?
+         AND user_id = ?
+         AND status = 'rejected'
+         AND rejection_notice_unread = TRUE`,
+      req.params.id,
+      userId
+    )
+
+    const remaining = await db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM leave_requests lr
+         WHERE lr.user_id = ?
+           AND lr.status = 'rejected'
+           AND lr.rejection_notice_unread = TRUE
+           AND NOT EXISTS (
+             SELECT 1
+             FROM leave_requests child
+             WHERE child.original_id = lr.id
+           )`
+      )
+      .get<{ count: number }>(userId)
+
+    res.json({
+      success: true,
+      data: { remainingUnread: Number(remaining?.count || 0) },
+      message: '驳回提醒已标记为已读',
+    })
+  } catch (error) {
+    console.error('标记请假驳回提醒失败:', error)
+    res.status(500).json({ success: false, message: '标记驳回提醒失败' })
+  }
+})
+
+// 获取续假、补假所需的主申请信息和建议续假时间
+router.get('/requests/:id/related-context', requireAuth, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const request = await db
+      .prepare(
+        `SELECT lr.*
+         FROM leave_requests lr
+         WHERE lr.id = ?
+           AND lr.user_id = ?
+           AND lr.status = 'approved'
+           AND NOT EXISTS (
+             SELECT 1 FROM leave_requests next_version
+             WHERE next_version.original_id = lr.id
+           )`
+      )
+      .get<Record<string, any>>(req.params.id, userId)
+    if (!request) {
+      return res.status(404).json({ success: false, message: '仅已批准的本人申请可以续假或补假' })
+    }
+
+    const rootRequestId = request.parent_request_id || request.id
+    const latestExtension = await db
+      .prepare(
+        `SELECT lr.end_date, lr.end_half
+         FROM leave_requests lr
+         WHERE (
+             lr.id = ?
+             OR (lr.parent_request_id = ? AND lr.application_kind = 'extension')
+           )
+           AND lr.status IN ('pending', 'approved')
+           AND NOT EXISTS (
+             SELECT 1 FROM leave_requests next_version
+             WHERE next_version.original_id = lr.id
+           )
+         ORDER BY
+           lr.end_date DESC,
+           CASE lr.end_half WHEN 'afternoon' THEN 1 ELSE 0 END DESC
+         LIMIT 1`
+      )
+      .get<{ end_date: string; end_half: LeaveHalf }>(rootRequestId, rootRequestId)
+    const suggestedStart = latestExtension
+      ? await getNextWorkingLeaveHalf(latestExtension.end_date, latestExtension.end_half)
+      : null
+
+    const rootRequest = request.id === rootRequestId
+      ? request
+      : await db.prepare(`SELECT * FROM leave_requests WHERE id = ?`).get<Record<string, any>>(rootRequestId)
+
+    res.json({
+      success: true,
+      data: {
+        parentRequest: rootRequest || request,
+        suggestedExtensionStart: suggestedStart,
+      },
+    })
+  } catch (error) {
+    console.error('获取续假补假上下文失败:', error)
+    res.status(500).json({ success: false, message: '获取关联申请信息失败' })
+  }
+})
+
+// 提交续假或补假，统一挂在主申请下
+router.post(
+  '/requests/:id/related',
+  requireAuth,
+  uploadLeaveAttachment.array('attachments', 5),
+  async (req, res) => {
+    const uploadedFiles = (req.files as Express.Multer.File[]) || []
+    const createdPaths: string[] = []
+
+    try {
+      const userId = req.session.userId!
+      const { id } = req.params
+      const { relationType, startDate, startHalf, endDate, endHalf } = req.body
+      const requestMode = String(req.body.requestMode || 'single')
+      if (!['extension', 'supplement'].includes(relationType)) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '关联申请类型无效' })
+      }
+      if (!['single', 'combined'].includes(requestMode)) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '申请方式无效' })
+      }
+
+      let segments: Array<{
+        leaveTypeCode: string
+        days: number
+        reason: string
+      }>
+      if (requestMode === 'combined') {
+        let rawSegments: unknown
+        try {
+          rawSegments = JSON.parse(String(req.body.segments || '[]'))
+        } catch {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({ success: false, message: '组合假期内容格式错误' })
+        }
+        if (!Array.isArray(rawSegments) || rawSegments.length < 2) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({
+            success: false,
+            message: `组合${relationType === 'extension' ? '续假' : '补假'}至少需要两种假期`,
+          })
+        }
+        if (rawSegments.length > MAX_COMBINED_LEAVE_SEGMENTS) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({
+            success: false,
+            message: `一次最多组合 ${MAX_COMBINED_LEAVE_SEGMENTS} 种假期`,
+          })
+        }
+
+        segments = rawSegments.map((item: any) => ({
+          leaveTypeCode: String(item?.leaveTypeCode || '').trim(),
+          days: Number(item?.days),
+          reason: String(item?.reason || '').trim(),
+        }))
+        const invalidSegment = segments.find(
+          item =>
+            !item.leaveTypeCode ||
+            !Number.isFinite(item.days) ||
+            item.days <= 0 ||
+            !Number.isInteger(item.days * 2) ||
+            item.days > MAX_LEAVE_BALANCE_DAYS ||
+            item.reason.length > 500
+        )
+        if (invalidSegment) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({
+            success: false,
+            message: '每段组合假期都必须选择类型，天数须为半天倍数且事由不超过500字',
+          })
+        }
+      } else {
+        const leaveTypeCode = String(req.body.leaveTypeCode || '').trim()
+        const reason = String(req.body.reason || '').trim()
+        if (!leaveTypeCode || (!NO_REASON_LEAVE_TYPES.includes(leaveTypeCode) && !reason)) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({ success: false, message: '请填写所有必填字段' })
+        }
+        if (reason.length > 500) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({ success: false, message: '请假事由不能超过500个字符' })
+        }
+        segments = [{ leaveTypeCode, days: 0, reason }]
+      }
+
+      const typeCodes = segments.map(item => item.leaveTypeCode)
+      if (new Set(typeCodes).size !== typeCodes.length) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '组合请假中的假期类型不能重复' })
+      }
+
+      const periodError = relationType === 'supplement'
+        ? validateLeavePeriod(startDate, startHalf, endDate, endHalf, '0000-01-01')
+        : validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+      if (periodError) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: periodError })
+      }
+      const parentRequest = await db
+        .prepare(
+          `SELECT lr.*
+           FROM leave_requests lr
+           WHERE lr.id = ?
+             AND lr.user_id = ?
+             AND lr.status = 'approved'
+             AND NOT EXISTS (
+               SELECT 1 FROM leave_requests next_version
+               WHERE next_version.original_id = lr.id
+             )`
+        )
+        .get<Record<string, any>>(id, userId)
+      if (!parentRequest) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(404).json({ success: false, message: '仅已批准的本人申请可以续假或补假' })
+      }
+      const rootRequestId = parentRequest.parent_request_id || parentRequest.id
+      const rootRequest = parentRequest.id === rootRequestId
+        ? parentRequest
+        : await db.prepare(`SELECT * FROM leave_requests WHERE id = ?`).get<Record<string, any>>(rootRequestId)
+      if (!rootRequest) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(409).json({ success: false, message: '主申请关联信息不完整' })
+      }
+
+      if (relationType === 'extension') {
+        const latestExtension = await db
+          .prepare(
+            `SELECT lr.end_date, lr.end_half
+             FROM leave_requests lr
+             WHERE (
+                 lr.id = ?
+                 OR (lr.parent_request_id = ? AND lr.application_kind = 'extension')
+               )
+               AND lr.status IN ('pending', 'approved')
+               AND NOT EXISTS (
+                 SELECT 1 FROM leave_requests next_version
+                 WHERE next_version.original_id = lr.id
+               )
+             ORDER BY
+               lr.end_date DESC,
+               CASE lr.end_half WHEN 'afternoon' THEN 1 ELSE 0 END DESC
+             LIMIT 1`
+          )
+          .get<{ end_date: string; end_half: LeaveHalf }>(rootRequestId, rootRequestId)
+        const expectedStart = latestExtension
+          ? await getNextWorkingLeaveHalf(latestExtension.end_date, latestExtension.end_half)
+          : null
+        if (!expectedStart || startDate !== expectedStart.date || startHalf !== expectedStart.half) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          const expectedLabel = expectedStart
+            ? `${expectedStart.date}${expectedStart.half === 'morning' ? '上午' : '下午'}`
+            : '主申请结束后'
+          return res.status(409).json({
+            success: false,
+            message: `续假必须紧接上一段假期，开始时间应为 ${expectedLabel}`,
+          })
+        }
+      } else {
+        const rootEndOrder = `${rootRequest.end_date}-${rootRequest.end_half === 'afternoon' ? '1' : '0'}`
+        const supplementStartOrder = `${startDate}-${startHalf === 'afternoon' ? '1' : '0'}`
+        if (supplementStartOrder <= rootEndOrder) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(409).json({
+            success: false,
+            message: '补假时间必须在主申请结束时间之后',
+          })
+        }
+      }
+
+      const placeholders = typeCodes.map(() => '?').join(', ')
+      const typeRows = await db
+        .prepare(
+          `SELECT id, code, name, requires_attachment, requires_balance_check, default_days
+           FROM leave_type_configs
+           WHERE is_active = true AND code IN (${placeholders})`
+        )
+        .all<LeaveTypeConfigRow>(...typeCodes)
+      const typeMap = new Map(typeRows.map(type => [type.code, type]))
+      if (typeMap.size !== typeCodes.length) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '假期类型不存在或已停用' })
+      }
+      const excludedCodes = await getGenderExcludedTypes(userId)
+      if (typeCodes.some(code => excludedCodes.includes(code))) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: '申请中包含不适用于您性别的假期类型',
+        })
+      }
+      for (const segment of segments) {
+        const type = typeMap.get(segment.leaveTypeCode)!
+        if (!NO_REASON_LEAVE_TYPES.includes(type.code) && !segment.reason) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({
+            success: false,
+            message: `请填写${type.name}的请假事由`,
+          })
+        }
+      }
+      const attachmentType = typeRows.find(type => type.requires_attachment)
+      if (attachmentType && uploadedFiles.length === 0) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: `${attachmentType.name}需要上传证明文件`,
+        })
+      }
+
+      const totalDays = await calculateLeaveDays(startDate, startHalf, endDate, endHalf)
+      if (totalDays <= 0) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: '请假时长不能为0（所选时间段全为休息日）',
+        })
+      }
+      if (requestMode === 'single') {
+        segments[0].days = totalDays
+      } else {
+        const assignedDays = segments.reduce((sum, item) => sum + item.days, 0)
+        if (Math.abs(assignedDays - totalDays) > 0.001) {
+          cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+          return res.status(400).json({
+            success: false,
+            message: `组合假期已分配 ${assignedDays} 天，与所选时段 ${totalDays} 天不一致`,
+          })
+        }
+      }
+
+      const periods = requestMode === 'combined'
+        ? await splitLeavePeriodByDays(
+            startDate,
+            startHalf,
+            endDate,
+            endHalf,
+            segments.map(item => item.days)
+          )
+        : [{
+            startDate,
+            startHalf,
+            endDate,
+            endHalf,
+            days: totalDays,
+          }]
+      const allocations = await Promise.all(
+        periods.map(period =>
+          calculateLeaveDaysByYear(
+            period.startDate,
+            period.startHalf,
+            period.endDate,
+            period.endHalf
+          )
+        )
+      )
+      const userInfo = await db
+        .prepare(`SELECT name, department FROM users WHERE id = ?`)
+        .get<{ name: string; department: string | null }>(userId)
+      const approver = await findApprover(userId)
+      if (!userInfo || !approver) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({
+          success: false,
+          message: !userInfo
+            ? '用户信息不存在'
+            : getLeaveApproverUnavailableMessage(req.session.user?.role),
+        })
+      }
+
+      const now = new Date().toISOString()
+      const relationLabel = relationType === 'extension' ? '续假' : '补假'
+      const combinationGroupId = requestMode === 'combined' ? nanoid() : null
+      const createdRequests: Array<{ id: string; requestNo: string }> = []
+
+      await db.transaction(async client => {
+        if (typeCodes.includes('marriage')) {
+          await assertMarriageLeaveAvailable(client, userId)
+        }
+        for (let index = 0; index < segments.length; index += 1) {
+          const segment = segments[index]
+          const created = await createPendingLeaveRequest(client, {
+            requestId: nanoid(),
+            userId,
+            applicantName: userInfo.name,
+            applicantDepartment: userInfo.department,
+            typeConfig: typeMap.get(segment.leaveTypeCode)!,
+            period: periods[index],
+            allocations: allocations[index],
+            reason: segment.reason,
+            approver,
+            applicationKind: relationType as 'extension' | 'supplement',
+            combinationGroupId,
+            parentRequestId: rootRequestId,
+            logComment: requestMode === 'combined'
+              ? `组合${relationLabel}第 ${index + 1}/${segments.length} 段，关联主申请 ${rootRequest.request_no}`
+              : `${relationLabel}，关联主申请 ${rootRequest.request_no}`,
+            now,
+          })
+          createdRequests.push(created)
+        }
+        await persistLeaveAttachments(
+          client,
+          uploadedFiles,
+          createdRequests.map(item => item.id),
+          userId,
+          now,
+          createdPaths
+        )
+      })
+
+      res.json({
+        success: true,
+        message: requestMode === 'combined'
+          ? `组合${relationLabel}已拆分为 ${createdRequests.length} 条申请`
+          : `${relationLabel}申请已提交`,
+        data: {
+          ...createdRequests[0],
+          parentRequestNo: rootRequest.request_no,
+          combinationGroupId,
+          requests: createdRequests,
+        },
+      })
+    } catch (error) {
+      console.error('提交续假补假失败:', error)
+      cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+      if (error instanceof LeaveOperationError) {
+        return res.status(error.statusCode).json({ success: false, message: error.message })
+      }
+      res.status(500).json({ success: false, message: '提交关联申请失败' })
+    }
+  }
+)
+
 // 查看单条申请详情（含审批日志）
 router.get('/requests/:id', requireAuth, async (req, res) => {
   try {
@@ -939,8 +2087,13 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
       role: string
       name: string
     }>(userId)
-    const isAdmin = userInfo?.role === 'admin' || userInfo?.role === 'super_admin'
-    const canReviewAssigned = userInfo?.role === 'general_manager'
+    const isAdmin =
+      userInfo?.role === 'admin' ||
+      isSystemAdminEquivalentRole(userInfo?.role)
+    const isCcRecipient =
+      userInfo?.role === 'admin' ||
+      userInfo?.role === 'super_admin'
+    const canReviewAssigned = isLeaveApproverRole(userInfo?.role)
 
     const requestChain = await db.prepare(`
       WITH RECURSIVE ancestors AS (
@@ -961,16 +2114,19 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
         INNER JOIN request_chain parent ON child.original_id = parent.id
       )
       SELECT rc.*, au.name as approver_real_name,
-             COALESCE(
-               NULLIF(BTRIM(au.position), ''),
-               NULLIF(BTRIM(aep.position), ''),
-               CASE au.role
-                 WHEN 'super_admin' THEN '超级管理员'
-                 WHEN 'general_manager' THEN '总经理'
-                 WHEN 'admin' THEN '管理员'
-                 ELSE '员工'
-               END
-             ) as approver_position
+             CASE au.role
+               WHEN 'chairman' THEN '董事长'
+               WHEN 'general_manager' THEN '总经理'
+               ELSE COALESCE(
+                 NULLIF(BTRIM(au.position), ''),
+                 NULLIF(BTRIM(aep.position), ''),
+                 CASE au.role
+                   WHEN 'super_admin' THEN '超级管理员'
+                   WHEN 'admin' THEN '管理员'
+                   ELSE '员工'
+                 END
+               )
+             END as approver_position
       FROM request_chain rc
       LEFT JOIN users au ON rc.approver_id = au.id
       LEFT JOIN employee_profiles aep ON aep.user_id = au.id
@@ -1012,16 +2168,19 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
         `
       SELECT lal.*, lr.version, lr.request_no,
              COALESCE(u.name, lal.operator_name) as operator_real_name,
-             COALESCE(
-               NULLIF(BTRIM(u.position), ''),
-               NULLIF(BTRIM(ep.position), ''),
-               CASE u.role
-                 WHEN 'super_admin' THEN '超级管理员'
-                 WHEN 'general_manager' THEN '总经理'
-                 WHEN 'admin' THEN '管理员'
-                 ELSE '员工'
-               END
-             ) as operator_position
+             CASE u.role
+               WHEN 'chairman' THEN '董事长'
+               WHEN 'general_manager' THEN '总经理'
+               ELSE COALESCE(
+                 NULLIF(BTRIM(u.position), ''),
+                 NULLIF(BTRIM(ep.position), ''),
+                 CASE u.role
+                   WHEN 'super_admin' THEN '超级管理员'
+                   WHEN 'admin' THEN '管理员'
+                   ELSE '员工'
+                 END
+               )
+             END as operator_position
       FROM leave_approval_logs lal
       INNER JOIN leave_requests lr ON lr.id = lal.leave_request_id
       LEFT JOIN users u ON u.id = lal.operator_id
@@ -1032,16 +2191,66 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
       )
       .all(...chainIds)
 
+    const relationRootId = request.parent_request_id || request.id
+    const parentRequest = request.parent_request_id
+      ? await db
+          .prepare(
+            `SELECT id, request_no, leave_type_name, start_date, start_half,
+                    end_date, end_half, total_days, reason, status,
+                    application_kind, combination_group_id
+             FROM leave_requests
+             WHERE id = ?`
+          )
+          .get(request.parent_request_id)
+      : null
+    const relatedRequests = await db
+      .prepare(
+        `SELECT lr.id, lr.request_no, lr.leave_type_name, lr.start_date, lr.start_half,
+                lr.end_date, lr.end_half, lr.total_days, lr.reason, lr.status,
+                lr.application_kind, lr.combination_group_id
+         FROM leave_requests lr
+         WHERE lr.parent_request_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM leave_requests next_version
+             WHERE next_version.original_id = lr.id
+           )
+         ORDER BY lr.start_date ASC,
+                  CASE lr.start_half WHEN 'morning' THEN 0 ELSE 1 END ASC,
+                  lr.request_no ASC`
+      )
+      .all(relationRootId)
+    const combinationRequests = request.combination_group_id
+      ? await db
+          .prepare(
+            `SELECT lr.id, lr.request_no, lr.leave_type_name, lr.start_date, lr.start_half,
+                    lr.end_date, lr.end_half, lr.total_days, lr.reason, lr.status,
+                    lr.application_kind, lr.combination_group_id
+             FROM leave_requests lr
+             WHERE lr.combination_group_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM leave_requests next_version
+                 WHERE next_version.original_id = lr.id
+               )
+             ORDER BY lr.start_date ASC,
+                      CASE lr.start_half WHEN 'morning' THEN 0 ELSE 1 END ASC,
+                      lr.request_no ASC`
+          )
+          .all(request.combination_group_id)
+      : []
+
     res.json({
       success: true,
       data: {
         ...request,
         root_request_no: requestChain[0].request_no,
         version_count: requestChain.length,
-        cc_recipient_role: isAdmin && userInfo ? getRoleDisplayName(userInfo.role) : null,
-        cc_recipient_name: isAdmin ? userInfo?.name || null : null,
+        cc_recipient_role: isCcRecipient && userInfo ? getRoleDisplayName(userInfo.role) : null,
+        cc_recipient_name: isCcRecipient ? userInfo?.name || null : null,
         attachments,
         logs,
+        parent_request: parentRequest,
+        related_requests: relatedRequests,
+        combination_requests: combinationRequests,
       },
     })
   } catch (error) {
@@ -1080,8 +2289,10 @@ router.get('/attachments/:attachmentId/download', requireAuth, async (req, res) 
 
     // 权限：本人、审批人或管理员
     const userInfo = await db.prepare(`SELECT role FROM users WHERE id = ?`).get<{ role: string }>(userId)
-    const isAdmin = userInfo?.role === 'admin' || userInfo?.role === 'super_admin'
-    const canReviewAssigned = userInfo?.role === 'general_manager'
+    const isAdmin =
+      userInfo?.role === 'admin' ||
+      isSystemAdminEquivalentRole(userInfo?.role)
+    const canReviewAssigned = isLeaveApproverRole(userInfo?.role)
     let isChainApprover = false
     if (canReviewAssigned) {
       const chainAssignment = await db.prepare(`
@@ -1133,7 +2344,9 @@ router.post('/requests/:id/cancel', requireAuth, async (req, res) => {
     const { id } = req.params
 
     const now = new Date().toISOString()
-    const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
+    const userInfo = await db
+      .prepare(`SELECT name FROM users WHERE id = ?`)
+      .get<{ name: string }>(userId)
 
     await db.transaction(async (client) => {
       const requestResult = await client.query<BalanceRequestData & { status: string }>(
@@ -1218,6 +2431,11 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
         leave_type_code: string
         total_days: number
         request_no: string
+        application_kind: LeaveApplicationKind
+        combination_group_id: string | null
+        parent_request_id: string | null
+        start_date: string
+        start_half: LeaveHalf
       }>(id, userId)
 
     if (!originalRequest) {
@@ -1229,10 +2447,40 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
       return res.status(400).json({ success: false, message: '只有草稿或被驳回的申请才可重新提交' })
     }
 
-    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    const periodError = validateLeavePeriod(
+      startDate,
+      startHalf,
+      endDate,
+      endHalf,
+      originalRequest.application_kind === 'supplement' ? '0000-01-01' : undefined
+    )
     if (periodError) {
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: periodError })
+    }
+    if (
+      (originalRequest.application_kind === 'extension' ||
+        originalRequest.application_kind === 'supplement') &&
+      originalRequest.parent_request_id
+    ) {
+      if (
+        originalRequest.application_kind === 'extension' &&
+        originalRequest.combination_group_id
+      ) {
+        if (
+          startDate !== originalRequest.start_date ||
+          startHalf !== originalRequest.start_half
+        ) {
+          throw new LeaveOperationError('组合续假重新提交时不能修改该分段的开始时间', 409)
+        }
+      } else {
+        await assertRelatedLeaveTiming(
+          originalRequest.application_kind,
+          originalRequest.parent_request_id,
+          startDate,
+          startHalf
+        )
+      }
     }
 
     const leaveTypeCode = req.body.leaveTypeCode || originalRequest.leave_type_code
@@ -1253,8 +2501,7 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
       return res.status(400).json({ success: false, message: '假期类型不存在' })
     }
 
-    const noReasonTypes = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
-    if (!noReasonTypes.includes(leaveTypeCode) && !normalizedReason) {
+    if (!NO_REASON_LEAVE_TYPES.includes(leaveTypeCode) && !normalizedReason) {
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: '请填写请假事由' })
     }
@@ -1315,7 +2562,7 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({
         success: false,
-        message: '未找到可用的总经理审批人，请联系管理员配置总经理账号',
+        message: getLeaveApproverUnavailableMessage(req.session.user?.role),
       })
     }
 
@@ -1328,8 +2575,12 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
         status: string
         version: number
         request_no: string
+        application_kind: LeaveApplicationKind
+        combination_group_id: string | null
+        parent_request_id: string | null
       }>(
-        `SELECT status, version, request_no
+        `SELECT status, version, request_no, application_kind,
+                combination_group_id, parent_request_id
          FROM leave_requests
          WHERE id = $1 AND user_id = $2
          FOR UPDATE`,
@@ -1351,6 +2602,9 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
         }
       }
 
+      if (leaveTypeCode === 'marriage') {
+        await assertMarriageLeaveAvailable(client, userId)
+      }
       await assertNoOverlappingLeave(client, userId, startDate, startHalf, endDate, endHalf)
       if (typeConfig.requires_balance_check) {
         await reserveLeaveBalances(client, userId, leaveTypeCode, typeConfig.name, allocations, now)
@@ -1397,8 +2651,12 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
             id, request_no, user_id, applicant_name, applicant_department,
             leave_type_code, leave_type_name, start_date, start_half, end_date, end_half,
             total_days, balance_allocations_json, balance_reserved, reason, status, approver_id, approver_name,
-            submitted_at, version, original_id, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18,$19,$20,$21,$22)`,
+            submitted_at, version, original_id, application_kind, combination_group_id,
+            parent_request_id, created_at, updated_at
+          ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',
+            $16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+          )`,
           [
             resultRequestId,
             resultRequestNo,
@@ -1420,6 +2678,9 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
             now,
             lockedRequest.version + 1,
             id,
+            lockedRequest.application_kind,
+            lockedRequest.combination_group_id,
+            lockedRequest.parent_request_id,
             now,
             now,
           ]
@@ -1468,15 +2729,24 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
 // ==================== 审批端接口 ====================
 
 // 待我审批的申请列表
-router.get('/pending', requireGeneralManager, async (req, res) => {
+router.get('/pending', requireLeaveApprover, async (req, res) => {
   try {
     const userId = req.session.userId!
     const list = await db
       .prepare(
         `
-      SELECT lr.*, u.name as user_name, u.department as user_department
+      SELECT lr.*, u.name as user_name, u.department as user_department,
+             parent_request.request_no as parent_request_no,
+             parent_request.leave_type_name as parent_leave_type_name,
+             parent_request.start_date as parent_start_date,
+             parent_request.start_half as parent_start_half,
+             parent_request.end_date as parent_end_date,
+             parent_request.end_half as parent_end_half,
+             parent_request.total_days as parent_total_days,
+             parent_request.reason as parent_reason
       FROM leave_requests lr
       LEFT JOIN users u ON lr.user_id = u.id
+      LEFT JOIN leave_requests parent_request ON parent_request.id = lr.parent_request_id
       WHERE lr.approver_id = ? AND lr.status = 'pending' AND lr.user_id <> ?
       ORDER BY lr.submitted_at ASC
     `
@@ -1491,7 +2761,7 @@ router.get('/pending', requireGeneralManager, async (req, res) => {
 })
 
 // 当前审批人已处理的申请链，每条申请只展示当前最终版本。
-router.get('/reviewed', requireGeneralManager, async (req, res) => {
+router.get('/reviewed', requireLeaveApprover, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { page, pageSize, offset } = parsePagination(req.query.page, req.query.pageSize)
@@ -1518,7 +2788,15 @@ router.get('/reviewed', requireGeneralManager, async (req, res) => {
     const list = await db.prepare(
       `SELECT lr.*, u.name as user_name, u.department as user_department,
               lal.action as review_action, lal.comment as review_comment,
-              lal.created_at as reviewed_at
+              lal.created_at as reviewed_at,
+              parent_request.request_no as parent_request_no,
+              parent_request.leave_type_name as parent_leave_type_name,
+              parent_request.start_date as parent_start_date,
+              parent_request.start_half as parent_start_half,
+              parent_request.end_date as parent_end_date,
+              parent_request.end_half as parent_end_half,
+              parent_request.total_days as parent_total_days,
+              parent_request.reason as parent_reason
        FROM leave_requests lr
        INNER JOIN LATERAL (
          SELECT action, comment, created_at
@@ -1533,6 +2811,7 @@ router.get('/reviewed', requireGeneralManager, async (req, res) => {
          LIMIT 1
        ) lal ON TRUE
        LEFT JOIN users u ON lr.user_id = u.id
+       LEFT JOIN leave_requests parent_request ON parent_request.id = lr.parent_request_id
        WHERE lr.status IN ('approved', 'rejected')
          AND NOT EXISTS (
            SELECT 1 FROM leave_requests next_version
@@ -1559,20 +2838,26 @@ router.get('/reviewed', requireGeneralManager, async (req, res) => {
 })
 
 // 审批通过
-router.post('/requests/:id/approve', requireGeneralManager, async (req, res) => {
+router.post('/requests/:id/approve', requireLeaveApprover, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { id } = req.params
     const { comment } = req.body
 
-    const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
+    const userInfo = await db
+      .prepare(`SELECT name, role FROM users WHERE id = ?`)
+      .get<{ name: string; role: string }>(userId)
     const now = new Date().toISOString()
 
     await db.transaction(async (client) => {
-      const requestResult = await client.query<BalanceRequestData & { status: string }>(
+      const requestResult = await client.query<
+        BalanceRequestData & { status: string; applicant_role: string }
+      >(
         `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
-                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status,
+                applicant.role AS applicant_role
          FROM leave_requests lr
+         INNER JOIN users applicant ON applicant.id = lr.user_id
          WHERE lr.id = $1 AND lr.user_id <> $2 AND lr.approver_id = $2
          FOR UPDATE OF lr`,
         [id, userId]
@@ -1580,6 +2865,9 @@ router.post('/requests/:id/approve', requireGeneralManager, async (req, res) => 
       const request = requestResult.rows[0]
       if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
       if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
+      if (userInfo?.role !== getRequiredLeaveApproverRole(request.applicant_role)) {
+        throw new LeaveOperationError('当前角色不能审批该申请', 403)
+      }
 
       const allocations = await getStoredBalanceAllocations(request)
 
@@ -1610,7 +2898,7 @@ router.post('/requests/:id/approve', requireGeneralManager, async (req, res) => 
 })
 
 // 驳回
-router.post('/requests/:id/reject', requireGeneralManager, async (req, res) => {
+router.post('/requests/:id/reject', requireLeaveApprover, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { id } = req.params
@@ -1620,14 +2908,20 @@ router.post('/requests/:id/reject', requireGeneralManager, async (req, res) => {
       return res.status(400).json({ success: false, message: '驳回时必须填写驳回理由' })
     }
 
-    const userInfo = await db.prepare(`SELECT name FROM users WHERE id = ?`).get<{ name: string }>(userId)
+    const userInfo = await db
+      .prepare(`SELECT name, role FROM users WHERE id = ?`)
+      .get<{ name: string; role: string }>(userId)
     const now = new Date().toISOString()
 
     await db.transaction(async (client) => {
-      const requestResult = await client.query<BalanceRequestData & { status: string }>(
+      const requestResult = await client.query<
+        BalanceRequestData & { status: string; applicant_role: string }
+      >(
         `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
-                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status,
+                applicant.role AS applicant_role
          FROM leave_requests lr
+         INNER JOIN users applicant ON applicant.id = lr.user_id
          WHERE lr.id = $1 AND lr.user_id <> $2 AND lr.approver_id = $2
          FOR UPDATE OF lr`,
         [id, userId]
@@ -1635,6 +2929,9 @@ router.post('/requests/:id/reject', requireGeneralManager, async (req, res) => {
       const request = requestResult.rows[0]
       if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
       if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
+      if (userInfo?.role !== getRequiredLeaveApproverRole(request.applicant_role)) {
+        throw new LeaveOperationError('当前角色不能审批该申请', 403)
+      }
 
       const allocations = await getStoredBalanceAllocations(request)
 
@@ -1642,7 +2939,8 @@ router.post('/requests/:id/reject', requireGeneralManager, async (req, res) => {
 
       await client.query(
         `UPDATE leave_requests
-         SET status = 'rejected', reject_reason = $1, rejected_at = $2, updated_at = $3
+         SET status = 'rejected', reject_reason = $1, rejection_notice_unread = TRUE,
+             rejected_at = $2, updated_at = $3
          WHERE id = $4 AND status = 'pending'`,
         [rejectReason.trim(), now, now, id]
       )
@@ -1748,7 +3046,8 @@ router.put('/admin/types/:code', requireAdmin, async (req, res) => {
       })
     }
 
-    const nextRequiresBalanceCheck = requires_balance_check !== false
+    const nextRequiresBalanceCheck =
+      FIXED_BALANCE_LEAVE_TYPES.has(code) || requires_balance_check !== false
     const nextRequiresAttachment = requires_attachment ? true : false
     const nextDescription = description?.trim() || null
     const now = new Date().toISOString()
@@ -1888,16 +3187,19 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
     const listSql = `
       SELECT lr.*, u.name as user_name, u.department as user_department,
              au.name as approver_real_name,
-             COALESCE(
-               NULLIF(BTRIM(au.position), ''),
-               NULLIF(BTRIM(aep.position), ''),
-               CASE au.role
-                 WHEN 'super_admin' THEN '超级管理员'
-                 WHEN 'general_manager' THEN '总经理'
-                 WHEN 'admin' THEN '管理员'
-                 ELSE '员工'
-               END
-             ) as approver_position
+             CASE au.role
+               WHEN 'chairman' THEN '董事长'
+               WHEN 'general_manager' THEN '总经理'
+               ELSE COALESCE(
+                 NULLIF(BTRIM(au.position), ''),
+                 NULLIF(BTRIM(aep.position), ''),
+                 CASE au.role
+                   WHEN 'super_admin' THEN '超级管理员'
+                   WHEN 'admin' THEN '管理员'
+                   ELSE '员工'
+                 END
+               )
+             END as approver_position
       FROM leave_requests lr
       LEFT JOIN users u ON lr.user_id = u.id
       LEFT JOIN users au ON lr.approver_id = au.id
@@ -1970,8 +3272,13 @@ router.get('/admin/balances', requireAdmin, async (req, res) => {
       employee_no: string | null
     }>(...userParams)
     const types = await db
-      .prepare(`SELECT code, name FROM leave_type_configs WHERE is_active = true ORDER BY sort_order`)
-      .all<{ code: string; name: string }>()
+      .prepare(
+        `SELECT code, name, requires_balance_check
+         FROM leave_type_configs
+         WHERE is_active = true
+         ORDER BY sort_order`
+      )
+      .all<{ code: string; name: string; requires_balance_check: boolean }>()
 
     const result = []
     for (const user of users) {
@@ -2031,15 +3338,27 @@ router.put('/admin/balances/:targetUserId/:typeCode/:year', requireAdmin, async 
       const targetResult = await client.query(
         `SELECT
            EXISTS(SELECT 1 FROM users WHERE id = $1) AS user_exists,
-           EXISTS(SELECT 1 FROM leave_type_configs WHERE code = $2 AND is_active = true) AS type_exists`,
+           EXISTS(
+             SELECT 1 FROM leave_type_configs
+             WHERE code = $2 AND is_active = true
+           ) AS type_exists,
+           COALESCE((
+             SELECT requires_balance_check
+             FROM leave_type_configs
+             WHERE code = $2 AND is_active = true
+           ), false) AS requires_balance_check`,
         [targetUserId, typeCode]
       )
       const target = targetResult.rows[0] as {
         user_exists: boolean
         type_exists: boolean
+        requires_balance_check: boolean
       }
       if (!target.user_exists) throw new LeaveOperationError('用户不存在', 404)
       if (!target.type_exists) throw new LeaveOperationError('假期类型不存在或已停用', 404)
+      if (!target.requires_balance_check) {
+        throw new LeaveOperationError('不限额度的假期类型无需调整余额', 409)
+      }
 
       await client.query(
         `INSERT INTO leave_balances (

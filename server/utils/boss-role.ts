@@ -21,12 +21,55 @@ export function isBossRole(role: unknown): role is "boss" {
   return role === "boss";
 }
 
+export function isChairmanRole(role: unknown): role is "chairman" {
+  return role === "chairman";
+}
+
 export function isSystemAdminRole(role: unknown): role is "super_admin" {
   return role === "super_admin";
 }
 
+export function isSystemAdminEquivalentRole(
+  role: unknown,
+): role is "super_admin" | "chairman" {
+  return isSystemAdminRole(role) || isChairmanRole(role);
+}
+
+export function canCreateChairmanAccount(role: unknown): boolean {
+  return role === "admin" || isSystemAdminEquivalentRole(role);
+}
+
+export function isRoleAllowed(
+  role: unknown,
+  allowedRoles: readonly string[],
+): boolean {
+  return (
+    (typeof role === "string" && allowedRoles.includes(role)) ||
+    (isChairmanRole(role) && allowedRoles.includes("super_admin"))
+  );
+}
+
 export function requiresEmployeeProfile(role: unknown): boolean {
-  return !isBossRole(role) && !isSystemAdminRole(role);
+  return (
+    !isBossRole(role) &&
+    !isChairmanRole(role) &&
+    !isSystemAdminRole(role)
+  );
+}
+
+export function getStandaloneRoleTransitionError(
+  currentRole: unknown,
+  nextRole: unknown,
+): string | null {
+  if (
+    currentRole !== nextRole &&
+    (!requiresEmployeeProfile(currentRole) ||
+      !requiresEmployeeProfile(nextRole))
+  ) {
+    return "BOSS、董事长和超级管理员账号需单独创建，不能转换角色";
+  }
+
+  return null;
 }
 
 export function getBossRoleTransitionError(
@@ -53,9 +96,9 @@ export function resolveUserAccountName(
     typeof username === "string" ? username.trim() : "";
   const normalizedName = typeof name === "string" ? name.trim() : "";
 
-  return isBossRole(role)
-    ? normalizedUsername || currentName
-    : normalizedName || currentName;
+  return requiresEmployeeProfile(role)
+    ? normalizedName || currentName
+    : normalizedUsername || currentName;
 }
 
 export function getUserCreationRequiredFieldsError(

@@ -18,6 +18,7 @@ import {
 import { validateFilePath } from '../utils/file-validation.js'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 import { db } from '../db/index.js'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -317,7 +318,8 @@ router.get('/transport-fuel-quota', requireAuth, async (req, res) => {
     // 管理员查看他人报销单时，使用申请人的 user_id 计算月度额度
     // 避免用管理员自己的额度数据影响申请人的报销显示
     let userId = sessionUserId
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin =
+      userRole === 'admin' || isSystemAdminEquivalentRole(userRole)
     if (excludeId && isAdmin) {
       const record = await db.prepare('SELECT user_id FROM reimbursements WHERE id = ?').get(excludeId) as { user_id: string } | undefined
       if (record?.user_id) {
@@ -928,7 +930,8 @@ router.get('/:id/deduction-invoices', requireAuth, async (req, res) => {
 
     // 确认该报销单属于当前用户（或管理员可查看）
     const user = req.session.user!
-    const isAdmin = user.role === 'admin' || user.role === 'super_admin'
+    const isAdmin =
+      user.role === 'admin' || isSystemAdminEquivalentRole(user.role)
 
     const reimbursement = await db.prepare(
       `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`
@@ -2622,7 +2625,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     }
 
     // 管理员可以查看所有报销单，总经理只能查看商务报销，普通用户只能查看自己的
-    const isAdmin = userRole === 'super_admin' || userRole === 'admin'
+    const isAdmin =
+      userRole === 'admin' || isSystemAdminEquivalentRole(userRole)
     const isGM = userRole === 'general_manager'
 
     let reimbursement
@@ -4024,7 +4028,8 @@ router.get('/payment-batch/:batchId', requireAuth, async (req, res) => {
 
     // 查询当前用户角色
     const user = await db.get('SELECT role FROM users WHERE id = ?', currentUserId)
-    const isAdmin = user?.role === 'admin' || user?.role === 'super_admin'
+    const isAdmin =
+      user?.role === 'admin' || isSystemAdminEquivalentRole(user?.role)
 
     const batch = await db.prepare(`
       SELECT pb.*, u.name as payerName

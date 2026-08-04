@@ -280,7 +280,11 @@ const searchingProjects = ref(false)
 const formVisible = ref(false)
 const editingEntry = ref<WorklogEntry | null>(null)
 
-const canFilterByUser = computed(() => ['super_admin', 'admin', 'general_manager'].includes(authStore.user?.role || ''))
+const canFilterByUser = computed(() =>
+  ['super_admin', 'chairman', 'admin', 'general_manager'].includes(
+    authStore.user?.role || '',
+  ),
+)
 
 // 按行政区分组项目
 const projectsByDistrict = computed(() => {

@@ -387,7 +387,11 @@ router.beforeEach(async (to, _from, next) => {
     // 检查是否需要管理员权限
     if (to.meta.requiresAdmin) {
       const role = authStore.user?.role;
-      if (role !== "super_admin" && role !== "admin") {
+      if (
+        role !== "super_admin" &&
+        role !== "chairman" &&
+        role !== "admin"
+      ) {
         next({ name: "Home" });
         return;
       }
@@ -396,7 +400,12 @@ router.beforeEach(async (to, _from, next) => {
     // 检查是否需要特定角色权限
     if (to.meta.requiresRole) {
       const role = authStore.user?.role;
-      if (!role || !(to.meta.requiresRole as string[]).includes(role)) {
+      const requiredRoles = to.meta.requiresRole as string[];
+      const roleAllowed =
+        !!role &&
+        (requiredRoles.includes(role) ||
+          (role === "chairman" && requiredRoles.includes("super_admin")));
+      if (!roleAllowed) {
         next({ name: "Home" });
         return;
       }

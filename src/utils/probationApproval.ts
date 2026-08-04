@@ -6,6 +6,13 @@ export type ProbationReviewStage =
   | "completed";
 
 export type ProbationDecision = "submit" | "approve" | "reject";
+export type ProbationApprovalStageKey = Exclude<
+  ProbationReviewStage,
+  "completed"
+>;
+export type ProbationApproverNames = Partial<
+  Record<ProbationApprovalStageKey, string | null>
+>;
 
 export interface ProbationApprovalRecord {
   id: string;
@@ -20,7 +27,7 @@ export interface ProbationApprovalRecord {
 }
 
 export interface ProbationApprovalStageView {
-  key: Exclude<ProbationReviewStage, "completed">;
+  key: ProbationApprovalStageKey;
   label: string;
   handler: string;
   order: number;
@@ -49,8 +56,8 @@ export const probationApprovalStageDefinitions = [
   },
   {
     key: "general_manager",
-    label: "总经理审批",
-    handler: "管理员",
+    label: "董事长审批",
+    handler: "董事长",
     order: 4,
   },
 ] as const;
@@ -60,6 +67,7 @@ export function buildProbationApprovalStages(
   currentVersion: number,
   reviewStage: ProbationReviewStage,
   status: string,
+  approverNames: ProbationApproverNames = {},
 ): ProbationApprovalStageView[] {
   const currentRecords = records.filter(
     (record) => record.form_version === currentVersion,
@@ -76,9 +84,14 @@ export function buildProbationApprovalStages(
     } else if (status === "submitted" && reviewStage === stage.key) {
       state = "current";
     }
+    const approverName =
+      record?.signer_name?.trim() || approverNames[stage.key]?.trim();
 
     return {
       ...stage,
+      handler: approverName
+        ? `${stage.handler} ${approverName}`
+        : stage.handler,
       state,
       record,
     };
@@ -110,16 +123,7 @@ export function probationDecisionLabel(decision: ProbationDecision): string {
 export function probationApprovalActorLabel(
   record: ProbationApprovalRecord,
 ): string {
-  const operatorName = record.signer_name?.trim() || "未知操作人";
-  const signatureOwnerName = record.signature_owner_name?.trim();
-  if (
-    record.stage !== "employee" &&
-    signatureOwnerName &&
-    signatureOwnerName !== operatorName
-  ) {
-    return `${operatorName}（代）`;
-  }
-  return operatorName;
+  return record.signer_name?.trim() || "未知操作人";
 }
 
 export function probationApprovalTimelineActorLabel(record: {
@@ -127,23 +131,22 @@ export function probationApprovalTimelineActorLabel(record: {
   step?: number | null;
   approver_name?: string | null;
 }): string {
-  const operatorName = record.approver_name?.trim() || "未知操作人";
-  const isFinalManagerReview =
-    record.step === 3 &&
-    (record.action === "approve" || record.action === "reject");
-  if (isFinalManagerReview && !operatorName.endsWith("（代）")) {
-    return `${operatorName}（代）`;
-  }
-  return operatorName;
+  return record.approver_name?.trim() || "未知操作人";
 }
 
-export function findGeneralManagerApprovalTask<
-  T extends { id: string; review_stage: ProbationReviewStage },
->(tasks: T[], confirmationId: string): T | null {
-  return (
-    tasks.find(
-      (task) =>
-        task.id === confirmationId && task.review_stage === "general_manager",
-    ) || null
-  );
+export function probationApprovalTimelineRoleNameLabel(record: {
+  action: string;
+  approver_name?: string | null;
+  approver_role?: string | null;
+}): string {
+  const actorName = probationApprovalTimelineActorLabel(record);
+  const roleLabels: Record<string, string> = {
+    user: "员工本人",
+    general_manager: "总经理",
+    admin: "管理员",
+    super_admin: "管理员",
+    chairman: "董事长",
+  };
+  const roleLabel = roleLabels[record.approver_role || ""];
+  return roleLabel ? `${roleLabel} ${actorName}` : actorName;
 }

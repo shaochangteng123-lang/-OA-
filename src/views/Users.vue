@@ -70,7 +70,7 @@
             <div class="yl-action-buttons">
               <el-button size="small" :icon="Edit" @click="editUser(row)">编辑</el-button>
               <el-button
-                v-if="authStore.hasPermission('manage_users') && row.role !== 'super_admin'"
+                v-if="authStore.hasPermission('manage_users') && !isProtectedSystemRole(row.role)"
                 size="small"
                 :icon="Key"
                 @click="resetPasswordDialog(row)"
@@ -78,7 +78,7 @@
                 重置密码
               </el-button>
               <el-popconfirm
-                v-if="authStore.hasPermission('manage_users') && row.role !== 'super_admin' && row.id !== authStore.user?.id"
+                v-if="authStore.hasPermission('manage_users') && !isProtectedSystemRole(row.role) && row.id !== authStore.user?.id"
                 title="确定删除此用户？此操作不可恢复。"
                 confirm-button-text="确定"
                 cancel-button-text="取消"
@@ -110,7 +110,7 @@
         <el-form-item label="用户名" prop="username">
           <el-input
             v-model="createForm.username"
-            :placeholder="isCreatingBoss ? '输入BOSS账号名称' : '使用员工姓名，即为显示名称'"
+            :placeholder="creatingUsernamePlaceholder"
           />
         </el-form-item>
         <el-form-item label="密码" prop="password">
@@ -120,12 +120,17 @@
           <el-select v-model="createForm.role" style="width: 100%">
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
+            <el-option
+              v-if="canCreateChairmanAccount"
+              label="董事长"
+              value="chairman"
+            />
             <el-option label="BOSS" value="boss" />
             <el-option label="普通用户" value="user" />
             <el-option label="访客" value="guest" />
           </el-select>
         </el-form-item>
-        <template v-if="!isCreatingBoss">
+        <template v-if="!isCreatingStandaloneAccount">
           <el-form-item label="员工编号">
             <el-input
               :model-value="nextEmployeeNo"
@@ -162,7 +167,7 @@
         <el-button
           type="primary"
           :loading="createLoading"
-          :disabled="!isCreatingBoss && (employeeNumberLoading || !nextEmployeeNo)"
+          :disabled="!isCreatingStandaloneAccount && (employeeNumberLoading || !nextEmployeeNo)"
           @click="handleCreateUser"
         >
           创建
@@ -184,7 +189,7 @@
         <el-form-item label="用户名" prop="username">
           <el-input
             v-model="editForm.username"
-            :placeholder="isEditingBoss ? '输入BOSS账号名称' : '使用员工姓名，即为显示名称'"
+            :placeholder="editingUsernamePlaceholder"
           />
         </el-form-item>
         <el-form-item label="密码" prop="password">
@@ -193,10 +198,15 @@
         <el-form-item label="角色" prop="role">
           <el-select
             v-model="editForm.role"
-            :disabled="editingOriginalRole === 'boss'"
+            :disabled="isEditingStandaloneAccount"
             style="width: 100%"
           >
-            <el-option v-if="authStore.user?.role === 'super_admin'" label="超级管理员" value="super_admin" />
+            <el-option v-if="canManageSystemRoles" label="超级管理员" value="super_admin" />
+            <el-option
+              v-if="canManageSystemRoles || editingOriginalRole === 'chairman'"
+              label="董事长"
+              value="chairman"
+            />
             <el-option label="管理员" value="admin" />
             <el-option label="总经理" value="general_manager" />
             <el-option v-if="editingOriginalRole === 'boss'" label="BOSS" value="boss" />
@@ -409,7 +419,21 @@ const createForm = reactive({
   position: '',
   employmentStatus: 'probation',
 })
-const isCreatingBoss = computed(() => createForm.role === 'boss')
+const standaloneAccountRoles = new Set(['super_admin', 'chairman', 'boss'])
+const canManageSystemRoles = computed(() =>
+  ['super_admin', 'chairman'].includes(authStore.user?.role || ''),
+)
+const canCreateChairmanAccount = computed(() =>
+  ['admin', 'super_admin', 'chairman'].includes(authStore.user?.role || ''),
+)
+const isCreatingStandaloneAccount = computed(() =>
+  standaloneAccountRoles.has(createForm.role),
+)
+const creatingUsernamePlaceholder = computed(() => {
+  if (createForm.role === 'chairman') return '输入董事长账号名称'
+  if (createForm.role === 'boss') return '输入BOSS账号名称'
+  return '使用员工姓名，即为显示名称'
+})
 
 const normalizeEmployeeNoInput = (value: string) => value.trim().toUpperCase().replace(/\s+/g, '')
 
@@ -448,9 +472,33 @@ const validateChineseName = (_rule: unknown, value: string, callback: (error?: E
   }
 }
 
+const validateAccountUsername = (
+  _rule: unknown,
+  value: string,
+  callback: (error?: Error) => void,
+) => {
+  if (!value) {
+    callback(new Error('请输入用户名'))
+  } else if (value.length < 2) {
+    callback(new Error('用户名至少2个字符'))
+  } else if (value.length > 50) {
+    callback(new Error('用户名不能超过50个字符'))
+  } else if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(value)) {
+    callback(new Error('用户名只能包含汉字、字母、数字和下划线'))
+  } else {
+    callback()
+  }
+}
+
 const createRules = computed<FormRules>(() => ({
   username: [
-    { required: true, validator: validateChineseName, trigger: 'blur' },
+    {
+      required: true,
+      validator: isCreatingStandaloneAccount.value
+        ? validateAccountUsername
+        : validateChineseName,
+      trigger: 'blur',
+    },
   ],
   password: [
     { required: true, message: '请输入密码', trigger: 'blur' },
@@ -459,7 +507,7 @@ const createRules = computed<FormRules>(() => ({
   role: [
     { required: true, message: '请选择角色', trigger: 'change' },
   ],
-  ...(isCreatingBoss.value ? {} : {
+  ...(isCreatingStandaloneAccount.value ? {} : {
     email: [
       { required: true, message: '请输入邮箱', trigger: 'blur' },
       { type: 'email', message: '请输入有效的邮箱地址', trigger: 'blur' },
@@ -503,33 +551,33 @@ const editForm = reactive({
   bankName: '',
   bankAccountNumber: '',
 })
-const isEditingBoss = computed(() => editForm.role === 'boss')
-const isEditingSystemAdmin = computed(() => editForm.role === 'super_admin')
-const requiresEditingEmployeeProfile = computed(
-  () => !isEditingBoss.value && !isEditingSystemAdmin.value,
+const isEditingStandaloneAccount = computed(() =>
+  standaloneAccountRoles.has(editingOriginalRole.value),
 )
+const isEditingSystemAccount = computed(() =>
+  standaloneAccountRoles.has(editForm.role),
+)
+const requiresEditingEmployeeProfile = computed(
+  () => !isEditingSystemAccount.value,
+)
+const editingUsernamePlaceholder = computed(() => {
+  if (editForm.role === 'chairman') return '输入董事长账号名称'
+  if (editForm.role === 'boss') return '输入BOSS账号名称'
+  if (editForm.role === 'super_admin') return '输入超级管理员账号名称'
+  return '使用员工姓名，即为显示名称'
+})
 
 const validateEditUsername = (
   rule: unknown,
   value: string,
   callback: (error?: Error) => void,
 ) => {
-  if (!isEditingSystemAdmin.value) {
+  if (!isEditingSystemAccount.value) {
     validateChineseName(rule, value, callback)
     return
   }
 
-  if (!value) {
-    callback(new Error('请输入用户名'))
-  } else if (value.length < 2) {
-    callback(new Error('用户名至少2个字符'))
-  } else if (value.length > 50) {
-    callback(new Error('用户名不能超过50个字符'))
-  } else if (!/^[\u4e00-\u9fa5a-zA-Z0-9_]+$/.test(value)) {
-    callback(new Error('用户名只能包含汉字、字母、数字和下划线'))
-  } else {
-    callback()
-  }
+  validateAccountUsername(rule, value, callback)
 }
 
 // 编辑表单手机号验证器（可选）
@@ -639,6 +687,7 @@ const newPositionName = ref('')
 function getRoleTagType(role: string): ElementPlusTagType {
   const roleMap: Record<string, ElementPlusTagType> = {
     super_admin: 'danger',
+    chairman: 'danger',
     admin: 'warning',
     general_manager: 'info',
     boss: 'danger',
@@ -652,6 +701,7 @@ function getRoleTagType(role: string): ElementPlusTagType {
 function getRoleText(role: string) {
   const roleMap: Record<string, string> = {
     super_admin: '超级管理员',
+    chairman: '董事长',
     admin: '管理员',
     general_manager: '总经理',
     boss: 'BOSS',
@@ -661,9 +711,13 @@ function getRoleText(role: string) {
   return roleMap[role] || '未知'
 }
 
+function isProtectedSystemRole(role: string) {
+  return role === 'super_admin' || role === 'chairman'
+}
+
 // 员工状态标签颜色
 function getEmploymentStatusTagType(status: string, role?: string): ElementPlusTagType {
-  if (role === 'boss' || role === 'super_admin') return 'info'
+  if (standaloneAccountRoles.has(role || '')) return 'info'
   const map: Record<string, ElementPlusTagType> = {
     active: 'success',
     probation: 'warning',
@@ -675,7 +729,7 @@ function getEmploymentStatusTagType(status: string, role?: string): ElementPlusT
 
 // 员工状态文本
 function getEmploymentStatusText(status: string, role?: string) {
-  if (role === 'boss' || role === 'super_admin') return '不适用'
+  if (standaloneAccountRoles.has(role || '')) return '不适用'
   const map: Record<string, string> = {
     active: '在职',
     probation: '试用期',
@@ -775,7 +829,7 @@ async function handleCreateUser() {
 
   try {
     createLoading.value = true
-    const payload = isCreatingBoss.value
+    const payload = isCreatingStandaloneAccount.value
       ? {
           username: createForm.username,
           password: createForm.password,

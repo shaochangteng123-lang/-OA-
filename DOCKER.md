@@ -18,6 +18,7 @@ docker compose down
 ## 开发模式特性
 
 ### 完整容器化开发环境（推荐）
+
 - ✅ 环境隔离，避免本地环境污染
 - ✅ 代码热重载（源码挂载）
 - ✅ 前端端口：8899（Vite dev server）
@@ -26,6 +27,7 @@ docker compose down
 - ✅ 完整依赖环境（canvas、PDF 处理等）
 
 ### 轻量级模式（可选）
+
 - 仅启动 PostgreSQL 容器
 - 代码在本地运行
 - 适合快速调试
@@ -33,6 +35,7 @@ docker compose down
 ## 常用命令
 
 ### 完整 Docker 开发模式（推荐）
+
 ```bash
 docker compose up -d          # 启动服务
 docker compose logs -f        # 查看日志
@@ -42,6 +45,7 @@ docker compose up -d --build  # 重新构建并启动
 ```
 
 ### 轻量级模式（可选）
+
 ```bash
 npm run docker:db    # 启动 PostgreSQL 容器
 npm run dev          # 启动本地开发服务器
@@ -49,20 +53,26 @@ npm run docker:stop  # 停止数据库容器
 ```
 
 ### 生产模式
+
 ```bash
 npm run docker:prod      # 启动生产环境
-npm run docker:stop:prod # 停止生产环境
-npm run docker:logs:prod # 查看生产环境日志
+npm run docker:prod:stop # 停止生产环境
+npm run docker:prod:logs # 查看生产环境日志
 ```
+
+开发与生产使用独立数据库卷、网络和上传目录，可以同时运行。`npm run mode:dev` 与
+`npm run mode:prod` 只启动或更新目标环境，不会停止另一套环境。
+生产构建前会自动执行 `npm run release:check`，前后端类型或完整回归测试失败时不会继续上线。
+生产容器启动后还会校验并重载 Nginx（反向代理）配置，并确认人事档案自动识别路由的收发等待时间均为 2400 秒。`nginx.conf` 使用绑定挂载，文件更新不会让既有工作进程自动采用新配置，因此生产更新应统一使用 `npm run docker:prod` 或 `npm run mode:prod`，不要只重建应用容器。
 
 ## 配置文件说明
 
 ```
 docker-compose.yml         # 开发环境（推荐）
+docker-compose.dev.yml     # 兼容旧命令，直接引用开发环境唯一配置
 docker-compose.simple.yml  # 仅 PostgreSQL（轻量级）
 docker-compose.prod.yml    # 生产环境
-Dockerfile.dev             # 开发环境镜像
-Dockerfile                 # 生产环境镜像
+Dockerfile                 # 开发与生产共用的多阶段构建文件
 ```
 
 ## 访问地址
@@ -76,9 +86,11 @@ Dockerfile                 # 生产环境镜像
 ### 日常开发（推荐）
 
 1. **首次启动**
+
    ```bash
    docker compose up -d --build
    ```
+
    首次构建需要 3-5 分钟
 
 2. **日常开发**
@@ -88,6 +100,7 @@ Dockerfile                 # 生产环境镜像
    - 后端修改自动重启
 
 3. **查看日志**
+
    ```bash
    docker compose logs -f
    ```
@@ -100,11 +113,13 @@ Dockerfile                 # 生产环境镜像
 ### 轻量级开发（可选）
 
 1. **启动数据库**
+
    ```bash
    npm run docker:db
    ```
 
 2. **启动开发服务器**
+
    ```bash
    npm run dev
    ```
@@ -126,12 +141,14 @@ Dockerfile                 # 生产环境镜像
 ## 故障排查
 
 ### Docker 未运行
+
 ```bash
 # macOS
 open -a Docker
 ```
 
 ### 端口被占用
+
 ```bash
 # 检查端口占用
 lsof -i :8899
@@ -143,6 +160,7 @@ kill -9 <PID>
 ```
 
 ### 查看详细日志
+
 ```bash
 # 所有服务日志
 docker compose logs -f
@@ -155,6 +173,7 @@ docker compose logs -f postgres
 ```
 
 ### 重新构建
+
 ```bash
 # 停止服务
 docker compose down
@@ -167,6 +186,7 @@ docker compose up -d
 ```
 
 ### 重置数据库
+
 ```bash
 # 停止并删除数据库容器和数据
 docker compose down -v
@@ -176,6 +196,7 @@ docker compose up -d
 ```
 
 ### 清理所有数据
+
 ```bash
 # 停止所有容器
 docker compose down -v
@@ -186,11 +207,11 @@ docker rmi yulilog-worklog-yulilog-dev yulilog-worklog-yulilog
 
 ## 性能对比
 
-| 模式 | 首次启动时间 | 热重载 | 环境隔离 | 推荐场景 |
-|------|------------|--------|---------|---------|
-| 完整 Docker | ~3-5分钟 | ✅ | ✅ | 日常开发（推荐） |
-| 轻量级 | ~10秒 | ✅ | ⚠️ | 快速调试 |
-| 生产模式 | ~5-10分钟 | ❌ | ✅ | 生产部署 |
+| 模式        | 首次启动时间 | 热重载 | 环境隔离 | 推荐场景         |
+| ----------- | ------------ | ------ | -------- | ---------------- |
+| 完整 Docker | ~3-5分钟     | ✅     | ✅       | 日常开发（推荐） |
+| 轻量级      | ~10秒        | ✅     | ⚠️       | 快速调试         |
+| 生产模式    | ~5-10分钟    | ❌     | ✅       | 生产部署         |
 
 ## 注意事项
 

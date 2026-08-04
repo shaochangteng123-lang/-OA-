@@ -6,6 +6,8 @@ import { api } from '@/utils/api'
 // 员工信息状态类型
 type ProfileStatus = 'none' | 'draft' | 'submitted'
 
+const PROFILELESS_ACCOUNT_ROLES = new Set(['super_admin', 'chairman', 'boss'])
+
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const isLoggedIn = computed(() => !!user.value)
@@ -16,7 +18,9 @@ export const useAuthStore = defineStore('auth', () => {
   const profileStatus = ref<ProfileStatus>('none')
   // 是否已完成入职信息填写（已提交状态）
   const hasCompletedOnboarding = computed(
-    () => user.value?.role === 'boss' || profileStatus.value === 'submitted',
+    () =>
+      PROFILELESS_ACCOUNT_ROLES.has(user.value?.role || '') ||
+      profileStatus.value === 'submitted',
   )
 
   // 检查会话
@@ -25,8 +29,8 @@ export const useAuthStore = defineStore('auth', () => {
       const response = await api.get('/api/auth/user')
       if (response.data.success && response.data.data) {
         user.value = response.data.data
-        // BOSS账号仅用于经营看板，不建立员工档案。
-        if (user.value?.role === 'boss') {
+        // 独立系统账号不建立员工档案。
+        if (PROFILELESS_ACCOUNT_ROLES.has(user.value?.role || '')) {
           profileStatus.value = 'none'
         } else {
           await fetchProfileStatus()
@@ -47,7 +51,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   // 获取员工信息状态
   async function fetchProfileStatus() {
-    if (user.value?.role === 'boss') {
+    if (PROFILELESS_ACCOUNT_ROLES.has(user.value?.role || '')) {
       profileStatus.value = 'none'
       return
     }

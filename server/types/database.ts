@@ -10,6 +10,7 @@ export interface User {
   avatar_url: string | null;
   role:
     | "super_admin"
+    | "chairman"
     | "admin"
     | "general_manager"
     | "boss"
@@ -326,6 +327,11 @@ export interface ProbationConfirmation {
   department_snapshot: string | null;
   position_snapshot: string | null;
   supervisor_id: string | null;
+  supervisor_name_snapshot: string | null;
+  hr_approver_id: string | null;
+  hr_approver_name_snapshot: string | null;
+  chairman_id: string | null;
+  chairman_name_snapshot: string | null;
   submit_time: string | null;
   approve_time: string | null;
   approver_id: string | null;

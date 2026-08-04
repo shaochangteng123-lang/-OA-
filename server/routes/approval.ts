@@ -12,6 +12,7 @@ import { requireAuth, requireAdmin, requireRole } from '../middleware/auth.js'
 import { validateFilePath } from '../utils/file-validation.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 import type { PoolClient } from 'pg'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -54,7 +55,7 @@ function formatDateTime(isoString: string | null): string {
 // 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
 function normalizeReimbursementTitle(title: string): string {
   const match = title.match(
-    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/
+    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/,
   )
   if (match) {
     return `${match[1]}-${match[2]}`
@@ -84,13 +85,13 @@ router.get('/statistics', requireAdmin, async (req, res) => {
     // 计算当月开始时间（北京时间 00:00:00）
     const monthStartBeijing = new Date(Date.UTC(year, month, 1, 0, 0, 0))
     const monthStart = new Date(
-      monthStartBeijing.getTime() - 8 * 60 * 60 * 1000
+      monthStartBeijing.getTime() - 8 * 60 * 60 * 1000,
     ).toISOString()
 
     // 计算当月结束时间（北京时间 23:59:59）
     const monthEndBeijing = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59))
     const monthEnd = new Date(
-      monthEndBeijing.getTime() - 8 * 60 * 60 * 1000
+      monthEndBeijing.getTime() - 8 * 60 * 60 * 1000,
     ).toISOString()
 
     // 财务区审批中心：排除转正类型（转正只在人力资源区审批中心）
@@ -122,7 +123,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
       AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
       ${typeFilter}
-    `
+    `,
       )
       .get()) as { count: number }
 
@@ -139,7 +140,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       AND r.status NOT IN ('draft', 'rejected')
       ${reimbursementTypeFilter}
       GROUP BY r.type
-    `
+    `,
       )
       .all(monthStart, monthEnd)) as Array<{
       type: string
@@ -159,7 +160,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       SELECT COUNT(*) as count FROM reimbursements r
       WHERE r.status = 'approved'
       ${reimbursementTypeFilter}
-    `
+    `,
       )
       .get()) as { count: number }
 
@@ -171,7 +172,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       WHERE r.status IN ('payment_uploaded', 'completed')
       AND r.pay_time >= ? AND r.pay_time <= ?
       ${reimbursementTypeFilter}
-    `
+    `,
       )
       .get(monthStart, monthEnd)) as { count: number; amount: number }
 
@@ -183,7 +184,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
       WHERE r.status = 'completed'
       AND r.completed_time >= ? AND r.completed_time <= ?
       ${reimbursementTypeFilter}
-    `
+    `,
       )
       .get(monthStart, monthEnd)) as { count: number; amount: number }
 
@@ -200,14 +201,14 @@ router.get('/statistics', requireAdmin, async (req, res) => {
         // 按类型统计当月数据
         basicStats: typeStatsMap['basic'] || { count: 0, amount: 0 },
         largeStats: typeStatsMap['large'] || { count: 0, amount: 0 },
-        businessStats: typeStatsMap['business'] || { count: 0, amount: 0 }
-      }
+        businessStats: typeStatsMap['business'] || { count: 0, amount: 0 },
+      },
     })
   } catch (error) {
     console.error('获取审批统计失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取审批统计失败'
+      message: '获取审批统计失败',
     })
   }
 })
@@ -227,13 +228,13 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
       'approved',
       'paid',
       'payment_uploaded',
-      'completed'
+      'completed',
     ]
     if (status) {
       if (!allowedStatuses.includes(status)) {
         return res.status(400).json({
           success: false,
-          message: `无效的状态筛选值，允许的值: ${allowedStatuses.join(', ')}`
+          message: `无效的状态筛选值，允许的值: ${allowedStatuses.join(', ')}`,
         })
       }
       conditions.push('r.status = ?')
@@ -272,7 +273,7 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ${conditions.join(' AND ')}
       ORDER BY r.approve_time DESC
-    `
+    `,
       )
       .all(...params)) as Array<any>
 
@@ -297,14 +298,14 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
         userId: r.user_id,
         reimbursementScope: r.reimbursement_scope,
         invoiceCategories: formatInvoiceCategories(r.invoice_categories),
-        paymentBatchId: r.payment_batch_id
-      }))
+        paymentBatchId: r.payment_batch_id,
+      })),
     })
   } catch (error) {
     console.error('获取已通过未付款列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取已通过未付款列表失败'
+      message: '获取已通过未付款列表失败',
     })
   }
 })
@@ -326,7 +327,7 @@ router.get('/paid-this-month', requireAdmin, async (req, res) => {
       const monthStart = new Date(
         now.getFullYear(),
         now.getMonth(),
-        1
+        1,
       ).toISOString()
       const monthEnd = new Date(
         now.getFullYear(),
@@ -334,7 +335,7 @@ router.get('/paid-this-month', requireAdmin, async (req, res) => {
         0,
         23,
         59,
-        59
+        59,
       ).toISOString()
       conditions.push('r.pay_time >= ? AND r.pay_time <= ?')
       params.push(monthStart, monthEnd)
@@ -375,7 +376,7 @@ router.get('/paid-this-month', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ${conditions.join(' AND ')}
       ORDER BY r.pay_time DESC
-    `
+    `,
       )
       .all(...params)) as Array<any>
 
@@ -400,14 +401,14 @@ router.get('/paid-this-month', requireAdmin, async (req, res) => {
         receiptConfirmedBy: r.receipt_confirmed_by,
         userId: r.user_id,
         reimbursementScope: r.reimbursement_scope,
-        invoiceCategories: formatInvoiceCategories(r.invoice_categories)
-      }))
+        invoiceCategories: formatInvoiceCategories(r.invoice_categories),
+      })),
     })
   } catch (error) {
     console.error('获取本月已付款列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取本月已付款列表失败'
+      message: '获取本月已付款列表失败',
     })
   }
 })
@@ -420,7 +421,7 @@ router.get('/completed-this-month', requireAdmin, async (req, res) => {
     const monthStart = new Date(
       now.getFullYear(),
       now.getMonth(),
-      1
+      1,
     ).toISOString()
     const monthEnd = new Date(
       now.getFullYear(),
@@ -428,7 +429,7 @@ router.get('/completed-this-month', requireAdmin, async (req, res) => {
       0,
       23,
       59,
-      59
+      59,
     ).toISOString()
 
     const reimbursements = (await db
@@ -443,7 +444,7 @@ router.get('/completed-this-month', requireAdmin, async (req, res) => {
       WHERE r.status = 'completed'
       AND r.completed_time >= ? AND r.completed_time <= ?
       ORDER BY r.completed_time DESC
-    `
+    `,
       )
       .all(monthStart, monthEnd)) as Array<any>
 
@@ -466,14 +467,14 @@ router.get('/completed-this-month', requireAdmin, async (req, res) => {
         completedTime: formatDateTime(r.completed_time),
         paymentProofPath: r.payment_proof_path,
         receiptConfirmedBy: r.receipt_confirmed_by,
-        userId: r.user_id
-      }))
+        userId: r.user_id,
+      })),
     })
   } catch (error) {
     console.error('获取本月已完成列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取本月已完成列表失败'
+      message: '获取本月已完成列表失败',
     })
   }
 })
@@ -489,7 +490,7 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
         `
       SELECT bank_account_name, bank_account_phone, bank_name, bank_account_number
       FROM employee_profiles WHERE user_id = ?
-    `
+    `,
       )
       .get(userId)) as
       | {
@@ -508,8 +509,8 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
           bankAccountName: profile.bank_account_name,
           bankAccountPhone: profile.bank_account_phone,
           bankName: profile.bank_name,
-          bankAccountNumber: profile.bank_account_number
-        }
+          bankAccountNumber: profile.bank_account_number,
+        },
       })
     }
 
@@ -519,7 +520,7 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
         `
       SELECT bank_account_name, bank_account_phone, bank_name, bank_account_number
       FROM users WHERE id = ?
-    `
+    `,
       )
       .get(userId)) as
       | {
@@ -533,7 +534,7 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: '用户不存在'
+        message: '用户不存在',
       })
     }
 
@@ -543,14 +544,14 @@ router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
         bankAccountName: user.bank_account_name,
         bankAccountPhone: user.bank_account_phone,
         bankName: user.bank_name,
-        bankAccountNumber: user.bank_account_number
-      }
+        bankAccountNumber: user.bank_account_number,
+      },
     })
   } catch (error) {
     console.error('获取收款人信息失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取收款人信息失败'
+      message: '获取收款人信息失败',
     })
   }
 })
@@ -565,14 +566,14 @@ router.get('/by-target', requireAuth, async (req, res) => {
     if (!targetId || !targetType) {
       return res.status(400).json({
         success: false,
-        message: '缺少必要参数'
+        message: '缺少必要参数',
       })
     }
 
     if (!userId) {
       return res.status(401).json({
         success: false,
-        message: '未登录'
+        message: '未登录',
       })
     }
 
@@ -591,7 +592,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
       WHERE target_id = ? AND target_type = ?
       ORDER BY created_at DESC
       LIMIT 1
-    `
+    `,
       )
       .get(targetId, targetType)) as ApprovalInstance | undefined
 
@@ -600,14 +601,15 @@ router.get('/by-target', requireAuth, async (req, res) => {
         success: true,
         data: {
           instance: null,
-          records: []
-        }
+          records: [],
+        },
       })
     }
 
     // 权限校验：只允许申请人、审批人、管理员或总经理（商务报销）查看
     const isApplicant = instance.applicant_id === userId
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin =
+      userRole === 'admin' || isSystemAdminEquivalentRole(userRole)
     const isGMForBusiness =
       userRole === 'general_manager' &&
       instance.type === 'reimbursement_business'
@@ -618,7 +620,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
         `
       SELECT COUNT(*) as count FROM approval_records
       WHERE instance_id = ? AND approver_id = ?
-    `
+    `,
       )
       .get(instance.id, userId)) as { count: number }
     const isApprover = approvalRecord.count > 0
@@ -629,7 +631,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
       'userRole:',
       userRole,
       'instance.type:',
-      instance.type
+      instance.type,
     )
     console.log(
       '[by-target] isApplicant:',
@@ -639,13 +641,13 @@ router.get('/by-target', requireAuth, async (req, res) => {
       'isGMForBusiness:',
       isGMForBusiness,
       'isApprover:',
-      isApprover
+      isApprover,
     )
 
     if (!isApplicant && !isApprover && !isAdmin && !isGMForBusiness) {
       return res.status(403).json({
         success: false,
-        message: '无权查看该审批记录'
+        message: '无权查看该审批记录',
       })
     }
 
@@ -662,7 +664,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
       LEFT JOIN users u ON ar.approver_id = u.id
       WHERE ai.target_id = ? AND ai.target_type = ?
       ORDER BY ar.action_time ASC
-    `
+    `,
       )
       .all(targetId, targetType)) as Array<
       ApprovalRecord & { approver_name: string; approver_avatar: string | null }
@@ -674,8 +676,8 @@ router.get('/by-target', requireAuth, async (req, res) => {
       records.map((r) => ({
         action: r.action,
         approver: r.approver_name,
-        comment: r.comment
-      }))
+        comment: r.comment,
+      })),
     )
 
     // 获取报销单最新状态（用于前端实时展示）
@@ -684,7 +686,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
         `
       SELECT status, description, payment_proof_path, pay_time, paid_time, paid_by, payment_upload_time, completed_time, receipt_confirmed_by, payment_batch_id
       FROM reimbursements WHERE id = ?
-    `
+    `,
       )
       .get(targetId)) as
       | {
@@ -706,14 +708,14 @@ router.get('/by-target', requireAuth, async (req, res) => {
       .prepare(
         `
       SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
-    `
+    `,
       )
       .get()) as { name: string } | undefined
     const gmUser = (await db
       .prepare(
         `
       SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
-    `
+    `,
       )
       .get()) as { name: string } | undefined
 
@@ -724,7 +726,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
           id: instance.id,
           status: instance.status,
           submitTime: formatDateTime(instance.submit_time),
-          completeTime: formatDateTime(instance.complete_time)
+          completeTime: formatDateTime(instance.complete_time),
         },
         records: records.map((record) => ({
           id: record.id,
@@ -734,7 +736,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
           approverAvatar: record.approver_avatar,
           action: record.action,
           comment: record.comment,
-          actionTime: formatDateTime(record.action_time)
+          actionTime: formatDateTime(record.action_time),
         })),
         reimbursementStatus: reimbursement?.status,
         reimbursementDescription: reimbursement?.description,
@@ -755,14 +757,14 @@ router.get('/by-target', requireAuth, async (req, res) => {
           : null,
         receiptConfirmedBy: reimbursement?.receipt_confirmed_by,
         adminApproverName: adminUser?.name || null,
-        gmApproverName: gmUser?.name || null
-      }
+        gmApproverName: gmUser?.name || null,
+      },
     })
   } catch (error) {
     console.error('获取审批记录失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取审批记录失败'
+      message: '获取审批记录失败',
     })
   }
 })
@@ -789,7 +791,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
     const conditions: string[] = [
       `ai.status NOT IN ('rejected', 'withdrawn', 'cancelled')`,
       `(ai.target_type != 'reimbursement' OR r.id IS NOT NULL)`,
-      `ai.target_type != 'probation'`
+      `ai.target_type != 'probation'`,
     ]
     const params: unknown[] = []
 
@@ -817,7 +819,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
       conditions.push(`r.status = 'completed'`)
     } else {
       conditions.push(
-        `(ai.target_type != 'reimbursement' OR r.status != 'completed')`
+        `(ai.target_type != 'reimbursement' OR r.status != 'completed')`,
       )
       if (status === 'pending') {
         conditions.push(`ai.status = 'pending'`)
@@ -882,7 +884,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
           ELSE 4
         END,
         ai.submit_time ASC
-    `
+    `,
       )
       .all(...params)) as Array<
       ApprovalInstance & {
@@ -919,22 +921,22 @@ router.get('/pending', requireAdmin, async (req, res) => {
           instance.reimbursement_title
             ? {
                 title: normalizeReimbursementTitle(
-                  instance.reimbursement_title
+                  instance.reimbursement_title,
                 ),
-                amount: instance.reimbursement_amount || 0
+                amount: instance.reimbursement_amount || 0,
               }
             : null,
         reimbursementUserId: instance.reimbursement_user_id,
         reimbursementType: instance.reimbursement_type,
         reimbursementScope: instance.reimbursement_scope,
-        invoiceCategories: formatInvoiceCategories(instance.invoice_categories)
-      }))
+        invoiceCategories: formatInvoiceCategories(instance.invoice_categories),
+      })),
     })
   } catch (error) {
     console.error('获取待审批列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取待审批列表失败'
+      message: '获取待审批列表失败',
     })
   }
 })
@@ -950,7 +952,7 @@ router.get('/my-submissions', requireAuth, async (req, res) => {
       SELECT * FROM approval_instances
       WHERE applicant_id = ?
       ORDER BY submit_time DESC
-    `
+    `,
       )
       .all(userId)) as ApprovalInstance[]
 
@@ -965,14 +967,14 @@ router.get('/my-submissions', requireAuth, async (req, res) => {
         status: instance.status,
         submitTime: formatDateTime(instance.submit_time),
         completeTime: formatDateTime(instance.complete_time),
-        createdAt: formatDateTime(instance.created_at)
-      }))
+        createdAt: formatDateTime(instance.created_at),
+      })),
     })
   } catch (error) {
     console.error('获取我的审批列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取我的审批列表失败'
+      message: '获取我的审批列表失败',
     })
   }
 })
@@ -988,14 +990,14 @@ router.get('/processed', requireAdmin, async (req, res) => {
         `
       SELECT DISTINCT instance_id FROM approval_records
       WHERE approver_id = ?
-    `
+    `,
       )
       .all(userId)) as Array<{ instance_id: string }>
 
     if (processedRecords.length === 0) {
       return res.json({
         success: true,
-        data: []
+        data: [],
       })
     }
 
@@ -1013,7 +1015,7 @@ router.get('/processed', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON ai.applicant_id = u.id
       WHERE ai.id IN (${placeholders})
       ORDER BY ai.updated_at DESC
-    `
+    `,
       )
       .all(...instanceIds)) as Array<
       ApprovalInstance & {
@@ -1036,14 +1038,14 @@ router.get('/processed', requireAdmin, async (req, res) => {
         status: instance.status,
         submitTime: formatDateTime(instance.submit_time),
         completeTime: formatDateTime(instance.complete_time),
-        createdAt: formatDateTime(instance.created_at)
-      }))
+        createdAt: formatDateTime(instance.created_at),
+      })),
     })
   } catch (error) {
     console.error('获取已处理审批列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取已处理审批列表失败'
+      message: '获取已处理审批列表失败',
     })
   }
 })
@@ -1055,16 +1057,16 @@ router.get(
   requireRole(['super_admin', 'admin', 'general_manager']),
   async (req, res) => {
     try {
-      // 排除系统管理员账号（super_admin 角色）
+      // 排除不建立员工档案的系统账号。
       const employees = (await db
         .prepare(
           `
       SELECT id, name, username, department, position
       FROM users
       WHERE status = 'active'
-      AND role != 'super_admin'
+      AND role NOT IN ('super_admin', 'chairman', 'boss')
       ORDER BY name ASC
-    `
+    `,
         )
         .all()) as Array<{
         id: string
@@ -1081,17 +1083,17 @@ router.get(
           name: e.name,
           username: e.username,
           department: e.department,
-          position: e.position
-        }))
+          position: e.position,
+        })),
       })
     } catch (error) {
       console.error('获取员工列表失败:', error)
       res.status(500).json({
         success: false,
-        message: '获取员工列表失败'
+        message: '获取员工列表失败',
       })
     }
-  }
+  },
 )
 
 // 员工报销汇总查询
@@ -1103,7 +1105,7 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
     if (!userId || !startDate || !endDate) {
       return res.status(400).json({
         success: false,
-        message: '请选择员工和日期范围'
+        message: '请选择员工和日期范围',
       })
     }
 
@@ -1115,7 +1117,7 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
     if (!employee) {
       return res.status(404).json({
         success: false,
-        message: '员工不存在'
+        message: '员工不存在',
       })
     }
 
@@ -1134,7 +1136,7 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
         AND created_at <= ?
         AND status NOT IN ('draft', 'rejected')
       GROUP BY type
-    `
+    `,
       )
       .all(userId, startDate, endDate + 'T23:59:59.999Z')) as Array<{
       type: string
@@ -1156,14 +1158,14 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
         AND created_at <= ?
         AND status NOT IN ('draft', 'rejected')
       ORDER BY created_at DESC
-    `
+    `,
       )
       .all(userId, startDate, endDate + 'T23:59:59.999Z')) as Array<any>
 
     // 计算总金额
     const totalAmount = summaryByType.reduce(
       (sum, item) => sum + item.amount,
-      0
+      0,
     )
     const totalCount = summaryByType.reduce((sum, item) => sum + item.count, 0)
 
@@ -1171,7 +1173,7 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 状态映射
@@ -1179,7 +1181,7 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
       pending: '待审批',
       approved: '已审批',
       payment_uploaded: '已付款',
-      completed: '已完成'
+      completed: '已完成',
     }
 
     res.json({
@@ -1187,23 +1189,23 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
       data: {
         employee: {
           id: employee.id,
-          name: employee.name
+          name: employee.name,
         },
         dateRange: {
           startDate,
-          endDate
+          endDate,
         },
         summary: {
           total: {
             count: totalCount,
-            amount: totalAmount
+            amount: totalAmount,
           },
           byType: summaryByType.map((item) => ({
             type: item.type,
             typeName: typeMap[item.type] || item.type,
             count: item.count,
-            amount: item.amount
-          }))
+            amount: item.amount,
+          })),
         },
         details: details.map((item) => ({
           id: item.id,
@@ -1216,15 +1218,15 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
           submitTime: formatDateTime(item.submitTime),
           approveTime: formatDateTime(item.approveTime),
           createTime: formatDateTime(item.createTime),
-          isDeleted: item.isDeleted === true
-        }))
-      }
+          isDeleted: item.isDeleted === true,
+        })),
+      },
     })
   } catch (error) {
     console.error('获取员工报销汇总失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取员工报销汇总失败'
+      message: '获取员工报销汇总失败',
     })
   }
 })
@@ -1301,7 +1303,7 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
       ORDER BY r.created_at DESC
-    `
+    `,
       )
       .all(...params)) as Array<any>
 
@@ -1309,7 +1311,7 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 状态映射
@@ -1319,7 +1321,7 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
       approved: '待付款',
       rejected: '已驳回',
       payment_uploaded: '待确认',
-      completed: '已完成'
+      completed: '已完成',
     }
 
     // 已付款状态：金额显示实际银行转账金额（与银行流水对应）
@@ -1358,15 +1360,15 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
           reimbursementScope: r.reimbursement_scope,
           invoiceCategories: formatInvoiceCategories(r.invoice_categories),
           createdAt: formatDateTime(r.created_at),
-          userId: r.user_id
+          userId: r.user_id,
         }
-      })
+      }),
     })
   } catch (error) {
     console.error('获取全部报销记录失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取全部报销记录失败'
+      message: '获取全部报销记录失败',
     })
   }
 })
@@ -1402,7 +1404,7 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
       WHERE r.status IN ('payment_uploaded', 'completed')
       AND r.pay_time >= ? AND r.pay_time <= ?
       ORDER BY u.name ASC, r.pay_time DESC
-    `
+    `,
       )
       .all(monthStart, monthEnd)) as Array<any>
 
@@ -1410,13 +1412,13 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 状态映射
     const statusMap: Record<string, string> = {
       payment_uploaded: '待确认',
-      completed: '已完成'
+      completed: '已完成',
     }
 
     // 按员工分组统计
@@ -1443,7 +1445,7 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
           position: r.applicant_position,
           totalAmount: 0,
           count: 0,
-          details: []
+          details: [],
         }
       }
 
@@ -1460,7 +1462,7 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
         status: r.status,
         statusName: statusMap[r.status] || r.status,
         payTime: formatDateTime(r.pay_time),
-        completedTime: formatDateTime(r.completed_time)
+        completedTime: formatDateTime(r.completed_time),
       })
     }
 
@@ -1468,8 +1470,8 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
     const employeeList = Object.entries(employeeSummary).map(
       ([userId, data]) => ({
         userId,
-        ...data
-      })
+        ...data,
+      }),
     )
 
     res.json({
@@ -1480,16 +1482,16 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
         summary: {
           totalAmount: grandTotal,
           totalCount: reimbursements.length,
-          employeeCount: employeeList.length
+          employeeCount: employeeList.length,
         },
-        employees: employeeList
-      }
+        employees: employeeList,
+      },
     })
   } catch (error) {
     console.error('导出月度报销数据失败:', error)
     res.status(500).json({
       success: false,
-      message: '导出月度报销数据失败'
+      message: '导出月度报销数据失败',
     })
   }
 })
@@ -1525,7 +1527,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
     if (!dateType || !finalStartDate || !finalEndDate) {
       return res.status(400).json({
         success: false,
-        message: '请提供查询参数'
+        message: '请提供查询参数',
       })
     }
 
@@ -1586,7 +1588,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
 
     const params: any[] = [
       `${startDateStr}T00:00:00.000Z`,
-      `${endDateStr}T23:59:59.999Z`
+      `${endDateStr}T23:59:59.999Z`,
     ]
 
     if (userId) {
@@ -1602,7 +1604,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 按员工分组统计
@@ -1630,7 +1632,7 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
           department: d.user_department,
           deductionAmount: 0,
           deductionCount: 0,
-          details: []
+          details: [],
         }
       }
 
@@ -1648,13 +1650,13 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
         originalAmount: d.original_amount || d.total_amount + deductionAmount,
         deductionAmount: deductionAmount,
         deductionReason: d.deduction_reason,
-        submitTime: formatDateTime(d.submit_time)
+        submitTime: formatDateTime(d.submit_time),
       })
     }
 
     // 转换为数组并按核减金额降序排序
     const employees = Object.values(employeeMap).sort(
-      (a, b) => b.deductionAmount - a.deductionAmount
+      (a, b) => b.deductionAmount - a.deductionAmount,
     )
 
     res.json({
@@ -1664,14 +1666,14 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
         totalDeduction,
         totalCount,
         employeeCount: employees.length,
-        employees
-      }
+        employees,
+      },
     })
   } catch (error) {
     console.error('查询核减金额失败:', error)
     res.status(500).json({
       success: false,
-      message: '查询核减金额失败'
+      message: '查询核减金额失败',
     })
   }
 })
@@ -1690,7 +1692,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
-        message: '无权访问'
+        message: '无权访问',
       })
     }
 
@@ -1699,7 +1701,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
     const monthStart = new Date(
       now.getFullYear(),
       now.getMonth(),
-      1
+      1,
     ).toISOString()
     const monthEnd = new Date(
       now.getFullYear(),
@@ -1707,7 +1709,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
       0,
       23,
       59,
-      59
+      59,
     ).toISOString()
 
     // 1. 待审批数量和金额（只统计商务报销，转正申请在人力资源区审批中心）
@@ -1719,13 +1721,13 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
       INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
       WHERE ai.status = 'pending'
       AND r.type = 'business'
-    `
+    `,
       )
       .get()) as { count: number; amount: number }
 
     const pendingStats = {
       count: pendingReimbursement.count,
-      amount: pendingReimbursement.amount
+      amount: pendingReimbursement.amount,
     }
 
     // 2. 本月已审批数量（包括通过和驳回的商务报销）
@@ -1738,7 +1740,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
       WHERE ai.status IN ('approved', 'rejected')
       AND r.type = 'business'
       AND ai.updated_at >= ? AND ai.updated_at <= ?
-    `
+    `,
       )
       .get(monthStart, monthEnd)) as { count: number; amount: number }
 
@@ -1750,7 +1752,7 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
       FROM reimbursements
       WHERE type = 'business'
       AND status = 'completed'
-    `
+    `,
       )
       .get()) as { count: number; amount: number }
 
@@ -1763,14 +1765,14 @@ router.get('/gm-statistics', requireAuth, async (req, res) => {
         completedThisMonthAmount: completedThisMonth.amount,
         completedCount: completedAll.count,
         completedAmount: completedAll.amount,
-        currentMonth: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-      }
+        currentMonth: `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`,
+      },
     })
   } catch (error) {
     console.error('获取总经理审批统计失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取统计数据失败'
+      message: '获取统计数据失败',
     })
   }
 })
@@ -1787,7 +1789,7 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
-        message: '无权访问'
+        message: '无权访问',
       })
     }
 
@@ -1819,7 +1821,7 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
       WHERE ai.status = 'pending'
       AND r.type = 'business'
       ORDER BY ai.submit_time ASC
-    `
+    `,
       )
       .all()) as Array<{
       id: string
@@ -1856,24 +1858,24 @@ router.get('/gm-pending', requireAuth, async (req, res) => {
       createdAt: formatDateTime(item.created_at),
       reimbursementInfo: {
         title: normalizeReimbursementTitle(item.reimbursement_title),
-        amount: item.reimbursement_amount
+        amount: item.reimbursement_amount,
       },
       reimbursementType: item.reimbursement_type,
       reimbursementScope: item.reimbursement_scope,
       client: item.client,
       serviceTarget: item.service_target,
-      reimbursementStatus: item.reimbursement_status
+      reimbursementStatus: item.reimbursement_status,
     }))
 
     res.json({
       success: true,
-      data: result
+      data: result,
     })
   } catch (error) {
     console.error('获取总经理待审批列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取待审批列表失败'
+      message: '获取待审批列表失败',
     })
   }
 })
@@ -1890,7 +1892,7 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
-        message: '无权访问'
+        message: '无权访问',
       })
     }
 
@@ -1899,7 +1901,7 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
     const monthStart = new Date(
       now.getFullYear(),
       now.getMonth(),
-      1
+      1,
     ).toISOString()
     const monthEnd = new Date(
       now.getFullYear(),
@@ -1907,7 +1909,7 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
       0,
       23,
       59,
-      59
+      59,
     ).toISOString()
 
     // 查询本月已审批的商务报销（用子查询取每张报销单最新的审批实例，避免重复）
@@ -1945,7 +1947,7 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
       AND ai.status IN ('approved', 'rejected')
       AND ai.updated_at >= ? AND ai.updated_at <= ?
       ORDER BY ai.updated_at DESC
-    `
+    `,
       )
       .all(monthStart, monthEnd)) as Array<{
       id: string
@@ -1986,18 +1988,18 @@ router.get('/gm-completed', requireAuth, async (req, res) => {
       paymentUploadTime: formatDateTime(item.payment_upload_time),
       reimbursementScope: item.reimbursement_scope,
       client: item.client,
-      serviceTarget: item.service_target
+      serviceTarget: item.service_target,
     }))
 
     res.json({
       success: true,
-      data: result
+      data: result,
     })
   } catch (error) {
     console.error('获取总经理已审批列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取已审批列表失败'
+      message: '获取已审批列表失败',
     })
   }
 })
@@ -2012,7 +2014,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       userId: filterUserId,
       reimbursementScope,
       startDate,
-      endDate
+      endDate,
     } = req.query
 
     // 检查是否是总经理
@@ -2022,7 +2024,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
     if (!user || user.role !== 'general_manager') {
       return res.status(403).json({
         success: false,
-        message: '无权访问'
+        message: '无权访问',
       })
     }
 
@@ -2069,7 +2071,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
         '[GM-ALL] Date filter - startDate:',
         startDate,
         '-> UTC:',
-        startISO
+        startISO,
       )
     }
 
@@ -2095,7 +2097,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
       ORDER BY r.created_at DESC
-    `
+    `,
       )
       .all(...params)) as Array<any>
 
@@ -2103,7 +2105,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 状态映射
@@ -2113,7 +2115,7 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       approved: '待付款',
       rejected: '已驳回',
       payment_uploaded: '待确认',
-      completed: '已完成'
+      completed: '已完成',
     }
 
     const result = reimbursements.map((item) => ({
@@ -2138,18 +2140,18 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       reimbursementScope: item.reimbursement_scope,
       client: item.client,
       serviceTarget: item.service_target,
-      createdAt: formatDateTime(item.created_at)
+      createdAt: formatDateTime(item.created_at),
     }))
 
     res.json({
       success: true,
-      data: result
+      data: result,
     })
   } catch (error) {
     console.error('获取总经理全部查询列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取全部查询列表失败'
+      message: '获取全部查询列表失败',
     })
   }
 })
@@ -2243,7 +2245,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
       ORDER BY ri.invoice_date DESC, ri.created_at DESC
-    `
+    `,
       )
       .all(...params)) as Array<any>
 
@@ -2261,7 +2263,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
         AND ri.is_deduction = 1
-    `
+    `,
       )
       .get(...params)) as { total: number }
 
@@ -2269,7 +2271,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
     const typeMap: Record<string, string> = {
       basic: '基础报销',
       large: '大额报销',
-      business: '商务报销'
+      business: '商务报销',
     }
 
     // 判断文件类型（发票 PDF 或收据图片）
@@ -2300,7 +2302,7 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         reimbursementTypeName:
           typeMap[inv.reimbursement_type] || inv.reimbursement_type,
         reimbursementTitle: normalizeReimbursementTitle(
-          inv.reimbursement_title || ''
+          inv.reimbursement_title || '',
         ),
         reimbursementScope: inv.reimbursement_scope,
         reimbursementStatus: inv.reimbursement_status,
@@ -2308,16 +2310,16 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
         userId: inv.user_id,
         userName: inv.user_name,
         userDepartment: inv.user_department,
-        createdAt: formatDateTime(inv.created_at)
+        createdAt: formatDateTime(inv.created_at),
       })),
       // 核减发票总金额（单独返回，前端不再使用，保留兼容性）
-      deductionInvoicesTotal: deductionInvoicesTotal.total || 0
+      deductionInvoicesTotal: deductionInvoicesTotal.total || 0,
     })
   } catch (error) {
     console.error('查询发票列表失败:', error)
     res.status(500).json({
       success: false,
-      message: '查询发票列表失败'
+      message: '查询发票列表失败',
     })
   }
 })
@@ -2353,7 +2355,7 @@ router.post(
         try {
           const pdfBytes = fs.readFileSync(fullPath)
           const pdf = await PDFDocument.load(pdfBytes, {
-            ignoreEncryption: true
+            ignoreEncryption: true,
           })
           const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices())
           pages.forEach((page) => mergedPdf.addPage(page))
@@ -2366,14 +2368,14 @@ router.post(
       res.setHeader('Content-Type', 'application/pdf')
       res.setHeader(
         'Content-Disposition',
-        'inline; filename="invoices-print.pdf"'
+        'inline; filename="invoices-print.pdf"',
       )
       res.send(Buffer.from(mergedBytes))
     } catch (error) {
       console.error('合并 PDF 失败:', error)
       res.status(500).json({ success: false, message: '合并 PDF 失败' })
     }
-  }
+  },
 )
 
 // 发票管理 - 批量下载发票（ZIP打包）
@@ -2391,7 +2393,7 @@ router.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: '请选择要下载的发票'
+          message: '请选择要下载的发票',
         })
       }
 
@@ -2412,14 +2414,14 @@ router.post(
       INNER JOIN reimbursements r ON ri.reimbursement_id = r.id
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ri.id IN (${placeholders})
-    `
+    `,
         )
         .all(...invoiceIds)) as Array<any>
 
       if (invoices.length === 0) {
         return res.status(404).json({
           success: false,
-          message: '未找到发票'
+          message: '未找到发票',
         })
       }
 
@@ -2436,12 +2438,12 @@ router.post(
       res.setHeader('Content-Type', 'application/zip')
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="invoices_${timestamp}.zip"`
+        `attachment; filename="invoices_${timestamp}.zip"`,
       )
 
       // 创建 ZIP 归档
       const archive = archiver('zip', {
-        zlib: { level: 9 } // 最高压缩级别
+        zlib: { level: 9 }, // 最高压缩级别
       })
 
       // 监听错误
@@ -2449,7 +2451,7 @@ router.post(
         console.error('ZIP 创建失败:', err)
         res.status(500).json({
           success: false,
-          message: 'ZIP 创建失败'
+          message: 'ZIP 创建失败',
         })
       })
 
@@ -2494,11 +2496,11 @@ router.post(
       if (!res.headersSent) {
         res.status(500).json({
           success: false,
-          message: '批量下载发票失败'
+          message: '批量下载发票失败',
         })
       }
     }
-  }
+  },
 )
 
 // 获取审批详情
@@ -2523,21 +2525,40 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       SELECT COUNT(*) as count
       FROM probation_confirmations pc
       JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
       WHERE pc.status = 'submitted'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
         AND COALESCE(ep.user_id, '') <> ?
         AND (
           (pc.review_stage = 'supervisor' AND pc.supervisor_id = ?)
-          OR (pc.review_stage = 'hr' AND ? IN ('admin', 'super_admin'))
-          OR (pc.review_stage = 'general_manager' AND ? IN ('admin', 'super_admin'))
+          OR (
+            pc.review_stage = 'hr'
+            AND (
+              (pc.hr_approver_id IS NOT NULL AND pc.hr_approver_id = ?)
+              OR (
+                pc.hr_approver_id IS NULL
+                AND ? IN ('admin', 'super_admin')
+              )
+            )
+          )
+          OR (
+            pc.review_stage = 'general_manager'
+            AND (
+              (pc.chairman_id IS NOT NULL AND pc.chairman_id = ?)
+              OR (pc.chairman_id IS NULL AND ? = 'chairman')
+            )
+          )
         )
-    `
+    `,
       )
-      .get(userId, userId, user.role, user.role)) as { count: number }
+      .get(userId, userId, userId, user.role, userId, user.role)) as {
+      count: number
+    }
     data.probationSignaturePending = Number(probationSignaturePending.count)
 
     // Admin/Super Admin: 审批中心待办（包含所有未完成流程：pending、approved、payment_uploaded）
     // 财务区审批中心：排除转正类型（转正只在人力资源区审批中心）
-    if (user.role === 'admin' || user.role === 'super_admin') {
+    if (user.role === 'admin' || isSystemAdminEquivalentRole(user.role)) {
       // admin 统计基础和大额报销的全部流程 + 商务报销的待付款流程，super_admin 统计所有报销
       const typeFilter =
         user.role === 'admin'
@@ -2555,12 +2576,12 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         AND (ai.target_type != 'reimbursement' OR r.id IS NOT NULL)
         AND (ai.target_type != 'reimbursement' OR r.status != 'completed')
         ${typeFilter}
-      `
+      `,
         )
         .get()) as { count: number }
       data.approvalPending = approvalPending.count
 
-      // 管理员处理人事部意见，并代签最终总经理审批。
+      // 管理员只处理人事部意见。
       data.probationPending = data.probationSignaturePending
 
       const probationDueSoon = (await db
@@ -2569,12 +2590,14 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         SELECT COUNT(*) as count
         FROM probation_confirmations pc
         INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
         WHERE ep.status = 'submitted'
           AND ep.employment_status = 'probation'
+          AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
           AND pc.status IN ('pending', 'rejected')
           AND pc.probation_end_date ~ '^\\d{4}-\\d{2}-\\d{2}$'
           AND pc.probation_end_date::date <= CURRENT_DATE + INTERVAL '30 days'
-      `
+      `,
         )
         .get()) as { count: number }
       data.probationDueSoon = probationDueSoon.count
@@ -2583,17 +2606,43 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         .prepare(
           `
         SELECT COUNT(*) as count
-        FROM probation_confirmations pc
-        WHERE pc.status = 'approved'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM probation_documents pd
-            WHERE pd.confirmation_id = pc.id
-              AND pd.document_type = 'application'
-              AND pd.source_type = 'official'
-              AND pd.form_version = pc.form_version
+        FROM employee_profiles ep
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+        LEFT JOIN LATERAL (
+          SELECT pc.id, pc.status, pc.form_version
+          FROM probation_confirmations pc
+          WHERE pc.employee_id = ep.id
+          ORDER BY pc.created_at DESC
+          LIMIT 1
+        ) current_confirmation ON TRUE
+        WHERE ep.status = 'submitted'
+          AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
+          AND (
+            (
+              current_confirmation.status = 'approved'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM probation_documents pd
+                WHERE pd.confirmation_id = current_confirmation.id
+                  AND pd.document_type = 'application'
+                  AND pd.source_type = 'official'
+                  AND pd.form_version = current_confirmation.form_version
+              )
+            )
+            OR (
+              current_confirmation.id IS NULL
+              AND ep.employment_status = 'active'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM probation_documents pd
+                WHERE pd.employee_id = ep.id
+                  AND pd.confirmation_id IS NULL
+                  AND pd.document_type = 'application'
+                  AND pd.source_type = 'official'
+              )
+            )
           )
-      `
+      `,
         )
         .get()) as { count: number }
       data.probationArchivePending = Number(probationArchivePending.count)
@@ -2609,7 +2658,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         INNER JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
         WHERE ai.status = 'pending'
         AND r.type = 'business'
-      `
+      `,
         )
         .get()) as { count: number }
 
@@ -2618,21 +2667,26 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       data.probationPending = data.probationSignaturePending
     }
 
-    // 请假待办只属于申请单指定的总经理，管理员仅接收抄送记录。
+    // 董事长处理转正最终审批和分配给本人的总经理请假。
+    if (user.role === 'chairman') {
+      data.probationPending = data.probationSignaturePending
+    }
+
+    // 请假待办只属于申请单指定的总经理或董事长，管理员仅接收抄送记录。
     data.leaveApprovalPending = 0
-    if (user.role === 'general_manager') {
+    if (user.role === 'general_manager' || user.role === 'chairman') {
       const leavePending = (await db
         .prepare(
           `
         SELECT COUNT(*) as count FROM leave_requests
         WHERE status = 'pending' AND approver_id = ?
-      `
+      `,
         )
         .get(userId)) as { count: number }
       data.leaveApprovalPending = leavePending.count
     }
 
-    // 所有用户：本人当前仍待修改重提的请假驳回记录。
+    // 所有用户：本人尚未查看的最新请假驳回记录。
     // 重新提交会创建新版本，已有子版本的历史驳回记录不再重复计数。
     const myLeaveRejected = (await db
       .prepare(
@@ -2641,12 +2695,13 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       FROM leave_requests lr
       WHERE lr.user_id = ?
         AND lr.status = 'rejected'
+        AND lr.rejection_notice_unread = TRUE
         AND NOT EXISTS (
           SELECT 1
           FROM leave_requests child
           WHERE child.original_id = lr.id
         )
-    `
+    `,
       )
       .get(userId)) as { count: number }
     data.myLeaveRejected = myLeaveRejected.count
@@ -2660,7 +2715,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       WHERE user_id = ?
         AND status = 'approved'
         AND approval_notice_unread = TRUE
-    `
+    `,
       )
       .get(userId)) as { count: number }
     data.myLeaveApproved = Number(myLeaveApproved.count)
@@ -2672,7 +2727,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       SELECT type, COUNT(*) as count FROM reimbursements
       WHERE user_id = ? AND status = 'payment_uploaded'
       GROUP BY type
-    `
+    `,
       )
       .all(userId)) as Array<{ type: string; count: number }>
 
@@ -2691,7 +2746,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       SELECT type, COUNT(*) as count FROM reimbursements
       WHERE user_id = ? AND status = 'rejected'
       GROUP BY type
-    `
+    `,
       )
       .all(userId)) as Array<{ type: string; count: number }>
 
@@ -2707,14 +2762,14 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myResignationPending = 0
     data.myHandoverPending = 0
     data.resignationPending = 0
-    if (user.role === 'admin' || user.role === 'super_admin') {
+    if (user.role === 'admin' || isSystemAdminEquivalentRole(user.role)) {
       const resignationPending = (await db
         .prepare(
           `
         SELECT COUNT(*) as count
         FROM resignation_requests
         WHERE status IN ('draft', 'pending_confirmation')
-      `
+      `,
         )
         .get()) as { count: number }
       data.resignationPending = Number(resignationPending.count)
@@ -2727,7 +2782,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       SELECT ep.id, ep.employment_status, ep.hire_date, ep.contract_end_date
       FROM employee_profiles ep
       WHERE ep.user_id = ?
-    `
+    `,
       )
       .get(userId)) as
       | {
@@ -2747,7 +2802,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         .prepare(
           `
         SELECT status FROM probation_confirmations WHERE employee_id = ?
-      `
+      `,
         )
         .get(profile.id)) as { status: string } | undefined
 
@@ -2758,12 +2813,12 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     }
 
     // Admin: 转正被驳回数量（用于人力资源区菜单栏提示）
-    if (user.role === 'admin' || user.role === 'super_admin') {
+    if (user.role === 'admin' || isSystemAdminEquivalentRole(user.role)) {
       const probationRejected = (await db
         .prepare(
           `
         SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'rejected'
-      `
+      `,
         )
         .get()) as { count: number }
       data.probationRejected = probationRejected.count
@@ -2776,7 +2831,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       SELECT COUNT(*) as count FROM daily_log_comments c
       INNER JOIN daily_log_submissions s ON c.submission_id = s.id
       WHERE s.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
-    `
+    `,
       )
       .get(userId, userId)) as { count: number }
     data.unreadLogComments = unreadComments.count
@@ -2785,7 +2840,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     if (
       user.role === 'general_manager' ||
       user.role === 'admin' ||
-      user.role === 'super_admin'
+      isSystemAdminEquivalentRole(user.role)
     ) {
       const unreadReplies = (await db
         .prepare(
@@ -2793,7 +2848,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         SELECT COUNT(*) as count FROM daily_log_comments c
         INNER JOIN daily_log_comments parent ON c.reply_to = parent.id
         WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
-      `
+      `,
         )
         .get(userId, userId)) as { count: number }
       data.unreadTeamLogReplies = unreadReplies.count
@@ -2815,7 +2870,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     if (!userId || !userRole) {
       return res.status(401).json({
         success: false,
-        message: '未登录'
+        message: '未登录',
       })
     }
 
@@ -2829,7 +2884,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       WHERE ai.id = ?
-    `
+    `,
       )
       .get(id)) as
       | (ApprovalInstance & {
@@ -2841,13 +2896,14 @@ router.get('/:id', requireAuth, async (req, res) => {
     if (!instance) {
       return res.status(404).json({
         success: false,
-        message: '审批不存在'
+        message: '审批不存在',
       })
     }
 
     // 权限校验：只允许申请人、审批人、管理员或总经理（商务报销）查看
     const isApplicant = instance.applicant_id === userId
-    const isAdmin = userRole === 'admin' || userRole === 'super_admin'
+    const isAdmin =
+      userRole === 'admin' || isSystemAdminEquivalentRole(userRole)
     const isGMForBusiness =
       userRole === 'general_manager' &&
       instance.type === 'reimbursement_business'
@@ -2858,7 +2914,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         `
       SELECT COUNT(*) as count FROM approval_records
       WHERE instance_id = ? AND approver_id = ?
-    `
+    `,
       )
       .get(id, userId)) as { count: number }
     const isApprover = approvalRecord.count > 0
@@ -2866,7 +2922,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     if (!isApplicant && !isApprover && !isAdmin && !isGMForBusiness) {
       return res.status(403).json({
         success: false,
-        message: '无权查看该审批记录'
+        message: '无权查看该审批记录',
       })
     }
 
@@ -2882,7 +2938,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       LEFT JOIN users u ON ar.approver_id = u.id
       WHERE ar.instance_id = ?
       ORDER BY ar.action_time ASC
-    `
+    `,
       )
       .all(id)) as Array<
       ApprovalRecord & { approver_name: string; approver_avatar: string | null }
@@ -2893,14 +2949,14 @@ router.get('/:id', requireAuth, async (req, res) => {
       .prepare(
         `
       SELECT name FROM users WHERE role IN ('admin', 'super_admin') AND status = 'active' ORDER BY role ASC LIMIT 1
-    `
+    `,
       )
       .get()) as { name: string } | undefined
     const gmUser = (await db
       .prepare(
         `
       SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
-    `
+    `,
       )
       .get()) as { name: string } | undefined
 
@@ -2927,17 +2983,17 @@ router.get('/:id', requireAuth, async (req, res) => {
           approverAvatar: record.approver_avatar,
           action: record.action,
           comment: record.comment,
-          actionTime: formatDateTime(record.action_time)
+          actionTime: formatDateTime(record.action_time),
         })),
         adminApproverName: adminUser?.name || null,
-        gmApproverName: gmUser?.name || null
-      }
+        gmApproverName: gmUser?.name || null,
+      },
     })
   } catch (error) {
     console.error('获取审批详情失败:', error)
     res.status(500).json({
       success: false,
-      message: '获取审批详情失败'
+      message: '获取审批详情失败',
     })
   }
 })
@@ -2962,14 +3018,14 @@ router.post(
       if (!instance) {
         return res.status(404).json({
           success: false,
-          message: '审批不存在'
+          message: '审批不存在',
         })
       }
 
       if (instance.status !== 'pending') {
         return res.status(400).json({
           success: false,
-          message: '该审批已处理'
+          message: '该审批已处理',
         })
       }
 
@@ -2978,14 +3034,14 @@ router.post(
         if (instance.type !== 'reimbursement_business') {
           return res.status(403).json({
             success: false,
-            message: '总经理只能审批商务报销'
+            message: '总经理只能审批商务报销',
           })
         }
       } else if (userRole === 'admin') {
         if (instance.type === 'reimbursement_business') {
           return res.status(403).json({
             success: false,
-            message: '管理员不能审批商务报销'
+            message: '管理员不能审批商务报销',
           })
         }
       }
@@ -3008,7 +3064,7 @@ router.post(
           instance.current_step,
           userId,
           comment || null,
-          now
+          now,
         )
 
         // 更新审批实例状态
@@ -3021,7 +3077,7 @@ router.post(
       `,
           now,
           now,
-          id
+          id,
         )
 
         // 如果是报销单审批，同步更新报销单状态
@@ -3040,7 +3096,7 @@ router.post(
           FROM reimbursement_invoices
           WHERE reimbursement_id = ?
         `,
-            instance.target_id
+            instance.target_id,
           )
 
           const totalDeduction = invoiceSummary?.total_deduction || 0
@@ -3054,7 +3110,7 @@ router.post(
         `,
             actualAmount,
             now,
-            instance.target_id
+            instance.target_id,
           )
 
           // 实际报销金额为0时（全额核减），直接完成，无需付款流程
@@ -3071,13 +3127,13 @@ router.post(
               totalDeduction,
               now,
               now,
-              instance.target_id
+              instance.target_id,
             )
             console.log(
               '✅ 报销单全额核减，直接完成:',
               instance.target_id,
               '核减金额:',
-              totalDeduction
+              totalDeduction,
             )
           } else {
             await txRun(
@@ -3091,7 +3147,7 @@ router.post(
               userName || '系统',
               totalDeduction,
               now,
-              instance.target_id
+              instance.target_id,
             )
             console.log(
               '✅ 同步更新报销单状态为已通过:',
@@ -3099,7 +3155,7 @@ router.post(
               '核减金额:',
               totalDeduction,
               '实际金额:',
-              actualAmount
+              actualAmount,
             )
           }
         }
@@ -3109,16 +3165,16 @@ router.post(
 
       res.json({
         success: true,
-        message: '审批已通过'
+        message: '审批已通过',
       })
     } catch (error) {
       console.error('审批通过失败:', error)
       res.status(500).json({
         success: false,
-        message: '审批通过失败'
+        message: '审批通过失败',
       })
     }
-  }
+  },
 )
 
 // 驳回审批（管理员和总经理均可操作）
@@ -3135,7 +3191,7 @@ router.post(
       if (!comment) {
         return res.status(400).json({
           success: false,
-          message: '请填写驳回原因'
+          message: '请填写驳回原因',
         })
       }
 
@@ -3147,14 +3203,14 @@ router.post(
       if (!instance) {
         return res.status(404).json({
           success: false,
-          message: '审批不存在'
+          message: '审批不存在',
         })
       }
 
       if (instance.status !== 'pending') {
         return res.status(400).json({
           success: false,
-          message: '该审批已处理'
+          message: '该审批已处理',
         })
       }
 
@@ -3163,14 +3219,14 @@ router.post(
         if (instance.type !== 'reimbursement_business') {
           return res.status(403).json({
             success: false,
-            message: '总经理只能驳回商务报销'
+            message: '总经理只能驳回商务报销',
           })
         }
       } else if (userRole === 'admin') {
         if (instance.type === 'reimbursement_business') {
           return res.status(403).json({
             success: false,
-            message: '管理员不能驳回商务报销'
+            message: '管理员不能驳回商务报销',
           })
         }
       }
@@ -3194,7 +3250,7 @@ router.post(
           instance.current_step,
           userId,
           comment,
-          now
+          now,
         )
 
         // 更新审批实例状态
@@ -3207,7 +3263,7 @@ router.post(
       `,
           now,
           now,
-          id
+          id,
         )
 
         // 如果是报销单审批，同步更新报销单状态
@@ -3223,7 +3279,7 @@ router.post(
             rejectUserName || '系统',
             comment,
             now,
-            instance.target_id
+            instance.target_id,
           )
           console.log('✅ 同步更新报销单状态为已驳回:', instance.target_id)
         }
@@ -3232,21 +3288,21 @@ router.post(
       console.log('✅ 审批驳回:', {
         instanceId: id,
         approverId: userId,
-        reason: comment
+        reason: comment,
       })
 
       res.json({
         success: true,
-        message: '审批已驳回'
+        message: '审批已驳回',
       })
     } catch (error) {
       console.error('审批驳回失败:', error)
       res.status(500).json({
         success: false,
-        message: '审批驳回失败'
+        message: '审批驳回失败',
       })
     }
-  }
+  },
 )
 
 // 提交审批（用于报销单、工作日志等提交审批）
@@ -3258,7 +3314,7 @@ router.post('/submit', requireAuth, async (req, res) => {
     if (!type || !targetId || !targetType) {
       return res.status(400).json({
         success: false,
-        message: '缺少必要参数'
+        message: '缺少必要参数',
       })
     }
 
@@ -3266,20 +3322,20 @@ router.post('/submit', requireAuth, async (req, res) => {
     if (targetType === 'reimbursement') {
       const reimbursement = await db.get(
         'SELECT id, user_id, status FROM reimbursements WHERE id = ?',
-        targetId
+        targetId,
       )
 
       if (!reimbursement) {
         return res.status(404).json({
           success: false,
-          message: '报销单不存在'
+          message: '报销单不存在',
         })
       }
 
       if (reimbursement.user_id !== userId) {
         return res.status(403).json({
           success: false,
-          message: '无权提交此报销单的审批'
+          message: '无权提交此报销单的审批',
         })
       }
 
@@ -3287,7 +3343,7 @@ router.post('/submit', requireAuth, async (req, res) => {
       if (reimbursement.status !== 'pending') {
         return res.status(400).json({
           success: false,
-          message: '只有待审批状态的报销单才能提交审批'
+          message: '只有待审批状态的报销单才能提交审批',
         })
       }
     }
@@ -3298,14 +3354,14 @@ router.post('/submit', requireAuth, async (req, res) => {
         `
       SELECT id FROM approval_instances
       WHERE target_id = ? AND target_type = ? AND status = 'pending'
-    `
+    `,
       )
       .get(targetId, targetType)
 
     if (existing) {
       return res.status(400).json({
         success: false,
-        message: '该项目已有待处理的审批'
+        message: '该项目已有待处理的审批',
       })
     }
 
@@ -3318,7 +3374,7 @@ router.post('/submit', requireAuth, async (req, res) => {
         `
       INSERT INTO approval_instances (id, flow_id, type, target_id, target_type, applicant_id, current_step, status, submit_time, created_at, updated_at)
       VALUES (?, NULL, ?, ?, ?, ?, 1, 'pending', ?, ?, ?)
-    `
+    `,
       )
       .run(instanceId, type, targetId, targetType, userId, now, now, now)
 
@@ -3326,19 +3382,19 @@ router.post('/submit', requireAuth, async (req, res) => {
       instanceId,
       type,
       targetId,
-      applicantId: userId
+      applicantId: userId,
     })
 
     res.json({
       success: true,
       data: { id: instanceId },
-      message: '审批已提交'
+      message: '审批已提交',
     })
   } catch (error) {
     console.error('提交审批失败:', error)
     res.status(500).json({
       success: false,
-      message: '提交审批失败'
+      message: '提交审批失败',
     })
   }
 })
@@ -3357,7 +3413,7 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
     if (!instance) {
       return res.status(404).json({
         success: false,
-        message: '审批不存在'
+        message: '审批不存在',
       })
     }
 
@@ -3365,14 +3421,14 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
     if (instance.applicant_id !== userId) {
       return res.status(403).json({
         success: false,
-        message: '只有申请人可以撤销审批'
+        message: '只有申请人可以撤销审批',
       })
     }
 
     if (instance.status !== 'pending') {
       return res.status(400).json({
         success: false,
-        message: '只能撤销待处理的审批'
+        message: '只能撤销待处理的审批',
       })
     }
 
@@ -3385,7 +3441,7 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
       UPDATE approval_instances
       SET status = 'cancelled', complete_time = ?, updated_at = ?
       WHERE id = ?
-    `
+    `,
       )
       .run(now, now, id)
 
@@ -3393,13 +3449,13 @@ router.post('/:id/cancel', requireAuth, async (req, res) => {
 
     res.json({
       success: true,
-      message: '审批已撤销'
+      message: '审批已撤销',
     })
   } catch (error) {
     console.error('撤销审批失败:', error)
     res.status(500).json({
       success: false,
-      message: '撤销审批失败'
+      message: '撤销审批失败',
     })
   }
 })

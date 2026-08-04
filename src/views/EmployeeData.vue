@@ -493,7 +493,7 @@
                 >
                   <template #title>
                     {{ probationArchivePendingCount }}
-                    名员工已完成全部转正审批，但尚未上传正式盖章转正档案，请到对应员工详情的“转正档案”中完成归档
+                    名在职员工尚未归档正式盖章转正申请表，请到对应员工详情的“转正档案”中完成归档
                   </template>
                 </el-alert>
                 <ProbationApprovalPanel :key="probationManagementVersion" />
@@ -1244,6 +1244,11 @@
               </div>
             </div>
 
+            <EmployeeDocumentUploadIssues
+              :issues="currentEmployeeDocumentUploadIssues"
+              @dismiss="dismissEmployeeDocumentUploadIssue"
+            />
+
             <!-- 文档列表 -->
             <el-table
               :data="documentTypes"
@@ -1819,11 +1824,18 @@ import {
   type ResignationType,
 } from "@/stores/resignation";
 import { usePendingStore } from "@/stores/pending";
+import { useEmployeeDocumentRecognitionStore } from "@/stores/employeeDocumentRecognition";
 import { api } from "@/utils/api";
 import {
   formatContractDate,
   getContractExpiryReminder,
 } from "@/utils/contractReminder";
+import {
+  resolveEmployeeDocumentRecognitionCompletion,
+  resolveEmployeeDocumentUploadError,
+  type EmployeeDocumentUploadIssueType,
+} from "@/utils/employeeDocumentUploadIssues";
+import EmployeeDocumentUploadIssues from "@/components/employee/EmployeeDocumentUploadIssues.vue";
 import LeaveAdminPanel from "@/components/leave/LeaveAdminPanel.vue";
 import HumanCostPanel from "@/components/payroll/HumanCostPanel.vue";
 import ResignationArchiveManager from "@/components/resignation/ResignationArchiveManager.vue";
@@ -1875,6 +1887,7 @@ const onboardingStore = useOnboardingStore();
 const probationStore = useProbationStore();
 const resignationStore = useResignationStore();
 const pendingStore = usePendingStore();
+const employeeDocumentRecognitionStore = useEmployeeDocumentRecognitionStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -2084,17 +2097,20 @@ const getProbationStatusText = (status: string) => {
   return textMap[status] || status;
 };
 
-const validatePdfUpload = (file: File) => {
+const validatePdfUpload = (
+  file: File,
+  showIssue: (message: string) => void = (message) => ElMessage.error(message),
+) => {
   const isPdf = file.type === "application/pdf";
   const isLt10M = file.size / 1024 / 1024 < 10;
 
   if (!isPdf) {
-    ElMessage.error("只支持 PDF 格式的文件");
+    showIssue("只支持 PDF 格式的文件");
     return false;
   }
 
   if (!isLt10M) {
-    ElMessage.error("文件大小不能超过 10MB");
+    showIssue("文件大小不能超过 10MB");
     return false;
   }
 
@@ -2456,7 +2472,44 @@ const currentEmployee = ref<EmployeeProfile | null>(null);
 // 员工档案文件相关
 const employeeDocuments = ref<EmployeeDocument[]>([]);
 const documentsLoading = ref(false);
-const autoDocumentUploadCount = ref(0);
+const autoDocumentUploadCount = computed(
+  () => employeeDocumentRecognitionStore.pendingCount,
+);
+const employeeDocumentAutoUploadTimeout = 40 * 60 * 1000;
+const currentEmployeeDocumentUploadIssues = computed(() => {
+  const employeeId = currentEmployee.value?.id;
+  if (!employeeId) return [];
+  return employeeDocumentRecognitionStore.issues.filter(
+    (issue) => issue.employeeId === employeeId,
+  );
+});
+const addEmployeeDocumentUploadIssue = (
+  employeeId: string,
+  type: EmployeeDocumentUploadIssueType,
+  message: string,
+  employeeNameOverride?: string,
+  taskId?: string,
+) => {
+  const employeeName =
+    employeeNameOverride ||
+    (currentEmployee.value?.id === employeeId
+      ? currentEmployee.value.name
+      : employeeList.value.find((employee) => employee.id === employeeId)
+          ?.name) ||
+    "未知员工";
+  return employeeDocumentRecognitionStore.addIssue(
+    {
+      employeeId,
+      employeeName,
+      type,
+      message: `员工「${employeeName}」${message}`,
+    },
+    taskId,
+  );
+};
+const dismissEmployeeDocumentUploadIssue = (issueId: string) => {
+  employeeDocumentRecognitionStore.dismissIssue(issueId);
+};
 const documentMutationPending = ref(false);
 const deletingAllDocuments = ref(false);
 const documentControlsDisabled = computed(() => {
@@ -2782,9 +2835,23 @@ const fetchEmployeeDocuments = async () => {
   }
 };
 
-let autoDocumentUploadQueue: Promise<void> = Promise.resolve();
-
-const uploadAutoClassifiedDocument = async (employeeId: string, file: File) => {
+const uploadAutoClassifiedDocument = async (
+  employeeId: string,
+  employeeName: string,
+  file: File,
+  taskId: string,
+) => {
+  const addUploadIssue = (
+    type: EmployeeDocumentUploadIssueType,
+    message: string,
+  ) =>
+    addEmployeeDocumentUploadIssue(
+      employeeId,
+      type,
+      message,
+      employeeName,
+      taskId,
+    );
   const formData = new FormData();
   formData.append("originalFileName", file.name);
   formData.append("file", file);
@@ -2795,12 +2862,16 @@ const uploadAutoClassifiedDocument = async (employeeId: string, file: File) => {
       formData,
       {
         headers: { "Content-Type": "multipart/form-data" },
-        timeout: 600000,
+        timeout: employeeDocumentAutoUploadTimeout,
       },
     );
     if (!res.data.success) {
-      ElMessage.error(res.data.message || `文件「${file.name}」上传失败`);
-      return;
+      const failureReason = res.data.message || "上传失败";
+      addUploadIssue("error", `文件「${file.name}」：${failureReason}`);
+      return {
+        type: "error" as const,
+        message: `员工「${employeeName}」文件「${file.name}」：${failureReason}`,
+      };
     }
 
     const classifications = Array.isArray(res.data.classifications)
@@ -2854,18 +2925,25 @@ const uploadAutoClassifiedDocument = async (employeeId: string, file: File) => {
       await pendingStore.refreshPendingCounts();
       await fetchEmployeeList();
     }
-    ElMessage.success(
-      `文件「${file.name}」已拆分归档：${labels}${details.length > 0 ? `；${details.join("；")}` : ""}`,
-    );
+    const successDetail = `${labels}${details.length > 0 ? `；${details.join("；")}` : ""}`;
 
+    const failedSubItems: string[] = [];
     if (res.data.salaryRecognition?.status === "failed") {
-      ElMessage.warning(
-        `入职邀请函已归档，但${res.data.salaryRecognition.message}，请在人力成本中填写本月工资`,
+      failedSubItems.push(
+        `入职邀请函薪酬：${res.data.salaryRecognition.message || "未能识别"}`,
+      );
+      addUploadIssue(
+        "warning",
+        `文件「${file.name}」中的入职邀请函已归档，但${res.data.salaryRecognition.message}，请在人力成本中填写本月工资`,
       );
     }
     if (res.data.contractRecognition?.status === "failed") {
-      ElMessage.warning(
-        `劳动合同已归档，但${res.data.contractRecognition.message}，合同到期时间未更新`,
+      failedSubItems.push(
+        `劳动合同期限：${res.data.contractRecognition.message || "未能识别"}`,
+      );
+      addUploadIssue(
+        "warning",
+        `文件「${file.name}」中的劳动合同已归档，但${res.data.contractRecognition.message}，合同到期时间未更新`,
       );
     }
 
@@ -2881,53 +2959,87 @@ const uploadAutoClassifiedDocument = async (employeeId: string, file: File) => {
             `${segment.label}（第${segment.pageNumbers.join("、")}页）`,
         )
         .join("、");
-      ElMessage.info(`以下资料已归档至“其他”：${otherText}`);
+      addUploadIssue(
+        "info",
+        `文件「${file.name}」中的以下资料已归档至“其他”：${otherText}`,
+      );
     }
 
     const missingTypes = Array.isArray(res.data.missingTypes)
       ? res.data.missingTypes
       : [];
+    const missingLabels = missingTypes.map(
+      (type: string) =>
+        documentTypes.find((item) => item.type === type)?.label || type,
+    );
     if (classifications.length > 1 && missingTypes.length > 0) {
-      const missingLabels = missingTypes
-        .map(
-          (type: string) =>
-            documentTypes.find((item) => item.type === type)?.label || type,
-        )
-        .join("、");
-      ElMessage.warning(
-        `本次合并文件未识别到：${missingLabels}；如文件中确实包含，请检查对应档案行`,
+      addUploadIssue(
+        "warning",
+        `文件「${file.name}」未识别到：${missingLabels.join("、")}；如文件中确实包含，请检查对应档案行`,
       );
     }
-  } catch (error: any) {
-    const message = error.response?.data?.message || "上传失败";
-    if (error.response?.status === 422) {
-      ElMessage.warning(`文件「${file.name}」：${message}`);
-    } else {
-      ElMessage.error(`文件「${file.name}」：${message}`);
-    }
+
+    const completion = resolveEmployeeDocumentRecognitionCompletion({
+      missingLabels,
+      unsupportedSegments: otherSegments,
+      failedCount: res.data.failedCount,
+      failedSubItems,
+    });
+    addUploadIssue(
+      completion.type,
+      completion.type === "warning"
+        ? `文件「${file.name}」归档完成，但需要核对：${completion.warningSummary}`
+        : `文件「${file.name}」中的人事档案已全部识别并上传成功：${successDetail}`,
+    );
+    return {
+      type: completion.type,
+      message:
+        completion.type === "warning"
+          ? `员工「${employeeName}」文件「${file.name}」归档完成，但需要核对：${completion.warningSummary}；已归档：${labels}`
+          : `员工「${employeeName}」文件「${file.name}」识别并上传完成：${labels}；请核对自动归位结果`,
+    };
+  } catch (error: unknown) {
+    const resolvedError = resolveEmployeeDocumentUploadError(error);
+    addUploadIssue(
+      resolvedError.type,
+      `文件「${file.name}」：${resolvedError.message}`,
+    );
+    return {
+      type:
+        resolvedError.type === "success" || resolvedError.type === "info"
+          ? ("warning" as const)
+          : resolvedError.type,
+      message: `员工「${employeeName}」文件「${file.name}」：${resolvedError.message}`,
+    };
   }
 };
 
 const handleAutoUploadDoc = (file: File) => {
   const employeeId = currentEmployee.value?.id;
-  if (!employeeId || documentMutationPending.value || !validatePdfUpload(file))
+  const employeeName = currentEmployee.value?.name || "未知员工";
+  if (
+    !employeeId ||
+    documentMutationPending.value ||
+    !validatePdfUpload(file, (message) =>
+      addEmployeeDocumentUploadIssue(
+        employeeId,
+        "error",
+        `文件「${file.name}」：${message}`,
+        employeeName,
+      ),
+    )
+  )
     return false;
 
-  autoDocumentUploadCount.value += 1;
-  autoDocumentUploadQueue = autoDocumentUploadQueue
-    .then(() => uploadAutoClassifiedDocument(employeeId, file))
-    .finally(async () => {
-      autoDocumentUploadCount.value = Math.max(
-        0,
-        autoDocumentUploadCount.value - 1,
-      );
-      if (
-        autoDocumentUploadCount.value === 0 &&
-        currentEmployee.value?.id === employeeId
-      ) {
-        await fetchEmployeeDocuments();
-      }
-    });
+  employeeDocumentRecognitionStore.enqueueTask(
+    {
+      employeeId,
+      employeeName,
+      fileName: file.name,
+    },
+    (taskId) =>
+      uploadAutoClassifiedDocument(employeeId, employeeName, file, taskId),
+  );
 
   return false;
 };
@@ -3181,6 +3293,20 @@ watch(detailActiveTab, (newTab) => {
     fetchEmployeeResignationArchive();
   }
 });
+
+watch(
+  () => employeeDocumentRecognitionStore.completionSequence,
+  () => {
+    const employeeId = currentEmployee.value?.id;
+    if (
+      employeeId &&
+      detailActiveTab.value === "documents" &&
+      employeeDocumentRecognitionStore.lastCompletedEmployeeId === employeeId
+    ) {
+      fetchEmployeeDocuments();
+    }
+  },
+);
 
 const editFormData = reactive<Partial<EmployeeProfile>>({
   name: "",

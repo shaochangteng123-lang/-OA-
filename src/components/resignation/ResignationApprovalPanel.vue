@@ -351,7 +351,8 @@ const detailDocuments = computed(
 const hasFinalApprovalRole = computed(() => {
   return (
     authStore.user?.role === "general_manager" ||
-    authStore.user?.role === "super_admin"
+    authStore.user?.role === "super_admin" ||
+    authStore.user?.role === "chairman"
   );
 });
 

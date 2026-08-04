@@ -633,7 +633,7 @@ async function loadPayrollRows(
      JOIN employee_profiles ep ON ep.id = pr.employee_id
      LEFT JOIN users u ON u.id = ep.user_id
      WHERE pr.payroll_month BETWEEN ? AND ?
-       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')
+       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')
      ORDER BY pr.payroll_month ASC`,
     startMonth,
     endMonth,
@@ -828,7 +828,7 @@ async function loadEmployeeAggregate(
      FROM employee_profiles ep
      LEFT JOIN users u ON u.id = ep.user_id
      WHERE ep.status = 'submitted'
-       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')`,
+       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')`,
     currentMonth,
   );
 
@@ -855,7 +855,7 @@ async function loadEmployeeDepartments(): Promise<DistributionRow[]> {
      LEFT JOIN users u ON u.id = ep.user_id
      WHERE ep.status = 'submitted'
        AND COALESCE(ep.employment_status, 'active') <> 'resigned'
-       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')
+       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')
      GROUP BY NULLIF(TRIM(ep.department), '')
      ORDER BY count DESC, name ASC`,
   );
@@ -910,7 +910,7 @@ async function loadWorkLogOverview(today: string): Promise<{
        WHERE u.status = 'active'
          AND ep.status = 'submitted'
          AND COALESCE(ep.employment_status, 'active') <> 'resigned'
-         AND u.role NOT IN ('guest', 'super_admin', 'boss')
+         AND u.role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
        ORDER BY u.name ASC`,
     ),
     db.all<{ user_id: string }>(
@@ -980,7 +980,7 @@ async function loadWorkLogOverview(today: string): Promise<{
        JOIN users u ON u.id = ranked.user_id
        LEFT JOIN employee_profiles ep ON ep.user_id = ranked.user_id
        WHERE ranked.row_number = 1
-         AND u.role NOT IN ('guest', 'super_admin', 'boss')
+         AND u.role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
        ORDER BY ranked.log_date DESC, ranked.updated_at DESC
        LIMIT 10`,
     ),
@@ -999,7 +999,7 @@ async function loadWorkLogOverview(today: string): Promise<{
        JOIN users u ON u.id = ws.user_id
        LEFT JOIN employee_profiles ep ON ep.user_id = ws.user_id
        WHERE ws.week_start = ?
-         AND u.role NOT IN ('guest', 'super_admin', 'boss')
+         AND u.role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
        ORDER BY u.name ASC`,
       weekStart,
     ),
@@ -1048,7 +1048,7 @@ async function loadWorkLogOverview(today: string): Promise<{
        JOIN users u ON u.id = ws.user_id
        LEFT JOIN employee_profiles ep ON ep.user_id = ws.user_id
        WHERE ws.week_start = ?
-         AND u.role NOT IN ('guest', 'super_admin', 'boss')
+         AND u.role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
        ORDER BY u.name ASC`,
       latestWeeklyRange.week_start,
     );

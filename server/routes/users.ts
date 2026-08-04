@@ -16,16 +16,19 @@ import {
   type DepartmentPositionMap,
 } from '../utils/department-position.js'
 import {
-  getBossRoleTransitionError,
+  canCreateChairmanAccount,
+  getStandaloneRoleTransitionError,
   getUserCreationRequiredFieldsError,
   isBossRole,
+  isChairmanRole,
+  isSystemAdminEquivalentRole,
   requiresEmployeeProfile,
   resolveUserAccountName,
 } from '../utils/boss-role.js'
 
 const router = express.Router()
 
-const USER_ROLES = ['super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest'] as const
+const USER_ROLES = ['super_admin', 'chairman', 'admin', 'general_manager', 'boss', 'user', 'guest'] as const
 const USER_STATUSES = ['active', 'inactive'] as const
 const EMPLOYMENT_STATUSES = ['probation', 'active', 'resigned'] as const
 const EMPLOYEE_NUMBER_SOURCE_QUERY = `
@@ -93,12 +96,16 @@ router.get('/list', requireAuth, async (req, res) => {
   try {
     const currentUserId = req.session.userId
 
-    // 检查权限：只有 super_admin 和 admin 可以查看用户列表
+    // 管理员和具备系统管理员能力的账号可以查看用户列表。
     const currentUser = await db
       .prepare('SELECT role FROM users WHERE id = ?')
       .get(currentUserId) as { role: string } | undefined
 
-    if (!currentUser || !['super_admin', 'admin'].includes(currentUser.role)) {
+    if (
+      !currentUser ||
+      (!isSystemAdminEquivalentRole(currentUser.role) &&
+        currentUser.role !== 'admin')
+    ) {
       return res.status(403).json({
         success: false,
         message: '无权查看用户列表',
@@ -111,7 +118,7 @@ router.get('/list', requireAuth, async (req, res) => {
         SELECT id, name, email, avatar_url
         FROM users
         WHERE status = ?
-          AND role <> 'boss'
+          AND role NOT IN ('boss', 'chairman')
         ORDER BY name ASC
       `)
       .all('active') as Array<{ id: string; name: string; email: string | null; avatar_url: string | null }>
@@ -144,7 +151,7 @@ router.get('/directory', requireAuth, async (_req, res) => {
         SELECT id, name, avatar_url, department, position, role
         FROM users
         WHERE status = 'active'
-          AND role <> 'boss'
+          AND role NOT IN ('boss', 'chairman')
         ORDER BY name ASC
       `)
       .all() as Array<{
@@ -262,19 +269,19 @@ router.post('/', requireAdmin, async (req, res) => {
       })
     }
 
-    const bossRoleTransitionError = getBossRoleTransitionError(user.role, role)
-    if (bossRoleTransitionError) {
+    const roleTransitionError = getStandaloneRoleTransitionError(user.role, role)
+    if (roleTransitionError) {
       return res.status(400).json({
         success: false,
-        message: bossRoleTransitionError,
+        message: roleTransitionError,
       })
     }
 
-    const isBoss = isBossRole(role)
+    const clearsEmployeeFields = isBossRole(role) || isChairmanRole(role)
     const needsEmployeeProfile = requiresEmployeeProfile(role)
     const normalizedEmployeeNo = needsEmployeeProfile
       ? normalizeEmployeeNumber(employeeNo ?? user.employee_no)
-      : isBoss
+      : clearsEmployeeFields
         ? null
         : user.employee_no
     if (needsEmployeeProfile && !isValidEmployeeNumber(normalizedEmployeeNo)) {
@@ -313,8 +320,8 @@ router.post('/', requireAdmin, async (req, res) => {
           true,
         )
       : {
-          department: isBoss ? null : user.department,
-          position: isBoss ? null : user.position,
+          department: clearsEmployeeFields ? null : user.department,
+          position: clearsEmployeeFields ? null : user.position,
           error: null,
         }
     if (organizationSelection.error) {
@@ -328,17 +335,23 @@ router.post('/', requireAdmin, async (req, res) => {
       .prepare('SELECT role FROM users WHERE id = ?')
       .get(req.session.userId) as { role: string } | undefined
 
-    if (user.role === 'super_admin' && currentUser?.role !== 'super_admin') {
+    if (
+      isSystemAdminEquivalentRole(user.role) &&
+      !isSystemAdminEquivalentRole(currentUser?.role)
+    ) {
       return res.status(403).json({
         success: false,
-        message: '只有超级管理员可以修改超级管理员账号',
+        message: '只有超级管理员或董事长可以修改系统级账号',
       })
     }
 
-    if (role === 'super_admin' && currentUser?.role !== 'super_admin') {
+    if (
+      isSystemAdminEquivalentRole(role) &&
+      !isSystemAdminEquivalentRole(currentUser?.role)
+    ) {
       return res.status(403).json({
         success: false,
-        message: '只有超级管理员可以授予超级管理员角色',
+        message: '只有超级管理员或董事长可以授予系统级角色',
       })
     }
 
@@ -441,8 +454,8 @@ router.post('/', requireAdmin, async (req, res) => {
          WHERE id = ?`,
         nextUsername,
         nextName,
-        needsEmployeeProfile ? email || user.email || null : isBoss ? null : user.email,
-        needsEmployeeProfile ? mobile || user.mobile || null : isBoss ? null : user.mobile,
+        needsEmployeeProfile ? email || user.email || null : clearsEmployeeFields ? null : user.email,
+        needsEmployeeProfile ? mobile || user.mobile || null : clearsEmployeeFields ? null : user.mobile,
         role,
         status,
         organizationSelection.department,
@@ -450,14 +463,14 @@ router.post('/', requireAdmin, async (req, res) => {
         normalizedEmployeeNo,
         needsEmployeeProfile
           ? bankAccountName || user.bank_account_name || null
-          : isBoss ? null : user.bank_account_name,
+          : clearsEmployeeFields ? null : user.bank_account_name,
         needsEmployeeProfile
           ? bankAccountPhone || user.bank_account_phone || null
-          : isBoss ? null : user.bank_account_phone,
-        needsEmployeeProfile ? bankName || user.bank_name || null : isBoss ? null : user.bank_name,
+          : clearsEmployeeFields ? null : user.bank_account_phone,
+        needsEmployeeProfile ? bankName || user.bank_name || null : clearsEmployeeFields ? null : user.bank_name,
         needsEmployeeProfile
           ? bankAccountNumber || user.bank_account_number || null
-          : isBoss ? null : user.bank_account_number,
+          : clearsEmployeeFields ? null : user.bank_account_number,
         now,
         id,
       )
@@ -579,7 +592,11 @@ router.get('/activities', requireAuth, async (req, res) => {
         .prepare('SELECT role FROM users WHERE id = ?')
         .get(currentUserId) as { role: string } | undefined
 
-      if (!currentUser || !['super_admin', 'admin'].includes(currentUser.role)) {
+      if (
+        !currentUser ||
+        (!isSystemAdminEquivalentRole(currentUser.role) &&
+          currentUser.role !== 'admin')
+      ) {
         return res.status(403).json({
           success: false,
           message: '无权查看其他用户的活动记录',
@@ -669,7 +686,7 @@ router.post('/create', requireAdmin, async (req, res) => {
         message: requiredFieldsError,
       })
     }
-    const isBoss = isBossRole(role)
+    const needsEmployeeProfile = requiresEmployeeProfile(role)
 
     const usernameValidation = validateUsername(normalizedUsername)
     if (!usernameValidation.valid) {
@@ -686,7 +703,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证手机号格式（必须11位）
-    if (!isBoss && !/^1[3-9]\d{9}$/.test(normalizedMobile)) {
+    if (needsEmployeeProfile && !/^1[3-9]\d{9}$/.test(normalizedMobile)) {
       return res.status(400).json({
         success: false,
         message: '手机号格式不正确',
@@ -694,7 +711,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证收款人手机号格式（如果提供）
-    if (!isBoss && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    if (needsEmployeeProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
         success: false,
         message: '收款人手机号格式不正确',
@@ -702,7 +719,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证银行卡号格式（如果提供）
-    if (!isBoss && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+    if (needsEmployeeProfile && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
       return res.status(400).json({
         success: false,
         message: '银行卡号格式不正确（16-19位数字）',
@@ -710,7 +727,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证邮箱格式（如果提供）
-    if (!isBoss && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+    if (needsEmployeeProfile && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       return res.status(400).json({
         success: false,
         message: '邮箱格式不正确',
@@ -718,14 +735,27 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证角色
-    const validRoles = ['admin', 'general_manager', 'boss', 'user', 'guest']
+    const validRoles = ['chairman', 'admin', 'general_manager', 'boss', 'user', 'guest']
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
-        message: '无效的角色，可选值：admin, general_manager, boss, user, guest',
+        message: '无效的角色',
       })
     }
-    const nextEmploymentStatus = isBoss ? null : employmentStatus || 'probation'
+    if (role === 'chairman') {
+      const currentUser = await db.prepare(
+        'SELECT role FROM users WHERE id = ?',
+      ).get(req.session.userId) as { role: string } | undefined
+      if (!canCreateChairmanAccount(currentUser?.role)) {
+        return res.status(403).json({
+          success: false,
+          message: '只有管理员、超级管理员或董事长可以创建董事长账号',
+        })
+      }
+    }
+    const nextEmploymentStatus = needsEmployeeProfile
+      ? employmentStatus || 'probation'
+      : null
     if (nextEmploymentStatus && !EMPLOYMENT_STATUSES.includes(nextEmploymentStatus)) {
       return res.status(400).json({ success: false, message: '无效的员工状态' })
     }
@@ -735,13 +765,13 @@ router.post('/create', requireAdmin, async (req, res) => {
         message: '新账号不能直接创建为已离职状态',
       })
     }
-    const organizationSelection = isBoss
-      ? { department: null, position: null, error: null }
-      : validateDepartmentPositionPair(
+    const organizationSelection = needsEmployeeProfile
+      ? validateDepartmentPositionPair(
           await getDepartmentPositionMap(),
           department,
           position,
         )
+      : { department: null, position: null, error: null }
     if (organizationSelection.error) {
       return res.status(400).json({ success: false, message: organizationSelection.error })
     }
@@ -755,7 +785,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     await db.transaction(async (client) => {
       // 串行化账号创建，避免用户名、手机号在并发请求中重复。
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['user-create'])
-      if (!isBoss) {
+      if (needsEmployeeProfile) {
         await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, ['employee-number-write'])
       }
 
@@ -780,7 +810,7 @@ router.post('/create', requireAdmin, async (req, res) => {
         throw new UserOperationError('手机号已被使用', 409)
       }
 
-      if (!isBoss) {
+      if (needsEmployeeProfile) {
         generatedEmployeeNo = await getNextAvailableEmployeeNumber(client)
       }
 
@@ -792,19 +822,19 @@ router.post('/create', requireAdmin, async (req, res) => {
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$11,$12,$13,$14,true,$15,$16)`,
         [
           userId, normalizedUsername, passwordHash, normalizedUsername,
-          isBoss ? null : normalizedEmail,
-          isBoss ? null : normalizedMobile,
+          needsEmployeeProfile ? normalizedEmail : null,
+          needsEmployeeProfile ? normalizedMobile : null,
           role || 'user', organizationSelection.department,
-          organizationSelection.position, isBoss ? null : bankAccountName || null,
-          isBoss ? null : bankAccountPhone || null,
-          isBoss ? null : bankName || null,
-          isBoss ? null : bankAccountNumber || null,
+          organizationSelection.position, needsEmployeeProfile ? bankAccountName || null : null,
+          needsEmployeeProfile ? bankAccountPhone || null : null,
+          needsEmployeeProfile ? bankName || null : null,
+          needsEmployeeProfile ? bankAccountNumber || null : null,
           generatedEmployeeNo,
           now, now,
         ]
       )
 
-      if (isBoss) return
+      if (!needsEmployeeProfile) return
 
       // 同步创建员工档案（草稿），由员工本人完善后提交。
       const profileId = nanoid()
@@ -829,8 +859,8 @@ router.post('/create', requireAdmin, async (req, res) => {
         id: userId,
         username: normalizedUsername,
         name: normalizedUsername,
-        email: isBoss ? null : normalizedEmail,
-        mobile: isBoss ? null : normalizedMobile,
+        email: needsEmployeeProfile ? normalizedEmail : null,
+        mobile: needsEmployeeProfile ? normalizedMobile : null,
         employeeNo: generatedEmployeeNo,
         role: role || 'user',
       },
@@ -874,11 +904,11 @@ router.delete('/:id', requireAdmin, async (req, res) => {
       })
     }
 
-    // 不能删除超级管理员
-    if (user.role === 'super_admin') {
+    // 系统级账号不能通过普通删除入口移除。
+    if (isSystemAdminEquivalentRole(user.role)) {
       return res.status(400).json({
         success: false,
-        message: '不能删除超级管理员账号',
+        message: '不能删除超级管理员或董事长账号',
       })
     }
 

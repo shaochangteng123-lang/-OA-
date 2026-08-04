@@ -15,10 +15,16 @@
         <LeaveDatePicker
           v-model="form.startDate"
           placeholder="选择开始日期"
-          :disabled-date="isPastLeaveDateDisabled"
+          :disabled="isCombinedExtension"
+          :disabled-date="disableStartDate"
           @change="onDateChange"
         />
-        <el-radio-group v-model="form.startHalf" class="half-radio" @change="onDateChange">
+        <el-radio-group
+          v-model="form.startHalf"
+          class="half-radio"
+          :disabled="isCombinedExtension"
+          @change="onDateChange"
+        >
           <el-radio-button value="morning">上午</el-radio-button>
           <el-radio-button value="afternoon">下午</el-radio-button>
         </el-radio-group>
@@ -129,6 +135,11 @@ const existingAttachmentsLoading = ref(false)
 let calcTimer: ReturnType<typeof setTimeout> | null = null
 
 const isDraft = computed(() => props.originalRequest.status === 'draft')
+const isSupplement = computed(() => props.originalRequest.application_kind === 'supplement')
+const isCombinedExtension = computed(() => (
+  props.originalRequest.application_kind === 'extension' &&
+  Boolean(props.originalRequest.combination_group_id)
+))
 const formNotice = computed(() => isDraft.value
   ? `该申请已撤回并保存为草稿，重新提交后将进入审批。申请编号：${props.originalRequest.request_no}`
   : `原申请已被驳回，请修改后重新提交。原申请编号：${props.originalRequest.request_no}`
@@ -151,7 +162,11 @@ const existingAttachmentCards = computed(() => existingAttachments.value.map(att
 })))
 
 const today = formatLocalDateValue()
-const initialStartDate = props.originalRequest.start_date >= today ? props.originalRequest.start_date : ''
+const initialStartDate = isSupplement.value ||
+  isCombinedExtension.value ||
+  props.originalRequest.start_date >= today
+  ? props.originalRequest.start_date
+  : ''
 const initialEndDate = initialStartDate && props.originalRequest.end_date >= initialStartDate
   ? props.originalRequest.end_date
   : ''
@@ -164,7 +179,14 @@ const form = ref({
   reason: props.originalRequest.reason,
 })
 
-const NO_REASON_TYPES = ['annual', 'marriage', 'bereavement', 'maternity', 'paternity']
+const NO_REASON_TYPES = [
+  'annual',
+  'marriage',
+  'bereavement',
+  'compensatory',
+  'maternity',
+  'paternity',
+]
 const reasonRequired = !NO_REASON_TYPES.includes(props.originalRequest.leave_type_code)
 
 const rules: FormRules = {
@@ -175,7 +197,15 @@ const rules: FormRules = {
     : [],
 }
 
+function disableStartDate(time: Date): boolean {
+  return isSupplement.value ? false : isPastLeaveDateDisabled(time)
+}
+
 function disableEndDate(time: Date): boolean {
+  if (isSupplement.value) {
+    const date = formatLocalDateValue(time)
+    return Boolean(form.value.startDate && date < form.value.startDate)
+  }
   return isLeaveEndDateDisabled(time, form.value.startDate)
 }
 
@@ -214,6 +244,7 @@ function onDateChange() {
         startHalf: form.value.startHalf,
         endDate: form.value.endDate,
         endHalf: form.value.endHalf,
+        allowPast: isSupplement.value,
       })
       calculatedDays.value = result.days
     } catch {

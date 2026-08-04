@@ -242,7 +242,7 @@ async function submitOnlineApplication() {
   if (!applicationFormValid.value) return;
   try {
     await ElMessageBox.confirm(
-      "确认提交本次述职和电子签名？提交后由总经理签署主管领导意见，再由管理员签署人事部意见并代签总经理审批。",
+      "确认提交本次述职和电子签名？提交后由总经理签署主管领导意见、管理员签署人事部意见，最后由董事长完成最终审批。",
       "提交转正申请",
       {
         confirmButtonText: "确认提交",

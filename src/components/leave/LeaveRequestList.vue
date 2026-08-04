@@ -25,7 +25,22 @@
         align="center"
         :index="getRowIndex"
       />
-      <el-table-column label="申请编号" prop="request_no" width="160" align="center" />
+      <el-table-column label="申请编号" width="170" align="center">
+        <template #default="{ row }">
+          <div>{{ row.request_no }}</div>
+          <el-tag
+            v-if="row.application_kind !== 'normal'"
+            size="small"
+            effect="plain"
+            :type="applicationKindTagType(row.application_kind)"
+          >
+            {{ applicationKindLabel(row) }}
+          </el-tag>
+          <div v-if="row.parent_request_no" class="parent-request-no">
+            主申请 {{ row.parent_request_no }}
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column label="假期类型" prop="leave_type_name" width="90" align="center" />
       <el-table-column label="时间段" min-width="200" align="center">
         <template #default="{ row }">
@@ -47,7 +62,7 @@
       <el-table-column label="提交时间" width="110" align="center">
         <template #default="{ row }">{{ formatDate(row.submitted_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="160" align="center" fixed="right">
+      <el-table-column label="操作" width="230" align="center" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="handleView(row)">
             查看
@@ -73,6 +88,24 @@
           >
             删除
           </el-button>
+          <el-button
+            v-if="row.status === 'approved'"
+            link
+            type="primary"
+            size="small"
+            @click="openRelatedRequest(row, 'extension')"
+          >
+            续假
+          </el-button>
+          <el-button
+            v-if="row.status === 'approved'"
+            link
+            type="warning"
+            size="small"
+            @click="openRelatedRequest(row, 'supplement')"
+          >
+            补假
+          </el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -97,13 +130,31 @@
       :title="detailRequest ? `请假申请详情 - ${detailRequest.request_no}` : '请假申请详情'"
       size="480px"
       direction="rtl"
+      @closed="resetDetailNavigation"
     >
-      <LeaveApprovalTimeline
+      <div
         v-if="detailRequest"
-        :request="detailRequest"
-        :is-owner="true"
-        @resubmit="handleResubmitFromDetail"
-      />
+        v-loading="detailLoading"
+        class="detail-drawer-content"
+      >
+        <div v-if="detailHistory.length > 0" class="detail-navigation">
+          <el-button
+            link
+            type="primary"
+            :icon="ArrowLeft"
+            @click="handleDetailBack"
+          >
+            返回上一申请
+          </el-button>
+          <span>正在查看 {{ detailRequest.request_no }}</span>
+        </div>
+        <LeaveApprovalTimeline
+          :request="detailRequest"
+          :is-owner="true"
+          @resubmit="handleResubmitFromDetail"
+          @view-request="handleViewRelatedRequest"
+        />
+      </div>
       <el-skeleton v-else :rows="6" animated style="padding: 16px" />
     </el-drawer>
 
@@ -121,13 +172,31 @@
         @cancel="resubmitVisible = false"
       />
     </el-dialog>
+
+    <el-dialog
+      v-model="relatedVisible"
+      :title="relatedType === 'extension' ? '申请续假' : '申请补假'"
+      width="min(780px, 94vw)"
+      :close-on-click-modal="false"
+      destroy-on-close
+    >
+      <LeaveRelatedRequestForm
+        v-if="relatedRequest"
+        :source-request="relatedRequest"
+        :relation-type="relatedType"
+        @submitted="handleRelatedSuccess"
+        @cancel="relatedVisible = false"
+      />
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowLeft } from '@element-plus/icons-vue'
 import LeaveApprovalTimeline from './LeaveApprovalTimeline.vue'
+import LeaveRelatedRequestForm from './LeaveRelatedRequestForm.vue'
 import LeaveResubmitForm from './LeaveResubmitForm.vue'
 import {
   getMyRequests,
@@ -140,6 +209,7 @@ import {
 
 const emit = defineEmits<{
   (e: 'refresh'): void
+  (e: 'rejected-viewed', id: string): void
 }>()
 
 const activeTab = ref('')
@@ -150,8 +220,13 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const drawerVisible = ref(false)
 const detailRequest = ref<LeaveRequestDetail | null>(null)
+const detailHistory = ref<LeaveRequestDetail[]>([])
+const detailLoading = ref(false)
 const resubmitVisible = ref(false)
 const resubmitRequest = ref<LeaveRequest | null>(null)
+const relatedVisible = ref(false)
+const relatedRequest = ref<LeaveRequest | null>(null)
+const relatedType = ref<'extension' | 'supplement'>('extension')
 
 function getRowIndex(index: number): number {
   return (currentPage.value - 1) * pageSize.value + index + 1
@@ -169,6 +244,36 @@ function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'dan
     draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return map[status] || undefined
+}
+
+function applicationKindLabel(
+  request: Pick<LeaveRequest, 'application_kind' | 'combination_group_id'>
+): string {
+  if (request.combination_group_id && request.application_kind === 'extension') {
+    return '组合续假'
+  }
+  if (request.combination_group_id && request.application_kind === 'supplement') {
+    return '组合补假'
+  }
+  const labels: Record<LeaveRequest['application_kind'], string> = {
+    normal: '普通请假',
+    combined: '组合请假',
+    extension: '续假',
+    supplement: '补假',
+  }
+  return labels[request.application_kind] || '普通请假'
+}
+
+function applicationKindTagType(
+  kind: LeaveRequest['application_kind']
+): 'primary' | 'success' | 'warning' | 'info' {
+  const types: Record<LeaveRequest['application_kind'], 'primary' | 'success' | 'warning' | 'info'> = {
+    normal: 'info',
+    combined: 'primary',
+    extension: 'success',
+    supplement: 'warning',
+  }
+  return types[kind] || 'info'
 }
 
 function formatDate(iso: string): string {
@@ -200,13 +305,45 @@ async function fetchList() {
 
 async function handleView(row: LeaveRequest) {
   drawerVisible.value = true
+  detailHistory.value = []
   detailRequest.value = null
+  detailLoading.value = true
   try {
     detailRequest.value = await getRequestDetail(row.id)
+    if (row.status === 'rejected') {
+      emit('rejected-viewed', row.id)
+    }
   } catch {
     ElMessage.error('获取申请详情失败')
     drawerVisible.value = false
+  } finally {
+    detailLoading.value = false
   }
+}
+
+async function handleViewRelatedRequest(id: string) {
+  if (!detailRequest.value || detailRequest.value.id === id || detailLoading.value) return
+  const currentRequest = detailRequest.value
+  detailLoading.value = true
+  try {
+    const relatedRequest = await getRequestDetail(id)
+    detailHistory.value.push(currentRequest)
+    detailRequest.value = relatedRequest
+  } catch {
+    ElMessage.error('获取关联申请详情失败')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function handleDetailBack() {
+  const previousRequest = detailHistory.value.pop()
+  if (previousRequest) detailRequest.value = previousRequest
+}
+
+function resetDetailNavigation() {
+  detailHistory.value = []
+  detailRequest.value = null
 }
 
 async function handleCancel(row: LeaveRequest) {
@@ -265,6 +402,19 @@ function handleResubmitSuccess() {
   emit('refresh')
 }
 
+function openRelatedRequest(row: LeaveRequest, type: 'extension' | 'supplement') {
+  relatedRequest.value = row
+  relatedType.value = type
+  relatedVisible.value = true
+}
+
+async function handleRelatedSuccess() {
+  relatedVisible.value = false
+  relatedRequest.value = null
+  await fetchList()
+  emit('refresh')
+}
+
 onMounted(fetchList)
 
 defineExpose({ refresh: fetchList })
@@ -278,5 +428,29 @@ defineExpose({ refresh: fetchList })
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+.parent-request-no {
+  margin-top: 3px;
+  color: #909399;
+  font-size: 11px;
+}
+.detail-drawer-content {
+  min-height: 120px;
+}
+.detail-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #ebeef5;
+}
+.detail-navigation span {
+  overflow: hidden;
+  color: #909399;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

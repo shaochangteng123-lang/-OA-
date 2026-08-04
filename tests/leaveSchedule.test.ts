@@ -2,6 +2,7 @@ import {
   calculateLeaveReturnInfo,
   getBeijingLeaveClock,
   isApprovedLeaveActive,
+  resolveApprovedCombinationSchedule,
   type LeaveScheduleRequest,
   type LeaveWorkdayCalendar,
 } from '../server/utils/leave-schedule'
@@ -161,5 +162,66 @@ describe('请假生效时段和返岗计算', () => {
       return_to_work_half: null,
       leave_timing_status: 'not_applicable',
     })
+  })
+
+  it('组合请假全部通过后按整组最后一段计算统一返岗时间', () => {
+    const first = approvedRequest({
+      start_date: '2026-07-31',
+      start_half: 'morning',
+      end_date: '2026-08-03',
+      end_half: 'morning',
+      total_days: 1.5,
+      combination_group_id: 'group-1',
+    })
+    const second = approvedRequest({
+      start_date: '2026-08-03',
+      start_half: 'afternoon',
+      end_date: '2026-08-04',
+      end_half: 'afternoon',
+      total_days: 1.5,
+      combination_group_id: 'group-1',
+    })
+
+    const combined = resolveApprovedCombinationSchedule(first, [first, second])
+    const result = calculateLeaveReturnInfo(
+      combined,
+      emptyCalendar,
+      new Date('2026-07-31T00:00:00Z'),
+    )
+
+    expect(combined).toMatchObject({
+      start_date: '2026-07-31',
+      start_half: 'morning',
+      end_date: '2026-08-04',
+      end_half: 'afternoon',
+      total_days: 3,
+    })
+    expect(result.return_to_work_date).toBe('2026-08-05')
+    expect(result.return_to_work_half).toBe('morning')
+    expect(result.remaining_leave_days).toBe(3)
+  })
+
+  it('组合请假仍有未通过分段时不提前延后返岗时间', () => {
+    const first = approvedRequest({
+      start_date: '2026-07-31',
+      start_half: 'morning',
+      end_date: '2026-08-03',
+      end_half: 'morning',
+      total_days: 1.5,
+      combination_group_id: 'group-2',
+    })
+    const pending = approvedRequest({
+      status: 'pending',
+      start_date: '2026-08-03',
+      start_half: 'afternoon',
+      end_date: '2026-08-04',
+      end_half: 'afternoon',
+      total_days: 1.5,
+      combination_group_id: 'group-2',
+    })
+
+    expect(resolveApprovedCombinationSchedule(first, [first, pending])).toBe(
+      first,
+    )
   })
 })

@@ -138,6 +138,7 @@
           :current-version="confirmation.form_version"
           :review-stage="confirmation.review_stage"
           :status="confirmation.status"
+          :assignees="myStatus.approverNames"
           :show-history="false"
         />
       </section>
@@ -266,9 +267,13 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Delete, EditPen, RefreshLeft, View } from "@element-plus/icons-vue";
 import dayjs from "dayjs";
 import { api } from "@/utils/api";
+import { formatBeijingDateTimeMinute } from "@/utils/date";
 import { usePendingStore } from "@/stores/pending";
 import ProbationApprovalRecords from "@/components/probation/ProbationApprovalRecords.vue";
-import type { ProbationApprovalRecord } from "@/utils/probationApproval";
+import type {
+  ProbationApprovalRecord,
+  ProbationApproverNames,
+} from "@/utils/probationApproval";
 
 type ReviewStage =
   | "employee"
@@ -340,6 +345,7 @@ interface MyStatus {
   signatureHistory: SignatureRecord[];
   reviewStageLabel: string;
   supervisorName: string | null;
+  approverNames: ProbationApproverNames;
   probationHistory: ProbationHistoryRecord[];
 }
 
@@ -432,7 +438,7 @@ function formatDate(value: string | null | undefined) {
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? dayjs(value).format("YYYY-MM-DD HH:mm") : "-";
+  return formatBeijingDateTimeMinute(value) || "-";
 }
 
 function probationStatusText(status: string) {

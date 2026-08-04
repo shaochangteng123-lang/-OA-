@@ -8,11 +8,7 @@ import fs from "fs";
 import path from "path";
 import { db } from "../db/index.js";
 import { nanoid } from "nanoid";
-import type {
-  User,
-  UserDelegatedSignature,
-  UserSignature,
-} from "../types/database.js";
+import type { User, UserSignature } from "../types/database.js";
 import {
   verifyPassword,
   hashPassword,
@@ -31,11 +27,20 @@ import { validateFilePath } from "../utils/file-validation.js";
 
 const router = Router();
 
-type PersonalSignatureType = "personal" | "general_manager";
+type PersonalSignatureType = "personal";
 
 interface SignatureAccessContext {
   user: Pick<User, "id" | "name" | "role">;
-  representedUser: { id: string; name: string } | null;
+}
+
+class SignatureOperationError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode = 400,
+  ) {
+    super(message);
+    this.name = "SignatureOperationError";
+  }
 }
 
 function parsePersonalSignatureType(
@@ -44,12 +49,12 @@ function parsePersonalSignatureType(
   if (value === undefined || value === "" || value === "personal") {
     return "personal";
   }
-  return value === "general_manager" ? value : null;
+  return null;
 }
 
 async function getSignatureAccessContext(
   userId: string,
-  signatureType: PersonalSignatureType,
+  _signatureType: PersonalSignatureType,
 ): Promise<SignatureAccessContext | null> {
   const user = (await db
     .prepare(
@@ -60,23 +65,7 @@ async function getSignatureAccessContext(
     .get(userId)) as Pick<User, "id" | "name" | "role"> | undefined;
   if (!user) return null;
 
-  if (signatureType === "personal") {
-    return { user, representedUser: { id: user.id, name: user.name } };
-  }
-  if (!["admin", "super_admin"].includes(user.role)) {
-    return { user, representedUser: null };
-  }
-
-  const representedUser = (await db
-    .prepare(
-      `SELECT id, name
-       FROM users
-       WHERE role = 'general_manager' AND status = 'active'
-       ORDER BY created_at ASC
-       LIMIT 1`,
-    )
-    .get()) as { id: string; name: string } | undefined;
-  return { user, representedUser: representedUser || null };
+  return { user };
 }
 
 function resolvePersonalSignaturePath(storedPath: string) {
@@ -84,16 +73,6 @@ function resolvePersonalSignaturePath(storedPath: string) {
     throw new Error("个人电子签名文件路径不正确");
   }
   return path.resolve(process.cwd(), storedPath.replace(/^[/\\]+/, ""));
-}
-
-function removePersonalSignatureFile(storedPath: string | null | undefined) {
-  if (!storedPath) return;
-  try {
-    const filePath = resolvePersonalSignaturePath(storedPath);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (error) {
-    console.error("清理个人电子签名文件失败:", error);
-  }
 }
 
 function personalSignatureFileExists(
@@ -243,47 +222,21 @@ router.get("/signature", requireAuth, async (req, res) => {
         message: "用户不存在或已停用",
       });
     }
-    if (
-      signatureType === "general_manager" &&
-      !["admin", "super_admin"].includes(access.user.role)
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "只有管理员可以维护总经理签名",
-      });
-    }
-
-    const signature =
-      signatureType === "personal"
-        ? ((await db
-            .prepare(
-              `SELECT user_id, signature_path, created_at, updated_at
-               FROM user_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserSignature | undefined)
-        : ((await db
-            .prepare(
-              `SELECT user_id, represented_user_id, represented_user_name,
-                      signature_path, created_at, updated_at
-               FROM user_delegated_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserDelegatedSignature | undefined);
+    const signature = (await db
+      .prepare(
+        `SELECT user_id, signature_path, created_at, updated_at
+         FROM user_signatures
+         WHERE user_id = ?`,
+      )
+      .get(userId)) as UserSignature | undefined;
 
     const hasSignature = personalSignatureFileExists(signature?.signature_path);
-    const ownerName =
-      signatureType === "personal"
-        ? access.user.name
-        : (signature as UserDelegatedSignature | undefined)
-            ?.represented_user_name ||
-          access.representedUser?.name ||
-          "总经理";
     res.json({
       success: true,
       data: {
         signatureType,
-        ownerName,
+        ownerName: access.user.name,
+        locked: Boolean(signature),
         hasSignature,
         updatedAt: hasSignature ? signature?.updated_at || null : null,
       },
@@ -318,40 +271,17 @@ router.get("/signature/image", requireAuth, async (req, res) => {
         message: "用户不存在或已停用",
       });
     }
-    if (
-      signatureType === "general_manager" &&
-      !["admin", "super_admin"].includes(access.user.role)
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "只有管理员可以读取总经理签名",
-      });
-    }
-
-    const signature =
-      signatureType === "personal"
-        ? ((await db
-            .prepare(
-              `SELECT user_id, signature_path, created_at, updated_at
-               FROM user_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserSignature | undefined)
-        : ((await db
-            .prepare(
-              `SELECT user_id, represented_user_id, represented_user_name,
-                      signature_path, created_at, updated_at
-               FROM user_delegated_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserDelegatedSignature | undefined);
+    const signature = (await db
+      .prepare(
+        `SELECT user_id, signature_path, created_at, updated_at
+         FROM user_signatures
+         WHERE user_id = ?`,
+      )
+      .get(userId)) as UserSignature | undefined;
     if (!signature) {
       return res.status(404).json({
         success: false,
-        message:
-          signatureType === "personal"
-            ? "尚未保存个人电子签名"
-            : "尚未保存总经理电子签名",
+        message: "尚未保存个人电子签名",
       });
     }
 
@@ -375,7 +305,7 @@ router.get("/signature/image", requireAuth, async (req, res) => {
   }
 });
 
-// 当前账号保存或更换自己的个人电子签名
+// 当前账号首次确认自己的个人电子签名
 router.post("/signature", requireAuth, async (req, res) => {
   const userId = req.session?.userId;
   if (!userId) {
@@ -395,22 +325,6 @@ router.post("/signature", requireAuth, async (req, res) => {
       message: "用户不存在或已停用",
     });
   }
-  if (
-    signatureType === "general_manager" &&
-    !["admin", "super_admin"].includes(access.user.role)
-  ) {
-    return res.status(403).json({
-      success: false,
-      message: "只有管理员可以维护总经理签名",
-    });
-  }
-  if (signatureType === "general_manager" && !access.representedUser) {
-    return res.status(409).json({
-      success: false,
-      message: "请先创建并启用总经理账号",
-    });
-  }
-
   let signatureBuffer: Buffer;
   try {
     signatureBuffer = await normalizeSignaturePng(
@@ -427,93 +341,54 @@ router.post("/signature", requireAuth, async (req, res) => {
   const now = uploadedAt.toISOString();
   let newFilePath = "";
   try {
-    const existing =
-      signatureType === "personal"
-        ? ((await db
-            .prepare(
-              `SELECT user_id, signature_path, created_at, updated_at
-               FROM user_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserSignature | undefined)
-        : ((await db
-            .prepare(
-              `SELECT user_id, represented_user_id, represented_user_name,
-                      signature_path, created_at, updated_at
-               FROM user_delegated_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserDelegatedSignature | undefined);
-    const signatureDirectory = ensureDatedUploadDirectory(
-      "personal-signatures",
-      uploadedAt,
-      userId,
-      signatureType,
-    );
-    newFilePath = path.join(
-      signatureDirectory,
-      `${signatureType}-${nanoid(12)}.png`,
-    );
-    fs.writeFileSync(newFilePath, signatureBuffer);
-    const storedPath = toStoredUploadPath(newFilePath);
-
-    if (signatureType === "personal") {
-      await db
-        .prepare(
-          `INSERT INTO user_signatures (
-             user_id, signature_path, created_at, updated_at
-           ) VALUES (?, ?, ?, ?)
-           ON CONFLICT (user_id) DO UPDATE SET
-             signature_path = EXCLUDED.signature_path,
-             updated_at = EXCLUDED.updated_at`,
-        )
-        .run(userId, storedPath, existing?.created_at || now, now);
-    } else {
-      await db
-        .prepare(
-          `INSERT INTO user_delegated_signatures (
-             user_id, represented_user_id, represented_user_name,
-             signature_path, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT (user_id) DO UPDATE SET
-             represented_user_id = EXCLUDED.represented_user_id,
-             represented_user_name = EXCLUDED.represented_user_name,
-             signature_path = EXCLUDED.signature_path,
-             updated_at = EXCLUDED.updated_at`,
-        )
-        .run(
-          userId,
-          access.representedUser!.id,
-          access.representedUser!.name,
-          storedPath,
-          existing?.created_at || now,
-          now,
+    await db.transaction(async (client) => {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `personal-signature-${userId}`,
+      ]);
+      const existing = await client.query<UserSignature>(
+        `SELECT user_id, signature_path, created_at, updated_at
+         FROM user_signatures
+         WHERE user_id = $1`,
+        [userId],
+      );
+      if (existing.rows[0]) {
+        throw new SignatureOperationError(
+          "个人电子签名已确认并锁定，不能重复上传",
+          409,
         );
-    }
+      }
 
-    if (existing?.signature_path && existing.signature_path !== storedPath) {
-      removePersonalSignatureFile(existing.signature_path);
-    }
+      const signatureDirectory = ensureDatedUploadDirectory(
+        "personal-signatures",
+        uploadedAt,
+        userId,
+        signatureType,
+      );
+      newFilePath = path.join(
+        signatureDirectory,
+        `${signatureType}-${nanoid(12)}.png`,
+      );
+      fs.writeFileSync(newFilePath, signatureBuffer);
+      const storedPath = toStoredUploadPath(newFilePath);
+
+      await client.query(
+        `INSERT INTO user_signatures (
+           user_id, signature_path, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4)`,
+        [userId, storedPath, now, now],
+      );
+    });
 
     res.json({
       success: true,
       data: {
         signatureType,
-        ownerName:
-          signatureType === "personal"
-            ? access.user.name
-            : access.representedUser!.name,
+        ownerName: access.user.name,
+        locked: true,
         hasSignature: true,
         updatedAt: now,
       },
-      message:
-        signatureType === "personal"
-          ? existing
-            ? "个人电子签名已更新"
-            : "个人电子签名已保存"
-          : existing
-            ? "总经理电子签名已更新"
-            : "总经理电子签名已保存",
+      message: "个人电子签名已确认并锁定",
     });
   } catch (error) {
     if (newFilePath && fs.existsSync(newFilePath)) {
@@ -523,15 +398,21 @@ router.post("/signature", requireAuth, async (req, res) => {
         console.error("清理未保存的个人电子签名失败:", cleanupError);
       }
     }
+    if (error instanceof SignatureOperationError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+    }
     console.error("保存个人电子签名失败:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "保存个人电子签名失败",
     });
   }
 });
 
-// 当前账号删除自己的个人电子签名
+// 个人电子签名确认后不可删除
 router.delete("/signature", requireAuth, async (req, res) => {
   try {
     const userId = req.session?.userId;
@@ -545,55 +426,15 @@ router.delete("/signature", requireAuth, async (req, res) => {
         message: "电子签名类型不正确",
       });
     }
-    const access = await getSignatureAccessContext(userId, signatureType);
-    if (!access) {
+    if (!(await getSignatureAccessContext(userId, signatureType))) {
       return res.status(401).json({
         success: false,
         message: "用户不存在或已停用",
       });
     }
-    if (
-      signatureType === "general_manager" &&
-      !["admin", "super_admin"].includes(access.user.role)
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "只有管理员可以删除总经理签名",
-      });
-    }
-
-    const existing =
-      signatureType === "personal"
-        ? ((await db
-            .prepare(
-              `SELECT user_id, signature_path, created_at, updated_at
-               FROM user_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserSignature | undefined)
-        : ((await db
-            .prepare(
-              `SELECT user_id, represented_user_id, represented_user_name,
-                      signature_path, created_at, updated_at
-               FROM user_delegated_signatures
-               WHERE user_id = ?`,
-            )
-            .get(userId)) as UserDelegatedSignature | undefined);
-
-    await db
-      .prepare(
-        signatureType === "personal"
-          ? "DELETE FROM user_signatures WHERE user_id = ?"
-          : "DELETE FROM user_delegated_signatures WHERE user_id = ?",
-      )
-      .run(userId);
-    removePersonalSignatureFile(existing?.signature_path);
-    res.json({
-      success: true,
-      message:
-        signatureType === "personal"
-          ? "个人电子签名已删除"
-          : "总经理电子签名已删除",
+    return res.status(409).json({
+      success: false,
+      message: "个人电子签名确认后已锁定，不能删除",
     });
   } catch (error) {
     console.error("删除个人电子签名失败:", error);

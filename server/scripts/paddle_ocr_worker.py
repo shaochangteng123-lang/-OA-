@@ -58,6 +58,12 @@ def get_ocr_engine():
             use_textline_orientation=True,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
+            # 限制推理缓存、线程和批量大小，防止长文档识别时内存持续膨胀。
+            enable_mkldnn=True,
+            mkldnn_cache_capacity=1,
+            cpu_threads=2,
+            textline_orientation_batch_size=1,
+            text_recognition_batch_size=1,
             lang="ch",
             ocr_version="PP-OCRv4",
             text_det_box_thresh=0.25,

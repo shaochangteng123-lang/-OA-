@@ -41,7 +41,11 @@
         <template #header>
           <span class="card-title">我的申请记录</span>
         </template>
-        <LeaveRequestList ref="requestListRef" @refresh="handleRefresh" />
+        <LeaveRequestList
+          ref="requestListRef"
+          @refresh="handleRefresh"
+          @rejected-viewed="handleRejectedNoticeViewed"
+        />
       </el-card>
     </div>
   </div>
@@ -51,7 +55,10 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usePendingStore } from '@/stores/pending'
-import { markApprovedLeaveNoticesRead } from '@/utils/leaveApi'
+import {
+  markApprovedLeaveNoticesRead,
+  markRejectedLeaveNoticeRead,
+} from '@/utils/leaveApi'
 import LeaveBalancePanel from '@/components/leave/LeaveBalancePanel.vue'
 import LeaveRequestForm from '@/components/leave/LeaveRequestForm.vue'
 import LeaveRequestList from '@/components/leave/LeaveRequestList.vue'
@@ -70,6 +77,14 @@ async function handleApprovedNoticeClose() {
     await pendingStore.refreshPendingCounts()
   } catch {
     ElMessage.error('标记审批通过提醒已读失败')
+  }
+}
+
+async function handleRejectedNoticeViewed(id: string) {
+  try {
+    pendingStore.counts.myLeaveRejected = await markRejectedLeaveNoticeRead(id)
+  } catch {
+    ElMessage.error('标记驳回提醒已读失败')
   }
 }
 

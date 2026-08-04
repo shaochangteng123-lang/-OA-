@@ -20,7 +20,7 @@ export interface User {
   forceChangePassword?: boolean
 }
 
-export type UserRole = 'super_admin' | 'admin' | 'general_manager' | 'boss' | 'user' | 'guest'
+export type UserRole = 'super_admin' | 'chairman' | 'admin' | 'general_manager' | 'boss' | 'user' | 'guest'
 
 export type Permission =
   | 'view_worklogs'
@@ -48,8 +48,7 @@ export type Permission =
   | 'manage_worklog_entries'
   | 'manage_worklog_dicts'
 
-export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
-  super_admin: [
+const SYSTEM_ADMIN_PERMISSIONS: Permission[] = [
     'view_worklogs',
     'create_worklog',
     'edit_worklog',
@@ -74,7 +73,11 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'view_worklog_entries',
     'manage_worklog_entries',
     'manage_worklog_dicts',
-  ],
+]
+
+export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
+  super_admin: SYSTEM_ADMIN_PERMISSIONS,
+  chairman: SYSTEM_ADMIN_PERMISSIONS,
   admin: [
     'view_worklogs',
     'create_worklog',

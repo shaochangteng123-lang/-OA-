@@ -1,7 +1,18 @@
 import { pool } from '../db/index.js'
 import { isValidLeaveDate } from '../utils/leave.js'
+import {
+  addLeaveCalendarDays,
+  findLeavePeriodByDays,
+  findNextLeaveHalfSlot,
+  listLeaveHalfSlots,
+  splitLeaveHalfSlots,
+  type LeaveHalf,
+  type LeavePeriod,
+  type LeaveScheduleDay,
+} from '../utils/leave-period.js'
 export { calculateAnnualLeaveDays, calculateAnnualLeaveEntitlement } from '../utils/leave.js'
 export { isValidLeaveDate }
+export type { LeaveHalf, LeavePeriod } from '../utils/leave-period.js'
 
 /**
  * 工作日计算服务
@@ -18,11 +29,19 @@ function formatDate(date: Date): string {
   return `${y}-${m}-${d}`
 }
 
-export type LeaveHalf = 'morning' | 'afternoon'
-
 export interface LeaveYearAllocation {
   year: number
   days: number
+}
+
+async function getLeaveSchedule(startDate: string, endDate: string): Promise<LeaveScheduleDay[]> {
+  const result = await pool.query<LeaveScheduleDay>(
+    `SELECT date, type
+     FROM holidays
+     WHERE date >= $1 AND date <= $2`,
+    [startDate, endDate]
+  )
+  return result.rows
 }
 
 /**
@@ -127,6 +146,47 @@ export async function calculateLeaveDaysByYear(
 }
 
 /**
+ * 根据目标天数计算请满后的起止时间，最多向后查找五年。
+ */
+export async function calculateLeavePeriodByDays(
+  startDate: string,
+  startHalf: LeaveHalf,
+  days: number,
+  maxEndDate?: string
+): Promise<LeavePeriod | null> {
+  const searchEndDate = maxEndDate || addLeaveCalendarDays(startDate, Math.max(366, Math.ceil(days * 3) + 30))
+  const schedule = await getLeaveSchedule(startDate, searchEndDate)
+  return findLeavePeriodByDays(startDate, startHalf, days, searchEndDate, schedule)
+}
+
+/**
+ * 将选定时段按组合假期的天数顺序拆成多个独立区间。
+ */
+export async function splitLeavePeriodByDays(
+  startDate: string,
+  startHalf: LeaveHalf,
+  endDate: string,
+  endHalf: LeaveHalf,
+  segmentDays: number[]
+): Promise<LeavePeriod[]> {
+  const schedule = await getLeaveSchedule(startDate, endDate)
+  const slots = listLeaveHalfSlots(startDate, startHalf, endDate, endHalf, schedule)
+  return splitLeaveHalfSlots(slots, segmentDays)
+}
+
+/**
+ * 获取指定半天结束后的第一个工作半天。
+ */
+export async function getNextWorkingLeaveHalf(
+  endDate: string,
+  endHalf: LeaveHalf
+): Promise<{ date: string; half: LeaveHalf } | null> {
+  const maxEndDate = addLeaveCalendarDays(endDate, 366)
+  const schedule = await getLeaveSchedule(endDate, maxEndDate)
+  return findNextLeaveHalfSlot(endDate, endHalf, maxEndDate, schedule)
+}
+
+/**
  * 根据假期类型代码返回法定默认额度
  */
 export function getLegalLeaveDays(leaveTypeCode: string): number {
@@ -134,10 +194,12 @@ export function getLegalLeaveDays(leaveTypeCode: string): number {
     annual: 5,
     personal: 3,
     sick: 30,
-    compensatory: 0,
+    compensatory: 3,
+    bereavement: 3,
     marriage: 3,
     maternity: 98,
     paternity: 15,
+    other: 0,
   }
   return defaults[leaveTypeCode] ?? 0
 }

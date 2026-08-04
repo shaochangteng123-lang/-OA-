@@ -95,20 +95,24 @@ describe("离职模板自动填写", () => {
     const fit = calculateResignationFieldTextFit(120, 80, 2.5, 16);
 
     expect(fit.transformOrigin).toBe("left center");
-    expect(fit.fontScale).toBeCloseTo(0.625, 6);
+    expect(fit.fontScale).toBeCloseTo(0.6, 6);
     expect(fit.horizontalScale).toBe(1);
     expect(fit.widthPercent).toBe(100);
-    expect((80 * fit.widthPercent * fit.horizontalScale) / 100).toBeCloseTo(
-      80,
-      6,
-    );
+    expect(120 * fit.fontScale).toBeCloseTo(72, 6);
   });
 
   it("达到最低字号后仅对超长文字做剩余横向适配", () => {
     const fit = calculateResignationFieldTextFit(300, 80, 2.5, 16);
 
     expect(fit.fontScale).toBeCloseTo(7 / 16, 6);
-    expect(fit.horizontalScale).toBeCloseTo(75 / (300 * (7 / 16)), 6);
+    expect(fit.horizontalScale).toBeCloseTo(72 / (300 * (7 / 16)), 6);
+  });
+
+  it("字段两侧保留笔画安全区，避免身份证号末位被括号或边界覆盖", () => {
+    const fit = calculateResignationFieldTextFit(154, 150.25, 2.5, 16);
+    const displayedWidth = 154 * fit.fontScale * fit.horizontalScale;
+
+    expect(displayedWidth).toBeLessThanOrEqual(142.25);
   });
 
   it("文字真实边界超出理论宽度时保留右侧完整笔画", () => {

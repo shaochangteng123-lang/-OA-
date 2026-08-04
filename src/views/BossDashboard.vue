@@ -915,7 +915,9 @@ let latestRequestId = 0;
 let lastSuccessfulRefreshAt = 0;
 const isSummaryBusy = computed(() => loading.value || refreshing.value);
 const canOpenBusinessDetails = computed(() =>
-  ["super_admin", "admin"].includes(authStore.user?.role || ""),
+  ["super_admin", "chairman", "admin"].includes(
+    authStore.user?.role || "",
+  ),
 );
 
 const periodLabel = computed(() => {

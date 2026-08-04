@@ -12,6 +12,8 @@ export interface LeaveTypeConfig {
   description: string | null
   sort_order: number
   is_active: boolean
+  is_available?: boolean
+  unavailable_reason?: string | null
 }
 
 export interface LeaveBalance {
@@ -23,6 +25,8 @@ export interface LeaveBalance {
   used_days: number
   pending_days: number
   available_days: number
+  is_available?: boolean
+  unavailable_reason?: string | null
 }
 
 export interface LeaveRequest {
@@ -49,11 +53,23 @@ export interface LeaveRequest {
   reject_reason: string | null
   approved_at: string | null
   approval_notice_unread?: boolean
+  rejection_notice_unread?: boolean
   rejected_at: string | null
   cancelled_at: string | null
   submitted_at: string
   version: number
   original_id: string | null
+  application_kind: 'normal' | 'combined' | 'extension' | 'supplement'
+  combination_group_id: string | null
+  parent_request_id: string | null
+  parent_request_no?: string | null
+  parent_leave_type_name?: string | null
+  parent_start_date?: string | null
+  parent_start_half?: 'morning' | 'afternoon' | null
+  parent_end_date?: string | null
+  parent_end_half?: 'morning' | 'afternoon' | null
+  parent_total_days?: number | null
+  parent_reason?: string | null
   created_at: string
   updated_at: string
   remaining_days?: number | null
@@ -61,6 +77,21 @@ export interface LeaveRequest {
   return_to_work_date?: string | null
   return_to_work_half?: 'morning' | 'afternoon' | null
   leave_timing_status?: 'not_applicable' | 'upcoming' | 'on_leave' | 'returned'
+}
+
+export interface LeaveRelatedRequestSummary {
+  id: string
+  request_no: string
+  leave_type_name: string
+  start_date: string
+  start_half: 'morning' | 'afternoon'
+  end_date: string
+  end_half: 'morning' | 'afternoon'
+  total_days: number
+  reason: string
+  status: LeaveRequest['status']
+  application_kind: LeaveRequest['application_kind']
+  combination_group_id?: string | null
 }
 
 export interface LeaveApprovalLog {
@@ -93,6 +124,9 @@ export interface LeaveRequestDetail extends LeaveRequest {
   version_count: number
   attachments: LeaveAttachment[]
   logs: LeaveApprovalLog[]
+  parent_request: LeaveRelatedRequestSummary | null
+  related_requests: LeaveRelatedRequestSummary[]
+  combination_requests: LeaveRelatedRequestSummary[]
 }
 
 export interface LeaveRequestListResponse {
@@ -129,8 +163,44 @@ export async function calculateDays(params: {
   startHalf: 'morning' | 'afternoon'
   endDate: string
   endHalf: 'morning' | 'afternoon'
+  allowPast?: boolean
 }): Promise<{ days: number }> {
   const res = await api.post('/api/leave/calculate-days', params)
+  return res.data.data
+}
+
+// 根据开始时间和组合总天数自动计算结束时间
+export async function calculatePeriodByDays(params: {
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  days: number
+  allowPast?: boolean
+}): Promise<{
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  endDate: string
+  endHalf: 'morning' | 'afternoon'
+  days: number
+}> {
+  const res = await api.post('/api/leave/calculate-period-by-days', params)
+  return res.data.data
+}
+
+// 根据可用余额计算一键请满后的时间
+export async function calculateFullLeavePeriod(params: {
+  leaveTypeCode: string
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  allowPast?: boolean
+}): Promise<{
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  endDate: string
+  endHalf: 'morning' | 'afternoon'
+  days: number
+  availableDays: number
+}> {
+  const res = await api.post('/api/leave/calculate-full-period', params)
   return res.data.data
 }
 
@@ -143,6 +213,17 @@ export async function getMyBalances(): Promise<LeaveBalance[]> {
 // 提交请假申请（支持附件）
 export async function submitLeaveRequest(formData: FormData): Promise<{ id: string; requestNo: string }> {
   const res = await api.post('/api/leave/requests', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+  return res.data.data
+}
+
+// 提交组合请假
+export async function submitCombinedLeaveRequests(formData: FormData): Promise<{
+  combinationGroupId: string
+  requests: Array<{ id: string; requestNo: string }>
+}> {
+  const res = await api.post('/api/leave/requests/combined', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
   })
   return res.data.data
@@ -170,6 +251,43 @@ export async function getRequestDetail(id: string): Promise<LeaveRequestDetail> 
 // 确认已查看全部请假审批通过提醒
 export async function markApprovedLeaveNoticesRead(): Promise<void> {
   await api.post('/api/leave/requests/approved/mark-read')
+}
+
+// 确认已查看指定请假驳回提醒
+export async function markRejectedLeaveNoticeRead(id: string): Promise<number> {
+  const res = await api.post(`/api/leave/requests/${id}/rejected/mark-read`)
+  return Number(res.data.data?.remainingUnread || 0)
+}
+
+export interface RelatedLeaveContext {
+  parentRequest: LeaveRequest
+  suggestedExtensionStart: {
+    date: string
+    half: 'morning' | 'afternoon'
+  } | null
+}
+
+// 获取续假、补假的主申请上下文
+export async function getRelatedLeaveContext(id: string): Promise<RelatedLeaveContext> {
+  const res = await api.get(`/api/leave/requests/${id}/related-context`)
+  return res.data.data
+}
+
+// 提交续假或补假
+export async function submitRelatedLeaveRequest(
+  id: string,
+  formData: FormData
+): Promise<{
+  id: string
+  requestNo: string
+  parentRequestNo: string
+  combinationGroupId: string | null
+  requests: Array<{ id: string; requestNo: string }>
+}> {
+  const res = await api.post(`/api/leave/requests/${id}/related`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+  return res.data.data
 }
 
 // 下载附件（返回 URL）
@@ -278,7 +396,7 @@ export async function adminGetBalances(params?: {
   year?: number
 }): Promise<{
   users: Array<Record<string, any>>
-  types: Array<{ code: string; name: string }>
+  types: Array<{ code: string; name: string; requires_balance_check: boolean }>
   year: number
 }> {
   const res = await api.get('/api/leave/admin/balances', { params })

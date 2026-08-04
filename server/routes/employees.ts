@@ -18,10 +18,12 @@ import {
 } from '../services/employmentContractOcr.js'
 import { syncEmployeeCurrentAndFuturePayroll } from '../services/payrollRecordSync.js'
 import {
+  isEmployeeDocumentOcrInfrastructureError,
   type EmployeeDocumentType,
 } from '../services/employeeDocumentClassifier.js'
 import {
   analyzeEmployeeDocumentBundle,
+  mapEmployeeDocumentSectionRecognizedTexts,
   splitEmployeeDocumentBundle,
   type SplitEmployeeDocumentFile,
 } from '../services/employeeDocumentBundle.js'
@@ -58,6 +60,7 @@ import {
   validateContractTemplateDownload,
   type ContractTemplateAccessFields,
 } from '../utils/onboarding-template-access.js'
+import { requiresEmployeeProfile } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -153,6 +156,16 @@ class EmployeeOperationError extends Error {
   }
 }
 
+async function ensureEmployeeAccount(userId: string): Promise<void> {
+  const account = await db.prepare(
+    'SELECT role FROM users WHERE id = ? AND status = ?',
+  ).get(userId, 'active') as { role: string } | undefined
+  if (!account) throw new EmployeeOperationError('用户不存在或已停用', 401)
+  if (!requiresEmployeeProfile(account.role)) {
+    throw new EmployeeOperationError('当前角色不建立员工档案', 403)
+  }
+}
+
 const EMPLOYEE_DOCUMENT_TYPES = new Set<EmployeeDocumentType>([
   'invitation',
   'application',
@@ -242,6 +255,7 @@ interface EmployeeDocumentFileToPersist {
   originalFileName: string
   fileSize: number
   mimeType: string
+  preRecognizedPageTextCandidates?: ReadonlyMap<number, readonly string[]>
 }
 
 interface PersistEmployeeDocumentsOptions {
@@ -347,10 +361,16 @@ async function persistEmployeeDocuments(options: PersistEmployeeDocumentsOptions
   const preparedFiles: PreparedEmployeeDocumentFile[] = []
   for (const file of files) {
     const salaryRecognition = file.documentType === 'invitation'
-      ? await recognizeInvitationMonthlySalary(file.filePath)
+      ? await recognizeInvitationMonthlySalary(file.filePath, {
+          preRecognizedPageTextCandidates:
+            file.preRecognizedPageTextCandidates?.get(1),
+        })
       : null
     const contractRecognition = file.documentType === 'contract'
-      ? await recognizeEmploymentContractTerm(file.filePath)
+      ? await recognizeEmploymentContractTerm(file.filePath, {
+          preRecognizedPageTextCandidates:
+            file.preRecognizedPageTextCandidates,
+        })
       : null
     preparedFiles.push({
       ...file,
@@ -480,12 +500,17 @@ async function persistEmployeeDocuments(options: PersistEmployeeDocumentsOptions
     }
   })
 
+  const lastInvitationFile = [...preparedFiles]
+    .reverse()
+    .find(file => file.documentType === 'invitation')
+  const lastContractFile = [...preparedFiles]
+    .reverse()
+    .find(file => file.documentType === 'contract')
+
   return {
     documents: transactionResult.documents,
-    salaryRecognition:
-      preparedFiles.find((file) => file.documentType === 'invitation')?.salaryRecognition || null,
-    contractRecognition:
-      preparedFiles.find((file) => file.documentType === 'contract')?.contractRecognition || null,
+    salaryRecognition: lastInvitationFile?.salaryRecognition || null,
+    contractRecognition: lastContractFile?.contractRecognition || null,
     currentHireDate: transactionResult.currentHireDate,
     currentContractEndDate: transactionResult.currentContractEndDate,
     currentProbationEndDate: transactionResult.currentProbationEndDate,
@@ -572,8 +597,8 @@ router.get('/my-profile', requireAuth, async (req, res) => {
       WHERE id = ?
     `).get(userId) as { role: string } | undefined
 
-    // BOSS账号只用于经营看板，不自动创建或返回员工档案。
-    if (account?.role === 'boss') {
+    // 独立系统账号不自动创建或返回员工档案。
+    if (account && !requiresEmployeeProfile(account.role)) {
       return res.json({
         success: true,
         data: null,
@@ -641,6 +666,7 @@ router.get('/my-profile', requireAuth, async (req, res) => {
 router.post('/my-profile', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId!
+    await ensureEmployeeAccount(userId)
     const normalized = normalizeEmployeeProfileInput(req.body)
     if (!normalized.data) {
       return res.status(400).json({ success: false, message: normalized.error })
@@ -807,6 +833,9 @@ router.post('/my-profile', requireAuth, async (req, res) => {
     }
   } catch (error) {
     console.error('保存员工信息失败:', error)
+    if (error instanceof EmployeeOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
     res.status(500).json({ success: false, message: '保存员工信息失败' })
   }
 })
@@ -815,6 +844,7 @@ router.post('/my-profile', requireAuth, async (req, res) => {
 router.post('/my-profile/submit', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId!
+    await ensureEmployeeAccount(userId)
     const now = new Date().toISOString()
     let employeeId = ''
 
@@ -977,7 +1007,7 @@ router.get('/statistics', requireAdmin, async (req, res) => {
         LEFT JOIN users u ON ep.user_id = u.id
         CROSS JOIN leave_clock clock
         WHERE ep.status = 'submitted'
-          AND COALESCE(u.role, 'user') <> 'boss'
+          AND COALESCE(u.role, 'user') NOT IN ('boss', 'chairman', 'super_admin')
       )
       SELECT
         COUNT(*) as total,
@@ -1030,7 +1060,7 @@ router.get('/list', requireAdmin, async (req, res) => {
         FROM employee_profiles ep
         LEFT JOIN users u ON ep.user_id = u.id
         CROSS JOIN leave_clock clock
-        WHERE COALESCE(u.role, 'user') <> 'boss'
+        WHERE COALESCE(u.role, 'user') NOT IN ('boss', 'chairman', 'super_admin')
       )
     `
     const conditions: string[] = []
@@ -1593,7 +1623,12 @@ router.post('/:id/documents/auto-classify', requireAdmin, uploadEmployeeDoc.sing
     }
 
     const originalFileName = resolveOriginalFileName(file, req.body.originalFileName)
-    const analysis = await analyzeEmployeeDocumentBundle(file.path, originalFileName)
+    const recognizedTextBySourcePage = new Map<number, readonly string[]>()
+    const analysis = await analyzeEmployeeDocumentBundle(file.path, originalFileName, {
+      onPageRecognized: (pageNumber, recognizedTextCandidates) => {
+        recognizedTextBySourcePage.set(pageNumber, recognizedTextCandidates)
+      },
+    })
     if (analysis.status !== 'success' || analysis.sections.length === 0) {
       removeUploadedEmployeeDocument(file)
       return res.status(422).json({
@@ -1610,7 +1645,13 @@ router.post('/:id/documents/auto-classify', requireAdmin, uploadEmployeeDoc.sing
     )
     const result = await persistEmployeeDocuments({
       employeeId: id,
-      files: splitFiles,
+      files: splitFiles.map(splitFile => ({
+        ...splitFile,
+        preRecognizedPageTextCandidates: mapEmployeeDocumentSectionRecognizedTexts(
+          splitFile.pageNumbers,
+          recognizedTextBySourcePage,
+        ),
+      })),
       uploaderId: req.session.userId!,
     })
     persisted = true
@@ -1650,6 +1691,13 @@ router.post('/:id/documents/auto-classify', requireAdmin, uploadEmployeeDoc.sing
           // 忽略自动归档失败后的拆分文件清理错误
         }
       }
+    }
+    if (isEmployeeDocumentOcrInfrastructureError(error)) {
+      return res.status(503).json({
+        success: false,
+        message:
+          '档案文字识别服务本次未能完整处理文件，为避免错误归档，本次未上传任何文件，请稍后重新上传',
+      })
     }
     res.status(500).json({ success: false, message: '自动识别员工档案文件失败' })
   }

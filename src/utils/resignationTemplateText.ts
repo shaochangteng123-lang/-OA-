@@ -11,6 +11,7 @@ export function calculateResignationFieldTextFit(
   horizontalMargin: number,
   fontSize: number,
   minimumFontSize = 7,
+  glyphSafetyMargin = 1.5,
 ): ResignationFieldTextFit {
   const safeMeasuredWidth = Number.isFinite(measuredTextWidth)
     ? Math.max(0, measuredTextWidth)
@@ -25,7 +26,13 @@ export function calculateResignationFieldTextFit(
   const safeMinimumFontSize = Number.isFinite(minimumFontSize)
     ? Math.max(1, Math.min(safeFontSize, minimumFontSize))
     : 1;
-  const availableWidth = Math.max(1, safeFieldWidth - safeMargin * 2);
+  const safeGlyphMargin = Number.isFinite(glyphSafetyMargin)
+    ? Math.max(0, glyphSafetyMargin)
+    : 0;
+  const availableWidth = Math.max(
+    1,
+    safeFieldWidth - (safeMargin + safeGlyphMargin) * 2,
+  );
   const requiredScale =
     safeMeasuredWidth > availableWidth && safeMeasuredWidth > 0
       ? availableWidth / safeMeasuredWidth

@@ -3,6 +3,7 @@ import {
   addUtcCalendarDays,
   calculateLeaveReturnInfo,
   getBeijingLeaveClock,
+  resolveApprovedCombinationSchedule,
   type LeaveReturnInfo,
   type LeaveScheduleRequest,
   type LeaveWorkdayCalendar,
@@ -13,20 +14,61 @@ interface HolidayRow {
   type: 'holiday' | 'workday'
 }
 
+async function getCombinationRequests(
+  requests: LeaveScheduleRequest[],
+): Promise<LeaveScheduleRequest[]> {
+  const groupIds = [
+    ...new Set(
+      requests
+        .filter(
+          (request) =>
+            request.status === 'approved' && request.combination_group_id,
+        )
+        .map((request) => request.combination_group_id as string),
+    ),
+  ]
+  if (groupIds.length === 0) return []
+
+  const placeholders = groupIds.map(() => '?').join(', ')
+  return db
+    .prepare(
+      `SELECT lr.status, lr.start_date, lr.start_half, lr.end_date, lr.end_half,
+              lr.total_days, lr.combination_group_id
+       FROM leave_requests lr
+       WHERE lr.combination_group_id IN (${placeholders})
+         AND NOT EXISTS (
+           SELECT 1
+           FROM leave_requests next_version
+           WHERE next_version.original_id = lr.id
+         )`,
+    )
+    .all<LeaveScheduleRequest>(...groupIds)
+}
+
 export async function enrichLeaveRequestsWithSchedule<
   T extends LeaveScheduleRequest,
 >(requests: T[], now = new Date()): Promise<Array<T & LeaveReturnInfo>> {
-  const approvedRequests = requests.filter(
-    (request) => request.status === 'approved',
+  const combinationRequests = await getCombinationRequests(requests)
+  const scheduleRequests = requests.map((request) => ({
+    original: request,
+    effective: resolveApprovedCombinationSchedule(
+      request,
+      combinationRequests,
+    ),
+  }))
+  const approvedRequests = scheduleRequests
+    .map((request) => request.effective)
+    .filter(
+      (request) => request.status === 'approved',
   )
   if (approvedRequests.length === 0) {
     const emptyCalendar: LeaveWorkdayCalendar = {
       holidayDates: new Set(),
       workdayDates: new Set(),
     }
-    return requests.map((request) => ({
-      ...request,
-      ...calculateLeaveReturnInfo(request, emptyCalendar, now),
+    return scheduleRequests.map(({ original, effective }) => ({
+      ...original,
+      ...calculateLeaveReturnInfo(effective, emptyCalendar, now),
     }))
   }
 
@@ -62,8 +104,8 @@ export async function enrichLeaveRequestsWithSchedule<
     ),
   }
 
-  return requests.map((request) => ({
-    ...request,
-    ...calculateLeaveReturnInfo(request, calendar, now),
+  return scheduleRequests.map(({ original, effective }) => ({
+    ...original,
+    ...calculateLeaveReturnInfo(effective, calendar, now),
   }))
 }

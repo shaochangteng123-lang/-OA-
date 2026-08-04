@@ -624,7 +624,7 @@ router.get("/management/candidates", requireAdmin, async (_req, res) => {
       LEFT JOIN users u ON u.id = ep.user_id
       LEFT JOIN resignation_requests rr ON rr.employee_id = ep.id
       WHERE rr.id IS NULL
-        AND COALESCE(u.role, '') <> 'super_admin'
+        AND COALESCE(u.role, '') NOT IN ('super_admin', 'chairman')
       ORDER BY ep.name ASC
     `,
       )

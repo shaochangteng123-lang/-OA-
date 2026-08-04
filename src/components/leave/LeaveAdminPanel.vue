@@ -39,8 +39,13 @@
 
     <!-- 子 Tab -->
     <el-tabs v-model="activeSubTab" style="margin-top: 8px">
+      <!-- 董事长处理总经理请假 -->
+      <el-tab-pane v-if="isChairman" label="请假审批" name="approval">
+        <LeavePendingList @approved="handleLeaveApprovalUpdated" />
+      </el-tab-pane>
+
       <!-- 管理员抄送记录 -->
-      <el-tab-pane label="抄送记录" name="requests">
+      <el-tab-pane v-if="!isChairman" label="抄送记录" name="requests">
         <el-table
           v-loading="requestsLoading"
           :data="requestList"
@@ -54,7 +59,19 @@
             <template #default="{ row }">{{ row.applicant_name || row.user_name }}</template>
           </el-table-column>
           <el-table-column label="部门" prop="applicant_department" width="90" align="center" />
-          <el-table-column label="假期类型" prop="leave_type_name" width="90" align="center" />
+          <el-table-column label="假期类型" width="100" align="center">
+            <template #default="{ row }">
+              <div>{{ row.leave_type_name }}</div>
+              <el-tag
+                v-if="row.application_kind && row.application_kind !== 'normal'"
+                size="small"
+                effect="plain"
+                :type="applicationKindTagType(row.application_kind)"
+              >
+                {{ applicationKindLabel(row) }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="时间段" min-width="190" align="center">
             <template #default="{ row }">
               {{ row.start_date }}{{ row.start_half === 'morning' ? '上' : '下' }}午
@@ -196,11 +213,27 @@
               <div style="font-size:11px;color:#909399">余/总天数</div>
             </template>
             <template #default="{ row }">
-              <template v-if="row[type.code]">
-                <span :class="{ 'text-warning': row[type.code].available < 1 && row[type.code].total > 0 }">
-                  {{ row[type.code].available }}
-                </span>
-                <span style="color:#c0c4cc">/{{ row[type.code].total }}</span>
+              <span v-if="!type.requires_balance_check" class="unlimited-balance">
+                不限额度
+              </span>
+              <template v-else-if="row[type.code]">
+                <div class="balance-cell">
+                  <span>
+                    <span :class="{ 'text-warning': row[type.code].available < 1 && row[type.code].total > 0 }">
+                      {{ row[type.code].available }}
+                    </span>
+                    <span style="color:#c0c4cc">/{{ row[type.code].total }}</span>
+                  </span>
+                  <el-tooltip content="调整总天数" placement="top">
+                    <el-button
+                      text
+                      circle
+                      size="small"
+                      :icon="Edit"
+                      @click="openBalanceDialog(row, type)"
+                    />
+                  </el-tooltip>
+                </div>
               </template>
               <span v-else style="color:#c0c4cc">-</span>
             </template>
@@ -210,8 +243,34 @@
     </el-tabs>
 
     <!-- 请假详情抽屉 -->
-    <el-drawer v-model="drawerVisible" title="请假申请详情" size="480px">
-      <LeaveApprovalTimeline v-if="detailRequest" :request="detailRequest" :is-owner="false" />
+    <el-drawer
+      v-model="drawerVisible"
+      title="请假申请详情"
+      size="480px"
+      @closed="resetDetailNavigation"
+    >
+      <div
+        v-if="detailRequest"
+        v-loading="detailLoading"
+        class="detail-drawer-content"
+      >
+        <div v-if="detailHistory.length > 0" class="detail-navigation">
+          <el-button
+            link
+            type="primary"
+            :icon="ArrowLeft"
+            @click="handleDetailBack"
+          >
+            返回上一申请
+          </el-button>
+          <span>正在查看 {{ detailRequest.request_no }}</span>
+        </div>
+        <LeaveApprovalTimeline
+          :request="detailRequest"
+          :is-owner="false"
+          @view-request="handleViewRelatedRequest"
+        />
+      </div>
       <el-skeleton v-else :rows="6" animated style="padding:16px" />
     </el-drawer>
 
@@ -252,8 +311,13 @@
           <span style="font-size:12px;color:#909399;margin-left:8px">天</span>
         </el-form-item>
         <el-form-item label="需要余额检查">
-          <el-switch v-model="editTypeForm.requires_balance_check" />
-          <span style="font-size:12px;color:#909399;margin-left:8px">开启后请假时检查剩余天数</span>
+          <el-switch
+            v-model="editTypeForm.requires_balance_check"
+            :disabled="isFixedBalanceType(editTypeCode)"
+          />
+          <span style="font-size:12px;color:#909399;margin-left:8px">
+            {{ isFixedBalanceType(editTypeCode) ? '固定额度假期仅可调整天数' : '开启后请假时检查剩余天数' }}
+          </span>
         </el-form-item>
         <el-form-item label="需要上传附件">
           <el-switch v-model="editTypeForm.requires_attachment" />
@@ -267,22 +331,63 @@
         <el-button type="primary" :loading="editTypeLoading" @click="confirmEditType">保存修改</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="balanceDialogVisible"
+      title="调整员工假期额度"
+      width="420px"
+      :close-on-click-modal="false"
+    >
+      <el-descriptions :column="1" border size="small">
+        <el-descriptions-item label="员工">{{ balanceEditForm.userName }}</el-descriptions-item>
+        <el-descriptions-item label="假期">{{ balanceEditForm.typeName }}</el-descriptions-item>
+        <el-descriptions-item label="已使用">
+          {{ balanceEditForm.used }} 天
+        </el-descriptions-item>
+        <el-descriptions-item label="审批中">
+          {{ balanceEditForm.pending }} 天
+        </el-descriptions-item>
+      </el-descriptions>
+      <el-form label-width="90px" class="balance-edit-form">
+        <el-form-item label="总天数">
+          <el-input-number
+            v-model="balanceEditForm.total"
+            :min="balanceEditForm.used + balanceEditForm.pending"
+            :max="999.5"
+            :step="0.5"
+            :precision="1"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="balanceDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="balanceSaving" @click="saveBalance">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Download, Edit, Plus } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
 import LeaveApprovalTimeline from './LeaveApprovalTimeline.vue'
+import LeavePendingList from './LeavePendingList.vue'
+import { useAuthStore } from '@/stores/auth'
+import { usePendingStore } from '@/stores/pending'
 import {
   getLeaveTypes, adminGetTypes, adminCreateType, adminUpdateType, adminDeleteType,
-  adminGetRequests, adminGetBalances, getRequestDetail, getExportUrl,
+  adminGetRequests, adminGetBalances, adminAdjustBalance, getRequestDetail, getExportUrl,
   type LeaveTypeConfig, type LeaveRequest, type LeaveRequestDetail
 } from '@/utils/leaveApi'
 
-const activeSubTab = ref('requests')
+const authStore = useAuthStore()
+const pendingStore = usePendingStore()
+const isChairman = computed(() => authStore.user?.role === 'chairman')
+const activeSubTab = ref(isChairman.value ? 'approval' : 'requests')
 const leaveTypes = ref<LeaveTypeConfig[]>([])
 
 // ---- 全员请假记录 ----
@@ -294,6 +399,8 @@ const requestPageSize = ref(20)
 const filters = ref({ keyword: '', leaveTypeCode: '', status: '', dateRange: null as [string, string] | null })
 const drawerVisible = ref(false)
 const detailRequest = ref<LeaveRequestDetail | null>(null)
+const detailHistory = ref<LeaveRequestDetail[]>([])
+const detailLoading = ref(false)
 
 // ---- 假期类型管理 ----
 const typesLoading = ref(false)
@@ -329,10 +436,35 @@ const editTypeForm = ref({
 // ---- 员工余额 ----
 const balancesLoading = ref(false)
 const balanceUsers = ref<any[]>([])
-const balanceTypes = ref<{ code: string; name: string }[]>([])
+const balanceTypes = ref<Array<{
+  code: string
+  name: string
+  requires_balance_check: boolean
+}>>([])
 const balanceDepartment = ref('')
 const balanceYear = ref(new Date().getFullYear())
 const departments = ref<string[]>([])
+const balanceDialogVisible = ref(false)
+const balanceSaving = ref(false)
+const balanceEditForm = ref({
+  userId: '',
+  userName: '',
+  typeCode: '',
+  typeName: '',
+  total: 0,
+  used: 0,
+  pending: 0,
+})
+const FIXED_BALANCE_TYPE_CODES = new Set([
+  'annual',
+  'personal',
+  'sick',
+  'bereavement',
+  'compensatory',
+  'marriage',
+  'maternity',
+  'paternity',
+])
 
 function statusLabel(status: string): string {
   const m: Record<string, string> = {
@@ -346,6 +478,40 @@ function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'dan
     draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return m[status] || undefined
+}
+
+function applicationKindLabel(
+  request: Pick<LeaveRequest, 'application_kind' | 'combination_group_id'>
+): string {
+  if (request.combination_group_id && request.application_kind === 'extension') {
+    return '组合续假'
+  }
+  if (request.combination_group_id && request.application_kind === 'supplement') {
+    return '组合补假'
+  }
+  const labels: Record<LeaveRequest['application_kind'], string> = {
+    normal: '普通',
+    combined: '组合',
+    extension: '续假',
+    supplement: '补假',
+  }
+  return labels[request.application_kind] || '普通'
+}
+
+function applicationKindTagType(
+  kind: LeaveRequest['application_kind']
+): 'primary' | 'success' | 'warning' | 'info' {
+  const types: Record<LeaveRequest['application_kind'], 'primary' | 'success' | 'warning' | 'info'> = {
+    normal: 'info',
+    combined: 'primary',
+    extension: 'success',
+    supplement: 'warning',
+  }
+  return types[kind] || 'info'
+}
+
+function isFixedBalanceType(code: string): boolean {
+  return FIXED_BALANCE_TYPE_CODES.has(code)
 }
 
 function formatPerson(position: string | null | undefined, name: string): string {
@@ -415,15 +581,82 @@ async function fetchBalances() {
   }
 }
 
+function openBalanceDialog(
+  row: any,
+  type: { code: string; name: string; requires_balance_check: boolean }
+) {
+  if (!type.requires_balance_check) return
+  const balance = row[type.code]
+  if (!balance) return
+  balanceEditForm.value = {
+    userId: row.userId,
+    userName: row.userName,
+    typeCode: type.code,
+    typeName: type.name,
+    total: Number(balance.total),
+    used: Number(balance.used),
+    pending: Number(balance.pending),
+  }
+  balanceDialogVisible.value = true
+}
+
+async function saveBalance() {
+  balanceSaving.value = true
+  try {
+    await adminAdjustBalance(
+      balanceEditForm.value.userId,
+      balanceEditForm.value.typeCode,
+      balanceYear.value,
+      balanceEditForm.value.total
+    )
+    ElMessage.success('员工假期额度已调整')
+    balanceDialogVisible.value = false
+    await fetchBalances()
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.message || '调整假期额度失败')
+  } finally {
+    balanceSaving.value = false
+  }
+}
+
 async function handleViewRequest(row: LeaveRequest) {
   drawerVisible.value = true
+  detailHistory.value = []
   detailRequest.value = null
+  detailLoading.value = true
   try {
     detailRequest.value = await getRequestDetail(row.id)
   } catch {
     ElMessage.error('获取详情失败')
     drawerVisible.value = false
+  } finally {
+    detailLoading.value = false
   }
+}
+
+async function handleViewRelatedRequest(id: string) {
+  if (!detailRequest.value || detailRequest.value.id === id || detailLoading.value) return
+  const currentRequest = detailRequest.value
+  detailLoading.value = true
+  try {
+    const relatedRequest = await getRequestDetail(id)
+    detailHistory.value.push(currentRequest)
+    detailRequest.value = relatedRequest
+  } catch {
+    ElMessage.error('获取关联申请详情失败')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+function handleDetailBack() {
+  const previousRequest = detailHistory.value.pop()
+  if (previousRequest) detailRequest.value = previousRequest
+}
+
+function resetDetailNavigation() {
+  detailHistory.value = []
+  detailRequest.value = null
 }
 
 function openAddTypeDialog() {
@@ -465,7 +698,7 @@ function openEditTypeDialog(row: LeaveTypeConfig) {
   editTypeForm.value = {
     name: row.name,
     default_days: row.default_days ?? 0,
-    requires_balance_check: row.requires_balance_check,
+    requires_balance_check: isFixedBalanceType(row.code) ? true : row.requires_balance_check,
     requires_attachment: row.requires_attachment,
     description: row.description ?? '',
   }
@@ -500,9 +733,15 @@ function handleExport() {
   window.open(getExportUrl(params), '_blank')
 }
 
+async function handleLeaveApprovalUpdated() {
+  await pendingStore.refreshPendingCounts()
+}
+
 onMounted(async () => {
   leaveTypes.value = await getLeaveTypes().catch(() => [])
-  await Promise.all([fetchRequests(1), fetchTypes(), fetchBalances()])
+  const tasks = [fetchTypes(), fetchBalances()]
+  if (!isChairman.value) tasks.push(fetchRequests(1))
+  await Promise.all(tasks)
 })
 </script>
 
@@ -560,5 +799,38 @@ onMounted(async () => {
 .text-warning {
   color: #e6a23c;
   font-weight: 600;
+}
+.balance-cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 24px;
+}
+.balance-edit-form {
+  margin-top: 16px;
+}
+.unlimited-balance {
+  color: #909399;
+  font-size: 12px;
+}
+.detail-drawer-content {
+  min-height: 120px;
+}
+.detail-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #ebeef5;
+}
+.detail-navigation span {
+  overflow: hidden;
+  color: #909399;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

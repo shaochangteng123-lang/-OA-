@@ -57,7 +57,7 @@ describe("邀请函薪资同步", () => {
     )?.[0];
     expect(sourceQuery).toContain("LEFT JOIN users u ON u.id = ep.user_id");
     expect(sourceQuery).toContain(
-      "COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')",
+      "COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')",
     );
     expect(updateCall?.[1]).toEqual([
       "9000.00",

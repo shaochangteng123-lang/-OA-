@@ -33,6 +33,10 @@ import {
   matchPayrollReceiptEmployee,
   type PayrollReceiptEmployeeIdentity,
 } from "../utils/payroll-receipt-match.js";
+import {
+  getPreviousPayrollMonth,
+  resolvePayrollMonthDefaults,
+} from "../utils/payroll-month-defaults.js";
 
 const router = Router();
 
@@ -80,7 +84,21 @@ const HUMAN_COST_RECEIPT_CATEGORIES = [
 ] as const;
 
 type HumanCostReceiptCategory = (typeof HUMAN_COST_RECEIPT_CATEGORIES)[number];
-const HUMAN_COST_RECEIPT_RECOGNITION_VERSION = 3;
+const HUMAN_COST_RECEIPT_RECOGNITION_VERSIONS: Record<
+  HumanCostReceiptCategory,
+  number
+> = {
+  social_security: 3,
+  housing_fund: 3,
+  income_tax: 3,
+  net_salary: 4,
+};
+
+function getHumanCostReceiptRecognitionVersion(
+  category: HumanCostReceiptCategory,
+): number {
+  return HUMAN_COST_RECEIPT_RECOGNITION_VERSIONS[category];
+}
 const HUMAN_COST_RECEIPT_CATEGORY_LABELS: Record<
   HumanCostReceiptCategory,
   string
@@ -279,16 +297,16 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
     new Date().toISOString(),
     payrollMonth,
   );
-  const outdatedReceipts = await db.all<{
+  const receiptCandidates = await db.all<{
     id: string;
     file_path: string;
     mime_type: string;
     category: HumanCostReceiptCategory;
+    recognition_version: number;
   }>(
-    `SELECT id, file_path, mime_type, category
+    `SELECT id, file_path, mime_type, category, recognition_version
      FROM human_cost_receipts
      WHERE payroll_month = ?
-       AND recognition_version < ?
        AND recognition_status <> 'processing'
      ORDER BY CASE category
        WHEN 'social_security' THEN 1
@@ -297,7 +315,11 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
        ELSE 4
      END, created_at ASC`,
     payrollMonth,
-    HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+  );
+  const outdatedReceipts = receiptCandidates.filter(
+    (receipt) =>
+      receipt.recognition_version <
+      getHumanCostReceiptRecognitionVersion(receipt.category),
   );
   const receiptsToReprocess: Array<{
     id: string;
@@ -307,6 +329,9 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
     payrollMonth: string;
   }> = [];
   for (const receipt of outdatedReceipts) {
+    const targetVersion = getHumanCostReceiptRecognitionVersion(
+      receipt.category,
+    );
     const claimed = await db.run(
       `UPDATE human_cost_receipts
        SET recognition_status = 'processing',
@@ -317,7 +342,7 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
          AND recognition_status <> 'processing'`,
       new Date().toISOString(),
       receipt.id,
-      HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+      targetVersion,
     );
     if (claimed.changes !== 1) continue;
     receiptsToReprocess.push({
@@ -408,6 +433,7 @@ async function processHumanCostReceiptRecord(
   category: HumanCostReceiptCategory,
   payrollMonth: string,
 ): Promise<boolean> {
+  const targetVersion = getHumanCostReceiptRecognitionVersion(category);
   try {
     const recognition = await recognizeHumanCostReceipt(
       filePath,
@@ -442,7 +468,7 @@ async function processHumanCostReceiptRecord(
              FROM employee_profiles ep
              LEFT JOIN users u ON u.id = ep.user_id
              WHERE ep.status = 'submitted'
-               AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')`,
+               AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')`,
           )
         : [];
     const eligibleEmployees = employeeRows.filter((employee) =>
@@ -480,7 +506,7 @@ async function processHumanCostReceiptRecord(
           recognition.totalItemCount,
           recognition.ignoredItemCount,
           recognition.recognitionError,
-          HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+          targetVersion,
           now,
           receiptId,
         ],
@@ -525,7 +551,7 @@ async function processHumanCostReceiptRecord(
            updated_at = ?
        WHERE id = ? AND recognition_status = 'processing'`,
       message.slice(0, 300),
-      HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+      targetVersion,
       new Date().toISOString(),
       receiptId,
     );
@@ -557,7 +583,7 @@ async function markHumanCostReceiptQueuePaused(
            recognition_version = ?,
            updated_at = ?
        WHERE id = ? AND recognition_status = 'processing'`,
-      HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+      getHumanCostReceiptRecognitionVersion(receipt.category),
       now,
       receipt.id,
     );
@@ -697,7 +723,7 @@ async function loadPayrollRows(payrollMonth: string): Promise<
     LEFT JOIN users u ON u.id = ep.user_id
     LEFT JOIN employee_salary_profiles esp ON esp.employee_id = ep.id
     WHERE pr.payroll_month = ?
-      AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')
+      AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')
     ORDER BY
       NULLIF(REGEXP_REPLACE(COALESCE(u.employee_no, ep.employee_no), '[^0-9]', '', 'g'), '')::int ASC NULLS LAST,
       ep.name ASC
@@ -890,7 +916,7 @@ router.post(
             file.size,
             file.mimetype === "image/jpg" ? "image/jpeg" : file.mimetype,
             fileHash,
-            HUMAN_COST_RECEIPT_RECOGNITION_VERSION,
+            getHumanCostReceiptRecognitionVersion(category),
             uploadedBy,
             now,
             now,
@@ -1262,6 +1288,7 @@ router.post("/generate", requireAdmin, async (req, res) => {
     validatePayrollMonthWindow(payrollMonth);
     const { startDate, endDate } = getPayrollMonthRange(payrollMonth);
     const currentPayrollMonth = getCurrentPayrollMonth();
+    const previousPayrollMonth = getPreviousPayrollMonth(payrollMonth);
     const now = new Date().toISOString();
 
     await db.transaction(async (client) => {
@@ -1296,7 +1323,7 @@ router.post("/generate", requireAdmin, async (req, res) => {
          LEFT JOIN users u ON u.id = ep.user_id
          LEFT JOIN employee_salary_profiles esp ON esp.employee_id = ep.id
          WHERE ep.status = 'submitted'
-           AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')
+           AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')
          ORDER BY ep.created_at ASC`,
       );
 
@@ -1330,33 +1357,23 @@ router.post("/generate", requireAdmin, async (req, res) => {
           payrollMonth,
         );
 
-        const previousBaseResult = await client.query<{
+        const previousMonthResult = await client.query<{
+          monthly_salary: string;
           housing_fund_base: string;
           contribution_base: string;
         }>(
           `SELECT
+             monthly_salary::text AS monthly_salary,
              housing_fund_base::text AS housing_fund_base,
              contribution_base::text AS contribution_base
            FROM payroll_records
-           WHERE employee_id = $1 AND payroll_month < $2
-           ORDER BY payroll_month DESC
-           LIMIT 1`,
-          [employee.id, payrollMonth],
+           WHERE employee_id = $1 AND payroll_month = $2`,
+          [employee.id, previousPayrollMonth],
         );
-        const previousHousingFundBase =
-          previousBaseResult.rows[0]?.housing_fund_base;
-        const previousContributionBase =
-          previousBaseResult.rows[0]?.contribution_base;
-        const defaultHousingFundBase =
-          previousHousingFundBase &&
-          comparePayrollAmounts(previousHousingFundBase, "0") > 0
-            ? previousHousingFundBase
-            : automaticSalary;
-        const defaultContributionBase =
-          previousContributionBase &&
-          comparePayrollAmounts(previousContributionBase, "0") > 0
-            ? previousContributionBase
-            : automaticSalary;
+        const monthDefaults = resolvePayrollMonthDefaults(
+          automaticSalary,
+          previousMonthResult.rows[0],
+        );
 
         await client.query(
           `INSERT INTO payroll_records (
@@ -1364,7 +1381,7 @@ router.post("/generate", requireAdmin, async (req, res) => {
              housing_fund_base, contribution_base, individual_income_tax,
              created_at, updated_at
            ) VALUES (
-             $1,$2,$3,$4::numeric,$4::numeric,$5::numeric,$6::numeric,0,$7,$7
+             $1,$2,$3,$4::numeric,$5::numeric,$6::numeric,$7::numeric,$8::numeric,$9,$9
            )
            ON CONFLICT (employee_id, payroll_month) DO NOTHING`,
           [
@@ -1372,13 +1389,15 @@ router.post("/generate", requireAdmin, async (req, res) => {
             employee.id,
             payrollMonth,
             automaticSalary,
-            defaultHousingFundBase,
-            defaultContributionBase,
+            monthDefaults.monthlySalary,
+            monthDefaults.housingFundBase,
+            monthDefaults.contributionBase,
+            monthDefaults.individualIncomeTax,
             now,
           ],
         );
 
-        // 历史月份是工资快照；仅本月及未来月份随未手工修改的基础数据重算。
+        // 历史月份保持工资快照；本月及未来月份仅刷新尚未在该月手工修改的默认值。
         if (payrollMonth >= currentPayrollMonth) {
           await client.query(
             `UPDATE payroll_records
@@ -1386,38 +1405,49 @@ router.post("/generate", requireAdmin, async (req, res) => {
                    WHEN automatic_salary IS DISTINCT FROM $1::numeric
                      OR (
                        NOT monthly_salary_is_manual
-                       AND monthly_salary IS DISTINCT FROM $1::numeric
+                       AND monthly_salary IS DISTINCT FROM $2::numeric
                      )
                      OR (
                        NOT housing_fund_base_is_manual
-                       AND housing_fund_base IS DISTINCT FROM $2::numeric
+                       AND housing_fund_base IS DISTINCT FROM $3::numeric
                      )
                      OR (
                        NOT contribution_base_is_manual
-                       AND contribution_base IS DISTINCT FROM $3::numeric
+                       AND contribution_base IS DISTINCT FROM $4::numeric
+                     )
+                     OR (
+                       NOT tax_is_manual
+                       AND individual_income_tax IS DISTINCT FROM $5::numeric
                      )
                    THEN 1 ELSE 0
                  END,
                  automatic_salary = $1::numeric,
                  monthly_salary = CASE
-                   WHEN monthly_salary_is_manual THEN monthly_salary ELSE $1::numeric
+                   WHEN monthly_salary_is_manual THEN monthly_salary ELSE $2::numeric
                  END,
                  housing_fund_base = CASE
                    WHEN housing_fund_base_is_manual
                      THEN housing_fund_base
-                     ELSE $2::numeric
+                     ELSE $3::numeric
                  END,
                  contribution_base = CASE
                    WHEN contribution_base_is_manual
                      THEN contribution_base
-                     ELSE $3::numeric
+                     ELSE $4::numeric
                  END,
-                 updated_at = $4
-             WHERE employee_id = $5 AND payroll_month = $6`,
+                 individual_income_tax = CASE
+                   WHEN tax_is_manual
+                     THEN individual_income_tax
+                     ELSE $5::numeric
+                 END,
+                 updated_at = $6
+             WHERE employee_id = $7 AND payroll_month = $8`,
             [
               automaticSalary,
-              defaultHousingFundBase,
-              defaultContributionBase,
+              monthDefaults.monthlySalary,
+              monthDefaults.housingFundBase,
+              monthDefaults.contributionBase,
+              monthDefaults.individualIncomeTax,
               now,
               employee.id,
               payrollMonth,
@@ -1540,7 +1570,7 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
          LEFT JOIN users u ON u.id = ep.user_id
          WHERE pr.employee_id = $1
            AND pr.payroll_month = $2
-           AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')
+           AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')
          FOR UPDATE OF pr`,
         [employeeId, month],
       );

@@ -42,8 +42,7 @@
           <span>{{ stage.handler }}</span>
           <template v-if="stage.record">
             <small>
-              {{ probationApprovalActorLabel(stage.record) }} ·
-              {{ formatDateTime(stage.record.signed_at) }}
+              处理时间：{{ formatDateTime(stage.record.signed_at) }}
             </small>
             <p v-if="stage.record.opinion">
               {{
@@ -101,7 +100,7 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="处理时间" width="150">
+        <el-table-column label="处理时间（北京时间）" width="178">
           <template #default="{ row }">
             {{ formatDateTime(row.signed_at) }}
           </template>
@@ -135,7 +134,7 @@
         <el-table-column label="意见 / 说明" min-width="220">
           <template #default="{ row }">{{ row.comment || "-" }}</template>
         </el-table-column>
-        <el-table-column label="处理时间" width="150">
+        <el-table-column label="处理时间（北京时间）" width="178">
           <template #default="{ row }">
             {{ formatDateTime(row.action_time) }}
           </template>
@@ -152,7 +151,7 @@ import {
   CircleCloseFilled,
   Clock,
 } from "@element-plus/icons-vue";
-import dayjs from "dayjs";
+import { formatBeijingDateTimeMinute } from "@/utils/date";
 import {
   buildProbationApprovalStages,
   probationApprovalStageDefinitions,
@@ -161,6 +160,7 @@ import {
   probationDecisionLabel,
   sortProbationApprovalHistory,
   type ProbationApprovalRecord,
+  type ProbationApproverNames,
   type ProbationReviewStage,
 } from "@/utils/probationApproval";
 
@@ -180,12 +180,14 @@ const props = withDefaults(
     currentVersion: number;
     reviewStage: ProbationReviewStage;
     status: string;
+    assignees?: ProbationApproverNames;
     compact?: boolean;
     showHistory?: boolean;
   }>(),
   {
     records: () => [],
     fallbackRecords: () => [],
+    assignees: () => ({}),
     compact: false,
     showHistory: true,
   },
@@ -197,12 +199,13 @@ const stages = computed(() =>
     props.currentVersion,
     props.reviewStage,
     props.status,
+    props.assignees,
   ),
 );
 const historyRows = computed(() => sortProbationApprovalHistory(props.records));
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? dayjs(value).format("YYYY-MM-DD HH:mm") : "-";
+  return formatBeijingDateTimeMinute(value) || "-";
 }
 
 function stageLabel(stage: ProbationApprovalRecord["stage"]) {

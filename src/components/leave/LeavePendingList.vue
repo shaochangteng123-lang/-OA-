@@ -91,9 +91,23 @@
             align="center"
           >
             <template #default="{ row }">
-              <el-tag size="small" effect="plain">{{
-                row.leave_type_name
-              }}</el-tag>
+              <div class="leave-type-cell">
+                <el-tag size="small" effect="plain">{{
+                  row.leave_type_name
+                }}</el-tag>
+                <span v-if="row.application_kind !== 'normal'">
+                  {{ applicationKindLabel(row) }}
+                </span>
+                <el-tooltip
+                  v-if="row.parent_leave_type_name"
+                  :content="formatParentLeaveSummary(row)"
+                  placement="top"
+                >
+                  <span class="parent-leave-summary">
+                    原{{ row.parent_leave_type_name }} {{ row.parent_total_days }}天
+                  </span>
+                </el-tooltip>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="时间段" min-width="168" align="center">
@@ -125,10 +139,12 @@
               <span class="wrapped-text">{{ row.reason || "-" }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="提交时间" width="116" align="center">
-            <template #default="{ row }">{{
-              formatBeijingDateTime(row.submitted_at)
-            }}</template>
+          <el-table-column label="提交时间" width="166" align="center">
+            <template #default="{ row }">
+              <span class="approval-time">
+                {{ formatBeijingDateTime(row.submitted_at) }}
+              </span>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="188" align="center">
             <template #default="{ row }">
@@ -212,9 +228,23 @@
             align="center"
           >
             <template #default="{ row }">
-              <el-tag size="small" effect="plain">{{
-                row.leave_type_name
-              }}</el-tag>
+              <div class="leave-type-cell">
+                <el-tag size="small" effect="plain">{{
+                  row.leave_type_name
+                }}</el-tag>
+                <span v-if="row.application_kind !== 'normal'">
+                  {{ applicationKindLabel(row) }}
+                </span>
+                <el-tooltip
+                  v-if="row.parent_leave_type_name"
+                  :content="formatParentLeaveSummary(row)"
+                  placement="top"
+                >
+                  <span class="parent-leave-summary">
+                    原{{ row.parent_leave_type_name }} {{ row.parent_total_days }}天
+                  </span>
+                </el-tooltip>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="时间段" min-width="160" align="center">
@@ -262,10 +292,12 @@
               <span class="wrapped-text">{{ row.review_comment || "-" }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="审批时间" width="116" align="center">
-            <template #default="{ row }">{{
-              formatBeijingDateTime(row.reviewed_at)
-            }}</template>
+          <el-table-column label="审批时间" width="166" align="center">
+            <template #default="{ row }">
+              <span class="approval-time">
+                {{ formatBeijingDateTime(row.reviewed_at) }}
+              </span>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="68" align="center">
             <template #default="{ row }">
@@ -337,12 +369,30 @@
           : '请假申请详情'
       "
       size="min(560px, 92vw)"
+      @closed="resetDetailNavigation"
     >
-      <LeaveApprovalTimeline
+      <div
         v-if="detailRequest"
-        :request="detailRequest"
-        :is-owner="false"
-      />
+        v-loading="detailLoading"
+        class="detail-drawer-content"
+      >
+        <div v-if="detailHistory.length > 0" class="detail-navigation">
+          <el-button
+            link
+            type="primary"
+            :icon="ArrowLeft"
+            @click="handleDetailBack"
+          >
+            返回上一申请
+          </el-button>
+          <span>正在查看 {{ detailRequest.request_no }}</span>
+        </div>
+        <LeaveApprovalTimeline
+          :request="detailRequest"
+          :is-owner="false"
+          @view-request="handleViewRelatedRequest"
+        />
+      </div>
       <el-skeleton v-else :rows="6" animated style="padding: 16px" />
     </el-drawer>
   </div>
@@ -358,6 +408,7 @@ import {
   Search,
   User,
   View,
+  ArrowLeft,
 } from "@element-plus/icons-vue";
 import { usePendingStore } from "@/stores/pending";
 import LeaveApprovalTimeline from "./LeaveApprovalTimeline.vue";
@@ -394,6 +445,8 @@ const rejectReason = ref("");
 const currentRejectItem = ref<LeaveRequest | null>(null);
 const drawerVisible = ref(false);
 const detailRequest = ref<LeaveRequestDetail | null>(null);
+const detailHistory = ref<LeaveRequestDetail[]>([]);
+const detailLoading = ref(false);
 const currentLoading = computed(() =>
   activeTab.value === "pending" ? loading.value : historyLoading.value,
 );
@@ -416,6 +469,7 @@ const filteredPendingList = computed(() => {
       item.applicant_name,
       item.applicant_department,
       item.leave_type_name,
+      item.parent_leave_type_name,
       item.reason,
     ];
     return fields.some((field) =>
@@ -474,6 +528,43 @@ function formatLeavePeriod(request: LeaveRequest): string {
   const startHalf = request.start_half === "morning" ? "上午" : "下午";
   const endHalf = request.end_half === "morning" ? "上午" : "下午";
   return `${request.start_date}${startHalf} ~ ${request.end_date}${endHalf}`;
+}
+
+function formatParentLeaveSummary(request: LeaveRequest): string {
+  if (
+    !request.parent_leave_type_name ||
+    !request.parent_start_date ||
+    !request.parent_start_half ||
+    !request.parent_end_date ||
+    !request.parent_end_half
+  ) {
+    return '原请假信息'
+  }
+  const startHalf = request.parent_start_half === 'morning' ? '上午' : '下午'
+  const endHalf = request.parent_end_half === 'morning' ? '上午' : '下午'
+  return [
+    `${request.parent_leave_type_name} ${request.parent_total_days || 0}天`,
+    `${request.parent_start_date}${startHalf} 至 ${request.parent_end_date}${endHalf}`,
+    request.parent_reason || '未填写事由',
+  ].join('；')
+}
+
+function applicationKindLabel(
+  request: Pick<LeaveRequest, 'application_kind' | 'combination_group_id'>
+): string {
+  if (request.combination_group_id && request.application_kind === 'extension') {
+    return '组合续假'
+  }
+  if (request.combination_group_id && request.application_kind === 'supplement') {
+    return '组合补假'
+  }
+  const labels: Record<LeaveRequest['application_kind'], string> = {
+    normal: '',
+    combined: '组合',
+    extension: '续假',
+    supplement: '补假',
+  }
+  return labels[request.application_kind] || ''
 }
 
 function remainingDaysLabel(request: LeaveRequest): string {
@@ -564,13 +655,48 @@ async function confirmReject() {
 
 async function handleView(item: LeaveRequest) {
   drawerVisible.value = true;
+  detailHistory.value = [];
   detailRequest.value = null;
+  detailLoading.value = true;
   try {
     detailRequest.value = await getRequestDetail(item.id);
   } catch {
     ElMessage.error("获取详情失败");
     drawerVisible.value = false;
+  } finally {
+    detailLoading.value = false;
   }
+}
+
+async function handleViewRelatedRequest(id: string) {
+  if (
+    !detailRequest.value ||
+    detailRequest.value.id === id ||
+    detailLoading.value
+  ) {
+    return;
+  }
+  const currentRequest = detailRequest.value;
+  detailLoading.value = true;
+  try {
+    const relatedRequest = await getRequestDetail(id);
+    detailHistory.value.push(currentRequest);
+    detailRequest.value = relatedRequest;
+  } catch {
+    ElMessage.error("获取关联申请详情失败");
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function handleDetailBack() {
+  const previousRequest = detailHistory.value.pop();
+  if (previousRequest) detailRequest.value = previousRequest;
+}
+
+function resetDetailNavigation() {
+  detailHistory.value = [];
+  detailRequest.value = null;
 }
 
 async function refreshAll() {
@@ -583,6 +709,20 @@ defineExpose({ refresh: refreshAll });
 </script>
 
 <style scoped>
+.leave-type-cell {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 3px;
+}
+.leave-type-cell span {
+  color: #909399;
+  font-size: 11px;
+}
+.leave-type-cell .parent-leave-summary {
+  color: #606266;
+  font-weight: 600;
+}
 .leave-pending-list {
   width: 100%;
   min-width: 0;
@@ -767,6 +907,33 @@ defineExpose({ refresh: refreshAll });
   display: block;
   white-space: normal;
   word-break: break-word;
+}
+
+.approval-time {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.detail-drawer-content {
+  min-height: 120px;
+}
+
+.detail-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.detail-navigation span {
+  overflow: hidden;
+  color: #909399;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .approval-actions {

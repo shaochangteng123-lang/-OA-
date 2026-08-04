@@ -155,6 +155,7 @@ const preferences = reactive({
 function getRoleTagType(role?: string): ElementPlusTagType {
   const roleMap: Record<string, ElementPlusTagType> = {
     super_admin: 'danger',
+    chairman: 'danger',
     admin: 'warning',
     general_manager: 'info',
     boss: 'danger',
@@ -167,6 +168,7 @@ function getRoleTagType(role?: string): ElementPlusTagType {
 function getRoleText(role?: string) {
   const roleMap: Record<string, string> = {
     super_admin: '超级管理员',
+    chairman: '董事长',
     admin: '管理员',
     general_manager: '总经理',
     boss: 'BOSS',

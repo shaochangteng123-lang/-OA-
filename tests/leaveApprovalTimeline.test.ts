@@ -22,15 +22,18 @@ const globalStubs = {
       '<section class="timeline-item"><time>{{ timestamp }}</time><slot /></section>',
   },
   "el-icon": { template: "<span><slot /></span>" },
-  "el-button": { template: "<button><slot /></button>" },
+  "el-button": {
+    emits: ["click"],
+    template: "<button @click=\"$emit('click')\"><slot /></button>",
+  },
   "el-tooltip": { template: "<span><slot /></span>" },
 };
 
 function buildRequest(): LeaveRequestDetail {
   return {
     id: "request-v2",
-    request_no: "LR-2026-00002",
-    root_request_no: "LR-2026-00001",
+    request_no: "QJ-2026-00002",
+    root_request_no: "QJ-2026-00001",
     version_count: 2,
     user_id: "applicant-1",
     applicant_name: "申请人",
@@ -45,9 +48,9 @@ function buildRequest(): LeaveRequestDetail {
     reason: "申请年假",
     status: "approved",
     approver_id: "approver-1",
-    approver_name: "审批人",
-    approver_real_name: "审批人",
-    approver_position: "项目经理",
+    approver_name: "刘行",
+    approver_real_name: "刘行",
+    approver_position: "总经理",
     cc_recipient_role: "管理员",
     cc_recipient_name: "档案管理员",
     reject_reason: null,
@@ -68,7 +71,7 @@ function buildRequest(): LeaveRequestDetail {
         mime_type: "application/pdf",
         created_at: "2026-07-17T07:38:32.944Z",
         version: 1,
-        request_no: "LR-2026-00001",
+        request_no: "QJ-2026-00001",
       },
       {
         id: "attachment-v2",
@@ -78,7 +81,7 @@ function buildRequest(): LeaveRequestDetail {
         mime_type: "application/pdf",
         created_at: "2026-07-17T08:34:38.431Z",
         version: 2,
-        request_no: "LR-2026-00002",
+        request_no: "QJ-2026-00002",
       },
     ],
     logs: [
@@ -95,8 +98,8 @@ function buildRequest(): LeaveRequestDetail {
         id: "log-reject",
         leave_request_id: "request-v1",
         operator_id: "approver-1",
-        operator_name: "审批人",
-        operator_position: "项目经理",
+        operator_name: "刘行",
+        operator_position: "总经理",
         action: "reject",
         comment: "资料不完整",
         created_at: "2026-07-17T07:40:12.403Z",
@@ -154,5 +157,110 @@ describe("请假审批流程附件与时间", () => {
     });
 
     expect(wrapper.text()).toContain("管理员 档案管理员");
+  });
+
+  it("审批人按请假流程角色显示总经理姓名", () => {
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request: buildRequest(), isOwner: true },
+      global: { stubs: globalStubs },
+    });
+
+    expect(wrapper.text()).toContain("总经理 刘行");
+    expect(wrapper.text()).not.toContain("项目经理 刘行");
+  });
+
+  it("续假审批直接展示原请假类型、时间、天数和事由", () => {
+    const request = buildRequest();
+    request.application_kind = "extension";
+    request.parent_request_id = "parent-request";
+    request.parent_request = {
+      id: "parent-request",
+      request_no: "QJ-2026-00001",
+      leave_type_name: "年假",
+      start_date: "2026-07-13",
+      start_half: "morning",
+      end_date: "2026-07-17",
+      end_half: "afternoon",
+      total_days: 5,
+      reason: "家庭安排",
+      status: "approved",
+      application_kind: "normal",
+    };
+    request.related_requests = [];
+    request.combination_requests = [];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: false },
+      global: { stubs: globalStubs },
+    });
+
+    expect(wrapper.text()).toContain("原请假信息");
+    expect(wrapper.text()).toContain("年假");
+    expect(wrapper.text()).toContain("2026-07-13上午 至 2026-07-17下午");
+    expect(wrapper.text()).toContain("5 个工作日");
+    expect(wrapper.text()).toContain("家庭安排");
+  });
+
+  it("组合续假在审批详情中显示明确业务类型", () => {
+    const request = buildRequest();
+    request.application_kind = "extension";
+    request.combination_group_id = "extension-group";
+    request.parent_request_id = "parent-request";
+    request.parent_request = {
+      id: "parent-request",
+      request_no: "QJ-2026-00001",
+      leave_type_name: "年假",
+      start_date: "2026-07-13",
+      start_half: "morning",
+      end_date: "2026-07-17",
+      end_half: "afternoon",
+      total_days: 5,
+      reason: "家庭安排",
+      status: "approved",
+      application_kind: "normal",
+      combination_group_id: null,
+    };
+    request.related_requests = [];
+    request.combination_requests = [];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: false },
+      global: { stubs: globalStubs },
+    });
+
+    expect(wrapper.text()).toContain("组合续假");
+  });
+
+  it("点击原申请入口时通知详情抽屉加载关联申请", async () => {
+    const request = buildRequest();
+    request.application_kind = "extension";
+    request.parent_request_id = "parent-request";
+    request.parent_request = {
+      id: "parent-request",
+      request_no: "QJ-2026-00001",
+      leave_type_name: "年假",
+      start_date: "2026-07-13",
+      start_half: "morning",
+      end_date: "2026-07-17",
+      end_half: "afternoon",
+      total_days: 5,
+      reason: "家庭安排",
+      status: "approved",
+      application_kind: "normal",
+    };
+    request.related_requests = [];
+    request.combination_requests = [];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: false },
+      global: { stubs: globalStubs },
+    });
+    const viewOriginalButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("查看原申请"));
+
+    expect(viewOriginalButton).toBeDefined();
+    await viewOriginalButton!.trigger("click");
+    expect(wrapper.emitted("view-request")).toEqual([["parent-request"]]);
   });
 });

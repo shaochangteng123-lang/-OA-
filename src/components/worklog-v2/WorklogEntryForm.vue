@@ -498,7 +498,11 @@ const progressPhotos = ref<WorklogAttachment[]>([])
 const progressDocs = ref<WorklogAttachment[]>([])
 
 
-const isAdmin = computed(() => ['super_admin', 'admin', 'general_manager'].includes(authStore.user?.role || ''))
+const isAdmin = computed(() =>
+  ['super_admin', 'chairman', 'admin', 'general_manager'].includes(
+    authStore.user?.role || '',
+  ),
+)
 
 const selectedMatterStandardDays = computed(() => {
   if (!form.matter) return null

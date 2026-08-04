@@ -616,7 +616,8 @@
             type="warning"
           >
             <div class="tl-title tl-pending">
-              {{ flowRow.review_stage_label || "分级签署" }}
+              {{ flowRow.review_stage_label || "分级签署" }}：
+              {{ flowCurrentApprover }}
             </div>
             <div class="tl-desc">等待当前签署人填写意见并完成电子签名...</div>
           </el-timeline-item>
@@ -671,16 +672,15 @@ import {
   View,
 } from "@element-plus/icons-vue";
 import { api } from "@/utils/api";
-import { useAuthStore } from "@/stores/auth";
 import { usePendingStore } from "@/stores/pending";
-import { format } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { formatBeijingDateTimeMinute } from "@/utils/date";
 import ProbationSignatureTasks from "@/components/probation/ProbationSignatureTasks.vue";
 import ProbationApprovalRecords from "@/components/probation/ProbationApprovalRecords.vue";
 import {
   probationApprovalActorLabel,
-  probationApprovalTimelineActorLabel,
+  probationApprovalTimelineRoleNameLabel,
   type ProbationApprovalRecord,
+  type ProbationApproverNames,
 } from "@/utils/probationApproval";
 
 interface ArchivedApprovalRecord {
@@ -692,10 +692,6 @@ interface ArchivedApprovalRecord {
 }
 
 const pendingStore = usePendingStore();
-const authStore = useAuthStore();
-const isGeneralManager = computed(
-  () => authStore.user?.role === "general_manager",
-);
 
 const probationList = ref<any[]>([]);
 const signatureTasksRef = ref<InstanceType<typeof ProbationSignatureTasks>>();
@@ -712,12 +708,30 @@ const appliedSearch = reactive({ name: "", department: "", status: "" });
 const flowVisible = ref(false);
 const flowRow = ref<any>(null);
 const flowRecords = ref<any[]>([]);
+const flowApproverNames = ref<ProbationApproverNames>({});
 const flowLoading = ref(false);
 const historyFlowVisible = ref(false);
 const historyFlowRow = ref<any>(null);
 const historyFlowSignatures = ref<ProbationApprovalRecord[]>([]);
 const historyFlowRecords = ref<ArchivedApprovalRecord[]>([]);
 const historyFlowLoading = ref(false);
+const flowCurrentApprover = computed(() => {
+  const stage = flowRow.value?.review_stage as
+    | "employee"
+    | "supervisor"
+    | "hr"
+    | "general_manager"
+    | undefined;
+  const roles = {
+    employee: "员工本人",
+    supervisor: "总经理",
+    hr: "管理员",
+    general_manager: "董事长",
+  } as const;
+  if (!stage) return "待分配";
+  const name = flowApproverNames.value[stage]?.trim();
+  return name ? `${roles[stage]} ${name}` : roles[stage];
+});
 
 const displayList = computed(() => {
   if (activeTab.value !== "") return probationList.value;
@@ -768,12 +782,15 @@ async function fetchDepartmentList() {
 async function handleViewApprovalFlow(row: any) {
   flowRow.value = row;
   flowRecords.value = [];
+  flowApproverNames.value = {};
   flowVisible.value = true;
   flowLoading.value = true;
   try {
     const res = await api.get(`/api/probation/${row.id}/approval-flow`);
     if (res.data.success) {
       flowRecords.value = res.data.data.records || [];
+      flowApproverNames.value =
+        res.data.data.confirmation?.approver_names || {};
     }
   } catch {
     // 静默失败
@@ -831,10 +848,12 @@ function getActionLabel(action: string) {
 }
 
 function getActionTitle(record: any) {
+  const actorName =
+    record.approver_name || flowRow.value?.employee_name || "员工";
   if (["submit", "resubmit", "withdraw"].includes(record.action)) {
-    return record.approver_name || flowRow.value?.employee_name || "员工";
+    return `员工本人 ${actorName}`;
   }
-  return probationApprovalTimelineActorLabel(record);
+  return probationApprovalTimelineRoleNameLabel(record);
 }
 
 function formatSubmitComment(comment: string | null | undefined) {
@@ -870,9 +889,7 @@ function getRemainingDaysText(endDate: string | null | undefined): string {
 }
 
 function formatDateTime(dateStr: string) {
-  if (!dateStr) return "-";
-  const safeStr = dateStr.includes("T") ? dateStr : dateStr.replace(" ", "T");
-  return format(new Date(safeStr), "yyyy-MM-dd HH:mm", { locale: zhCN });
+  return formatBeijingDateTimeMinute(dateStr) || "-";
 }
 
 function getProbationStatusType(
@@ -903,12 +920,7 @@ async function fetchProbationList() {
     if (activeTab.value === "submitted") {
       params.status = "submitted";
     } else if (activeTab.value === "approved") {
-      if (isGeneralManager.value) {
-        params.reviewedByMeThisMonth = "1";
-      } else {
-        params.status = "approved";
-        params.thisMonth = "1";
-      }
+      params.reviewedByMeThisMonth = "1";
     }
     const response = await api.get("/api/probation/list", { params });
     if (response.data.success) {
@@ -982,7 +994,7 @@ function getSignatureStageText(stage: string) {
     employee: "员工本人",
     supervisor: "主管领导",
     hr: "人事部",
-    general_manager: "总经理",
+    general_manager: "董事长",
   };
   return labels[stage] || stage;
 }

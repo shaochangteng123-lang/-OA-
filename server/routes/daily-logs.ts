@@ -764,11 +764,11 @@ router.get('/comments/unreplied-gm', requireAuth, async (req, res) => {
     const userId = req.session.userId!
     // 总经理和超管自身不受强制回复限制
     const currentUser = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
-    if (currentUser && ['general_manager', 'super_admin'].includes(currentUser.role)) {
+    if (currentUser && ['general_manager', 'super_admin', 'chairman'].includes(currentUser.role)) {
       return res.json({ success: true, data: null })
     }
     const gmUsers = await db.all<{ id: string }>(
-      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin')`
+      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin', 'chairman')`
     )
     if (gmUsers.length === 0) return res.json({ success: true, data: null })
     const placeholders = gmUsers.map(() => '?').join(',')
@@ -802,12 +802,12 @@ router.get('/comments/pending-tasks', requireAuth, async (req, res) => {
     const userId = req.session.userId!
     // 只有最高层级（general_manager/super_admin）不需要此提醒，admin 仍可被分配任务
     const currentUser = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
-    if (currentUser && ['general_manager', 'super_admin'].includes(currentUser.role)) {
+    if (currentUser && ['general_manager', 'super_admin', 'chairman'].includes(currentUser.role)) {
       return res.json({ success: true, data: [] })
     }
     // 评论来源：所有有权限发起评论的角色（admin/general_manager/super_admin）
     const managerUsers = await db.all<{ id: string }>(
-      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin', 'admin') AND id != ?`,
+      `SELECT id FROM users WHERE role IN ('general_manager', 'super_admin', 'chairman', 'admin') AND id != ?`,
       userId,
     )
     if (managerUsers.length === 0) return res.json({ success: true, data: [] })
@@ -958,7 +958,7 @@ router.post('/comments/:submissionId/reply', requireAuth, async (req, res) => {
     }
     const user = await db.get<{ role: string }>(`SELECT role FROM users WHERE id = ?`, userId)
     const isOwner = submission.user_id === userId
-    const isManager = user && ['super_admin', 'admin', 'general_manager'].includes(user.role)
+    const isManager = user && ['super_admin', 'chairman', 'admin', 'general_manager'].includes(user.role)
     if (!isOwner && !isManager) {
       return res.status(403).json({ success: false, message: '无权回复此日志评论' })
     }
@@ -2097,7 +2097,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
     const allUsers = await db.all<{ id: string; name: string; position: string | null; role: string }>(
       `SELECT id, name, position, role
        FROM users
-       WHERE role NOT IN ('guest', 'super_admin', 'boss')
+       WHERE role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
        ORDER BY name`,
     )
 

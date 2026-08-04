@@ -30,6 +30,8 @@ import {
   generateProbationApplicationPdf,
   type ProbationPdfSignature,
 } from "../services/probationApplicationPdf.js";
+import { getMonthlyProbationReviewStage } from "../utils/probation-review.js";
+import { requiresEmployeeProfile } from "../utils/boss-role.js";
 
 const router = Router();
 
@@ -56,7 +58,14 @@ interface SignerSnapshot {
   position: string | null;
 }
 
-type SigningSignatureType = "personal" | "general_manager";
+interface ProbationApproverNames {
+  employee: string | null;
+  supervisor: string | null;
+  hr: string | null;
+  general_manager: string | null;
+}
+
+type SigningSignatureType = "personal";
 
 interface SigningSignature {
   buffer: Buffer;
@@ -68,7 +77,7 @@ const REVIEW_STAGE_LABELS: Record<ProbationReviewStage, string> = {
   employee: "员工填写",
   supervisor: "主管领导意见",
   hr: "人事部意见",
-  general_manager: "总经理审批",
+  general_manager: "董事长审批",
   completed: "已完成",
 };
 
@@ -130,20 +139,89 @@ async function resolveSupervisor(
   return generalManager.rows[0];
 }
 
+async function resolveHrApprover(client: PoolClient): Promise<SignerSnapshot> {
+  const approver = await client.query<SignerSnapshot>(
+    `SELECT u.id, u.name, u.role, ep.department, ep.position
+     FROM users u
+     LEFT JOIN employee_profiles ep ON ep.user_id = u.id
+     WHERE u.status = 'active'
+       AND u.role IN ('admin', 'super_admin')
+     ORDER BY CASE WHEN u.role = 'admin' THEN 0 ELSE 1 END, u.created_at ASC
+     LIMIT 1`,
+  );
+  if (!approver.rows[0]) {
+    throw new ProbationOperationError(
+      "未找到可签署人事部意见的管理员账号",
+      409,
+    );
+  }
+  return approver.rows[0];
+}
+
+async function resolveChairman(client: PoolClient): Promise<SignerSnapshot> {
+  const chairman = await client.query<SignerSnapshot>(
+    `SELECT u.id, u.name, u.role, ep.department, ep.position
+     FROM users u
+     LEFT JOIN employee_profiles ep ON ep.user_id = u.id
+     WHERE u.status = 'active'
+       AND u.role = 'chairman'
+     ORDER BY u.created_at ASC
+     LIMIT 1`,
+  );
+  if (!chairman.rows[0]) {
+    throw new ProbationOperationError(
+      "未找到可终审的董事长账号，请先创建并启用董事长账号",
+      409,
+    );
+  }
+  return chairman.rows[0];
+}
+
 function canSignStage(
   stage: ActiveReviewStage,
   signer: SignerSnapshot,
-  supervisorId: string | null,
+  confirmation: Pick<
+    ProbationConfirmation,
+    "supervisor_id" | "hr_approver_id" | "chairman_id"
+  >,
 ): boolean {
-  if (stage === "supervisor") return signer.id === supervisorId;
-  return ["admin", "super_admin"].includes(signer.role);
+  if (stage === "supervisor") {
+    return signer.id === confirmation.supervisor_id;
+  }
+  if (stage === "hr") {
+    return confirmation.hr_approver_id
+      ? signer.id === confirmation.hr_approver_id
+      : ["admin", "super_admin"].includes(signer.role);
+  }
+  return confirmation.chairman_id
+    ? signer.id === confirmation.chairman_id
+    : signer.role === "chairman";
+}
+
+function buildProbationApproverNames(
+  confirmation: Partial<ProbationConfirmation>,
+  employeeName: string | null | undefined,
+  supervisorName?: string | null,
+): ProbationApproverNames {
+  return {
+    employee:
+      confirmation.applicant_name_snapshot?.trim() ||
+      employeeName?.trim() ||
+      null,
+    supervisor:
+      confirmation.supervisor_name_snapshot?.trim() ||
+      supervisorName?.trim() ||
+      null,
+    hr: confirmation.hr_approver_name_snapshot?.trim() || null,
+    general_manager:
+      confirmation.chairman_name_snapshot?.trim() || null,
+  };
 }
 
 function parseSigningSignatureType(value: unknown): SigningSignatureType {
   if (value === undefined || value === "" || value === "personal") {
     return "personal";
   }
-  if (value === "general_manager") return value;
   throw new ProbationOperationError("所选电子签名类型不正确");
 }
 
@@ -152,56 +230,25 @@ async function loadSigningSignature(
   signer: SignerSnapshot,
   signatureType: SigningSignatureType,
 ): Promise<SigningSignature> {
-  let signature:
-    | { signature_path: string; signature_owner_name: string }
-    | undefined;
-
-  if (signatureType === "personal") {
-    const result = await client.query<{
-      signature_path: string;
-    }>(
-      `SELECT signature_path
-       FROM user_signatures
-       WHERE user_id = $1
-       FOR SHARE`,
-      [signer.id],
-    );
-    if (result.rows[0]) {
-      signature = {
+  const result = await client.query<{
+    signature_path: string;
+  }>(
+    `SELECT signature_path
+     FROM user_signatures
+     WHERE user_id = $1
+     FOR SHARE`,
+    [signer.id],
+  );
+  const signature = result.rows[0]
+    ? {
         signature_path: result.rows[0].signature_path,
         signature_owner_name: signer.name,
-      };
-    }
-  } else {
-    if (!["admin", "super_admin"].includes(signer.role)) {
-      throw new ProbationOperationError(
-        "只有管理员可以调用总经理电子签名",
-        403,
-      );
-    }
-    const result = await client.query<{
-      represented_user_name: string;
-      signature_path: string;
-    }>(
-      `SELECT represented_user_name, signature_path
-       FROM user_delegated_signatures
-       WHERE user_id = $1
-       FOR SHARE`,
-      [signer.id],
-    );
-    if (result.rows[0]) {
-      signature = {
-        signature_path: result.rows[0].signature_path,
-        signature_owner_name: result.rows[0].represented_user_name,
-      };
-    }
-  }
+      }
+    : undefined;
 
   if (!signature) {
     throw new ProbationOperationError(
-      signatureType === "personal"
-        ? "请先在个人设置上传本人电子签名"
-        : "请先在个人设置上传总经理电子签名",
+      "请先在个人设置上传本人电子签名",
       409,
     );
   }
@@ -209,7 +256,7 @@ async function loadSigningSignature(
   const signaturePath = toAbsoluteStoredPath(signature.signature_path);
   if (!fs.existsSync(signaturePath)) {
     throw new ProbationOperationError(
-      "电子签名文件不存在，请先在个人设置重新上传",
+      "电子签名文件不存在，请联系系统管理员处理",
       409,
     );
   }
@@ -716,10 +763,11 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
       const currentUser = (await db
         .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
         .get(userId)) as { role: string } | undefined;
-      if (currentUser?.role !== "general_manager") {
+      const reviewedStage = getMonthlyProbationReviewStage(currentUser?.role);
+      if (!currentUser || !reviewedStage) {
         return res
           .status(403)
-          .json({ success: false, message: "仅总经理可以查询本人审批记录" });
+          .json({ success: false, message: "当前角色不能查询本人审批记录" });
       }
 
       const now = new Date();
@@ -733,36 +781,41 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
                ep.hire_date as employee_hire_date,
                reviewed.reviewed_at
         FROM probation_confirmations pc
-        LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+        INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
         INNER JOIN (
           SELECT confirmation_id, MAX(signed_at) AS reviewed_at
           FROM probation_signature_records
           WHERE signer_id = ?
-            AND stage = 'supervisor'
+            AND stage = '${reviewedStage}'
             AND signed_at >= ?
             AND signed_at < ?
           GROUP BY confirmation_id
         ) reviewed ON reviewed.confirmation_id = pc.id
+        WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
       params.push(userId, monthStart, nextMonthStart);
 
       countSql = `
         SELECT COUNT(*) as total
         FROM probation_confirmations pc
+        INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
         INNER JOIN (
           SELECT DISTINCT confirmation_id
           FROM probation_signature_records
           WHERE signer_id = ?
-            AND stage = 'supervisor'
+            AND stage = '${reviewedStage}'
             AND signed_at >= ?
             AND signed_at < ?
         ) reviewed ON reviewed.confirmation_id = pc.id
+        WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
       countParams.push(userId, monthStart, nextMonthStart);
     } else if (includeNonApplied) {
       // UNION ALL：已有转正记录的员工 + 没有转正记录的实习期员工
-      const part1Where =
-        status === "pending" ? `WHERE pc.status = 'pending'` : "WHERE 1=1";
+      const part1StatusFilter =
+        status === "pending" ? `AND pc.status = 'pending'` : "";
 
       sql = `
         SELECT pc.id, pc.employee_id, pc.hire_date, pc.probation_end_date, pc.status,
@@ -777,8 +830,10 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
                ep.position as employee_position, ep.mobile as employee_mobile,
                ep.hire_date as employee_hire_date
         FROM probation_confirmations pc
-        LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
-        ${part1Where}
+        INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+        WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
+        ${part1StatusFilter}
 
         UNION ALL
 
@@ -796,20 +851,26 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
                ep2.position as employee_position, ep2.mobile as employee_mobile,
                ep2.hire_date as employee_hire_date
         FROM employee_profiles ep2
+        LEFT JOIN users employee_user ON employee_user.id = ep2.user_id
         WHERE ep2.employment_status = 'probation'
           AND ep2.status = 'submitted'
+          AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
           AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc2 WHERE pc2.employee_id = ep2.id)
       `;
 
       countSql = `
         SELECT (
           (SELECT COUNT(*) FROM probation_confirmations pc
-           LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
-           ${part1Where})
+           INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+           LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+           WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
+           ${part1StatusFilter})
           +
           (SELECT COUNT(*) FROM employee_profiles ep2
+           LEFT JOIN users employee_user ON employee_user.id = ep2.user_id
            WHERE ep2.employment_status = 'probation'
              AND ep2.status = 'submitted'
+             AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
              AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc2 WHERE pc2.employee_id = ep2.id))
         ) as total
       `;
@@ -820,15 +881,20 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
                ep.position as employee_position, ep.mobile as employee_mobile,
                ep.hire_date as employee_hire_date
         FROM probation_confirmations pc
-        LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+        INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
         WHERE pc.status = ?
+          AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
       params.push(status);
 
       countSql = `
         SELECT COUNT(*) as total
         FROM probation_confirmations pc
+        INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+        LEFT JOIN users employee_user ON employee_user.id = ep.user_id
         WHERE pc.status = ?
+          AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
       countParams.push(status);
 
@@ -962,10 +1028,13 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const nonAppliedProbation = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM employee_profiles
-      WHERE employment_status = 'probation'
-        AND status = 'submitted'
-        AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc WHERE pc.employee_id = employee_profiles.id)
+      SELECT COUNT(*) as count
+      FROM employee_profiles ep
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE ep.employment_status = 'probation'
+        AND ep.status = 'submitted'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
+        AND NOT EXISTS (SELECT 1 FROM probation_confirmations pc WHERE pc.employee_id = ep.id)
     `,
       )
       .get()) as { count: number };
@@ -974,7 +1043,11 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const total = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM probation_confirmations
+      SELECT COUNT(*) as count
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get()) as { count: number };
@@ -982,7 +1055,12 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const pending = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'pending'
+      SELECT COUNT(*) as count
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE pc.status = 'pending'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get()) as { count: number };
@@ -990,7 +1068,12 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const submitted = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'submitted'
+      SELECT COUNT(*) as count
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE pc.status = 'submitted'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get()) as { count: number };
@@ -998,7 +1081,12 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const approved = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'approved'
+      SELECT COUNT(*) as count
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE pc.status = 'approved'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get()) as { count: number };
@@ -1006,7 +1094,12 @@ router.get("/statistics", requireAdminOrGM, async (req, res) => {
     const rejected = (await db
       .prepare(
         `
-      SELECT COUNT(*) as count FROM probation_confirmations WHERE status = 'rejected'
+      SELECT COUNT(*) as count
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE pc.status = 'rejected'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get()) as { count: number };
@@ -1036,7 +1129,11 @@ router.get("/my-status", requireAuth, async (req, res) => {
     const profile = (await db
       .prepare(
         `
-      SELECT id, name, department, position, hire_date, employment_status FROM employee_profiles WHERE user_id = ?
+      SELECT ep.id, ep.name, ep.department, ep.position, ep.hire_date,
+             ep.employment_status, u.role AS user_role
+      FROM employee_profiles ep
+      INNER JOIN users u ON u.id = ep.user_id
+      WHERE ep.user_id = ?
     `,
       )
       .get(userId)) as
@@ -1047,10 +1144,11 @@ router.get("/my-status", requireAuth, async (req, res) => {
           position: string;
           hire_date: string | null;
           employment_status: string;
+          user_role: string;
         }
       | undefined;
 
-    if (!profile) {
+    if (!profile || !requiresEmployeeProfile(profile.user_role)) {
       return res.json({
         success: true,
         data: null,
@@ -1202,6 +1300,11 @@ router.get("/my-status", requireAuth, async (req, res) => {
           ? REVIEW_STAGE_LABELS[confirmation.review_stage]
           : REVIEW_STAGE_LABELS.employee,
         supervisorName,
+        approverNames: buildProbationApproverNames(
+          confirmation || confirmationData || {},
+          profile.name,
+          supervisorName,
+        ),
         probationHistory: probationHistoryRecords.map(
           publicProbationHistoryRecord,
         ),
@@ -1263,7 +1366,7 @@ router.get(
         .get(userId)) as { role: string } | undefined;
       const canView =
         history.employee_user_id === userId ||
-        ["admin", "super_admin", "general_manager"].includes(
+        ["admin", "super_admin", "general_manager", "chairman"].includes(
           user?.role || "",
         ) ||
         approvalRecords.some((record) => record.approver_id === userId) ||
@@ -1347,7 +1450,9 @@ router.get("/signatures/:signatureId/image", requireAuth, async (req, res) => {
         signature.supervisor_id,
         signature.signer_id,
       ].includes(userId) ||
-      ["admin", "super_admin", "general_manager"].includes(viewer.role);
+      ["admin", "super_admin", "general_manager", "chairman"].includes(
+        viewer.role,
+      );
     if (!canView) {
       return res
         .status(403)
@@ -1401,18 +1506,35 @@ router.get("/signature-tasks", requireAuth, async (req, res) => {
         supervisor.name AS supervisor_name
       FROM probation_confirmations pc
       JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
       LEFT JOIN users supervisor ON supervisor.id = pc.supervisor_id
       WHERE pc.status = 'submitted'
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
         AND COALESCE(ep.user_id, '') <> ?
         AND (
           (pc.review_stage = 'supervisor' AND pc.supervisor_id = ?)
-          OR (pc.review_stage = 'hr' AND ? IN ('admin', 'super_admin'))
-          OR (pc.review_stage = 'general_manager' AND ? IN ('admin', 'super_admin'))
+          OR (
+            pc.review_stage = 'hr'
+            AND (
+              (pc.hr_approver_id IS NOT NULL AND pc.hr_approver_id = ?)
+              OR (
+                pc.hr_approver_id IS NULL
+                AND ? IN ('admin', 'super_admin')
+              )
+            )
+          )
+          OR (
+            pc.review_stage = 'general_manager'
+            AND (
+              (pc.chairman_id IS NOT NULL AND pc.chairman_id = ?)
+              OR (pc.chairman_id IS NULL AND ? = 'chairman')
+            )
+          )
         )
       ORDER BY pc.submit_time ASC, pc.created_at ASC
     `,
       )
-      .all(userId, userId, user.role, user.role)) as Array<
+      .all(userId, userId, userId, user.role, userId, user.role)) as Array<
       ProbationConfirmationWithEmployee & {
         employee_user_id: string | null;
         supervisor_name: string | null;
@@ -1441,6 +1563,11 @@ router.get("/signature-tasks", requireAuth, async (req, res) => {
           signatures: currentSignatures,
           signatureHistory,
           review_stage_label: REVIEW_STAGE_LABELS[task.review_stage],
+          approver_names: buildProbationApproverNames(
+            task,
+            task.employee_name,
+            task.supervisor_name,
+          ),
           is_legacy_application: task.form_version === 0,
         };
       }),
@@ -1520,6 +1647,9 @@ router.post("/online-submit", requireAuth, async (req, res) => {
       );
       const profile = profileResult.rows[0];
       if (!profile) throw new ProbationOperationError("请先完成入职信息填写");
+      if (!requiresEmployeeProfile(profile.user_role)) {
+        throw new ProbationOperationError("系统账号不参与员工转正", 403);
+      }
       if (profile.employment_status !== "probation") {
         throw new ProbationOperationError(
           "当前状态不是实习期，无法申请转正",
@@ -1617,6 +1747,8 @@ router.post("/online-submit", requireAuth, async (req, res) => {
         requestedSignatureType,
       );
       const supervisor = await resolveSupervisor(client, profile.id);
+      const hrApprover = await resolveHrApprover(client);
+      const chairman = await resolveChairman(client);
       const nextVersion = Number(confirmation.form_version || 0) + 1;
       const signatureDirectory = ensureDatedUploadDirectory(
         "probation-signatures",
@@ -1645,14 +1777,19 @@ router.post("/online-submit", requireAuth, async (req, res) => {
              department_snapshot = $8,
              position_snapshot = $9,
              supervisor_id = $10,
-             submit_time = $11,
+             supervisor_name_snapshot = $11,
+             hr_approver_id = $12,
+             hr_approver_name_snapshot = $13,
+             chairman_id = $14,
+             chairman_name_snapshot = $15,
+             submit_time = $16,
              approve_time = NULL,
              approver_id = NULL,
              approver_comment = NULL,
              application_comment = $6,
              formal_document_generated_at = NULL,
-             updated_at = $12
-         WHERE id = $13`,
+             updated_at = $17
+         WHERE id = $18`,
         [
           firstContract.contract_start_date,
           firstContract.probation_end_date,
@@ -1664,6 +1801,11 @@ router.post("/online-submit", requireAuth, async (req, res) => {
           profile.department,
           profile.position,
           supervisor.id,
+          supervisor.name,
+          hrApprover.id,
+          hrApprover.name,
+          chairman.id,
+          chairman.name,
           now,
           now,
           confirmation.id,
@@ -1756,7 +1898,7 @@ router.post("/online-submit", requireAuth, async (req, res) => {
   }
 });
 
-// 总经理签主管意见，管理员依次签人事部意见和总经理审批。
+// 总经理签主管意见，管理员签人事部意见，董事长完成最终审批。
 router.post("/:id/sign-review", requireAuth, async (req, res) => {
   let signatureFilePath = "";
   let generatedFilePath = "";
@@ -1827,7 +1969,7 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
         throw new ProbationOperationError("当前环节不允许审批签名", 409);
       }
       const stage = confirmation.review_stage as ActiveReviewStage;
-      if (!canSignStage(stage, signer, confirmation.supervisor_id)) {
+      if (!canSignStage(stage, signer, confirmation)) {
         throw new ProbationOperationError(
           `当前账号不是${REVIEW_STAGE_LABELS[stage]}的签署人`,
           403,
@@ -1964,7 +2106,7 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
           `UPDATE approval_instances SET current_step = 3, updated_at = $1 WHERE id = $2`,
           [now, instanceId],
         );
-        responseMessage = "管理员已签署人事部意见，等待管理员完成总经理审批";
+        responseMessage = "管理员已签署人事部意见，等待董事长完成最终审批";
         return;
       }
 
@@ -2103,7 +2245,7 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
           [nanoid(), instanceId, admin.id, now],
         );
       }
-      responseMessage = "管理员已完成总经理审批，转正完成并生成待盖章申请单";
+      responseMessage = "董事长已完成最终审批，转正完成并生成待盖章申请单";
     });
     committed = true;
 
@@ -2652,8 +2794,10 @@ router.get("/:id", requireAdminOrGM, async (req, res) => {
              ep.position as employee_position, ep.mobile as employee_mobile,
              ep.email as employee_email, ep.hire_date as employee_hire_date
       FROM probation_confirmations pc
-      LEFT JOIN employee_profiles ep ON pc.employee_id = ep.id
+      INNER JOIN employee_profiles ep ON pc.employee_id = ep.id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
       WHERE pc.id = ?
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get(id)) as
@@ -2709,6 +2853,10 @@ router.get("/:id", requireAdminOrGM, async (req, res) => {
         ),
         signatureHistory,
         review_stage_label: REVIEW_STAGE_LABELS[confirmation.review_stage],
+        approver_names: buildProbationApproverNames(
+          confirmation,
+          confirmation.employee_name,
+        ),
       },
     });
   } catch (error) {
@@ -2717,7 +2865,7 @@ router.get("/:id", requireAdminOrGM, async (req, res) => {
   }
 });
 
-// 获取转正申请的审批流程（员工、管理员、总经理）
+// 获取转正申请的审批流程（员工、管理员、总经理、董事长）
 router.get("/:id/approval-flow", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
@@ -2727,7 +2875,12 @@ router.get("/:id/approval-flow", requireAuth, async (req, res) => {
     const confirmation = (await db
       .prepare(
         `
-      SELECT * FROM probation_confirmations WHERE id = ?
+      SELECT pc.*
+      FROM probation_confirmations pc
+      INNER JOIN employee_profiles ep ON ep.id = pc.employee_id
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE pc.id = ?
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get(id)) as ProbationConfirmation | undefined;
@@ -2748,13 +2901,16 @@ router.get("/:id/approval-flow", requireAuth, async (req, res) => {
 
     // 获取员工信息
     const employee = (await db
-      .prepare("SELECT user_id FROM employee_profiles WHERE id = ?")
-      .get(confirmation.employee_id)) as { user_id: string } | undefined;
+      .prepare("SELECT user_id, name FROM employee_profiles WHERE id = ?")
+      .get(confirmation.employee_id)) as
+      | { user_id: string; name: string }
+      | undefined;
 
-    // 权限检查：只有本人、管理员、总经理可以查看审批流程
+    // 权限检查：只有本人、管理员、总经理、董事长可以查看审批流程
     const isOwner = employee && employee.user_id === userId;
     const isAdmin = user.role === "admin" || user.role === "super_admin";
     const isGM = user.role === "general_manager";
+    const isChairman = user.role === "chairman";
     const isSupervisor = confirmation.supervisor_id === userId;
     const signatureParticipation = (await db
       .prepare(
@@ -2771,6 +2927,7 @@ router.get("/:id/approval-flow", requireAuth, async (req, res) => {
       !isOwner &&
       !isAdmin &&
       !isGM &&
+      !isChairman &&
       !isSupervisor &&
       !signatureParticipation
     ) {
@@ -2823,13 +2980,11 @@ router.get("/:id/approval-flow", requireAuth, async (req, res) => {
     // 最新的审批实例（用于状态判断）
     const instance = instances[instances.length - 1] || null;
 
-    const gmUser = (await db
-      .prepare(
-        `
-      SELECT name FROM users WHERE role = 'general_manager' AND status = 'active' LIMIT 1
-    `,
-      )
-      .get()) as { name: string } | undefined;
+    const gmUser = confirmation.supervisor_id
+      ? ((await db
+          .prepare("SELECT name FROM users WHERE id = ? LIMIT 1")
+          .get(confirmation.supervisor_id)) as { name: string } | undefined)
+      : undefined;
 
     const signatureRecords = (await db
       .prepare(
@@ -2855,6 +3010,11 @@ router.get("/:id/approval-flow", requireAuth, async (req, res) => {
             firstSubmitRecord?.action_time || confirmation.submit_time,
           approve_time: confirmation.approve_time,
           approver_comment: confirmation.approver_comment,
+          approver_names: buildProbationApproverNames(
+            confirmation,
+            employee?.name,
+            gmUser?.name,
+          ),
         },
         records,
         signatures: signatureRecords.map(publicSignatureRecord),
@@ -3297,9 +3457,11 @@ router.get("/employee/:employeeId/archive", requireAdmin, async (req, res) => {
     const employee = (await db
       .prepare(
         `
-      SELECT id, name, hire_date, employment_status
-      FROM employee_profiles
-      WHERE id = ?
+      SELECT ep.id, ep.name, ep.hire_date, ep.employment_status
+      FROM employee_profiles ep
+      LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      WHERE ep.id = ?
+        AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
     `,
       )
       .get(employeeId)) as
@@ -3435,15 +3597,20 @@ router.post(
       await db.transaction(async (client) => {
         const employeeResult = await client.query<{
           employment_status: string | null;
+          user_role: string | null;
         }>(
-          `SELECT employment_status
-         FROM employee_profiles
-         WHERE id = $1
-         FOR UPDATE`,
+          `SELECT ep.employment_status, employee_user.role AS user_role
+         FROM employee_profiles ep
+         LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+         WHERE ep.id = $1
+         FOR UPDATE OF ep`,
           [employeeId],
         );
         const employee = employeeResult.rows[0];
         if (!employee) throw new ProbationOperationError("员工信息不存在", 404);
+        if (!requiresEmployeeProfile(employee.user_role)) {
+          throw new ProbationOperationError("系统账号不参与员工转正档案", 409);
+        }
 
         const confirmationResult = await client.query<{
           id: string;

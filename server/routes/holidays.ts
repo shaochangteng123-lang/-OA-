@@ -2,6 +2,7 @@ import { Router } from 'express'
 import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
 import { requireAuth } from '../middleware/auth.js'
+import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 
 const router = Router()
 
@@ -53,7 +54,11 @@ router.post('/update', requireAuth, async (req, res) => {
     const currentUserId = req.session?.userId
     const currentUser = await db.prepare('SELECT role FROM users WHERE id = ?').get(currentUserId) as { role: string } | undefined
 
-    if (!currentUser || !['super_admin', 'admin'].includes(currentUser.role)) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'admin' &&
+        !isSystemAdminEquivalentRole(currentUser.role))
+    ) {
       return res.status(403).json({ success: false, message: '无权更新节假日数据' })
     }
 

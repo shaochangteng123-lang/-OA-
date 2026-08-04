@@ -17,6 +17,10 @@ export interface InvitationSalaryRecognition {
   method?: "text" | "image";
 }
 
+export interface InvitationSalaryRecognitionOptions {
+  preRecognizedPageTextCandidates?: readonly string[];
+}
+
 interface ParsedInvitationSalary {
   monthlySalary: string | null;
   annualSalary: string | null;
@@ -101,7 +105,11 @@ export function parseInvitationSalaryText(
     }
   }
 
-  return { monthlySalary, annualSalary, message: "入职邀请函月保障薪酬识别成功" };
+  return {
+    monthlySalary,
+    annualSalary,
+    message: "入职邀请函月保障薪酬识别成功",
+  };
 }
 
 async function extractFirstPageText(pdfPath: string): Promise<string> {
@@ -137,7 +145,8 @@ async function recognizeFirstPageImage(
       ],
       { timeout: 60000, maxBuffer: 10 * 1024 * 1024 },
     );
-    if (!fs.existsSync(imagePath)) throw new Error("入职邀请函第一页转图片失败");
+    if (!fs.existsSync(imagePath))
+      throw new Error("入职邀请函第一页转图片失败");
     return await callPaddleOcr(imagePath);
   } finally {
     try {
@@ -150,6 +159,7 @@ async function recognizeFirstPageImage(
 
 export async function recognizeInvitationMonthlySalary(
   pdfPath: string,
+  options: InvitationSalaryRecognitionOptions = {},
 ): Promise<InvitationSalaryRecognition> {
   try {
     if (!fs.existsSync(pdfPath)) {
@@ -188,6 +198,33 @@ export async function recognizeInvitationMonthlySalary(
       }
     } catch (error) {
       console.warn("入职邀请函文字层提取失败，改用图片识别:", error);
+    }
+
+    const preRecognizedCandidates = (
+      options.preRecognizedPageTextCandidates || []
+    )
+      .map((text) => text.trim())
+      .filter(Boolean);
+    if (preRecognizedCandidates.length > 0) {
+      const parsedCandidates = preRecognizedCandidates.map((text) =>
+        parseInvitationSalaryText(text),
+      );
+      const recognizedSalaries = new Set(
+        parsedCandidates
+          .map((parsed) => parsed.monthlySalary)
+          .filter((salary): salary is string => Boolean(salary)),
+      );
+      if (
+        recognizedSalaries.size === 1 &&
+        parsedCandidates.every((parsed) => parsed.monthlySalary !== null)
+      ) {
+        return {
+          status: "success",
+          monthlySalary: Array.from(recognizedSalaries)[0],
+          message: parsedCandidates[0].message,
+          method: "image",
+        };
+      }
     }
 
     let lastMessage = "未识别到入职邀请函月保障薪酬";

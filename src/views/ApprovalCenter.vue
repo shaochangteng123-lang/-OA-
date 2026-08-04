@@ -1817,7 +1817,7 @@ interface Statistics {
 const activeTab = computed({
   get: () => {
     const tab = route.query.tab as string
-    if (tab && ['pending', 'unpaid', 'paid', 'all', 'invoices'].includes(tab)) {
+    if (tab && ['pending', 'unpaid', 'upload_receipt', 'paid', 'all', 'invoices'].includes(tab)) {
       return tab
     }
     return 'pending'

@@ -7,6 +7,7 @@ export interface LeaveScheduleRequest {
   end_date: string
   end_half: LeaveScheduleHalf
   total_days: number
+  combination_group_id?: string | null
 }
 
 export interface LeaveWorkdayCalendar {
@@ -97,6 +98,49 @@ export function isWorkingDate(
 
   const dayOfWeek = new Date(`${date}T00:00:00Z`).getUTCDay()
   return dayOfWeek !== 0 && dayOfWeek !== 6
+}
+
+export function resolveApprovedCombinationSchedule(
+  request: LeaveScheduleRequest,
+  combinationRequests: LeaveScheduleRequest[],
+): LeaveScheduleRequest {
+  const groupId = request.combination_group_id
+  if (!groupId || request.status !== 'approved') return request
+
+  const groupRequests = combinationRequests.filter(
+    (item) => item.combination_group_id === groupId,
+  )
+  if (
+    groupRequests.length < 2 ||
+    groupRequests.some((item) => item.status !== 'approved')
+  ) {
+    return request
+  }
+
+  const firstRequest = groupRequests.reduce((first, item) =>
+    toSlot(item.start_date, item.start_half) <
+    toSlot(first.start_date, first.start_half)
+      ? item
+      : first,
+  )
+  const lastRequest = groupRequests.reduce((last, item) =>
+    toSlot(item.end_date, item.end_half) >
+    toSlot(last.end_date, last.end_half)
+      ? item
+      : last,
+  )
+
+  return {
+    ...request,
+    start_date: firstRequest.start_date,
+    start_half: firstRequest.start_half,
+    end_date: lastRequest.end_date,
+    end_half: lastRequest.end_half,
+    total_days: groupRequests.reduce(
+      (total, item) => total + Number(item.total_days),
+      0,
+    ),
+  }
 }
 
 export function isApprovedLeaveActive(

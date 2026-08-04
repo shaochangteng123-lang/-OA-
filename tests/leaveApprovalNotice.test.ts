@@ -2,13 +2,17 @@ import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent } from 'vue'
 import Leave from '../src/views/Leave.vue'
 import { usePendingStore } from '../src/stores/pending'
-import { markApprovedLeaveNoticesRead } from '../src/utils/leaveApi'
+import {
+  markApprovedLeaveNoticesRead,
+  markRejectedLeaveNoticeRead,
+} from '../src/utils/leaveApi'
 
-const { mount } =
+const { mount, flushPromises } =
   require('../node_modules/@vue/test-utils/dist/vue-test-utils.cjs.js') as typeof import('@vue/test-utils')
 
 jest.mock('@/utils/leaveApi', () => ({
   markApprovedLeaveNoticesRead: jest.fn().mockResolvedValue(undefined),
+  markRejectedLeaveNoticeRead: jest.fn().mockResolvedValue(0),
 }))
 
 jest.mock('@/utils/api', () => ({
@@ -30,6 +34,15 @@ const AlertStub = defineComponent({
     </div>
   `,
 })
+
+const LeaveRequestListStub = {
+  emits: ['rejected-viewed'],
+  template: `
+    <button class="view-rejected" @click="$emit('rejected-viewed', 'request-rejected-1')">
+      查看驳回
+    </button>
+  `,
+}
 
 describe('员工请假审批结果提醒', () => {
   beforeEach(() => {
@@ -54,7 +67,7 @@ describe('员工请假审批结果提醒', () => {
           'el-card': { template: '<section><slot name="header" /><slot /></section>' },
           LeaveBalancePanel: true,
           LeaveRequestForm: true,
-          LeaveRequestList: true,
+          LeaveRequestList: LeaveRequestListStub,
         },
       },
     })
@@ -66,5 +79,35 @@ describe('员工请假审批结果提醒', () => {
 
     expect(markApprovedLeaveNoticesRead).toHaveBeenCalledTimes(1)
     expect(refreshPendingCounts).toHaveBeenCalledTimes(1)
+  })
+
+  it('查看驳回申请详情后立即清除对应未读提醒', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const pendingStore = usePendingStore()
+    pendingStore.counts.myLeaveRejected = 1
+    jest.mocked(markRejectedLeaveNoticeRead).mockResolvedValueOnce(0)
+
+    const wrapper = mount(Leave, {
+      global: {
+        plugins: [pinia],
+        stubs: {
+          'el-alert': AlertStub,
+          'el-card': { template: '<section><slot name="header" /><slot /></section>' },
+          LeaveBalancePanel: true,
+          LeaveRequestForm: true,
+          LeaveRequestList: LeaveRequestListStub,
+        },
+      },
+    })
+
+    expect(wrapper.find('.alert-error').exists()).toBe(true)
+
+    await wrapper.get('.view-rejected').trigger('click')
+    await flushPromises()
+
+    expect(markRejectedLeaveNoticeRead).toHaveBeenCalledWith('request-rejected-1')
+    expect(pendingStore.counts.myLeaveRejected).toBe(0)
+    expect(wrapper.find('.alert-error').exists()).toBe(false)
   })
 })

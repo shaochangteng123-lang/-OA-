@@ -1,7 +1,7 @@
 import fs from "fs";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import { createCanvas } from "canvas";
 
 const execFileAsync = promisify(execFile);
@@ -39,6 +39,8 @@ interface PdfHtmlBox {
   width: number;
   height: number;
   fontSize: number;
+  fontFamily?: string;
+  color?: PdfRgbColor;
 }
 
 interface PdfHtmlTextNode extends PdfHtmlBox {
@@ -52,6 +54,12 @@ interface PdfHtmlPage {
   pageWidth: number;
   pageHeight: number;
   textNodes: PdfHtmlTextNode[];
+}
+
+export interface PdfHorizontalLine {
+  top: number;
+  left: number;
+  width: number;
 }
 
 interface PdfHtmlLine extends PdfHtmlBox {
@@ -74,6 +82,11 @@ export interface EmployeeNumberFieldAnchor {
   cover?: PdfHtmlBox;
   drawLeft?: number;
   textColor?: PdfRgbColor;
+  underline?: PdfHorizontalLine;
+  continuationContractHeader?: {
+    labelText: string;
+    cover: PdfHtmlBox;
+  };
 }
 
 export interface ContractTemplateDates {
@@ -243,6 +256,8 @@ function mergeBoxes(boxes: PdfHtmlTextNode[]): PdfHtmlBox {
     width: right - left,
     height: bottom - top,
     fontSize: Math.max(...boxes.map((box) => box.fontSize)),
+    fontFamily: boxes[0]?.fontFamily,
+    color: boxes[0]?.color,
   };
 }
 
@@ -306,11 +321,11 @@ function lineXAtCompactIndex(line: PdfHtmlLine, targetIndex: number): number {
     const end = start + Array.from(compact).length;
     if (targetIndex <= start) return node.left;
     if (targetIndex <= end) {
-      const prefix = Array.from(compact).slice(0, targetIndex - start).join("");
+      const prefix = Array.from(compact)
+        .slice(0, targetIndex - start)
+        .join("");
       const totalWeight = textWidthWeight(compact) || 1;
-      return (
-        node.left + node.width * (textWidthWeight(prefix) / totalWeight)
-      );
+      return node.left + node.width * (textWidthWeight(prefix) / totalWeight);
     }
 
     index = end;
@@ -356,8 +371,7 @@ function lineXRangeAtCompactIndex(
       for (const rawBoundaryIndex of rawBoundaryIndexes) {
         const prefix = rawCharacters.slice(0, rawBoundaryIndex).join("");
         candidates.push(
-          node.left +
-            node.width * (textWidthWeight(prefix) / totalWeight),
+          node.left + node.width * (textWidthWeight(prefix) / totalWeight),
         );
       }
     }
@@ -373,7 +387,10 @@ function lineXRangeAtCompactIndex(
 }
 
 function parsePdfHtmlPages(xml: string): PdfHtmlPage[] {
-  const fontSpecs = new Map<string, { size: number; color: PdfRgbColor }>();
+  const fontSpecs = new Map<
+    string,
+    { size: number; color: PdfRgbColor; family?: string }
+  >();
   const fontPattern = /<fontspec\b([^>]*)\/?\s*>/g;
   let fontMatch: RegExpExecArray | null;
   while ((fontMatch = fontPattern.exec(xml)) !== null) {
@@ -383,6 +400,7 @@ function parsePdfHtmlPages(xml: string): PdfHtmlPage[] {
     fontSpecs.set(attributes.id, {
       size,
       color: parseHexColor(attributes.color),
+      family: attributes.family?.trim() || undefined,
     });
   }
 
@@ -414,6 +432,7 @@ function parsePdfHtmlPages(xml: string): PdfHtmlPage[] {
         width,
         height,
         fontSize: font?.size || Math.max(height * 0.7, 1),
+        fontFamily: font?.family,
         color: font?.color || BLACK,
       });
     }
@@ -433,6 +452,7 @@ function buildAnchorFromCandidate(
   page: PdfHtmlPage,
   node: PdfHtmlTextNode,
   match: RegExpMatchArray,
+  redrawContinuationContractHeader = false,
 ): EmployeeNumberFieldAnchor {
   const labelCompact = `${match[1] || ""}编号${match[2] || ""}`;
   const inlineValue = match[3] || "";
@@ -446,10 +466,15 @@ function buildAnchorFromCandidate(
     width: labelWidth,
     height: node.height,
     fontSize: node.fontSize,
+    fontFamily: node.fontFamily,
+    color: node.color,
   };
 
   let value: PdfHtmlBox | null = null;
   let textColor = node.color;
+  let hasSeparator = Boolean(match[2]);
+  let separatorText = match[2] || "";
+  const sourceFieldNodes: PdfHtmlTextNode[] = [node];
   if (inlineValue) {
     value = {
       top: node.top,
@@ -457,6 +482,8 @@ function buildAnchorFromCandidate(
       width: Math.max(node.width - labelWidth, 1),
       height: node.height,
       fontSize: node.fontSize,
+      fontFamily: node.fontFamily,
+      color: node.color,
     };
   } else {
     const labelRight = label.left + label.width;
@@ -473,23 +500,47 @@ function buildAnchorFromCandidate(
       })
       .sort((left, right) => left.left - right.left);
 
-    const firstValueNode = sameLineNodes.find((candidate) =>
-      isPotentialEmployeeNumberValue(candidate.text),
-    );
-    if (firstValueNode) {
-      const valueNodes = [firstValueNode];
-      if (/^[：:]$/.test(compactText(firstValueNode.text))) {
-        const followingNode = sameLineNodes.find((candidate) => {
+    const separatorNode = !hasSeparator
+      ? sameLineNodes.find((candidate) => {
+          const separator = compactText(candidate.text);
           return (
-            candidate.left >= firstValueNode.left + firstValueNode.width - 3 &&
-            candidate !== firstValueNode &&
-            isPotentialEmployeeNumberValue(candidate.text)
+            /^[：:]$/.test(separator) &&
+            candidate.left <=
+              labelRight + Math.max(label.height, candidate.height) * 1.5
           );
-        });
-        if (followingNode) valueNodes.push(followingNode);
+        })
+      : undefined;
+
+    if (separatorNode) {
+      hasSeparator = true;
+      separatorText = compactText(separatorNode.text);
+      sourceFieldNodes.push(separatorNode);
+      const separatorRight = separatorNode.left + separatorNode.width;
+      label.width = Math.max(label.width, separatorRight - label.left);
+      textColor = separatorNode.color;
+
+      const followingValueNode = sameLineNodes.find((candidate) => {
+        return (
+          candidate !== separatorNode &&
+          candidate.left >= separatorRight - 3 &&
+          !/^[：:]$/.test(compactText(candidate.text)) &&
+          isPotentialEmployeeNumberValue(candidate.text)
+        );
+      });
+      if (followingValueNode) {
+        value = mergeBoxes([followingValueNode]);
+        textColor = followingValueNode.color;
+        sourceFieldNodes.push(followingValueNode);
       }
-      value = mergeBoxes(valueNodes);
-      textColor = firstValueNode.color;
+    } else {
+      const firstValueNode = sameLineNodes.find((candidate) =>
+        isPotentialEmployeeNumberValue(candidate.text),
+      );
+      if (firstValueNode) {
+        value = mergeBoxes([firstValueNode]);
+        textColor = firstValueNode.color;
+        sourceFieldNodes.push(firstValueNode);
+      }
     }
   }
 
@@ -497,10 +548,16 @@ function buildAnchorFromCandidate(
     pageIndex: page.pageIndex,
     pageWidth: page.pageWidth,
     pageHeight: page.pageHeight,
-    hasSeparator: Boolean(match[2]),
+    hasSeparator,
     label,
     value,
     textColor,
+    continuationContractHeader: redrawContinuationContractHeader
+      ? {
+          labelText: `${match[1] || "合同"}编号${separatorText || "："}`,
+          cover: mergeBoxes(sourceFieldNodes),
+        }
+      : undefined,
   };
 }
 
@@ -539,7 +596,12 @@ function findEmployeeNumberFieldOnPage(
   });
   const selected = candidates[0];
   return selected
-    ? buildAnchorFromCandidate(page, selected.node, selected.match)
+    ? buildAnchorFromCandidate(
+        page,
+        selected.node,
+        selected.match,
+        continuationContractPage,
+      )
     : null;
 }
 
@@ -561,6 +623,109 @@ export function parseEmployeeNumberFieldXml(
     : null;
 }
 
+function svgPageSize(svg: string): { width: number; height: number } | null {
+  const viewBox = svg.match(
+    /\bviewBox="(?:-?[\d.]+\s+){2}([\d.]+)\s+([\d.]+)"/i,
+  );
+  if (viewBox) {
+    return { width: Number(viewBox[1]), height: Number(viewBox[2]) };
+  }
+
+  const width = svg.match(/\bwidth="([\d.]+)(?:pt)?"/i);
+  const height = svg.match(/\bheight="([\d.]+)(?:pt)?"/i);
+  if (!width || !height) return null;
+  return { width: Number(width[1]), height: Number(height[1]) };
+}
+
+function svgTransformPoint(
+  x: number,
+  y: number,
+  transform: string | undefined,
+): { x: number; y: number } {
+  const values = transform
+    ?.match(/-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?/gi)
+    ?.map(Number);
+  if (!values || values.length !== 6) return { x, y };
+  const [a, b, c, d, e, f] = values;
+  return {
+    x: a * x + c * y + e,
+    y: b * x + d * y + f,
+  };
+}
+
+export function parseContractNumberUnderlineSvg(
+  svg: string,
+  anchor: EmployeeNumberFieldAnchor,
+): PdfHorizontalLine | null {
+  const pageSize = svgPageSize(svg);
+  if (!pageSize || pageSize.width <= 0 || pageSize.height <= 0) return null;
+
+  const expectedLeft =
+    ((anchor.label.left + anchor.label.width) / anchor.pageWidth) *
+    pageSize.width;
+  const expectedTop =
+    ((anchor.label.top + anchor.label.fontSize) / anchor.pageHeight) *
+    pageSize.height;
+  const referenceSize =
+    (anchor.label.fontSize / anchor.pageHeight) * pageSize.height;
+  const leftTolerance = Math.max(referenceSize * 1.5, 18);
+  const topTolerance = Math.max(referenceSize * 0.9, 12);
+  const minimumWidth = Math.max(referenceSize * 2, 30);
+  const candidates: Array<{
+    left: number;
+    top: number;
+    width: number;
+    score: number;
+  }> = [];
+
+  const pathPattern = /<path\b([^>]*)\/?>/gi;
+  let pathMatch: RegExpExecArray | null;
+  while ((pathMatch = pathPattern.exec(svg)) !== null) {
+    const attributes = parseAttributes(pathMatch[1]);
+    const line = attributes.d?.match(
+      /^\s*M\s*(-?[\d.e+]+)[,\s]+(-?[\d.e+]+)\s+L\s*(-?[\d.e+]+)[,\s]+(-?[\d.e+]+)\s*$/i,
+    );
+    if (!line) continue;
+
+    const start = svgTransformPoint(
+      Number(line[1]),
+      Number(line[2]),
+      attributes.transform,
+    );
+    const end = svgTransformPoint(
+      Number(line[3]),
+      Number(line[4]),
+      attributes.transform,
+    );
+    if (Math.abs(start.y - end.y) > 0.8) continue;
+
+    const left = Math.min(start.x, end.x);
+    const right = Math.max(start.x, end.x);
+    const top = (start.y + end.y) / 2;
+    const width = right - left;
+    if (width < minimumWidth) continue;
+    if (Math.abs(left - expectedLeft) > leftTolerance) continue;
+    if (Math.abs(top - expectedTop) > topTolerance) continue;
+
+    candidates.push({
+      left,
+      top,
+      width,
+      score: Math.abs(left - expectedLeft) + Math.abs(top - expectedTop) * 2,
+    });
+  }
+
+  const selected = candidates.sort(
+    (left, right) => left.score - right.score,
+  )[0];
+  if (!selected) return null;
+  return {
+    left: (selected.left / pageSize.width) * anchor.pageWidth,
+    top: (selected.top / pageSize.height) * anchor.pageHeight,
+    width: (selected.width / pageSize.width) * anchor.pageWidth,
+  };
+}
+
 function buildDateValueBox(
   leftMarker: PdfHtmlTextNode,
   rightMarker: PdfHtmlTextNode,
@@ -574,6 +739,8 @@ function buildDateValueBox(
     width,
     height: Math.max(leftMarker.height, rightMarker.height),
     fontSize: Math.max(leftMarker.fontSize, rightMarker.fontSize),
+    fontFamily: rightMarker.fontFamily || leftMarker.fontFamily,
+    color: rightMarker.color || leftMarker.color,
   };
 }
 
@@ -594,7 +761,9 @@ function buildDateRangeAnchor(
     .sort((left, right) => left.left - right.left);
 
   const years = sameLineNodes.filter((node) => compactText(node.text) === "年");
-  const months = sameLineNodes.filter((node) => compactText(node.text) === "月");
+  const months = sameLineNodes.filter(
+    (node) => compactText(node.text) === "月",
+  );
   const separator = sameLineNodes.find((node) =>
     compactText(node.text).includes("日起至"),
   );
@@ -602,8 +771,7 @@ function buildDateRangeAnchor(
 
   const ending = sameLineNodes.find((node) => {
     return (
-      node.left > months[1].left &&
-      compactText(node.text).startsWith("日")
+      node.left > months[1].left && compactText(node.text).startsWith("日")
     );
   });
   if (!ending) return null;
@@ -692,10 +860,7 @@ export function parseContractTemplatePositionFieldXml(
       const endIndex = text.indexOf("岗位", startIndex);
       if (endIndex < startIndex) continue;
 
-      const startBoundary = lineXRangeAtCompactIndex(
-        positionLine,
-        startIndex,
-      );
+      const startBoundary = lineXRangeAtCompactIndex(positionLine, startIndex);
       const endBoundary = lineXRangeAtCompactIndex(positionLine, endIndex);
       if (!startBoundary || !endBoundary) continue;
 
@@ -716,6 +881,8 @@ export function parseContractTemplatePositionFieldXml(
           width,
           height: positionLine.height,
           fontSize: positionLine.fontSize,
+          fontFamily: positionLine.fontFamily,
+          color: positionLine.color,
         },
       };
     }
@@ -747,6 +914,8 @@ function buildTextFieldAnchorFromLine(
     width: Math.max(valueRight - valueLeft, 1),
     height: line.height,
     fontSize: line.fontSize,
+    fontFamily: line.fontFamily,
+    color: line.color,
   };
 
   const cover = hasInlineValue
@@ -756,6 +925,8 @@ function buildTextFieldAnchorFromLine(
         width: Math.max(lineRight - valueLeft + 2, 1),
         height: line.height,
         fontSize: line.fontSize,
+        fontFamily: line.fontFamily,
+        color: line.color,
       }
     : undefined;
 
@@ -789,7 +960,9 @@ function findTextFieldOnPage(
 function pageContainsAssetAgreementTitle(page: PdfHtmlPage): boolean {
   return page.textNodes.some((node) => {
     const text = compactText(node.text);
-    return /附件[一1]笔记本电脑协议书/.test(text) || /笔记本电脑协议书/.test(text);
+    return (
+      /附件[一1]笔记本电脑协议书/.test(text) || /笔记本电脑协议书/.test(text)
+    );
   });
 }
 
@@ -804,9 +977,7 @@ function assetAgreementPageIndexes(pages: PdfHtmlPage[]): number[] {
       /乙方[（(]员工[）)][：:]?/,
       /乙方[：:]?/,
     ]);
-    const idNumber = findTextFieldOnPage(page, [
-      /身份证(?:号码|号)[：:]?/,
-    ]);
+    const idNumber = findTextFieldOnPage(page, [/身份证(?:号码|号)[：:]?/]);
     if (partyB && idNumber) indexes.add(page.pageIndex);
   });
   pages.forEach((page) => indexes.add(page.pageIndex));
@@ -840,13 +1011,16 @@ export function parseAssetAgreementFieldsXml(
       /乙方[（(]员工[）)][：:]?/,
       /乙方[：:]?/,
     ]);
-    idNumber ||= findTextFieldOnPage(page, [
-      /身份证(?:号码|号)[：:]?/,
-    ]);
+    idNumber ||= findTextFieldOnPage(page, [/身份证(?:号码|号)[：:]?/]);
     if (partyA && partyB && idNumber) break;
   }
 
-  if (employeeNumbers.length !== pages.length || !partyA || !partyB || !idNumber) {
+  if (
+    employeeNumbers.length !== pages.length ||
+    !partyA ||
+    !partyB ||
+    !idNumber
+  ) {
     return null;
   }
   return {
@@ -873,6 +1047,19 @@ async function extractEmployeeNumberLayout(pdfPath: string): Promise<{
   return { pages: parsePdfHtmlPages(stdout), xml: stdout };
 }
 
+async function extractContractFirstPageSvg(pdfPath: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "pdftocairo",
+    ["-f", "1", "-l", "1", "-svg", pdfPath, "-"],
+    {
+      encoding: "utf8",
+      timeout: 30000,
+      maxBuffer: 20 * 1024 * 1024,
+    },
+  );
+  return stdout;
+}
+
 function requiredPageIndexes(
   documentType: NumberedOnboardingDocumentType,
   pageCount: number,
@@ -892,6 +1079,81 @@ function documentTypeLabel(
   return "劳动合同书";
 }
 
+async function drawContinuationContractHeader(
+  pdfDocument: PDFDocument,
+  page: ReturnType<PDFDocument["getPages"]>[number],
+  anchor: EmployeeNumberFieldAnchor,
+  employeeNo: string,
+): Promise<void> {
+  const header = anchor.continuationContractHeader;
+  if (!header) return;
+
+  const pageWidth = page.getWidth();
+  const pageHeight = page.getHeight();
+  const scaleX = pageWidth / anchor.pageWidth;
+  const scaleY = pageHeight / anchor.pageHeight;
+  const reference = anchor.label;
+  const fontSize = Math.min(Math.max(reference.fontSize * scaleY, 8), 18);
+  const drawLeft = reference.left * scaleX;
+  const availableRight = Math.min(pageWidth * 0.5, pageWidth - 8);
+  const availableWidth = Math.max(availableRight - drawLeft, 1);
+  const textColor = reference.color || anchor.textColor || BLACK;
+  const text = `${header.labelText.trim()} ${employeeNo}`;
+
+  let raster: ReturnType<typeof createTextRaster>;
+  try {
+    raster = createTextRaster(
+      text,
+      availableWidth,
+      fontSize,
+      textColor,
+      reference.fontFamily,
+    );
+  } catch {
+    throw new Error(
+      `员工编号过长，无法写入文件第 ${(anchor.pageIndex ?? 0) + 1} 页`,
+    );
+  }
+
+  const coverMargin = 1.25;
+  const coverLeft = header.cover.left * scaleX;
+  const coverRight = (header.cover.left + header.cover.width) * scaleX;
+  const coverBottom =
+    pageHeight - (header.cover.top + header.cover.height) * scaleY;
+  const coverTop = pageHeight - header.cover.top * scaleY;
+  const coverX = Math.max(0, coverLeft - coverMargin);
+  const coverY = Math.max(0, coverBottom - coverMargin);
+  page.drawRectangle({
+    x: coverX,
+    y: coverY,
+    width: Math.min(
+      pageWidth - coverX,
+      coverRight - coverLeft + coverMargin * 2,
+    ),
+    height: Math.min(
+      pageHeight - coverY,
+      coverTop - coverBottom + coverMargin * 2,
+    ),
+    color: rgb(1, 1, 1),
+  });
+
+  const image = await pdfDocument.embedPng(new Uint8Array(raster.bytes));
+  const labelTop = pageHeight - reference.top * scaleY;
+  const labelBottom = pageHeight - (reference.top + reference.height) * scaleY;
+  const labelCenter = (labelTop + labelBottom) / 2;
+  const inkCenterFromImageBottom =
+    raster.height - (raster.inkBounds.top + raster.inkBounds.bottom) / 2;
+  const drawX = drawLeft - raster.inkBounds.left;
+  const drawY = labelCenter - inkCenterFromImageBottom;
+
+  page.drawImage(image, {
+    x: drawX,
+    y: drawY,
+    width: raster.width,
+    height: raster.height,
+  });
+}
+
 export async function writeEmployeeNumberToPdfBytes(
   sourceBytes: Uint8Array,
   employeeNo: string,
@@ -903,7 +1165,6 @@ export async function writeEmployeeNumberToPdfBytes(
   const pages = pdfDocument.getPages();
   if (pages.length === 0) throw new Error("文件没有可用页面");
 
-  const font = await pdfDocument.embedFont(StandardFonts.Helvetica);
   const normalizedAnchors = Array.isArray(anchors) ? anchors : [anchors];
   for (const anchor of normalizedAnchors) {
     const pageIndex = anchor.pageIndex ?? 0;
@@ -915,25 +1176,54 @@ export async function writeEmployeeNumberToPdfBytes(
       );
     }
 
+    if (anchor.continuationContractHeader) {
+      await drawContinuationContractHeader(
+        pdfDocument,
+        page,
+        anchor,
+        employeeNo,
+      );
+      continue;
+    }
+
     const pageWidth = page.getWidth();
     const pageHeight = page.getHeight();
     const scaleX = pageWidth / anchor.pageWidth;
     const scaleY = pageHeight / anchor.pageHeight;
     const reference = anchor.value || anchor.label;
     const text = anchor.hasSeparator ? employeeNo : `: ${employeeNo}`;
+    const fontSize = Math.min(Math.max(reference.fontSize * scaleY, 8), 18);
     const drawLeft =
       anchor.drawLeft ??
       anchor.value?.left ??
       anchor.label.left + anchor.label.width;
-    const drawX = drawLeft * scaleX + (anchor.value ? 0 : 2);
-    const maxWidth = Math.max(pageWidth - drawX - 8, 1);
-    let fontSize = Math.min(Math.max(reference.fontSize * scaleY, 8), 18);
-    while (font.widthOfTextAtSize(text, fontSize) > maxWidth && fontSize > 7) {
-      fontSize -= 0.5;
-    }
-    if (font.widthOfTextAtSize(text, fontSize) > maxWidth) {
+    const fallbackDrawX = drawLeft * scaleX + (anchor.value ? 0 : 2);
+    const underlineX = anchor.underline ? anchor.underline.left * scaleX : null;
+    const underlineWidth = anchor.underline
+      ? anchor.underline.width * scaleX
+      : null;
+    const horizontalInset = Math.max(2, fontSize * 0.12);
+    const maxWidth =
+      underlineWidth !== null
+        ? Math.max(underlineWidth - horizontalInset * 2 - 4, 1)
+        : Math.max(pageWidth - fallbackDrawX - 8, 1);
+    const textColor = anchor.textColor || reference.color || BLACK;
+    let raster: ReturnType<typeof createTextRaster>;
+    try {
+      raster = createTextRaster(
+        text,
+        maxWidth,
+        fontSize,
+        textColor,
+        reference.fontFamily,
+      );
+    } catch {
       throw new Error(`员工编号过长，无法写入文件第 ${pageIndex + 1} 页`);
     }
+    const drawX =
+      underlineX !== null && underlineWidth !== null
+        ? underlineX + (underlineWidth - raster.width) / 2
+        : fallbackDrawX;
 
     const cover = anchor.cover || anchor.value;
     if (cover) {
@@ -948,14 +1238,21 @@ export async function writeEmployeeNumberToPdfBytes(
       });
     }
 
-    const drawY = pageHeight - (reference.top + reference.fontSize) * scaleY;
-    const textColor = anchor.textColor || BLACK;
-    page.drawText(text, {
+    const image = await pdfDocument.embedPng(new Uint8Array(raster.bytes));
+    const sourceBaseline =
+      pageHeight - (reference.top + reference.fontSize) * scaleY;
+    const underlineY = anchor.underline
+      ? pageHeight - anchor.underline.top * scaleY
+      : null;
+    const baseline =
+      underlineY === null
+        ? sourceBaseline
+        : Math.max(sourceBaseline, underlineY + Math.max(2, fontSize * 0.12));
+    page.drawImage(image, {
       x: drawX,
-      y: drawY,
-      size: fontSize,
-      font,
-      color: rgb(textColor.red, textColor.green, textColor.blue),
+      y: baseline - raster.baselineFromBottom,
+      width: raster.width,
+      height: raster.height,
     });
   }
 
@@ -968,46 +1265,48 @@ function splitDateParts(value: string): [string, string, string] {
   return [match[1], String(Number(match[2])), String(Number(match[3]))];
 }
 
-function drawDateParts(
+async function drawDateParts(
+  pdfDocument: PDFDocument,
   page: ReturnType<PDFDocument["getPages"]>[number],
-  font: Awaited<ReturnType<PDFDocument["embedFont"]>>,
   pageWidth: number,
   pageHeight: number,
   anchor: PdfDatePartsAnchor,
   value: string,
-): void {
+): Promise<void> {
   const scaleX = page.getWidth() / pageWidth;
   const scaleY = page.getHeight() / pageHeight;
   const values = splitDateParts(value);
   const boxes = [anchor.year, anchor.month, anchor.day];
 
-  boxes.forEach((box, index) => {
+  for (const [index, box] of boxes.entries()) {
     const text = values[index];
     const availableWidth = Math.max(box.width * scaleX - 2, 1);
-    let fontSize = Math.min(Math.max(box.fontSize * scaleY, 8), 16);
-    while (
-      font.widthOfTextAtSize(text, fontSize) > availableWidth &&
-      fontSize > 7
-    ) {
-      fontSize -= 0.5;
-    }
-    if (font.widthOfTextAtSize(text, fontSize) > availableWidth) {
+    const fontSize = Math.min(Math.max(box.fontSize * scaleY, 8), 16);
+    let raster: ReturnType<typeof createTextRaster>;
+    try {
+      raster = createTextRaster(
+        text,
+        availableWidth,
+        fontSize,
+        box.color || BLACK,
+        box.fontFamily,
+      );
+    } catch {
       throw new Error("合同模板日期空位宽度不足");
     }
 
-    const textWidth = font.widthOfTextAtSize(text, fontSize);
-    const drawX = box.left * scaleX + (box.width * scaleX - textWidth) / 2;
+    const image = await pdfDocument.embedPng(new Uint8Array(raster.bytes));
+    const drawX = box.left * scaleX + (box.width * scaleX - raster.width) / 2;
     const baselineLift = Math.max(2.75, fontSize * 0.2);
-    const drawY =
+    const baseline =
       page.getHeight() - (box.top + box.fontSize) * scaleY + baselineLift;
-    page.drawText(text, {
+    page.drawImage(image, {
       x: drawX,
-      y: drawY,
-      size: fontSize,
-      font,
-      color: rgb(0, 0, 0),
+      y: baseline - raster.baselineFromBottom,
+      width: raster.width,
+      height: raster.height,
     });
-  });
+  }
 }
 
 export async function writeContractTemplateDatesToPdfBytes(
@@ -1019,21 +1318,20 @@ export async function writeContractTemplateDatesToPdfBytes(
     ignoreEncryption: true,
   });
   const pages = pdfDocument.getPages();
-  const font = await pdfDocument.embedFont(StandardFonts.Helvetica);
 
   const contractPage = pages[fields.contract.pageIndex];
   if (!contractPage) throw new Error("劳动合同期限所在页面不存在");
-  drawDateParts(
+  await drawDateParts(
+    pdfDocument,
     contractPage,
-    font,
     fields.contract.pageWidth,
     fields.contract.pageHeight,
     fields.contract.start,
     dates.contractStartDate,
   );
-  drawDateParts(
+  await drawDateParts(
+    pdfDocument,
     contractPage,
-    font,
     fields.contract.pageWidth,
     fields.contract.pageHeight,
     fields.contract.end,
@@ -1043,17 +1341,17 @@ export async function writeContractTemplateDatesToPdfBytes(
   if (dates.probationStartDate && dates.probationEndDate) {
     const probationPage = pages[fields.probation.pageIndex];
     if (!probationPage) throw new Error("试用期所在页面不存在");
-    drawDateParts(
+    await drawDateParts(
+      pdfDocument,
       probationPage,
-      font,
       fields.probation.pageWidth,
       fields.probation.pageHeight,
       fields.probation.start,
       dates.probationStartDate,
     );
-    drawDateParts(
+    await drawDateParts(
+      pdfDocument,
       probationPage,
-      font,
       fields.probation.pageWidth,
       fields.probation.pageHeight,
       fields.probation.end,
@@ -1071,56 +1369,111 @@ function rgbToCssColor(color: PdfRgbColor): string {
   return `rgb(${red}, ${green}, ${blue})`;
 }
 
+function normalizePdfFontFamily(fontFamily: string | undefined): string {
+  return String(fontFamily || "")
+    .replace(/^[A-Z]{6}\+/i, "")
+    .trim();
+}
+
+function resolveCanvasFontFamily(fontFamily: string | undefined): string {
+  const sourceFamily = normalizePdfFontFamily(fontFamily);
+  const isSerif = /(fangsong|仿宋|simsun|宋体|song|serif|mincho)/i.test(
+    sourceFamily,
+  );
+  const isMonospace = /(mono|courier|等宽)/i.test(sourceFamily);
+  return isSerif
+    ? '"Noto Serif CJK SC", serif'
+    : isMonospace
+      ? '"Noto Sans Mono CJK SC", "Noto Sans CJK SC", monospace'
+      : '"Noto Sans CJK SC", sans-serif';
+}
+
+export function resolveCanvasFontWeight(
+  fontFamily: string | undefined,
+): string {
+  const normalized = normalizePdfFontFamily(fontFamily);
+  return /(bold|black|heavy|semibold|demi)/i.test(normalized) ? "600" : "400";
+}
+
+function resolveCanvasFontStyle(fontFamily: string | undefined): string {
+  const normalized = normalizePdfFontFamily(fontFamily);
+  return /(italic|oblique|斜体)/i.test(normalized) ? "italic" : "normal";
+}
+
 function createTextRaster(
   value: string,
   availableWidth: number,
   preferredFontSize: number,
   color: PdfRgbColor = BLACK,
+  sourceFontFamily?: string,
 ): {
   bytes: Buffer;
   width: number;
   height: number;
   baselineFromBottom: number;
+  inkBounds: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  };
 } {
   const rasterScale = 6;
-  const fontFamily =
-    '"Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif';
+  const fontFamily = resolveCanvasFontFamily(sourceFontFamily);
+  const fontWeight = resolveCanvasFontWeight(sourceFontFamily);
+  const fontStyle = resolveCanvasFontStyle(sourceFontFamily);
   const measureCanvas = createCanvas(1, 1);
   const measureContext = measureCanvas.getContext("2d");
   let fontSize = preferredFontSize;
   let metrics: ReturnType<typeof measureContext.measureText> | null = null;
 
   do {
-    measureContext.font = `${fontSize * rasterScale}px ${fontFamily}`;
+    measureContext.font = `${fontStyle} ${fontWeight} ${fontSize * rasterScale}px ${fontFamily}`;
     metrics = measureContext.measureText(value);
     if (metrics.width / rasterScale <= availableWidth) break;
     fontSize -= 0.5;
   } while (fontSize >= 7);
 
-  if (!metrics || metrics.width / rasterScale > availableWidth || fontSize < 7) {
+  if (
+    !metrics ||
+    metrics.width / rasterScale > availableWidth ||
+    fontSize < 7
+  ) {
     throw new Error("自动填充内容过长，无法写入模板");
   }
 
   const padding = rasterScale * 2;
-  const ascent = metrics.actualBoundingBoxAscent || fontSize * rasterScale * 0.85;
-  const descent = metrics.actualBoundingBoxDescent || fontSize * rasterScale * 0.15;
+  const ascent =
+    metrics.actualBoundingBoxAscent || fontSize * rasterScale * 0.85;
+  const descent =
+    metrics.actualBoundingBoxDescent || fontSize * rasterScale * 0.15;
   const canvas = createCanvas(
     Math.max(1, Math.ceil(metrics.width + padding * 2)),
     Math.max(1, Math.ceil(ascent + descent + padding * 2)),
   );
   const context = canvas.getContext("2d");
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.font = `${fontSize * rasterScale}px ${fontFamily}`;
+  context.font = `${fontStyle} ${fontWeight} ${fontSize * rasterScale}px ${fontFamily}`;
   context.textBaseline = "alphabetic";
   context.fillStyle = rgbToCssColor(color);
   const baseline = padding + ascent;
   context.fillText(value, padding, baseline);
+  const inkLeft = metrics.actualBoundingBoxLeft || 0;
+  const inkRight = metrics.actualBoundingBoxRight || metrics.width;
+  const inkAscent = metrics.actualBoundingBoxAscent || ascent;
+  const inkDescent = metrics.actualBoundingBoxDescent || descent;
 
   return {
     bytes: canvas.toBuffer("image/png"),
     width: canvas.width / rasterScale,
     height: canvas.height / rasterScale,
     baselineFromBottom: (canvas.height - baseline) / rasterScale,
+    inkBounds: {
+      left: (padding - inkLeft) / rasterScale,
+      top: (baseline - inkAscent) / rasterScale,
+      right: (padding + inkRight) / rasterScale,
+      bottom: (baseline + inkDescent) / rasterScale,
+    },
   };
 }
 
@@ -1128,6 +1481,8 @@ function createPositionTextRaster(
   value: string,
   availableWidth: number,
   preferredFontSize: number,
+  color: PdfRgbColor,
+  fontFamily: string | undefined,
 ): {
   bytes: Buffer;
   width: number;
@@ -1135,7 +1490,13 @@ function createPositionTextRaster(
   baselineFromBottom: number;
 } {
   try {
-    return createTextRaster(value, availableWidth, preferredFontSize);
+    return createTextRaster(
+      value,
+      availableWidth,
+      preferredFontSize,
+      color,
+      fontFamily,
+    );
   } catch (error) {
     if (error instanceof Error && error.message.includes("过长")) {
       throw new Error("职位名称过长，无法写入劳动合同第四条");
@@ -1170,10 +1531,11 @@ export async function writeContractTemplatePositionToPdfBytes(
     position,
     Math.max(boxWidth - 3, 1),
     preferredFontSize,
+    box.color || BLACK,
+    box.fontFamily,
   );
   const image = await pdfDocument.embedPng(new Uint8Array(raster.bytes));
-  const baseline =
-    page.getHeight() - (box.top + box.fontSize) * scaleY + 0.75;
+  const baseline = page.getHeight() - (box.top + box.fontSize) * scaleY + 0.75;
   const imageX = boxX + (boxWidth - raster.width) / 2;
   const imageY = baseline - raster.baselineFromBottom + 1.5;
 
@@ -1188,7 +1550,11 @@ export async function writeContractTemplatePositionToPdfBytes(
     start: { x: boxX, y: baseline - 1.5 },
     end: { x: boxX + boxWidth, y: baseline - 1.5 },
     thickness: 0.6,
-    color: rgb(0, 0, 0),
+    color: rgb(
+      (box.color || BLACK).red,
+      (box.color || BLACK).green,
+      (box.color || BLACK).blue,
+    ),
   });
   page.drawImage(image, {
     x: imageX,
@@ -1220,17 +1586,15 @@ async function drawTextFieldRaster(
     text,
     Math.max(boxWidth - 4, 1),
     preferredFontSize,
-    field.textColor || BLACK,
+    field.textColor || box.color || BLACK,
+    box.fontFamily,
   );
   const image = await pdfDocument.embedPng(new Uint8Array(raster.bytes));
 
   if (field.cover) {
     page.drawRectangle({
       x: field.cover.left * scaleX - 1,
-      y:
-        page.getHeight() -
-        (field.cover.top + field.cover.height) * scaleY -
-        1,
+      y: page.getHeight() - (field.cover.top + field.cover.height) * scaleY - 1,
       width: field.cover.width * scaleX + 3,
       height: field.cover.height * scaleY + 2,
       color: rgb(1, 1, 1),
@@ -1239,11 +1603,12 @@ async function drawTextFieldRaster(
 
   const baseline = page.getHeight() - (box.top + box.fontSize) * scaleY + 0.75;
   if (field.underline) {
+    const underlineColor = field.textColor || box.color || BLACK;
     page.drawLine({
       start: { x: boxX, y: baseline - 1.5 },
       end: { x: boxX + boxWidth, y: baseline - 1.5 },
       thickness: 0.6,
-      color: rgb(0, 0, 0),
+      color: rgb(underlineColor.red, underlineColor.green, underlineColor.blue),
     });
   }
 
@@ -1316,6 +1681,21 @@ export async function writeEmployeeNumberToOnboardingTemplate(
   const anchors = requiredIndexes.map(
     (pageIndex) => anchorsByPage.get(pageIndex)!,
   );
+  if (documentType === "contract") {
+    const firstPageAnchor = anchorsByPage.get(0);
+    if (firstPageAnchor) {
+      try {
+        const svg = await extractContractFirstPageSvg(pdfPath);
+        firstPageAnchor.underline =
+          parseContractNumberUnderlineSvg(svg, firstPageAnchor) || undefined;
+      } catch (error) {
+        console.warn(
+          "未识别劳动合同首页编号下划线，继续按文字基线写入:",
+          error,
+        );
+      }
+    }
+  }
   return writeEmployeeNumberToPdfBytes(sourceBytes, employeeNo, anchors);
 }
 

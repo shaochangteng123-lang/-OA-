@@ -59,8 +59,9 @@ describe("BOSS角色权限", () => {
 });
 
 describe("系统账号资料规则", () => {
-  it("超级管理员和BOSS不要求员工档案字段", () => {
+  it("超级管理员、董事长和BOSS不要求员工档案字段", () => {
     expect(requiresEmployeeProfile("super_admin")).toBe(false);
+    expect(requiresEmployeeProfile("chairman")).toBe(false);
     expect(requiresEmployeeProfile("boss")).toBe(false);
     expect(requiresEmployeeProfile("admin")).toBe(true);
 
@@ -75,5 +76,9 @@ describe("系统账号资料规则", () => {
         role: "super_admin",
       }),
     ).toBeNull();
+  });
+
+  it("董事长与超级管理员权限完全一致", () => {
+    expect(ROLE_PERMISSIONS.chairman).toEqual(ROLE_PERMISSIONS.super_admin);
   });
 });

@@ -1,10 +1,12 @@
 import { PDFDocument } from "pdf-lib";
 import {
   parseAssetAgreementFieldsXml,
+  parseContractNumberUnderlineSvg,
   parseContractTemplateDateFieldsXml,
   parseContractTemplatePositionFieldXml,
   parseEmployeeNumberFieldXml,
   parseEmployeeNumberFieldsXml,
+  resolveCanvasFontWeight,
   writeAssetAgreementFieldsToPdfBytes,
   writeContractTemplateDatesToPdfBytes,
   writeContractTemplatePositionToPdfBytes,
@@ -46,6 +48,58 @@ describe("入职模板员工编号写入", () => {
     expect(anchor?.value).toMatchObject({ left: 744, width: 79 });
   });
 
+  it("将独立文字节点中的冒号归入编号标签", () => {
+    const anchors = parseEmployeeNumberFieldsXml(
+      `
+      <pdf2xml>
+        <page number="1" height="1262" width="892">
+          <fontspec id="1" size="24" family="HYUHQC+DroidSansFallback" color="#000000"/>
+          <fontspec id="2" size="24" family="KEFWRZ+NotoSansMonoCJKsc" color="#000000"/>
+          <text top="215" left="574" width="48" height="27" font="1">编号</text>
+          <text top="211" left="622" width="12" height="35" font="2">:</text>
+        </page>
+      </pdf2xml>
+    `,
+      "contract",
+    );
+
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].hasSeparator).toBe(true);
+    expect(anchors[0].label.left + anchors[0].label.width).toBe(634);
+    expect(anchors[0].value).toBeNull();
+  });
+
+  it("识别劳动合同首页编号下划线并保留其完整宽度", () => {
+    const anchor = parseEmployeeNumberFieldXml(
+      buildXml(
+        '<text top="216" left="574" width="60" height="24" font="1">编号:</text>',
+      ),
+    );
+    expect(anchor).not.toBeNull();
+
+    const underline = parseContractNumberUnderlineSvg(
+      `
+      <svg width="595.3pt" height="841.9pt" viewBox="0 0 595.3 841.9">
+        <path fill="none" stroke-width="0.72"
+          d="M 422.750425 159.34816 L 518.749895 159.34816"
+          transform="matrix(0.998826, 0, 0, 0.998826, 0, 0.444463)"/>
+      </svg>
+    `,
+      anchor!,
+    );
+
+    expect(underline).not.toBeNull();
+    expect(underline?.left).toBeCloseTo(632.7, 1);
+    expect(underline?.top).toBeCloseTo(239.2, 1);
+    expect(underline?.width).toBeCloseTo(143.7, 1);
+  });
+
+  it("普通黑体名称不再让生产编号额外加粗", () => {
+    expect(resolveCanvasFontWeight("XEKKFX+SimHei")).toBe("400");
+    expect(resolveCanvasFontWeight("HYUHQC+DroidSansFallback")).toBe("400");
+    expect(resolveCanvasFontWeight("ABCDEF+NotoSans-Bold")).toBe("600");
+  });
+
   it("忽略正文和页面下半区的编号字样", () => {
     const anchor = parseEmployeeNumberFieldXml(
       buildXml(
@@ -82,11 +136,11 @@ describe("入职模板员工编号写入", () => {
       `
       <pdf2xml>
         <page number="1" height="1262" width="892">
-          <fontspec id="1" size="24" color="#000000"/>
+          <fontspec id="1" size="24" family="XEKKFX+SimHei" color="#000000"/>
           <text top="215" left="574" width="48" height="27" font="1">编号：</text>
         </page>
         <page number="2" height="1262" width="892">
-          <fontspec id="2" size="14" color="#3178b4"/>
+          <fontspec id="2" size="14" family="RWLTAB+NotoSansCJKsc" color="#3178b4"/>
           <text top="68" left="115" width="139" height="20" font="2">合同编号：YULI-CS026</text>
         </page>
       </pdf2xml>
@@ -95,6 +149,8 @@ describe("入职模板员工编号写入", () => {
     );
 
     expect(anchors).toHaveLength(2);
+    expect(anchors[0].label.fontFamily).toBe("XEKKFX+SimHei");
+    expect(anchors[1].value?.fontFamily).toBe("RWLTAB+NotoSansCJKsc");
     expect(anchors[0].textColor).toEqual({ red: 0, green: 0, blue: 0 });
     expect(anchors[1].textColor).toEqual({
       red: 0x31 / 255,
@@ -102,6 +158,62 @@ describe("入职模板员工编号写入", () => {
       blue: 0xb4 / 255,
     });
     expect(anchors[1].value?.left).toBeGreaterThan(anchors[1].label.left);
+    expect(anchors[0].continuationContractHeader).toBeUndefined();
+    expect(anchors[1].continuationContractHeader).toMatchObject({
+      labelText: "合同编号：",
+      cover: { left: 115, top: 68, width: 139, height: 20 },
+    });
+  });
+
+  it("劳动合同续页只有标签时仍按整行重绘", () => {
+    const anchors = parseEmployeeNumberFieldsXml(
+      `
+      <pdf2xml>
+        <page number="1" height="1262" width="892">
+          <fontspec id="1" size="24" family="XEKKFX+SimHei" color="#000000"/>
+          <text top="215" left="574" width="48" height="27" font="1">编号：</text>
+        </page>
+        <page number="2" height="1262" width="892">
+          <fontspec id="2" size="14" family="XEKKFX+SimHei" color="#3178b4"/>
+          <text top="66" left="115" width="68" height="14" font="2">合同编号：</text>
+        </page>
+      </pdf2xml>
+    `,
+      "contract",
+    );
+
+    expect(anchors).toHaveLength(2);
+    expect(anchors[1].value).toBeNull();
+    expect(anchors[1].continuationContractHeader).toMatchObject({
+      labelText: "合同编号：",
+      cover: { left: 115, top: 66, width: 68, height: 14 },
+    });
+  });
+
+  it("劳动合同续页合并独立冒号和旧编号的覆盖范围", () => {
+    const anchors = parseEmployeeNumberFieldsXml(
+      `
+      <pdf2xml>
+        <page number="1" height="1262" width="892">
+          <fontspec id="1" size="24" color="#000000"/>
+          <text top="215" left="574" width="48" height="27" font="1">编号：</text>
+        </page>
+        <page number="2" height="1262" width="892">
+          <fontspec id="2" size="14" family="XEKKFX+SimHei" color="#3178b4"/>
+          <text top="66" left="115" width="56" height="14" font="2">合同编号</text>
+          <text top="64" left="171" width="12" height="18" font="2">:</text>
+          <text top="66" left="184" width="80" height="14" font="2">YULI-CS026</text>
+        </page>
+      </pdf2xml>
+    `,
+      "contract",
+    );
+
+    expect(anchors).toHaveLength(2);
+    expect(anchors[1].continuationContractHeader).toMatchObject({
+      labelText: "合同编号:",
+      cover: { left: 115, top: 64, width: 149, height: 18 },
+    });
   });
 
   it("写入后仍生成可读取的单页 PDF", async () => {
@@ -164,7 +276,7 @@ describe("劳动合同模板日期写入", () => {
   const contractDateXml = `
     <pdf2xml>
       <page number="1" height="1262" width="892">
-        <fontspec id="1" size="21" color="#000000"/>
+        <fontspec id="1" size="21" family="ABSEKN+FangSong" color="#000000"/>
         <text top="861" left="158" width="21" height="24" font="1">自</text>
         <text top="861" left="231" width="21" height="24" font="1">年</text>
         <text top="861" left="294" width="21" height="24" font="1">月</text>
@@ -188,8 +300,12 @@ describe("劳动合同模板日期写入", () => {
 
     expect(fields).not.toBeNull();
     expect(fields?.contract.start.year).toMatchObject({ left: 179, width: 52 });
+    expect(fields?.contract.start.year.fontFamily).toBe("ABSEKN+FangSong");
     expect(fields?.contract.end.day).toMatchObject({ left: 557, width: 42 });
-    expect(fields?.probation.start.year).toMatchObject({ left: 305, width: 52 });
+    expect(fields?.probation.start.year).toMatchObject({
+      left: 305,
+      width: 52,
+    });
     expect(fields?.probation.end.day).toMatchObject({ left: 683, width: 42 });
   });
 
@@ -221,7 +337,7 @@ describe("劳动合同模板职位写入", () => {
   const contractPositionXml = `
     <pdf2xml>
       <page number="2" height="1262" width="892">
-        <fontspec id="1" size="21" color="#000000"/>
+        <fontspec id="1" size="21" family="YMVEVT+MicrosoftYaHei" color="#000000"/>
         <text top="1048" left="115" width="63" height="24" font="1">第四条</text>
         <text top="1086" left="158" width="505" height="24" font="1">乙方同意根据甲方工作需要，担任报批报建部专员岗位</text>
         <text top="1086" left="673" width="42" height="24" font="1">工种</text>
@@ -234,6 +350,7 @@ describe("劳动合同模板职位写入", () => {
 
     expect(field).not.toBeNull();
     expect(field?.pageIndex).toBe(0);
+    expect(field?.value.fontFamily).toBe("YMVEVT+MicrosoftYaHei");
     expect(field?.value.left).toBeCloseTo(473.625, 2);
     expect(field?.value.width).toBeCloseTo(147.292, 2);
   });
@@ -314,7 +431,9 @@ describe("电脑管理办法协议自动填充", () => {
 
     expect(fields).not.toBeNull();
     expect(fields?.employeeNumbers).toHaveLength(2);
-    expect(fields?.employeeNumbers.map((anchor) => anchor.pageIndex)).toEqual([0, 1]);
+    expect(fields?.employeeNumbers.map((anchor) => anchor.pageIndex)).toEqual([
+      0, 1,
+    ]);
     expect(fields?.employeeNumbers[0].label.left).toBe(690);
     expect(fields?.partyA.cover).toBeDefined();
     expect(fields?.partyB.underline).toBe(true);

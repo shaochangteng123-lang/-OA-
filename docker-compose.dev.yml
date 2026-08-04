@@ -1,63 +1,11 @@
 # ============================================
-# YuliLog 工作日志系统 - 开发模式 Docker Compose
+# YuliLog 开发模式兼容入口
 # ============================================
-# 使用方法：
-#   启动：docker compose -f docker-compose.dev.yml up -d
-#   日志：docker compose -f docker-compose.dev.yml logs -f
-#   停止：docker compose -f docker-compose.dev.yml down
+# 开发模式的唯一配置源为 docker-compose.yml。
+# 保留此文件用于兼容旧命令和旧文档，避免维护两套相互偏离的开发配置。
+# 新命令建议直接使用：
+#   docker compose -f docker-compose.yml up -d --build
 # ============================================
 
-services:
-  postgres:
-    container_name: yulilog-postgres-dev
-    image: postgres:16-alpine
-    environment:
-      - POSTGRES_DB=yulilog_worklog
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - TZ=Asia/Shanghai
-    volumes:
-      - postgres_data_dev:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d yulilog_worklog"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  yulilog-dev:
-    container_name: yulilog-worklog-dev
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-    ports:
-      - "8900:8899"   # Vite 前端（宿主机8900映射到容器8899）
-      - "3001:3000"   # Express 后端（宿主机3001映射到容器3000）
-    env_file:
-      - .env
-    environment:
-      - NODE_ENV=development
-      - PORT=3000
-      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
-      - TZ=Asia/Shanghai
-    working_dir: /app
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      # 数据持久化
-      - ./uploads:/app/uploads
-      # 源代码挂载（热重载）
-      - ./src:/app/src
-      - ./server:/app/server
-      - ./public:/app/public
-      # 配置文件
-      - ./tsconfig.json:/app/tsconfig.json
-      - ./tsconfig.node.json:/app/tsconfig.node.json
-      - ./tsconfig.server.json:/app/tsconfig.server.json
-      - ./vite.config.ts:/app/vite.config.ts
-      - ./index.html:/app/index.html
-    restart: unless-stopped
-
-volumes:
-  postgres_data_dev:
+include:
+  - path: ./docker-compose.yml

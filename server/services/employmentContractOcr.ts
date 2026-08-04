@@ -16,6 +16,10 @@ export interface EmploymentContractTermRecognition {
   pageNumber?: number;
 }
 
+export interface EmploymentContractTermRecognitionOptions {
+  preRecognizedPageTextCandidates?: ReadonlyMap<number, readonly string[]>;
+}
+
 interface ParsedContractTerm {
   contractStartDate: string | null;
   contractEndDate: string | null;
@@ -23,8 +27,7 @@ interface ParsedContractTerm {
   message: string;
 }
 
-const DATE_PATTERN =
-  "(2[0Oo][0-9Oo]{2})年([0-9Oo]{1,2})月([0-9Oo]{1,2})[日曰]";
+const DATE_PATTERN = "(2[0Oo][0-9Oo]{2})年([0-9Oo]{1,2})月([0-9Oo]{1,2})[日曰]";
 
 function toHalfWidth(value: string): string {
   return value
@@ -72,7 +75,9 @@ function findProbationEndDate(compactText: string): string | null {
   const sectionAfterProbation = compactText.slice(probationIndex);
   const nextSectionIndex = sectionAfterProbation
     .slice(3)
-    .search(/(?:^|[一二三四五六七八九十\d][、.．])(?:工作内容|工作地点|劳动报酬|社会保险|劳动保护|合同解除|劳动纪律)|工作内容|工作地点|劳动报酬|社会保险/);
+    .search(
+      /(?:^|[一二三四五六七八九十\d][、.．])(?:工作内容|工作地点|劳动报酬|社会保险|劳动保护|合同解除|劳动纪律)|工作内容|工作地点|劳动报酬|社会保险/,
+    );
   const probationSection = sectionAfterProbation.slice(
     0,
     nextSectionIndex >= 0 ? nextSectionIndex + 3 : 300,
@@ -90,7 +95,9 @@ function findProbationEndDate(compactText: string): string | null {
     .pop();
   if (rangeEndDate) return rangeEndDate;
 
-  const dateMatches = [...probationSection.matchAll(new RegExp(DATE_PATTERN, "g"))];
+  const dateMatches = [
+    ...probationSection.matchAll(new RegExp(DATE_PATTERN, "g")),
+  ];
   const dates = dateMatches
     .map((match) => buildDate(match[1], match[2], match[3]))
     .filter((date): date is string => !!date);
@@ -214,6 +221,7 @@ async function recognizePdfPageImage(
 
 export async function recognizeEmploymentContractTerm(
   pdfPath: string,
+  options: EmploymentContractTermRecognitionOptions = {},
 ): Promise<EmploymentContractTermRecognition> {
   try {
     if (!fs.existsSync(pdfPath)) {
@@ -257,6 +265,42 @@ export async function recognizeEmploymentContractTerm(
     const preferredPages = [2, 1, 3, 4].filter(
       (pageNumber) => pageNumber <= inspectPageCount,
     );
+    for (const pageNumber of preferredPages) {
+      const preRecognizedCandidates = (
+        options.preRecognizedPageTextCandidates?.get(pageNumber) || []
+      )
+        .map((text) => text.trim())
+        .filter(Boolean);
+      if (preRecognizedCandidates.length === 0) continue;
+
+      const parsedCandidates = preRecognizedCandidates.map((text) =>
+        parseEmploymentContractTermText(text),
+      );
+      const recognizedTerms = parsedCandidates.filter(
+        (parsed) => parsed.contractStartDate && parsed.contractEndDate,
+      );
+      const uniqueTerms = new Set(
+        recognizedTerms.map((parsed) =>
+          [
+            parsed.contractStartDate,
+            parsed.contractEndDate,
+            parsed.probationEndDate || "",
+          ].join("|"),
+        ),
+      );
+      if (
+        uniqueTerms.size === 1 &&
+        recognizedTerms.length === parsedCandidates.length
+      ) {
+        return {
+          status: "success",
+          ...recognizedTerms[0],
+          method: "image",
+          pageNumber,
+        };
+      }
+    }
+
     let lastMessage = "未识别到劳动合同起止日期";
     for (const dpi of [300, 600]) {
       for (const pageNumber of preferredPages) {

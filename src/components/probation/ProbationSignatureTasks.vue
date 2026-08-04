@@ -61,24 +61,26 @@
           formatDateTime(row.submit_time)
         }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="206" align="center">
+      <el-table-column label="操作" width="240" align="center">
         <template #default="{ row }">
-          <el-button
-            size="small"
-            plain
-            :icon="List"
-            @click="openFlowDialog(row)"
-          >
-            审批流程
-          </el-button>
-          <el-button
-            type="primary"
-            size="small"
-            :icon="EditPen"
-            @click="openSignDialog(row)"
-          >
-            填写并签名
-          </el-button>
+          <div class="signature-actions">
+            <el-button
+              size="small"
+              plain
+              :icon="List"
+              @click="openFlowDialog(row)"
+            >
+              审批流程
+            </el-button>
+            <el-button
+              type="primary"
+              size="small"
+              :icon="EditPen"
+              @click="openSignDialog(row)"
+            >
+              填写并签名
+            </el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -101,6 +103,7 @@
             :current-version="currentTask.form_version"
             :review-stage="currentTask.review_stage"
             :status="currentTask.status"
+            :assignees="currentTask.approver_names"
           />
           <el-button
             type="primary"
@@ -182,6 +185,7 @@
         :current-version="flowTask.form_version"
         :review-stage="flowTask.review_stage"
         :status="flowTask.status"
+        :assignees="flowTask.approver_names"
       />
     </el-dialog>
   </section>
@@ -193,13 +197,14 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { Check, Close, EditPen, List } from "@element-plus/icons-vue";
 import dayjs from "dayjs";
 import { api } from "@/utils/api";
+import { formatBeijingDateTimeMinute } from "@/utils/date";
 import { usePendingStore } from "@/stores/pending";
 import ProbationApprovalRecords from "@/components/probation/ProbationApprovalRecords.vue";
 import ProbationTemplateEditor from "@/components/probation/ProbationTemplateEditor.vue";
 import type { PersonalSignatureType } from "@/utils/personalSignature";
 import {
-  findGeneralManagerApprovalTask,
   type ProbationApprovalRecord,
+  type ProbationApproverNames,
   type ProbationReviewStage,
 } from "@/utils/probationApproval";
 
@@ -225,6 +230,7 @@ interface SignatureTask {
   is_legacy_application: boolean;
   signatures: SignatureRecord[];
   signatureHistory: SignatureRecord[];
+  approver_names: ProbationApproverNames;
 }
 
 withDefaults(
@@ -271,7 +277,7 @@ function formatDate(value: string | null | undefined) {
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? dayjs(value).format("YYYY-MM-DD HH:mm") : "-";
+  return formatBeijingDateTimeMinute(value) || "-";
 }
 
 function requestErrorMessage(error: unknown, fallback: string) {
@@ -350,22 +356,6 @@ async function submitReview(decision: "approve" | "reject") {
     await Promise.all([fetchTasks(), pendingStore.refreshPendingCounts()]);
     emit("updated");
 
-    if (decision === "approve" && task.review_stage === "hr") {
-      const finalApprovalTask = findGeneralManagerApprovalTask(
-        tasks.value,
-        task.id,
-      );
-      if (finalApprovalTask) {
-        currentTask.value = finalApprovalTask;
-        opinion.value = "";
-        signatureDataUrl.value = "";
-        signatureType.value = "general_manager";
-        templateReady.value = false;
-        ElMessage.success("人事部意见已签署，请继续完成总经理审批");
-        return;
-      }
-    }
-
     ElMessage.success(response.data.message);
     dialogVisible.value = false;
   } catch (error: unknown) {
@@ -410,6 +400,20 @@ onMounted(fetchTasks);
   line-height: 1.45;
   white-space: normal;
   word-break: break-word;
+}
+
+.signature-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.signature-actions :deep(.el-button) {
+  flex: none;
+  margin-left: 0;
 }
 
 .section-header {

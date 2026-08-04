@@ -415,6 +415,7 @@ import { ref, computed, onMounted, onUnmounted, reactive, watch } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { usePendingStore } from "@/stores/pending";
+import { useEmployeeDocumentRecognitionStore } from "@/stores/employeeDocumentRecognition";
 import { ElMessage, ElNotification } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { api } from "@/utils/api";
@@ -450,6 +451,8 @@ const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 const pendingStore = usePendingStore();
+const employeeDocumentRecognitionStore =
+  useEmployeeDocumentRecognitionStore();
 
 // ===================== 强制修改密码弹窗 =====================
 const showChangePasswordDialog = computed(
@@ -574,13 +577,23 @@ const contractExpiryBadge = computed(() => {
 // 是否是管理员
 const isAdmin = computed(() => {
   return (
-    authStore.user?.role === "super_admin" || authStore.user?.role === "admin"
+    authStore.user?.role === "super_admin" ||
+    authStore.user?.role === "chairman" ||
+    authStore.user?.role === "admin"
   );
 });
 
 // 是否是总经理
 const isGeneralManager = computed(() => {
   return authStore.user?.role === "general_manager";
+});
+
+// 是否具有人力资源请假审批职责
+const isLeaveApprover = computed(() => {
+  return (
+    authStore.user?.role === "general_manager" ||
+    authStore.user?.role === "chairman"
+  );
 });
 
 // 是否是BOSS
@@ -635,7 +648,7 @@ const hrGroupHasBadge = computed(() => {
   const generalManagerProbation = isGeneralManager.value
     ? counts.probationPending || 0
     : 0;
-  const leaveApproval = isGeneralManager.value
+  const leaveApproval = isLeaveApprover.value
     ? counts.leaveApprovalPending || 0
     : 0;
   const adminResignation = isAdmin.value ? counts.resignationPending || 0 : 0;
@@ -701,11 +714,16 @@ watch(
 );
 
 const employeeDataBadge = computed(() => {
+  const chairmanLeavePending =
+    authStore.user?.role === "chairman"
+      ? pendingStore.counts.leaveApprovalPending || 0
+      : 0;
   const count = isAdmin.value
     ? (pendingStore.counts.probationDueSoon || 0) +
       (pendingStore.counts.probationSignaturePending || 0) +
       (pendingStore.counts.probationArchivePending || 0) +
-      (pendingStore.counts.resignationPending || 0)
+      (pendingStore.counts.resignationPending || 0) +
+      chairmanLeavePending
     : 0;
   return count > 0 ? count : undefined;
 });
@@ -788,6 +806,7 @@ const handleLogout = async () => {
     // 清除侧边栏锁定状态，确保下次登录时侧边栏是折叠的
     localStorage.removeItem("sidebar-pinned");
     await authStore.logout();
+    employeeDocumentRecognitionStore.clearAll();
     router.push("/login");
     ElMessage.success("已退出登录");
   } catch (error) {

@@ -102,6 +102,7 @@ const emit = defineEmits<{
 function getRoleLabel(role?: string): string {
   const labels: Record<string, string> = {
     super_admin: '超级管理员',
+    chairman: '董事长',
     admin: '管理员',
     general_manager: '总经理',
     boss: 'BOSS',

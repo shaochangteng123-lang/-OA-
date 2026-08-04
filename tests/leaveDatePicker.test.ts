@@ -24,6 +24,9 @@ jest.mock('@/utils/holidays', () => ({
 }))
 
 const DatePickerStub = defineComponent({
+  props: {
+    disabled: Boolean,
+  },
   setup(_, { slots }) {
     return () =>
       h('div', [
@@ -53,5 +56,21 @@ describe('请假日期选择器节假日数据', () => {
     expect(wrapper.text()).toContain('班')
     expect(wrapper.find('[title="国庆节补班"]').exists()).toBe(true)
     expect(wrapper.findAll('.leave-date-cell__name')).toHaveLength(1)
+  })
+
+  it('可将续假等场景的只读状态传给日期控件', () => {
+    const wrapper = mount(LeaveDatePicker, {
+      props: {
+        modelValue: '2026-10-31',
+        disabled: true,
+      },
+      global: {
+        stubs: {
+          'el-date-picker': DatePickerStub,
+        },
+      },
+    })
+
+    expect(wrapper.getComponent(DatePickerStub).props('disabled')).toBe(true)
   })
 })

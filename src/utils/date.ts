@@ -45,6 +45,13 @@ export function formatBeijingDateTime(
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
+export function formatBeijingDateTimeMinute(
+  value: string | Date | null | undefined,
+): string {
+  const formatted = formatBeijingDateTime(value);
+  return formatted.length >= 16 ? formatted.slice(0, 16) : formatted;
+}
+
 export function formatDateChinese(date: string | Date): string {
   const d = typeof date === "string" ? parseISO(date) : date;
   return format(d, "yyyy年MM月dd日 EEEE", { locale: zhCN });

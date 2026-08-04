@@ -22,6 +22,13 @@ export interface PaymentProofOcrResult {
   proofNo: string        // 电子回单号码（用于查重）
   rawText?: string       // 原始识别文本
 }
+export interface PaymentProofValidationOptions {
+  /**
+   * 仅供已由业务层确认用途的实发工资回单使用。账号漏识别时仍保留收款人，
+   * 后续可按姓名关联员工；银行、回单、金额和交易凭证等真实性校验保持不变。
+   */
+  allowMissingPayeeAccount?: boolean
+}
 
 // ==================== 中文大写金额解析 ====================
 
@@ -174,6 +181,39 @@ function extractPayee(text: string, textNoSpace: string): string {
     if (name !== '付款' && name !== '收款') return name
   }
 
+  return ''
+}
+
+/**
+ * 提取机构类收款人。
+ * 公积金、社保和税务回单的收款人通常不是个人姓名；当 OCR 漏掉第二个“户名”
+ * 标签时，仍可根据机构全称确认收款人，避免被 2-4 个汉字的人名兜底规则遗漏。
+ */
+function extractInstitutionPayee(text: string, payer: string): string {
+  const normalizedPayer = payer.replace(/[\s|｜"“”]/g, '')
+  const institutionPattern =
+    /(?:住房)?公积金管理(?:中心|部)|社会保险(?:事业)?管理中心|待报解预算收入/
+  const lines = text
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/^(?:收款人|收款方|收款户名|户名)[：:]?\s*/, '')
+        .replace(/[|｜"“”]/g, '')
+        .trim(),
+    )
+    .filter(Boolean)
+
+  for (const line of lines) {
+    const normalizedLine = line.replace(/\s+/g, '')
+    if (
+      normalizedLine.length >= 4 &&
+      normalizedLine.length <= 40 &&
+      normalizedLine !== normalizedPayer &&
+      institutionPattern.test(normalizedLine)
+    ) {
+      return normalizedLine
+    }
+  }
   return ''
 }
 
@@ -373,6 +413,11 @@ function parsePaymentProofText(text: string, result: PaymentProofOcrResult): voi
   result.amount = extractAmount(text, textNoSpace)
   result.proofNo = extractProofNo(text, textNoSpace)
 
+  // 公积金、社保和税务回单允许机构全称作为收款人。
+  if (!result.payee) {
+    result.payee = extractInstitutionPayee(text, result.payer)
+  }
+
   // 如果前面步骤都未找到收款人姓名，但账号已识别，在账号附近行里二次查找
   if (!result.payee && result.payeeAccount) {
     result.payee = extractPayeeNameNearAccount(text, result.payeeAccount)
@@ -398,7 +443,11 @@ function parsePaymentProofText(text: string, result: PaymentProofOcrResult): voi
  * 4. 包含银行特有关键字（电子回单号码 / 交易流水号 / 交易时间，至少一个）
  * 5. 不包含系统界面特征（排除截图）
  */
-function validatePaymentProof(rawText: string, result: PaymentProofOcrResult): {
+function validatePaymentProof(
+  rawText: string,
+  result: PaymentProofOcrResult,
+  options: PaymentProofValidationOptions = {},
+): {
   isValid: boolean
   reason?: string
 } {
@@ -423,8 +472,12 @@ function validatePaymentProof(rawText: string, result: PaymentProofOcrResult): {
     }
   }
 
-  // 3. 收款人和收款账号必须同时识别到
-  if (!result.payee || !result.payeeAccount) {
+  // 3. 通用回单要求收款人和账号同时识别；明确的实发工资回单允许账号漏识别，
+  // 后续仍须使用收款人姓名精确关联员工。
+  if (
+    !result.payee ||
+    (!result.payeeAccount && !options.allowMissingPayeeAccount)
+  ) {
     const missing: string[] = []
     if (!result.payee) missing.push('收款人姓名')
     if (!result.payeeAccount) missing.push('收款账号')
@@ -470,6 +523,7 @@ function validatePaymentProof(rawText: string, result: PaymentProofOcrResult): {
 
 export function parseAndValidatePaymentProofText(
   text: string,
+  options: PaymentProofValidationOptions = {},
 ): PaymentProofOcrResult {
   const result: PaymentProofOcrResult = {
     payer: '',
@@ -481,7 +535,7 @@ export function parseAndValidatePaymentProofText(
   }
 
   parsePaymentProofText(text, result)
-  const validation = validatePaymentProof(text, result)
+  const validation = validatePaymentProof(text, result, options)
   if (!validation.isValid) {
     throw new Error(validation.reason || '此不是付款回单')
   }

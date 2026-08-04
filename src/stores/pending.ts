@@ -35,7 +35,7 @@ export interface PendingCounts {
   myEmploymentStatus: string | null
   // 管理员/超级管理员：离职档案待完善或待确认
   resignationPending: number
-  // 总经理：分配给本人的请假待审批
+  // 总经理或董事长：分配给本人的请假待审批
   leaveApprovalPending: number
   // 用户: 请假被驳回后待修改重提
   myLeaveRejected: number

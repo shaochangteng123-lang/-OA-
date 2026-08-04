@@ -62,6 +62,7 @@ api.interceptors.response.use(
         '/api/approval/pending-counts',
         '/api/auth/user',
         '/api/reimbursement/upload-deduction-invoice',
+        '/documents/auto-classify',
         '/api/worklog-ai/complete'
       ]
       const requestUrl = error.config?.url || ''

@@ -113,7 +113,9 @@ async function recognizeReceiptImages(
         ignoredItemCount += 1;
         continue;
       }
-      const result = parseAndValidatePaymentProofText(rawResult.rawText);
+      const result = parseAndValidatePaymentProofText(rawResult.rawText, {
+        allowMissingPayeeAccount: category === "net_salary",
+      });
       amounts.push(result.amount);
       recognizedItems.push({
         pageNo: item.pageNo,

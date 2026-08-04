@@ -5,6 +5,8 @@
       <slot name="title">{{ title }}</slot>
     </div>
 
+    <EmployeeDocumentRecognitionNotice />
+
     <!-- 右侧用户信息 -->
     <div class="top-bar-right">
       <!-- 用户下拉菜单 -->
@@ -64,6 +66,7 @@
 <script setup lang="ts">
 import { ArrowDown, Setting, Sunny, SwitchButton } from '@element-plus/icons-vue'
 import type { User } from '@/types'
+import EmployeeDocumentRecognitionNotice from '@/components/employee/EmployeeDocumentRecognitionNotice.vue'
 
 defineProps<{
   user: User | null
@@ -81,6 +84,7 @@ const emit = defineEmits<{
 function getRoleLabel(role?: string): string {
   const labels: Record<string, string> = {
     super_admin: '超级管理员',
+    chairman: '董事长',
     admin: '管理员',
     general_manager: '总经理',
     boss: 'BOSS',
@@ -127,6 +131,7 @@ function handleCommand(command: string) {
 }
 
 .page-title {
+  flex-shrink: 0;
   font-size: 18px;
   font-weight: 600;
   color: #1f2937;

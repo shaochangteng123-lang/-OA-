@@ -1,6 +1,10 @@
 import { Request, Response, NextFunction } from 'express'
 import { db } from '../db/index.js'
-import { isBossRequestAllowed } from '../utils/boss-role.js'
+import {
+  isBossRequestAllowed,
+  isRoleAllowed,
+} from '../utils/boss-role.js'
+import { LEAVE_APPROVER_ROLES } from '../utils/leave-approval.js'
 
 interface AuthenticatedUser {
   id: string
@@ -88,7 +92,7 @@ export function requireRole(roles: string[]) {
       if (!user) return
 
       // 检查用户角色是否在允许的角色列表中
-      if (!roles.includes(user.role)) {
+      if (!isRoleAllowed(user.role, roles)) {
         console.log('🔒 权限不足:', {
           path: req.path,
           userId: req.session.userId,
@@ -161,6 +165,9 @@ export const requireAdminOrGM = requireRole(['super_admin', 'admin', 'general_ma
 
 // 快捷中间件：仅总经理
 export const requireGeneralManager = requireRole(['general_manager'])
+
+// 快捷中间件：请假审批人（总经理或董事长）
+export const requireLeaveApprover = requireRole([...LEAVE_APPROVER_ROLES])
 
 // 快捷中间件：总经理或超级管理员
 export const requireGMOrSuperAdmin = requireRole(['super_admin', 'general_manager'])

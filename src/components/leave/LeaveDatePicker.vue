@@ -5,6 +5,7 @@
     :placeholder="placeholder"
     format="YYYY-MM-DD"
     value-format="YYYY-MM-DD"
+    :disabled="disabled"
     :disabled-date="disabledDate"
     class="leave-date-picker"
     popper-class="leave-date-picker-popper"
@@ -56,11 +57,13 @@ const props = withDefaults(
   defineProps<{
     modelValue?: string
     placeholder?: string
+    disabled?: boolean
     disabledDate?: (date: Date) => boolean
   }>(),
   {
     modelValue: '',
     placeholder: '选择日期',
+    disabled: false,
     disabledDate: undefined,
   }
 )

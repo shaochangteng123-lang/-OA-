@@ -170,6 +170,59 @@ export const db = {
   pool,
 };
 
+export type DatabaseColumnReader = {
+  all<T = unknown>(sql: string, ...params: unknown[]): Promise<T[]>;
+};
+
+const REQUIRED_DATABASE_COLUMNS = [
+  {
+    tableName: "probation_confirmations",
+    columnName: "application_comment",
+    featureName: "转正申请备注",
+  },
+] as const;
+
+export async function assertRequiredDatabaseSchema(
+  database: DatabaseColumnReader = db,
+): Promise<void> {
+  const tableNames = Array.from(
+    new Set(REQUIRED_DATABASE_COLUMNS.map((column) => column.tableName)),
+  );
+  const existingColumns = await database.all<{
+    table_name: string;
+    column_name: string;
+  }>(
+    `
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = ANY(?::text[])
+    `,
+    tableNames,
+  );
+  const existingColumnKeys = new Set(
+    existingColumns.map(
+      (column) => `${column.table_name}.${column.column_name}`,
+    ),
+  );
+  const missingColumns = REQUIRED_DATABASE_COLUMNS.filter(
+    (column) =>
+      !existingColumnKeys.has(`${column.tableName}.${column.columnName}`),
+  );
+
+  if (missingColumns.length > 0) {
+    const missingColumnDescription = missingColumns
+      .map(
+        (column) =>
+          `${column.featureName}（${column.tableName}.${column.columnName}）`,
+      )
+      .join("、");
+    throw new Error(
+      `数据库结构校验失败：缺少${missingColumnDescription}。请先完成数据库迁移后再启动服务。`,
+    );
+  }
+}
+
 export async function initDatabase() {
   console.log("🔧 初始化 PostgreSQL 数据库表...");
 
@@ -186,7 +239,7 @@ export async function initDatabase() {
       email TEXT,
       mobile TEXT,
       avatar_url TEXT,
-      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest')),
+      role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('super_admin', 'chairman', 'admin', 'general_manager', 'boss', 'user', 'guest')),
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
       department TEXT,
       position TEXT,
@@ -729,6 +782,11 @@ export async function initDatabase() {
       department_snapshot TEXT,
       position_snapshot TEXT,
       supervisor_id TEXT REFERENCES users(id),
+      supervisor_name_snapshot TEXT,
+      hr_approver_id TEXT REFERENCES users(id),
+      hr_approver_name_snapshot TEXT,
+      chairman_id TEXT REFERENCES users(id),
+      chairman_name_snapshot TEXT,
       submit_time TEXT,
       approve_time TEXT,
       approver_id TEXT REFERENCES users(id),
@@ -995,15 +1053,61 @@ export async function initDatabase() {
       reject_reason TEXT,
       approved_at TEXT,
       approval_notice_unread BOOLEAN NOT NULL DEFAULT FALSE,
+      rejection_notice_unread BOOLEAN NOT NULL DEFAULT FALSE,
       rejected_at TEXT,
       cancelled_at TEXT,
       submitted_at TEXT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1,
       original_id TEXT REFERENCES leave_requests(id),
+      application_kind TEXT NOT NULL DEFAULT 'normal'
+        CHECK(application_kind IN ('normal', 'combined', 'extension', 'supplement')),
+      combination_group_id TEXT,
+      parent_request_id TEXT REFERENCES leave_requests(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
   `);
+
+    await ddlClient.query(`
+      UPDATE leave_requests legacy
+      SET request_no = REGEXP_REPLACE(legacy.request_no, '^LR-', 'QJ-')
+      WHERE legacy.request_no ~ '^LR-[0-9]{4}-[0-9]+$'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM leave_requests current_request
+          WHERE current_request.id <> legacy.id
+            AND current_request.request_no = REGEXP_REPLACE(legacy.request_no, '^LR-', 'QJ-')
+        )
+    `);
+
+    await ddlClient.query(`
+      WITH qj_max AS (
+        SELECT
+          SUBSTRING(request_no FROM '^QJ-([0-9]{4})-') AS request_year,
+          MAX((SUBSTRING(request_no FROM '^QJ-[0-9]{4}-([0-9]+)$'))::INTEGER) AS max_sequence
+        FROM leave_requests
+        WHERE request_no ~ '^QJ-[0-9]{4}-[0-9]+$'
+        GROUP BY SUBSTRING(request_no FROM '^QJ-([0-9]{4})-')
+      ),
+      legacy_ranked AS (
+        SELECT
+          lr.id,
+          SUBSTRING(lr.request_no FROM '^LR-([0-9]{4})-') AS request_year,
+          COALESCE(qj_max.max_sequence, 0) + ROW_NUMBER() OVER (
+            PARTITION BY SUBSTRING(lr.request_no FROM '^LR-([0-9]{4})-')
+            ORDER BY lr.created_at ASC, lr.id ASC
+          ) AS next_sequence
+        FROM leave_requests lr
+        LEFT JOIN qj_max
+          ON qj_max.request_year = SUBSTRING(lr.request_no FROM '^LR-([0-9]{4})-')
+        WHERE lr.request_no ~ '^LR-[0-9]{4}-[0-9]+$'
+      )
+      UPDATE leave_requests lr
+      SET request_no = 'QJ-' || legacy_ranked.request_year || '-' ||
+        LPAD(legacy_ranked.next_sequence::TEXT, 5, '0')
+      FROM legacy_ranked
+      WHERE lr.id = legacy_ranked.id
+    `);
 
     await ddlClient.query(`
       ALTER TABLE leave_requests
@@ -1017,6 +1121,56 @@ export async function initDatabase() {
     await ddlClient.query(`
       ALTER TABLE leave_requests
       ADD COLUMN IF NOT EXISTS approval_notice_unread BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await ddlClient.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'leave_requests'
+            AND column_name = 'rejection_notice_unread'
+        ) THEN
+          ALTER TABLE leave_requests
+          ADD COLUMN rejection_notice_unread BOOLEAN;
+
+          UPDATE leave_requests
+          SET rejection_notice_unread = (status = 'rejected');
+
+          ALTER TABLE leave_requests
+          ALTER COLUMN rejection_notice_unread SET DEFAULT FALSE;
+
+          ALTER TABLE leave_requests
+          ALTER COLUMN rejection_notice_unread SET NOT NULL;
+        END IF;
+      END $$;
+    `);
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS application_kind TEXT NOT NULL DEFAULT 'normal'
+    `);
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS combination_group_id TEXT
+    `);
+    await ddlClient.query(`
+      ALTER TABLE leave_requests
+      ADD COLUMN IF NOT EXISTS parent_request_id TEXT
+    `);
+    await ddlClient.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'leave_requests_parent_request_id_fkey'
+        ) THEN
+          ALTER TABLE leave_requests
+          ADD CONSTRAINT leave_requests_parent_request_id_fkey
+          FOREIGN KEY (parent_request_id) REFERENCES leave_requests(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
     `);
     await ddlClient.query(`
       UPDATE leave_requests lr
@@ -1157,6 +1311,9 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_leave_requests_approver_id ON leave_requests(approver_id);
     CREATE INDEX IF NOT EXISTS idx_leave_requests_dates ON leave_requests(start_date, end_date);
     CREATE INDEX IF NOT EXISTS idx_leave_requests_approval_notice ON leave_requests(user_id, status, approval_notice_unread);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_rejection_notice ON leave_requests(user_id, status, rejection_notice_unread);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_combination_group ON leave_requests(combination_group_id);
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_parent_request ON leave_requests(parent_request_id);
     CREATE INDEX IF NOT EXISTS idx_leave_balances_user_year ON leave_balances(user_id, year);
     CREATE INDEX IF NOT EXISTS idx_leave_approval_logs_req_id ON leave_approval_logs(leave_request_id);
   `);
@@ -2025,7 +2182,63 @@ export async function initDatabase() {
       ADD COLUMN IF NOT EXISTS department_snapshot TEXT,
       ADD COLUMN IF NOT EXISTS position_snapshot TEXT,
       ADD COLUMN IF NOT EXISTS supervisor_id TEXT REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS supervisor_name_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS hr_approver_id TEXT REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS hr_approver_name_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS chairman_id TEXT REFERENCES users(id),
+      ADD COLUMN IF NOT EXISTS chairman_name_snapshot TEXT,
+      ADD COLUMN IF NOT EXISTS application_comment TEXT,
       ADD COLUMN IF NOT EXISTS formal_document_generated_at TEXT
+  `);
+  await assertRequiredDatabaseSchema();
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET supervisor_name_snapshot = u.name
+    FROM users u
+    WHERE pc.supervisor_id = u.id
+      AND pc.supervisor_name_snapshot IS NULL
+  `);
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET hr_approver_id = candidate.id
+    FROM (
+      SELECT id
+      FROM users
+      WHERE status = 'active'
+        AND role IN ('admin', 'super_admin')
+      ORDER BY CASE WHEN role = 'admin' THEN 0 ELSE 1 END, created_at ASC
+      LIMIT 1
+    ) candidate
+    WHERE pc.form_version > 0
+      AND pc.hr_approver_id IS NULL
+  `);
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET hr_approver_name_snapshot = u.name
+    FROM users u
+    WHERE pc.hr_approver_id = u.id
+      AND pc.hr_approver_name_snapshot IS NULL
+  `);
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET chairman_id = candidate.id
+    FROM (
+      SELECT id
+      FROM users
+      WHERE status = 'active'
+        AND role = 'chairman'
+      ORDER BY created_at ASC
+      LIMIT 1
+    ) candidate
+    WHERE pc.form_version > 0
+      AND pc.chairman_id IS NULL
+  `);
+  await db.run(`
+    UPDATE probation_confirmations pc
+    SET chairman_name_snapshot = u.name
+    FROM users u
+    WHERE pc.chairman_id = u.id
+      AND pc.chairman_name_snapshot IS NULL
   `);
   await db.run(`
     UPDATE probation_confirmations
@@ -2109,7 +2322,7 @@ export async function initDatabase() {
       name: "用户角色",
       statements: [
         `ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`,
-        `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK(role IN ('super_admin', 'admin', 'general_manager', 'boss', 'user', 'guest'))`,
+        `ALTER TABLE users ADD CONSTRAINT users_role_check CHECK(role IN ('super_admin', 'chairman', 'admin', 'general_manager', 'boss', 'user', 'guest'))`,
       ],
     },
     {
@@ -2181,6 +2394,13 @@ export async function initDatabase() {
         `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_status_check`,
         `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_status_allowed_check`,
         `ALTER TABLE leave_requests ADD CONSTRAINT leave_requests_status_allowed_check CHECK(status IN ('draft', 'pending', 'approved', 'rejected', 'cancelled'))`,
+      ],
+    },
+    {
+      name: "请假申请类型",
+      statements: [
+        `ALTER TABLE leave_requests DROP CONSTRAINT IF EXISTS leave_requests_application_kind_check`,
+        `ALTER TABLE leave_requests ADD CONSTRAINT leave_requests_application_kind_check CHECK(application_kind IN ('normal', 'combined', 'extension', 'supplement'))`,
       ],
     },
     {
@@ -2305,23 +2525,33 @@ export async function initDatabase() {
     console.log("ℹ️  请假历史草稿迁移:", error.message);
   }
 
-  // 请假仅由总经理审批，将历史待办转给申请人之外的可用总经理。
+  // 普通员工请假由总经理审批，总经理请假由董事长审批。
   try {
     const leaveApproverMigration = await db.run(
       `
-      WITH preferred_approvers AS (
-        SELECT lr.id AS request_id, approver.id AS approver_id, approver.name AS approver_name
+      WITH request_targets AS (
+        SELECT lr.id AS request_id,
+               lr.user_id,
+               CASE
+                 WHEN applicant.role = 'general_manager' THEN 'chairman'
+                 ELSE 'general_manager'
+               END AS approver_role
         FROM leave_requests lr
-        CROSS JOIN LATERAL (
+        INNER JOIN users applicant ON applicant.id = lr.user_id
+        WHERE lr.status = 'pending'
+      ),
+      preferred_approvers AS (
+        SELECT target.request_id, approver.id AS approver_id, approver.name AS approver_name
+        FROM request_targets target
+        LEFT JOIN LATERAL (
           SELECT u.id, u.name
           FROM users u
           WHERE u.status = 'active'
-            AND u.id != lr.user_id
-            AND u.role = 'general_manager'
+            AND u.id != target.user_id
+            AND u.role = target.approver_role
           ORDER BY u.created_at ASC, u.id ASC
           LIMIT 1
-        ) approver
-        WHERE lr.status = 'pending'
+        ) approver ON TRUE
       )
       UPDATE leave_requests lr
       SET approver_id = preferred.approver_id,
@@ -2338,7 +2568,7 @@ export async function initDatabase() {
     );
     if (leaveApproverMigration.changes > 0) {
       console.log(
-        `✅ 已将 ${leaveApproverMigration.changes} 条历史请假待办转交总经理`,
+        `✅ 已按申请人角色重新分配 ${leaveApproverMigration.changes} 条历史请假待办`,
       );
     }
   } catch (error: any) {
@@ -2489,11 +2719,11 @@ export async function initDatabase() {
       {
         id: "lt_compensatory",
         code: "compensatory",
-        name: "调休假",
+        name: "丧假",
         requires_attachment: false,
         requires_balance_check: true,
-        default_days: 0,
-        description: "加班后的调休，由管理员手动调整余额",
+        default_days: 3,
+        description: "法定丧假默认3天，管理员可按公司制度调整",
         sort_order: 4,
       },
       {
@@ -2526,6 +2756,16 @@ export async function initDatabase() {
         description: "法定陪产假15天",
         sort_order: 7,
       },
+      {
+        id: "lt_other",
+        code: "other",
+        name: "其他请假",
+        requires_attachment: false,
+        requires_balance_check: false,
+        default_days: 0,
+        description: "不占用固定假期余额的其他请假",
+        sort_order: 8,
+      },
     ];
     for (const lt of leaveTypes) {
       await db.run(
@@ -2542,8 +2782,35 @@ export async function initDatabase() {
         now,
       );
     }
-    console.log("✅ 初始化假期类型配置（7种）");
+    console.log("✅ 初始化假期类型配置（8种）");
   }
+
+  await db.run(
+    `INSERT INTO leave_type_configs (
+       id, code, name, requires_attachment, requires_balance_check,
+       default_days, description, sort_order, is_active, created_at
+     )
+     SELECT ?, 'other', '其他请假', false, false, 0,
+            '不占用固定假期余额的其他请假',
+            COALESCE(MAX(sort_order), 0) + 1, true, ?
+     FROM leave_type_configs
+     HAVING NOT EXISTS (
+       SELECT 1 FROM leave_type_configs WHERE code = 'other'
+     )
+     ON CONFLICT DO NOTHING`,
+    "lt_other",
+    new Date().toISOString(),
+  );
+
+  await db.run(
+    `UPDATE leave_type_configs
+     SET requires_balance_check = true
+     WHERE code IN (
+       'annual', 'personal', 'sick', 'bereavement', 'compensatory',
+       'marriage', 'maternity', 'paternity'
+     )
+       AND requires_balance_check = false`,
+  );
 
   const annualDescriptionMigration = await db.run(
     `UPDATE leave_type_configs
@@ -2553,6 +2820,28 @@ export async function initDatabase() {
   );
   if (annualDescriptionMigration.changes > 0) {
     console.log("✅ 数据库迁移：年假基础额度说明已更新");
+  }
+
+  const bereavementTypeMigration = await db.run(
+    `UPDATE leave_type_configs
+     SET name = '丧假',
+         default_days = 3,
+         description = '法定丧假默认3天，管理员可按公司制度调整'
+     WHERE code = 'compensatory'
+       AND name = '调休假'
+       AND default_days = 0`,
+  );
+  if (bereavementTypeMigration.changes > 0) {
+    await db.run(
+      `UPDATE leave_balances
+       SET total_days = 3, updated_at = ?
+       WHERE leave_type_code = 'compensatory'
+         AND total_days = 0
+         AND used_days = 0
+         AND pending_days = 0`,
+      new Date().toISOString(),
+    );
+    console.log("✅ 数据库迁移：旧版调休假配置已更新为丧假");
   }
 
   // 将旧版“999 天且不校验余额”的事假哨兵配置迁移为每年 3 天带薪事假。
@@ -2985,7 +3274,7 @@ export async function initDatabase() {
     // 添加 read_at 列（标记员工是否已读评论）
     try {
       await db.run(
-        `ALTER TABLE daily_log_comments ADD COLUMN read_at TEXT DEFAULT NULL`,
+        `ALTER TABLE daily_log_comments ADD COLUMN IF NOT EXISTS read_at TEXT DEFAULT NULL`,
       );
     } catch {
       /* 列已存在则忽略 */
@@ -2993,7 +3282,7 @@ export async function initDatabase() {
     // 添加 reply_to 列（回复某条评论）
     try {
       await db.run(
-        `ALTER TABLE daily_log_comments ADD COLUMN reply_to TEXT DEFAULT NULL`,
+        `ALTER TABLE daily_log_comments ADD COLUMN IF NOT EXISTS reply_to TEXT DEFAULT NULL`,
       );
     } catch {
       /* 列已存在则忽略 */
@@ -3001,7 +3290,7 @@ export async function initDatabase() {
     // 添加 withdrawn_at 列（撤回评论）
     try {
       await db.run(
-        `ALTER TABLE daily_log_comments ADD COLUMN withdrawn_at TEXT DEFAULT NULL`,
+        `ALTER TABLE daily_log_comments ADD COLUMN IF NOT EXISTS withdrawn_at TEXT DEFAULT NULL`,
       );
     } catch {
       /* 列已存在则忽略 */
@@ -3009,7 +3298,7 @@ export async function initDatabase() {
     // 添加 due_date 列（总经理设置的完成期限）
     try {
       await db.run(
-        `ALTER TABLE daily_log_comments ADD COLUMN due_date TEXT DEFAULT NULL`,
+        `ALTER TABLE daily_log_comments ADD COLUMN IF NOT EXISTS due_date TEXT DEFAULT NULL`,
       );
     } catch {
       /* 列已存在则忽略 */
@@ -3017,7 +3306,7 @@ export async function initDatabase() {
     // 添加 completed_at 列（员工标记完成时间）
     try {
       await db.run(
-        `ALTER TABLE daily_log_comments ADD COLUMN completed_at TEXT DEFAULT NULL`,
+        `ALTER TABLE daily_log_comments ADD COLUMN IF NOT EXISTS completed_at TEXT DEFAULT NULL`,
       );
     } catch {
       /* 列已存在则忽略 */
@@ -3056,7 +3345,7 @@ export async function initDatabase() {
   // 数据库迁移：weekly_summaries 添加 locked_at 字段
   try {
     await db.run(
-      `ALTER TABLE weekly_summaries ADD COLUMN locked_at TEXT DEFAULT NULL`,
+      `ALTER TABLE weekly_summaries ADD COLUMN IF NOT EXISTS locked_at TEXT DEFAULT NULL`,
     );
   } catch {
     /* 列已存在则忽略 */

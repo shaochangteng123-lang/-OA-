@@ -43,12 +43,13 @@
     </div>
 
     <div class="confirm-actions">
+      <span>确认后不能再次上传、更换或删除</span>
       <el-button
         type="primary"
         :disabled="!uploadSignature"
         @click="confirmUploadedSignature"
       >
-        使用此签名
+        确认并锁定此签名
       </el-button>
     </div>
   </div>
@@ -288,12 +289,24 @@ async function normalizeSignatureImage(file: File): Promise<string> {
 
 .confirm-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 12px;
+}
+
+.confirm-actions span {
+  color: #909399;
+  font-size: 12px;
 }
 
 @media (max-width: 560px) {
   .upload-actions {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .confirm-actions {
+    align-items: flex-end;
     flex-direction: column;
   }
 }

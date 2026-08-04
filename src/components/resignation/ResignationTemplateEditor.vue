@@ -1183,12 +1183,13 @@ onBeforeUnmount(() => {
   align-items: center;
   overflow: hidden;
   color: #000;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 2px;
   background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
   cursor: text;
   transition:
-    border-color 0.15s ease,
+    box-shadow 0.15s ease,
     background-color 0.15s ease;
 }
 
@@ -1260,9 +1261,10 @@ onBeforeUnmount(() => {
 .template-field:hover,
 .template-field.selected,
 .template-field:focus-within {
-  border-color: #409eff;
   background: rgb(255 255 255 / 72%);
-  box-shadow: 0 0 0 2px rgb(64 158 255 / 12%);
+  box-shadow:
+    inset 0 0 0 1px #409eff,
+    0 0 0 2px rgb(64 158 255 / 12%);
 }
 
 .template-field.source-backed:hover,

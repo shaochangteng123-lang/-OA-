@@ -44,7 +44,7 @@ export async function syncEmployeeCurrentAndFuturePayroll(
      LEFT JOIN users u ON u.id = ep.user_id
      LEFT JOIN employee_salary_profiles esp ON esp.employee_id = ep.id
      WHERE ep.id = $1
-       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'boss')`,
+       AND COALESCE(u.role, 'user') NOT IN ('super_admin', 'chairman', 'boss')`,
     [employeeId],
   );
   const source = sourceResult.rows[0];
