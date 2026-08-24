@@ -52,6 +52,176 @@ const routes: RouteRecordRaw[] = [
         },
       },
       {
+        path: "/contracts",
+        name: "ContractList",
+        component: () => import("@/views/ContractList.vue"),
+        meta: {
+          title: "合同管理",
+          requiresRole: [
+            "super_admin",
+            "chairman",
+            "admin",
+            "general_manager",
+            "boss",
+            "user",
+          ],
+        },
+      },
+      {
+        path: "/contracts/create",
+        name: "ContractCreate",
+        component: () => import("@/views/ContractCreate.vue"),
+        meta: { title: "新增合同", requiresAdmin: true },
+      },
+      {
+        path: "/contracts/cancelled",
+        name: "CancelledContracts",
+        component: () => import("@/views/CancelledContracts.vue"),
+        meta: { title: "已撤销合同", requiresAdmin: true },
+      },
+      {
+        path: "/contracts/:id",
+        name: "ContractDetail",
+        component: () => import("@/views/ContractDetail.vue"),
+        meta: {
+          title: "合同详情",
+          requiresRole: [
+            "super_admin",
+            "chairman",
+            "admin",
+            "general_manager",
+            "boss",
+            "user",
+          ],
+        },
+      },
+      {
+        path: "/contract-approvals",
+        name: "ContractApprovalCenter",
+        component: () => import("@/views/ContractApprovalCenter.vue"),
+        meta: {
+          title: "合同审批",
+          requiresRole: ["general_manager"],
+        },
+      },
+      {
+        path: "/contract-applications/mine",
+        name: "MyContractApplications",
+        component: () => import("@/views/MyContractApplications.vue"),
+        meta: {
+          title: "我的申请",
+          requiresRole: ["user"],
+        },
+      },
+      {
+        path: "/contract-download-requests/new",
+        name: "ContractDownloadRequestCreate",
+        component: () => import("@/views/ContractDownloadRequestCreate.vue"),
+        meta: {
+          title: "申请下载合同附件",
+          requiresRole: ["user"],
+        },
+      },
+      {
+        path: "/contract-download-requests/mine",
+        name: "ContractDownloadRequestList",
+        redirect: (to) => ({
+          path: "/contract-applications/mine",
+          query: { ...to.query, tab: "download" },
+        }),
+        meta: {
+          title: "我的申请",
+          requiresRole: ["user"],
+        },
+      },
+      {
+        path: "/contract-download-requests/approval",
+        name: "ContractDownloadRequestApproval",
+        component: () => import("@/views/ContractDownloadRequestCenter.vue"),
+        meta: {
+          title: "合同下载申请审批",
+          requiresRole: ["general_manager"],
+        },
+      },
+      {
+        path: "/contract-tasks",
+        name: "AdminContractTasks",
+        component: () => import("@/views/AdminContractTasks.vue"),
+        meta: {
+          title: "合同待办",
+          requiresAdmin: true,
+        },
+      },
+      {
+        path: "/contract-download-requests/tasks",
+        name: "ContractDownloadTaskList",
+        redirect: (to) => ({
+          path: "/contract-tasks",
+          query: { ...to.query, tab: "download" },
+        }),
+        meta: {
+          title: "合同待办",
+          requiresRole: ["admin"],
+        },
+      },
+      {
+        path: "/invoice-applications/new",
+        name: "InvoiceApplicationCreate",
+        component: () => import("@/views/InvoiceApplicationCreate.vue"),
+        meta: {
+          title: "发起开票及用印申请",
+          requiresRole: ["user"],
+        },
+      },
+      {
+        path: "/invoice-applications/mine",
+        name: "InvoiceApplicationList",
+        redirect: (to) => ({
+          path: "/contract-applications/mine",
+          query: { ...to.query, tab: "invoice" },
+        }),
+        meta: {
+          title: "我的申请",
+          requiresRole: ["user"],
+        },
+      },
+      {
+        path: "/invoice-applications/approval",
+        name: "InvoiceApplicationApproval",
+        component: () => import("@/views/InvoiceApplicationCenter.vue"),
+        meta: {
+          title: "开票申请审批",
+          requiresRole: ["general_manager"],
+        },
+      },
+      {
+        path: "/invoice-applications/tasks",
+        name: "InvoiceApplicationTasks",
+        redirect: (to) => ({
+          path: "/contract-tasks",
+          query: { ...to.query, tab: "invoice" },
+        }),
+        meta: {
+          title: "合同待办",
+          requiresAdmin: true,
+        },
+      },
+      {
+        path: "/contract-dashboard",
+        name: "ContractDashboard",
+        component: () => import("@/views/ContractDashboard.vue"),
+        meta: {
+          title: "合同经营看板",
+          requiresRole: [
+            "super_admin",
+            "chairman",
+            "admin",
+            "general_manager",
+            "boss",
+          ],
+        },
+      },
+      {
         path: "/calendar",
         name: "Calendar",
         component: () => import("@/views/Calendar.vue"),
@@ -170,6 +340,15 @@ const routes: RouteRecordRaw[] = [
         name: "ReimbursementStatistics",
         component: () => import("@/views/ReimbursementStatistics.vue"),
         meta: { title: "报销统计" },
+      },
+      {
+        path: "/monthly-financial-report",
+        name: "MonthlyFinancialReport",
+        component: () => import("@/views/MonthlyFinancialReport.vue"),
+        meta: {
+          title: "月度财务报表",
+          requiresRole: ["admin", "general_manager"],
+        },
       },
       {
         path: "/reimbursement-management",
@@ -387,11 +566,7 @@ router.beforeEach(async (to, _from, next) => {
     // 检查是否需要管理员权限
     if (to.meta.requiresAdmin) {
       const role = authStore.user?.role;
-      if (
-        role !== "super_admin" &&
-        role !== "chairman" &&
-        role !== "admin"
-      ) {
+      if (role !== "super_admin" && role !== "chairman" && role !== "admin") {
         next({ name: "Home" });
         return;
       }
@@ -428,7 +603,13 @@ router.beforeEach(async (to, _from, next) => {
     // BOSS角色以只读经营分析为主，不进入普通业务操作页面。
     if (
       authStore.user?.role === "boss" &&
-      !["BossDashboard", "Settings"].includes(String(to.name))
+      ![
+        "BossDashboard",
+        "ContractList",
+        "ContractDashboard",
+        "ContractDetail",
+        "Settings",
+      ].includes(String(to.name))
     ) {
       next({ name: "BossDashboard" });
       return;

@@ -1237,7 +1237,9 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
     const { status, type, userId, reimbursementScope, startDate, endDate } =
       req.query
 
-    let whereClause = 'WHERE COALESCE(r.is_deleted, FALSE) = FALSE'
+    // 管理员全部查询保留所有历史报销，包括用户侧已删除的已付款记录。
+    // 报销单不会再因时间超过 90 天而自动归档。
+    let whereClause = 'WHERE 1=1'
     const params: any[] = []
 
     // 默认只查询已付款状态（payment_uploaded, completed）

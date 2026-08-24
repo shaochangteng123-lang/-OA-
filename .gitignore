@@ -81,6 +81,12 @@ uploads/
 
 # 本地生成产物
 generated/
+debug/contract-ocr-holdout-private/
+debug/contract-ocr-v6-holdout-*-shard*.jsonl
+debug/contract-ocr-stage8-private/
+debug/contract-ocr-stage9-private/
+debug/contract-ocr-stage10-private/
+debug/contract-ocr-stage11-private/
 
 # Python 缓存
 __pycache__/

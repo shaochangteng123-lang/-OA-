@@ -7,10 +7,6 @@
 import { spawn, ChildProcess } from "child_process";
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // 常驻进程单例
 let daemonProcess: ChildProcess | null = null;
@@ -23,16 +19,58 @@ export interface PaddleOcrLine {
   text: string;
   confidence: number;
   box: number[][];
+  modelVersion?: PaddleOcrModelVersion;
 }
 
 export interface PaddleOcrResult {
   lines: PaddleOcrLine[];
   fullText: string;
+  modelVersion: PaddleOcrModelVersion;
+  qrCodes?: string[];
+}
+
+export const PADDLE_OCR_MODELS = [
+  "v4_mobile",
+  "v5_server",
+  "v6_medium",
+] as const;
+export type PaddleOcrModel = (typeof PADDLE_OCR_MODELS)[number];
+export type PaddleOcrRequestModel = PaddleOcrModel;
+export type PaddleOcrModelVersion = PaddleOcrModel | "rapidocr";
+
+/**
+ * 将工作进程和滚动部署期间可能返回的旧标识统一为可持久化的规范模型版本。
+ * 未知标识不得进入审计结果，使用本次实际请求模型作为安全回退。
+ */
+export function normalizePaddleOcrModelVersion(
+  value: unknown,
+  fallback: PaddleOcrModelVersion,
+): PaddleOcrModelVersion {
+  const model = String(value || "").trim();
+  if (model === "rapidocr") return "rapidocr";
+  if (model === "v6_test") return "v6_medium";
+  if ((PADDLE_OCR_MODELS as readonly string[]).includes(model)) {
+    return model as PaddleOcrModel;
+  }
+  return fallback;
+}
+
+export function resolvePaddleOcrModel(
+  value = process.env.OCR_MODEL,
+): PaddleOcrModel {
+  const model = String(value || "v4_mobile").trim();
+  if ((PADDLE_OCR_MODELS as readonly string[]).includes(model)) {
+    return model as PaddleOcrModel;
+  }
+  throw new Error(
+    `OCR_MODEL（识别模型配置）无效：${model}，可选值为 ${PADDLE_OCR_MODELS.join(", ")}`,
+  );
 }
 
 interface PaddleOcrWorkerReady {
   ready: boolean;
   engine?: string;
+  model_version?: string;
   error?: string;
 }
 
@@ -91,6 +129,8 @@ interface ActiveOcrRequest {
   resolve: (value: PaddleOcrResult) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  process: ChildProcess;
+  model: PaddleOcrRequestModel;
 }
 
 // 常驻进程一次只处理一张图片，因此这里只允许存在一个活动请求。
@@ -104,6 +144,12 @@ let startingPromise: Promise<void> | null = null;
 
 // 记录主动关闭的进程，避免把正常清理误判为意外退出。
 const expectedExitProcesses = new WeakSet<ChildProcess>();
+interface ProcessExitWaiter {
+  completion: Promise<void>;
+  settle: () => void;
+}
+const processExitWaiters = new WeakMap<ChildProcess, ProcessExitWaiter>();
+let processExitBarrier: Promise<void> = Promise.resolve();
 let shuttingDown = false;
 
 function enqueueSerial<T>(task: () => Promise<T>): Promise<T> {
@@ -115,21 +161,87 @@ function enqueueSerial<T>(task: () => Promise<T>): Promise<T> {
   return result;
 }
 
-function rejectActiveRequest(error: OcrInfrastructureError): void {
+function rejectActiveRequest(
+  error: OcrInfrastructureError,
+  processForRequest?: ChildProcess,
+): void {
   const request = activeRequest;
   if (!request) return;
+  if (processForRequest && request.process !== processForRequest) return;
   activeRequest = null;
   clearTimeout(request.timer);
   request.reject(error);
+}
+
+function hasProcessExited(processToCheck: ChildProcess): boolean {
+  return processToCheck.exitCode !== null || processToCheck.signalCode !== null;
+}
+
+/**
+ * 返回指定子进程首次 exit/close（退出/关闭）时完成的 Promise（异步结果）。
+ * 监听器在检查退出状态前安装，并在安装后再次检查，避免退出事件竞态；同一进程
+ * 被重复停止时复用同一个结果，不会重复注册无界监听器。
+ */
+function processExitPromise(processToWait: ChildProcess): Promise<void> {
+  const existing = processExitWaiters.get(processToWait);
+  if (existing) {
+    if (hasProcessExited(processToWait)) existing.settle();
+    return existing.completion;
+  }
+  if (hasProcessExited(processToWait)) return Promise.resolve();
+
+  let settled = false;
+  let settle!: () => void;
+  const completion = new Promise<void>((resolve) => {
+    settle = () => {
+      if (settled) return;
+      settled = true;
+      processToWait.removeListener("exit", settle);
+      processToWait.removeListener("close", settle);
+      resolve();
+    };
+    processToWait.once("exit", settle);
+    processToWait.once("close", settle);
+  });
+  processExitWaiters.set(processToWait, { completion, settle });
+
+  // 子进程可能在监听器安装与 Promise（异步结果）登记之间已经退出。
+  if (hasProcessExited(processToWait)) settle();
+  return completion;
+}
+
+function extendProcessExitBarrier(completion: Promise<void>): void {
+  const previousBarrier = processExitBarrier;
+  processExitBarrier = Promise.all([previousBarrier, completion]).then(
+    () => undefined,
+  );
+}
+
+async function waitForProcessExitBarrier(): Promise<void> {
+  // 等待期间若又有进程进入停止流程，继续等待最新屏障，确保 spawn（创建子进程）
+  // 前所有旧进程均已确认退出。
+  while (true) {
+    const currentBarrier = processExitBarrier;
+    await currentBarrier;
+    if (processExitBarrier === currentBarrier) return;
+  }
 }
 
 /**
  * 获取 PaddleOCR worker 脚本路径
  */
 function getWorkerPath(): string {
+  const runtimeEntryDirectory = process.argv[1]
+    ? path.dirname(path.resolve(process.argv[1]))
+    : process.cwd();
   const candidates = [
-    path.resolve(__dirname, "../scripts/paddle_ocr_worker.py"),
     path.resolve(process.cwd(), "server/scripts/paddle_ocr_worker.py"),
+    path.resolve(process.cwd(), "dist/server/scripts/paddle_ocr_worker.py"),
+    path.resolve(runtimeEntryDirectory, "scripts/paddle_ocr_worker.py"),
+    path.resolve(
+      runtimeEntryDirectory,
+      "../../server/scripts/paddle_ocr_worker.py",
+    ),
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -184,9 +296,36 @@ function handleStdoutData(
             ),
           );
         } else {
+          const modelVersion = normalizePaddleOcrModelVersion(
+            data.model_version,
+            req.model,
+          );
+          const responseLines = Array.isArray(data.lines) ? data.lines : [];
           req.resolve({
-            lines: Array.isArray(data.lines) ? data.lines : [],
+            lines: responseLines.map((line: Record<string, unknown>) => ({
+              text: typeof line.text === "string" ? line.text : "",
+              confidence: Number.isFinite(Number(line.confidence))
+                ? Number(line.confidence)
+                : 0,
+              box: Array.isArray(line.box) ? (line.box as number[][]) : [],
+              modelVersion: normalizePaddleOcrModelVersion(
+                line.model_version,
+                modelVersion,
+              ),
+            })),
             fullText: typeof data.fullText === "string" ? data.fullText : "",
+            modelVersion,
+            qrCodes: Array.isArray(data.qr_codes)
+              ? Array.from(
+                  new Set<string>(
+                    (data.qr_codes as unknown[])
+                      .filter((value: unknown): value is string =>
+                        Boolean(typeof value === "string" && value.trim()),
+                      )
+                      .map((value: string) => value.trim()),
+                  ),
+                )
+              : [],
           });
         }
       } else {
@@ -211,7 +350,12 @@ function stopProcess(
     daemonReady = false;
     stdoutBuffer = "";
   }
-  if (!processToStop.killed) {
+  const alreadyExited = hasProcessExited(processToStop);
+  const exitCompletion = processExitPromise(processToStop);
+  // 先登记屏障再发送信号；即使 kill（终止进程）同步触发退出事件，后续启动也只能
+  // 在当前调用栈结束后观察到已经完成的屏障。重复停止会复用同一退出结果。
+  extendProcessExitBarrier(exitCompletion);
+  if (!alreadyExited && !processToStop.killed) {
     processToStop.kill(signal);
   }
 }
@@ -227,6 +371,17 @@ async function startDaemon(): Promise<void> {
   }
 
   // 如果已经就绪，直接返回
+  if (daemonProcess && daemonReady) return;
+
+  // 超时或写入失败会强制终止旧进程。必须确认旧进程已经 exit/close（退出/关闭）
+  // 后才能加载下一份模型，避免短时间内两个 PaddleOCR（飞桨文字识别）进程重叠占用内存。
+  await waitForProcessExitBarrier();
+
+  if (shuttingDown) {
+    throw new OcrInfrastructureError("PaddleOCR 常驻进程已关闭", {
+      reason: "daemon_shutdown",
+    });
+  }
   if (daemonProcess && daemonReady) return;
 
   if (!startingPromise) {
@@ -301,7 +456,9 @@ async function startDaemon(): Promise<void> {
             startSettled = true;
             clearTimeout(startTimeout);
             daemonReady = true;
-            console.log(`✅ PaddleOCR 常驻进程就绪（引擎: ${data.engine}）`);
+            console.log(
+              `✅ PaddleOCR 常驻进程就绪（引擎: ${data.engine}，模型: ${normalizePaddleOcrModelVersion(data.model_version, resolvePaddleOcrModel())}）`,
+            );
             resolve();
           } else {
             settleStartFailure(
@@ -336,7 +493,9 @@ async function startDaemon(): Promise<void> {
                 reason: expectedExit
                   ? "daemon_shutdown"
                   : "daemon_unexpected_exit",
-                retryable: !expectedExit,
+                // 未预期的 SIGKILL（强制终止信号）通常来自宿主 OOM（内存耗尽）；立即以相同图片重试只会
+                // 再次制造相同峰值。其他瞬时退出仍保留一次自动重试。
+                retryable: !expectedExit && signal !== "SIGKILL",
               },
             ),
             false,
@@ -348,8 +507,9 @@ async function startDaemon(): Promise<void> {
           rejectActiveRequest(
             new OcrInfrastructureError("PaddleOCR 常驻进程意外退出", {
               reason: "daemon_unexpected_exit",
-              retryable: true,
+              retryable: signal !== "SIGKILL",
             }),
+            proc,
           );
         }
       });
@@ -363,6 +523,7 @@ async function startDaemon(): Promise<void> {
               reason: "daemon_unavailable",
               cause: err,
             }),
+            proc,
           );
           stopProcess(proc, "SIGKILL");
           return;
@@ -382,6 +543,7 @@ async function startDaemon(): Promise<void> {
             reason: "daemon_write_failed",
             cause: err,
           }),
+          proc,
         );
         stopProcess(proc, "SIGKILL");
       });
@@ -418,8 +580,11 @@ function cleanup(signal: NodeJS.Signals = "SIGTERM"): void {
 /**
  * 调用 OCR 识别（通过常驻进程）
  */
-export async function callPaddleOcr(filePath: string): Promise<string> {
-  return (await callPaddleOcrDetailed(filePath)).fullText;
+export async function callPaddleOcr(
+  filePath: string,
+  model: PaddleOcrModel = resolvePaddleOcrModel(),
+): Promise<string> {
+  return (await callPaddleOcrDetailed(filePath, model)).fullText;
 }
 
 /**
@@ -427,17 +592,19 @@ export async function callPaddleOcr(filePath: string): Promise<string> {
  */
 export async function callPaddleOcrDetailed(
   filePath: string,
+  model: PaddleOcrModel = resolvePaddleOcrModel(),
 ): Promise<PaddleOcrResult> {
-  return enqueueSerial(() => callPaddleOcrWithRetry(filePath));
+  return enqueueSerial(() => callPaddleOcrWithRetry(filePath, model));
 }
 
 async function callPaddleOcrWithRetry(
   filePath: string,
+  model: PaddleOcrRequestModel,
 ): Promise<PaddleOcrResult> {
   const maximumAttempts = 2;
   for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
     try {
-      return await dispatchPaddleOcrRequest(filePath);
+      return await dispatchPaddleOcrRequest(filePath, model);
     } catch (error) {
       const canRetry =
         attempt < maximumAttempts &&
@@ -459,6 +626,7 @@ async function callPaddleOcrWithRetry(
 
 async function dispatchPaddleOcrRequest(
   filePath: string,
+  model: PaddleOcrRequestModel,
 ): Promise<PaddleOcrResult> {
   await startDaemon();
 
@@ -496,10 +664,17 @@ async function dispatchPaddleOcrRequest(
       );
     }, 180000);
 
-    const requestState: ActiveOcrRequest = { resolve, reject, timer };
+    const requestState: ActiveOcrRequest = {
+      resolve,
+      reject,
+      timer,
+      process: processForRequest,
+      model,
+    };
     activeRequest = requestState;
 
-    const requestPayload = JSON.stringify({ image_path: filePath }) + "\n";
+    const requestPayload =
+      JSON.stringify({ image_path: filePath, model }) + "\n";
     try {
       processForRequest.stdin!.write(requestPayload, (error) => {
         if (!error || activeRequest !== requestState) return;

@@ -38,14 +38,16 @@ services:
       dockerfile: Dockerfile
       target: development
     ports:
-      - "0.0.0.0:8899:8899"   # Vite 前端（局域网可访问）
-      - "0.0.0.0:3000:3000"   # Express 后端（局域网可访问）
+      - "0.0.0.0:8899:8899" # Vite 前端（局域网可访问）
+      - "0.0.0.0:3000:3000" # Express 后端（局域网可访问）
     env_file:
       - .env
     environment:
       - NODE_ENV=development
       - PORT=3000
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog
+      - OCR_MODEL=${OCR_MODEL:-v6_medium}
+      - OCR_V6_MODEL_ROOT=${OCR_V6_MODEL_ROOT:-/opt/paddleocr-v6-medium}
       - TZ=Asia/Shanghai
       - VITE_ALLOWED_HOSTS=all
       - VITE_ENABLE_WORKLOG=true

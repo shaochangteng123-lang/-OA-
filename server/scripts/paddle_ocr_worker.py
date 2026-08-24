@@ -20,6 +20,37 @@ import sys
 import json
 import os
 import signal
+import gc
+import ctypes
+import importlib.metadata
+
+
+def decode_qr_codes(image_path):
+    """读取票面二维码内容；二维码失败不得影响正文 OCR（光学字符识别）。"""
+    try:
+        import cv2
+
+        image = cv2.imread(image_path)
+        if image is None:
+            return []
+        detector = cv2.QRCodeDetector()
+        decoded = []
+        try:
+            detected, values, _, _ = detector.detectAndDecodeMulti(image)
+            if detected:
+                decoded.extend(str(value).strip() for value in values if str(value).strip())
+        except Exception:
+            pass
+        if not decoded:
+            try:
+                value, _, _ = detector.detectAndDecode(image)
+                if str(value).strip():
+                    decoded.append(str(value).strip())
+            except Exception:
+                pass
+        return list(dict.fromkeys(decoded))
+    except Exception:
+        return []
 
 # 抑制 PaddleOCR 的日志输出
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
@@ -40,22 +71,102 @@ if "--daemon" in sys.argv:
 # 全局单例，避免重复初始化
 _ocr_engine = None
 _ocr_type = None  # 记录使用的引擎类型
+_ocr_model_version = None
+
+SUPPORTED_OCR_MODELS = {
+    "v4_mobile",
+    "v5_server",
+    "v6_medium",
+}
+V6_MEDIUM_CONFIG_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "config", "ocr-v6-medium.json")
+)
 
 
-def get_ocr_engine():
+def load_v6_medium_config():
+    """读取第六版正式候选配置，并校验固定运行环境。"""
+    with open(V6_MEDIUM_CONFIG_PATH, "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    installed_version = importlib.metadata.version("paddleocr")
+    if installed_version != config["paddleocrVersion"]:
+        raise RuntimeError(
+            f"{config['id']} 要求 PaddleOCR 版本为 {config['paddleocrVersion']}，"
+            f"当前为 {installed_version}"
+        )
+    return config
+
+
+def resolve_v6_medium_model_directories(config):
+    """解析第六版候选模型目录，禁止回退或运行时在线下载。"""
+    root_variable = config["modelRootEnvironmentVariable"]
+    model_root = os.path.abspath(
+        os.path.expanduser(
+            os.environ.get(root_variable) or config["defaultModelRoot"]
+        )
+    )
+    directories = []
+    for section in ("detection", "recognition"):
+        model_directory = os.path.join(model_root, config[section]["directoryName"])
+        required_files = (
+            "inference.json",
+            "inference.pdiparams",
+            "inference.yml",
+        )
+        if not all(
+            os.path.isfile(os.path.join(model_directory, file_name))
+            for file_name in required_files
+        ):
+            raise RuntimeError(
+                f"{config['id']} 模型目录未准备完整: {model_directory}，"
+                "请先运行 prepare_ocr_v6_medium_models.py"
+            )
+        directories.append(model_directory)
+    return directories
+
+
+def resolve_ocr_model(model_version=None):
+    """解析并校验本次请求使用的 OCR 模型。"""
+    resolved = str(model_version or os.environ.get("OCR_MODEL") or "v4_mobile").strip()
+    if resolved not in SUPPORTED_OCR_MODELS:
+        supported = ", ".join(sorted(SUPPORTED_OCR_MODELS))
+        raise RuntimeError(
+            f"不支持的 OCR_MODEL（识别模型配置）: {resolved}，可选值: {supported}"
+        )
+    return resolved
+
+
+def release_ocr_engine():
+    """在模型切换前释放旧模型，避免两套模型同时占用内存。"""
+    global _ocr_engine, _ocr_type, _ocr_model_version
+    _ocr_engine = None
+    _ocr_type = None
+    _ocr_model_version = None
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def get_ocr_engine(model_version=None):
     """获取或初始化 OCR 引擎（单例）"""
-    global _ocr_engine, _ocr_type
+    global _ocr_engine, _ocr_type, _ocr_model_version
+    requested_model = resolve_ocr_model(model_version)
+    if _ocr_engine is not None and _ocr_model_version == requested_model:
+        return _ocr_engine, _ocr_type, _ocr_model_version
     if _ocr_engine is not None:
-        return _ocr_engine, _ocr_type
+        release_ocr_engine()
 
     # 优先使用 PaddleOCR
     try:
         from paddleocr import PaddleOCR
-        # PP-OCRv4 mobile 轻量模型，仅加载核心 OCR 模型（检测+识别+行方向）
+        # 仅加载核心 OCR 模型（检测+识别）。模型切换仍复用相同的资源限制，
+        # 不启用额外文档预处理模型，确保现有识别业务流程保持不变。
         # 不启用 doc_orientation_classify 和 doc_unwarping，它们需要额外下载大模型
-        # 且对标准 PDF 回单（非手机拍照变形文档）帮助不大
-        _ocr_engine = PaddleOCR(
-            use_textline_orientation=True,
+        # 且对由 PDF 渲染的正向页面帮助不大。关闭行方向模型可避免额外
+        # 的模型常驻内存，PDF 页旋转仍由 pdftoppm 正确处理。
+        common_options = dict(
+            use_textline_orientation=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             # 限制推理缓存、线程和批量大小，防止长文档识别时内存持续膨胀。
@@ -64,13 +175,67 @@ def get_ocr_engine():
             cpu_threads=2,
             textline_orientation_batch_size=1,
             text_recognition_batch_size=1,
-            lang="ch",
-            ocr_version="PP-OCRv4",
             text_det_box_thresh=0.25,
             text_det_unclip_ratio=1.8,
         )
+        if requested_model == "v6_medium":
+            # PaddleOCR 3.5.0 尚未注册第六版模型名称，但底层推理格式兼容。
+            # 准备脚本只在隔离目录中将元数据名称映射到 3.5.0 已注册的同类
+            # 检测／识别运行器；模型参数本身仍是官方第六版模型。
+            v6_config = load_v6_medium_config()
+            detection_directory, recognition_directory = (
+                resolve_v6_medium_model_directories(v6_config)
+            )
+            runtime = v6_config["runtime"]
+            v6_options = {
+                **common_options,
+                "enable_mkldnn": bool(runtime["enableMkldnn"]),
+                "cpu_threads": int(runtime["cpuThreads"]),
+                "text_recognition_batch_size": int(
+                    runtime["textRecognitionBatchSize"]
+                ),
+                "text_det_limit_side_len": int(
+                    runtime["textDetectionLimitSideLength"]
+                ),
+                "text_det_limit_type": runtime["textDetectionLimitType"],
+            }
+            _ocr_engine = PaddleOCR(
+                **v6_options,
+                text_detection_model_name=v6_config["detection"][
+                    "runtimeModelName"
+                ],
+                text_detection_model_dir=detection_directory,
+                text_recognition_model_name=v6_config["recognition"][
+                    "runtimeModelName"
+                ],
+                text_recognition_model_dir=recognition_directory,
+            )
+        elif requested_model == "v5_server":
+            # PP-OCRv5_server（第五版服务器模型）在 CPU（中央处理器）上使用
+            # MKLDNN（英特尔深度学习加速库）和默认 960 像素检测长边时会产生
+            # 过高的临时张量峰值。仅收紧第五版推理资源，不改变页面裁片、
+            # 文字合并或合同字段解析逻辑；第四版继续沿用原有加速参数。
+            v5_options = {
+                **common_options,
+                "enable_mkldnn": False,
+                "cpu_threads": 1,
+                "text_det_limit_side_len": 640,
+                "text_det_limit_type": "max",
+            }
+            _ocr_engine = PaddleOCR(
+                **v5_options,
+                text_detection_model_name="PP-OCRv5_server_det",
+                text_recognition_model_name="PP-OCRv5_server_rec",
+            )
+        else:
+            _ocr_engine = PaddleOCR(
+                **common_options,
+                lang="ch",
+                ocr_version="PP-OCRv4",
+            )
         _ocr_type = "paddleocr"
-        return _ocr_engine, _ocr_type
+        _ocr_model_version = requested_model
+        return _ocr_engine, _ocr_type, _ocr_model_version
     except ImportError:
         pass
 
@@ -79,21 +244,25 @@ def get_ocr_engine():
         from rapidocr_onnxruntime import RapidOCR
         _ocr_engine = RapidOCR()
         _ocr_type = "rapidocr"
-        return _ocr_engine, _ocr_type
+        _ocr_model_version = "rapidocr"
+        return _ocr_engine, _ocr_type, _ocr_model_version
     except ImportError:
         raise RuntimeError("未找到可用的 OCR 引擎，请安装 PaddleOCR 或 RapidOCR")
 
 
-def do_ocr(image_path):
+def do_ocr(image_path, model_version=None):
     """执行 OCR 识别"""
-    engine, engine_type = get_ocr_engine()
+    engine, engine_type, active_model_version = get_ocr_engine(model_version)
 
     if engine_type == "paddleocr":
-        return ocr_with_paddleocr(engine, image_path)
+        lines, full_text = ocr_with_paddleocr(engine, image_path)
     elif engine_type == "rapidocr":
-        return ocr_with_rapidocr(engine, image_path)
+        lines, full_text = ocr_with_rapidocr(engine, image_path)
     else:
         raise RuntimeError("未找到可用的 OCR 引擎")
+    for line in lines:
+        line["model_version"] = active_model_version
+    return lines, full_text, active_model_version
 
 
 def ocr_with_paddleocr(engine, image_path):
@@ -185,15 +354,20 @@ def ensure_extension(image_path):
     return tmp_path, True
 
 
-def process_request(image_path):
+def process_request(image_path, model_version=None):
     """处理单个 OCR 请求，返回 JSON 结果字典"""
     if not os.path.exists(image_path):
         return {"error": f"文件不存在: {image_path}"}
 
     actual_path, is_tmp = ensure_extension(image_path)
     try:
-        lines, full_text = do_ocr(actual_path)
-        return {"lines": lines, "fullText": full_text}
+        lines, full_text, active_model_version = do_ocr(actual_path, model_version)
+        return {
+            "lines": lines,
+            "fullText": full_text,
+            "model_version": active_model_version,
+            "qr_codes": decode_qr_codes(actual_path),
+        }
     except Exception as e:
         return {"error": str(e)}
     finally:
@@ -202,14 +376,32 @@ def process_request(image_path):
                 os.unlink(actual_path)
             except Exception:
                 pass
+        # Paddle 的 CPU（中央处理器）临时张量在连续页面之间可能保留在
+        # glibc（GNU C 标准库）分配器中。及时回收 Python 对象并将空闲堆页
+        # 还给操作系统，避免长合同识别到第二页后累积至 OOM（内存耗尽）。
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
 
 
 def run_daemon():
     """常驻模式：从 stdin 逐行读取请求，结果写到 stdout"""
     # 先初始化引擎，输出 ready 信号
     try:
-        _, engine_type = get_ocr_engine()
-        print(json.dumps({"ready": True, "engine": engine_type}, ensure_ascii=False), flush=True)
+        _, engine_type, model_version = get_ocr_engine()
+        print(
+            json.dumps(
+                {
+                    "ready": True,
+                    "engine": engine_type,
+                    "model_version": model_version,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     except Exception as e:
         print(json.dumps({"ready": False, "error": str(e)}, ensure_ascii=False), flush=True)
         sys.exit(1)
@@ -227,10 +419,11 @@ def run_daemon():
         try:
             request = json.loads(line)
             image_path = request.get("image_path", "")
+            model_version = request.get("model")
             if not image_path:
                 result = {"error": "缺少 image_path 参数"}
             else:
-                result = process_request(image_path)
+                result = process_request(image_path, model_version)
         except json.JSONDecodeError:
             result = {"error": "无效的 JSON 输入"}
         except Exception as e:
@@ -251,7 +444,8 @@ def main():
         sys.exit(1)
 
     image_path = sys.argv[1]
-    result = process_request(image_path)
+    model_version = sys.argv[2] if len(sys.argv) >= 3 else None
+    result = process_request(image_path, model_version)
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
     if "error" in result:

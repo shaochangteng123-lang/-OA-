@@ -907,7 +907,13 @@ async function handleSave() {
           amount: null,
           note: form.contractNote || null,
         })
-      } catch { /* ignore */ }
+      } catch (error: unknown) {
+        const code = (error as { response?: { data?: { code?: string } } })
+          .response?.data?.code
+        if (code === 'FORMAL_CONTRACT_MANAGED') {
+          ElMessage.info('该项目已由正式合同模块统一管理，日志已保存，合同状态未在此处改动')
+        }
+      }
     }
 
     // 推送暂存的进展记录（含附件）—— 新建日志场景

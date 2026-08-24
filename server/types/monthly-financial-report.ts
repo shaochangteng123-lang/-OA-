@@ -1,0 +1,127 @@
+export const FINANCIAL_ACCOUNT_CODES = [
+  "general",
+  "business",
+  "welfare_one",
+  "welfare_two",
+] as const;
+
+export type FinancialAccountCode = (typeof FINANCIAL_ACCOUNT_CODES)[number];
+
+export const MONTHLY_FINANCIAL_MANUAL_CATEGORIES = [
+  "general_interest",
+  "business_interest",
+  "general_bank_fee",
+  "business_bank_fee",
+  "general_other",
+  "welfare_one_supplement",
+  "welfare_two_supplement",
+  "welfare_one_407",
+  "welfare_one_407_ai",
+  "welfare_one_8h_ai",
+  "welfare_two_refreshment",
+  "welfare_two_team_building",
+  "welfare_two_physical_exam",
+] as const;
+
+export type MonthlyFinancialManualCategory =
+  (typeof MONTHLY_FINANCIAL_MANUAL_CATEGORIES)[number];
+
+export type MonthlyFinancialDirection = "income" | "expense";
+export type MonthlyFinancialReportStatus = "draft" | "closed" | "reopened";
+
+export interface MonthlyFinancialManualItemInput {
+  id?: string;
+  category: MonthlyFinancialManualCategory;
+  accountCode: FinancialAccountCode;
+  direction: MonthlyFinancialDirection;
+  amount: string;
+  occurredOn: string;
+  description?: string | null;
+  voucherReference?: string | null;
+}
+
+export type FinancialAccountAmounts = Record<FinancialAccountCode, string>;
+
+export interface MonthlyFinancialAutomaticSnapshot {
+  income: {
+    mainBusinessReceipts: string;
+    tax: string;
+    marketingReserve: string;
+    businessCost: string;
+    accountingBase: string;
+  };
+  expenses: {
+    humanCost: string;
+    basicReimbursement: string;
+    largeReimbursement: string;
+    businessReimbursement: string;
+    assetAdministration: string;
+  };
+  sources: Array<{
+    code: string;
+    name: string;
+    recordCount: number;
+    amount: string;
+    updatedAt: string | null;
+    available: boolean;
+    message: string | null;
+  }>;
+  details: Array<{
+    sourceType: string;
+    sourceId: string;
+    occurredOn: string;
+    accountCode: FinancialAccountCode;
+    metric: string;
+    amount: string;
+    description: string;
+    personId?: string | null;
+    personName?: string | null;
+  }>;
+  generatedAt: string;
+}
+
+export interface MonthlyFinancialReportView {
+  id: string | null;
+  month: string;
+  status: MonthlyFinancialReportStatus;
+  version: number;
+  lastRefreshedAt: string | null;
+  closedAt: string | null;
+  updatedAt: string | null;
+  openingBalances: FinancialAccountAmounts;
+  accounts: Array<{
+    code: FinancialAccountCode;
+    name: string;
+    openingBalance: string;
+    income: string;
+    expense: string;
+    closingBalance: string;
+  }>;
+  income: MonthlyFinancialAutomaticSnapshot["income"] & {
+    generalInterest: string;
+    businessInterest: string;
+    welfareOneSupplementIncome: string;
+    welfareTwoSupplementIncome: string;
+  };
+  expenses: MonthlyFinancialAutomaticSnapshot["expenses"] & {
+    generalBankFee: string;
+    businessBankFee: string;
+    generalOtherExpense: string;
+    welfareOne407: string;
+    welfareOne407Ai: string;
+    welfareOne8hAi: string;
+    welfareTwoRefreshment: string;
+    welfareTwoTeamBuilding: string;
+    welfareTwoHealthCheck: string;
+  };
+  manualItems: MonthlyFinancialManualItemInput[];
+  sources: MonthlyFinancialAutomaticSnapshot["sources"];
+  details: MonthlyFinancialAutomaticSnapshot["details"];
+  warnings: Array<{ code: string; message: string; blocking: boolean }>;
+  permissions: {
+    canMaintain: boolean;
+    canClose: boolean;
+    canReopen: boolean;
+    canDownload: boolean;
+  };
+}

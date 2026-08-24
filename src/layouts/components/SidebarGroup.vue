@@ -2,10 +2,17 @@
   <div class="sidebar-group">
     <div class="group-header" @click="handleHeaderClick">
       <!-- 横线始终显示，宽度随侧边栏变化 -->
-      <div class="group-divider-line" :class="{ collapsed: sidebarCollapsed }"></div>
+      <div
+        class="group-divider-line"
+        :class="{ collapsed: sidebarCollapsed }"
+      ></div>
 
       <!-- 侧边栏折叠时：横线右侧显示小红点 -->
-      <span v-if="sidebarCollapsed && hasBadge" class="group-badge-dot"></span>
+      <span
+        v-if="sidebarCollapsed && badgeVisible"
+        class="group-badge-dot"
+        aria-label="存在待办事项"
+      ></span>
 
       <!-- 标题文字叠加在横线上方 -->
       <transition name="title-fade">
@@ -13,7 +20,11 @@
           <span class="title-text">{{ title }}</span>
           <div class="title-actions">
             <!-- 分组收起时：标题旁显示小红点 -->
-            <span v-if="hasBadge && !isExpanded" class="group-title-badge-dot"></span>
+            <span
+              v-if="badgeVisible && !isExpanded"
+              class="group-title-badge-dot"
+              aria-label="存在待办事项"
+            ></span>
             <!-- 折叠/展开图标 -->
             <el-icon class="collapse-icon" :class="{ rotated: !isExpanded }">
               <ArrowDown />
@@ -31,32 +42,38 @@
 </template>
 
 <script setup lang="ts">
-import { ArrowDown } from '@element-plus/icons-vue'
+import { computed } from "vue";
+import { ArrowDown } from "@element-plus/icons-vue";
 
 const props = defineProps<{
-  title?: string
-  titleCollapsed: boolean // 控制标题显示
-  sidebarCollapsed: boolean // 控制横线宽度
-  groupKey: string // 用于标识不同的分组
-  hasBadge?: boolean // 分组内是否有待办提示
-}>()
+  title?: string;
+  titleCollapsed: boolean; // 控制标题显示
+  sidebarCollapsed: boolean; // 控制横线宽度
+  groupKey: string; // 用于标识不同的分组
+  hasBadge?: boolean; // 分组内是否有待办提示
+  badge?: string | number; // 仅用于判断分组内是否存在待办；一级分组统一显示红点
+}>();
+
+const badgeVisible = computed(
+  () => props.hasBadge || Number(props.badge || 0) > 0,
+);
 
 defineEmits<{
-  'update:expanded': [value: boolean]
-  'update:locked': [value: boolean]
-}>()
+  "update:expanded": [value: boolean];
+  "update:locked": [value: boolean];
+}>();
 
 // 从父组件接收展开和锁定状态
-const isExpanded = defineModel<boolean>('expanded', { default: false })
-defineModel<boolean>('locked', { default: false })
+const isExpanded = defineModel<boolean>("expanded", { default: false });
+defineModel<boolean>("locked", { default: false });
 
 // 点击标题切换展开/折叠
 const handleHeaderClick = () => {
   // 只有在侧边栏展开且标题可见时才响应点击
   if (!props.titleCollapsed) {
-    isExpanded.value = !isExpanded.value
+    isExpanded.value = !isExpanded.value;
   }
-}
+};
 </script>
 
 <style scoped>
@@ -168,14 +185,16 @@ const handleHeaderClick = () => {
 
 /* 标题淡入：展开完成后延迟显示，带字间距动画 */
 .title-fade-enter-active {
-  transition: opacity 0.3s ease 0.4s,
+  transition:
+    opacity 0.3s ease 0.4s,
     letter-spacing 0.3s ease 0.4s,
     transform 0.3s ease 0.4s;
 }
 
 /* 标题淡出：开始折叠时立即消失 */
 .title-fade-leave-active {
-  transition: opacity 0.1s ease,
+  transition:
+    opacity 0.1s ease,
     letter-spacing 0.1s ease;
 }
 

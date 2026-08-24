@@ -99,6 +99,20 @@
               :collapsed="sidebarCollapsed"
               tooltip-content="羽隶经营看板"
             />
+            <SidebarMenuItem
+              path="/contract-dashboard"
+              label="合同经营看板"
+              :icon="TrendCharts"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同经营看板"
+            />
+            <SidebarMenuItem
+              path="/contracts"
+              label="合同台账"
+              :icon="Document"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同台账"
+            />
           </SidebarGroup>
 
           <!-- 办公区 -->
@@ -215,6 +229,14 @@
               "
               badge-type="danger"
             />
+            <SidebarMenuItem
+              v-if="canViewMonthlyFinancialReport"
+              path="/monthly-financial-report"
+              label="月度财务报表"
+              :icon="TrendCharts"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="月度财务报表"
+            />
           </SidebarGroup>
 
           <!-- 人力资源区 -->
@@ -274,6 +296,109 @@
               :collapsed="sidebarCollapsed"
               tooltip-content="员工数据"
               :badge="employeeDataBadge"
+              badge-type="danger"
+            />
+          </SidebarGroup>
+
+          <!-- 合同管理：位于人力资源区下方的独立业务模块 -->
+          <SidebarGroup
+            v-if="!isBoss && (isAdmin || isGeneralManager || isProjectUser)"
+            v-model:expanded="groupStates.contract.expanded"
+            title="合同管理"
+            :title-collapsed="!groupTitlesVisible"
+            :sidebar-collapsed="sidebarCollapsed"
+            group-key="contract"
+            :has-badge="contractGroupHasBadge"
+            :badge="contractGroupBadge"
+          >
+            <SidebarMenuItem
+              v-if="isAdmin || isGeneralManager || isProjectUser"
+              path="/contracts"
+              label="合同台账"
+              :icon="Document"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同台账"
+              :badge="
+                isAdmin && contractPendingSealCount > 0
+                  ? contractPendingSealCount
+                  : undefined
+              "
+              badge-type="danger"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin || isGeneralManager"
+              path="/contract-dashboard"
+              label="合同经营看板"
+              :icon="TrendCharts"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同经营看板"
+            />
+            <SidebarMenuItem
+              v-if="isGeneralManager"
+              path="/contract-approvals"
+              label="合同审批"
+              :icon="Stamp"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同审批"
+              :badge="
+                contractPendingCount > 0 ? contractPendingCount : undefined
+              "
+              badge-type="danger"
+            />
+            <SidebarMenuItem
+              v-if="isProjectUser"
+              path="/contract-applications/mine"
+              label="我的申请"
+              :icon="Tickets"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="我的申请"
+              :badge="
+                myContractApplicationPendingCount > 0
+                  ? myContractApplicationPendingCount
+                  : undefined
+              "
+              badge-type="danger"
+            />
+            <SidebarMenuItem
+              v-if="isGeneralManager"
+              path="/contract-download-requests/approval"
+              label="下载申请审批"
+              :icon="Stamp"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同下载申请审批"
+              :badge="
+                contractDownloadApprovalPendingCount > 0
+                  ? contractDownloadApprovalPendingCount
+                  : undefined
+              "
+              badge-type="danger"
+            />
+            <SidebarMenuItem
+              v-if="isGeneralManager"
+              path="/invoice-applications/approval"
+              label="开票申请审批"
+              :icon="Tickets"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="开票申请审批"
+              :badge="
+                invoiceApplicationApprovalPendingCount > 0
+                  ? invoiceApplicationApprovalPendingCount
+                  : undefined
+              "
+              badge-type="danger"
+            />
+            <SidebarMenuItem
+              v-if="isAdmin"
+              path="/contract-tasks"
+              label="合同待办"
+              :icon="Tickets"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="合同待办"
+              :badge="
+                contractTaskPendingCount > 0
+                  ? contractTaskPendingCount
+                  : undefined
+              "
               badge-type="danger"
             />
           </SidebarGroup>
@@ -421,6 +546,15 @@ import type { FormInstance, FormRules } from "element-plus";
 import { api } from "@/utils/api";
 import { getContractExpiryReminder } from "@/utils/contractReminder";
 import {
+  getContractPendingCount,
+  getContractPendingSealCount,
+} from "@/utils/contractApi";
+import {
+  CONTRACT_DOWNLOAD_BADGE_REFRESH_EVENT,
+  getContractDownloadPendingCounts,
+} from "@/utils/contractDownloadApi";
+import { getInvoiceApplicationPendingCounts } from "@/utils/invoiceApplicationApi";
+import {
   Calendar,
   FolderOpened,
   Collection,
@@ -441,6 +575,9 @@ import {
   List,
   Clock,
   Stamp,
+  Document,
+  TrendCharts,
+  Tickets,
 } from "@element-plus/icons-vue";
 import SidebarHeader from "./components/SidebarHeader.vue";
 import SidebarMenuItem from "./components/SidebarMenuItem.vue";
@@ -451,8 +588,16 @@ const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 const pendingStore = usePendingStore();
-const employeeDocumentRecognitionStore =
-  useEmployeeDocumentRecognitionStore();
+const employeeDocumentRecognitionStore = useEmployeeDocumentRecognitionStore();
+const contractPendingCount = ref(0);
+const contractPendingSealCount = ref(0);
+const contractDownloadApprovalPendingCount = ref(0);
+const contractDownloadExecutorPendingCount = ref(0);
+const contractDownloadUnreadCount = ref(0);
+const invoiceApplicationEmployeeActionPendingCount = ref(0);
+const invoiceApplicationApprovalPendingCount = ref(0);
+const invoiceApplicationAdminPendingCount = ref(0);
+let contractPendingTimer: number | null = null;
 
 // ===================== 强制修改密码弹窗 =====================
 const showChangePasswordDialog = computed(
@@ -539,6 +684,7 @@ const groupStates = reactive<Record<string, GroupState>>({
   office: { expanded: false },
   finance: { expanded: false },
   hr: { expanded: false },
+  contract: { expanded: false },
   project: { expanded: false },
   system: { expanded: false },
 });
@@ -588,6 +734,31 @@ const isGeneralManager = computed(() => {
   return authStore.user?.role === "general_manager";
 });
 
+// 月度财务报表按业务要求精确限制为普通管理员和总经理。
+const canViewMonthlyFinancialReport = computed(() => {
+  return (
+    authStore.user?.role === "admin" ||
+    authStore.user?.role === "general_manager"
+  );
+});
+
+const isProjectUser = computed(() => authStore.user?.role === "user");
+const isContractDownloadExecutor = computed(
+  () => authStore.user?.role === "admin",
+);
+const contractTaskPendingCount = computed(
+  () =>
+    invoiceApplicationAdminPendingCount.value +
+    (isContractDownloadExecutor.value
+      ? contractDownloadExecutorPendingCount.value
+      : 0),
+);
+const myContractApplicationPendingCount = computed(
+  () =>
+    contractDownloadUnreadCount.value +
+    invoiceApplicationEmployeeActionPendingCount.value,
+);
+
 // 是否具有人力资源请假审批职责
 const isLeaveApprover = computed(() => {
   return (
@@ -630,6 +801,30 @@ const financeGroupHasBadge = computed(() => {
     gmApproval > 0
   );
 });
+
+const contractGroupBadge = computed(() => {
+  if (isGeneralManager.value) {
+    return (
+      contractPendingCount.value +
+      contractDownloadApprovalPendingCount.value +
+      invoiceApplicationApprovalPendingCount.value
+    );
+  }
+  if (isContractDownloadExecutor.value) {
+    return (
+      contractPendingSealCount.value +
+      contractDownloadExecutorPendingCount.value +
+      invoiceApplicationAdminPendingCount.value
+    );
+  }
+  if (isAdmin.value)
+    return (
+      contractPendingSealCount.value + invoiceApplicationAdminPendingCount.value
+    );
+  if (isProjectUser.value) return myContractApplicationPendingCount.value;
+  return 0;
+});
+const contractGroupHasBadge = computed(() => contractGroupBadge.value > 0);
 
 const hrGroupHasBadge = computed(() => {
   const counts = pendingStore.counts;
@@ -733,6 +928,20 @@ const pageTitle = computed(() => {
   const routeTitles: Record<string, string> = {
     "/": "今日日志",
     "/boss-dashboard": "羽隶经营看板",
+    "/contracts": "合同管理",
+    "/contracts/create": "新增合同",
+    "/contract-approvals": "合同审批",
+    "/contract-download-requests/new": "申请下载合同附件",
+    "/contract-download-requests/mine": "我的申请",
+    "/contract-download-requests/approval": "合同下载申请审批",
+    "/contract-download-requests/tasks": "合同下载待办",
+    "/contract-tasks": "合同待办",
+    "/contract-applications/mine": "我的申请",
+    "/invoice-applications/new": "发起开票及用印申请",
+    "/invoice-applications/mine": "我的申请",
+    "/invoice-applications/approval": "开票申请审批",
+    "/invoice-applications/tasks": "开票与用印待办",
+    "/contract-dashboard": "合同经营看板",
     "/history": "历史日志",
     "/calendar": "日历",
     "/basic-reimbursement": "",
@@ -742,6 +951,7 @@ const pageTitle = computed(() => {
     "/business-reimbursement": "",
     "/business-reimbursement/create": "", // 不显示标题
     "/reimbursement-statistics": "", // 不显示标题
+    "/monthly-financial-report": "", // 页面内展示完整标题和状态
     "/reimbursement-management": "", // 不显示标题
     "/onboarding": "",
     "/probation": "",
@@ -766,6 +976,13 @@ const pageTitle = computed(() => {
   // 检查是否是报销单详情页面（带 ID 参数的路由）
   if (route.path.match(/^\/(basic|large|business)-reimbursement\/.+$/)) {
     return "";
+  }
+
+  if (
+    route.path !== "/contracts/create" &&
+    route.path.match(/^\/contracts\/.+$/)
+  ) {
+    return "合同详情";
   }
 
   return routeTitles[route.path] !== undefined ? routeTitles[route.path] : "";
@@ -856,6 +1073,56 @@ const handleMouseLeave = () => {
   }, 400);
 };
 
+async function refreshContractBadges() {
+  const tasks: Promise<void>[] = [];
+  if (isGeneralManager.value) {
+    tasks.push(
+      getContractPendingCount()
+        .then((count) => {
+          contractPendingCount.value = count;
+        })
+        .catch(() => undefined),
+    );
+  }
+  if (isAdmin.value) {
+    tasks.push(
+      getContractPendingSealCount()
+        .then((count) => {
+          contractPendingSealCount.value = count;
+        })
+        .catch(() => undefined),
+    );
+  }
+  if (isGeneralManager.value || isAdmin.value || isProjectUser.value) {
+    tasks.push(
+      getInvoiceApplicationPendingCounts()
+        .then((counts) => {
+          invoiceApplicationEmployeeActionPendingCount.value =
+            counts.employeeActionPending;
+          invoiceApplicationApprovalPendingCount.value = counts.managerPending;
+          invoiceApplicationAdminPendingCount.value = counts.adminPending;
+        })
+        .catch(() => undefined),
+    );
+  }
+  if (
+    isGeneralManager.value ||
+    isContractDownloadExecutor.value ||
+    isProjectUser.value
+  ) {
+    tasks.push(
+      getContractDownloadPendingCounts()
+        .then((counts) => {
+          contractDownloadApprovalPendingCount.value = counts.managerPending;
+          contractDownloadExecutorPendingCount.value = counts.executorPending;
+          contractDownloadUnreadCount.value = counts.unreadResults;
+        })
+        .catch(() => undefined),
+    );
+  }
+  await Promise.all(tasks);
+}
+
 // 组件挂载
 onMounted(() => {
   // 从 localStorage 读取锁定状态，如果没有保存过，默认为 false（不锁定）
@@ -871,6 +1138,15 @@ onMounted(() => {
     pendingStore.fetchPendingCounts();
     pendingStore.startPolling();
   }
+  if (isGeneralManager.value || isAdmin.value || isProjectUser.value) {
+    void refreshContractBadges();
+    contractPendingTimer = window.setInterval(refreshContractBadges, 5_000);
+    window.addEventListener(
+      CONTRACT_DOWNLOAD_BADGE_REFRESH_EVENT,
+      refreshContractBadges,
+    );
+    window.addEventListener("focus", refreshContractBadges);
+  }
 });
 
 onUnmounted(() => {
@@ -881,6 +1157,15 @@ onUnmounted(() => {
   }
   // 停止待办事项轮询
   pendingStore.stopPolling();
+  if (contractPendingTimer) {
+    window.clearInterval(contractPendingTimer);
+    contractPendingTimer = null;
+  }
+  window.removeEventListener(
+    CONTRACT_DOWNLOAD_BADGE_REFRESH_EVENT,
+    refreshContractBadges,
+  );
+  window.removeEventListener("focus", refreshContractBadges);
 });
 </script>
 

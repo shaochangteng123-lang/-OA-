@@ -61,6 +61,7 @@ export interface Project {
   project_manager: string;
   project_manager_phone: string;
   description: string | null;
+  requires_auxiliary_materials: boolean;
   current_task: string | null;
   user_id: string;
   created_at: string;
@@ -176,6 +177,290 @@ export interface GovernmentDepartment {
   website_url: string | null;
   sort_order: number;
   is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// 合同全生命周期模块
+export type ContractCategory = "main_business" | "non_main" | "asset";
+export type ContractDeclaredSubtype =
+  | "engineering_consulting"
+  | "preliminary_procedures"
+  | "technical_consulting"
+  | "non_main_income"
+  | "other_service"
+  | "procurement"
+  | "software"
+  | "equipment"
+  | "house_rental"
+  | "vehicle_rental"
+  | "parking_space"
+  | "office_asset";
+export type ContractAssetCategory =
+  | "procurement"
+  | "software"
+  | "equipment"
+  | "house_rental"
+  | "vehicle_rental"
+  | "parking_space"
+  | "office_asset"
+  | "other";
+export type ContractRelationType = "main" | "supplement" | "termination";
+export type ContractSupplementChangeType =
+  | "payment_terms_only"
+  | "amount_adjustment"
+  | "amount_and_payment"
+  | "legacy_unresolved";
+export type ContractLifecycleStatus =
+  | "draft"
+  | "approving"
+  | "pending_seal"
+  | "effective"
+  | "executing"
+  | "completed"
+  | "rejected"
+  | "terminated";
+
+export interface Contract {
+  id: string;
+  contract_no: string | null;
+  business_contract_no: string | null;
+  title: string | null;
+  description: string | null;
+  declared_category: ContractCategory | null;
+  declared_subtype: ContractDeclaredSubtype | null;
+  category: ContractCategory | null;
+  asset_category: ContractAssetCategory | null;
+  relation_type: ContractRelationType;
+  status: ContractLifecycleStatus;
+  area: string;
+  project_id: string | null;
+  parent_contract_id: string | null;
+  root_contract_id: string | null;
+  termination_target_contract_id?: string | null;
+  renewed_from_contract_id: string | null;
+  renewed_from_lease_end_date: string | null;
+  party_a: string | null;
+  party_b: string | null;
+  project_name: string | null;
+  amount_delta: number | null;
+  original_contract_amount: number | null;
+  recognized_original_amount: number | null;
+  recognized_final_amount: number | null;
+  amount_before_change: number | null;
+  amount_after_change: number | null;
+  current_effective_amount: number | null;
+  supplement_change_type: ContractSupplementChangeType | null;
+  supplement_sequence: number | null;
+  contract_date: string | null;
+  contract_date_source: "ocr" | "manual" | "upload_date" | null;
+  financial_direction: "income" | "cost" | null;
+  financial_direction_source: "contract_category" | "invoice" | null;
+  financial_direction_invoice_id: string | null;
+  financial_direction_confirmed_by: string | null;
+  financial_direction_confirmed_at: string | null;
+  financial_direction_version: number;
+  pending_action: "seal" | "termination" | null;
+  previous_status: ContractLifecycleStatus | null;
+  version: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ContractApprovalKind = "seal" | "termination" | "seal_difference";
+export type ContractApprovalRoundStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "withdrawn";
+
+export interface ContractApprovalRound {
+  id: string;
+  contract_id: string;
+  approval_kind: ContractApprovalKind;
+  status: ContractApprovalRoundStatus;
+  initiator_id: string;
+  initiator_role: string;
+  target_approver_id: string;
+  target_approver_name_snapshot: string;
+  target_approver_role_snapshot: string;
+  target_source: "project_owner" | "general_manager";
+  project_id_snapshot: string | null;
+  submitted_at: string;
+  completed_at: string | null;
+  completed_by: string | null;
+  completed_action: "approve" | "reject" | "withdraw" | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractFile {
+  id: string;
+  contract_id: string;
+  file_type: string;
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  mime_type: string;
+  file_hash: string;
+  version: number;
+  is_current: boolean;
+  uploaded_by: string;
+  created_at: string;
+}
+
+export interface ContractOcrJob {
+  id: string;
+  contract_id: string;
+  file_id: string;
+  status: "queued" | "processing" | "succeeded" | "partial" | "failed";
+  method: string | null;
+  engine_version: string | null;
+  parser_version: string | null;
+  retry_count: number;
+  raw_text: string | null;
+  warnings_json: string[];
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractOcrLine {
+  id: string;
+  job_id: string;
+  contract_id: string;
+  line_index: number;
+  page_number: number;
+  text: string;
+  bbox: number[][];
+  confidence: number;
+  model_version: string;
+  created_at: string;
+}
+
+export interface ContractOcrField {
+  id: string;
+  job_id: string;
+  contract_id: string;
+  field_code: string;
+  original_value: string | null;
+  normalized_value: string | null;
+  final_value: string | null;
+  confidence: number;
+  source: string;
+  manually_confirmed: boolean;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+}
+
+export type ContractSealVerificationStatus =
+  | "infrastructure_failed"
+  | "review_required"
+  | "difference_explanation_required"
+  | "difference_approving"
+  | "difference_approved"
+  | "ready_to_archive"
+  | "archived"
+  | "superseded";
+
+export interface ContractSealVerification {
+  id: string;
+  contract_id: string;
+  file_id: string;
+  status: ContractSealVerificationStatus;
+  upload_date: string;
+  approved_snapshot_json: Record<string, unknown>;
+  recognition_status: "succeeded" | "partial" | "failed";
+  recognition_method: string | null;
+  recognition_warnings_json: string[];
+  raw_text: string | null;
+  mismatches_json: Array<Record<string, unknown>>;
+  infrastructure_failure: boolean;
+  difference_explanation: string | null;
+  approval_submitted_at: string | null;
+  approval_completed_at: string | null;
+  created_by: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  archived_by: string | null;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ContractFinancialOcrRecordKind = "invoice" | "receipt" | "payment";
+
+export interface ContractFinancialOcrJob {
+  id: string;
+  contract_id: string;
+  file_id: string;
+  file_hash: string;
+  record_kind: ContractFinancialOcrRecordKind;
+  document_kind: "invoice" | "bank_receipt";
+  status: "processing" | "verified" | "blocked" | "failed" | "consumed";
+  validation_status: "verified" | "blocked" | "failed" | null;
+  recognition_method: string | null;
+  engine_version: string | null;
+  parser_version: string | null;
+  evidence_text_hash: string | null;
+  direction:
+    | "input"
+    | "output"
+    | "third_party"
+    | "receipt"
+    | "payment"
+    | "unknown"
+    | null;
+  document_status: "normal" | "void" | "red" | "unknown" | null;
+  can_auto_post: boolean;
+  snapshot_json: Record<string, unknown>;
+  blocking_reasons_json: Array<{
+    code: string;
+    message: string;
+    field?: string;
+  }>;
+  warnings_json: string[];
+  requested_by: string;
+  record_id: string | null;
+  started_at: string;
+  finished_at: string | null;
+  consumed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractSealVerificationField {
+  id: string;
+  verification_id: string;
+  contract_id: string;
+  field_code: "party_a" | "party_b" | "amount" | "contract_date";
+  approved_value: string | null;
+  recognized_value: string | null;
+  final_value: string | null;
+  confidence: number;
+  source: string;
+  requires_manual_confirmation: boolean;
+  manually_confirmed: boolean;
+  is_mismatch: boolean;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ContractRateCode = "tax" | "marketing" | "business" | "financial";
+
+export interface ContractRateConfig {
+  id: string;
+  rate_code: ContractRateCode;
+  rate_value: number;
+  effective_from: string;
+  effective_to: string | null;
+  is_active: boolean;
+  created_by: string | null;
+  change_reason: string | null;
   created_at: string;
   updated_at: string;
 }

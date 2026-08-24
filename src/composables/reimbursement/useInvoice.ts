@@ -39,6 +39,7 @@ export interface OcrResult {
 // 上传响应
 export interface UploadResponse {
   success: boolean
+  code?: string
   message?: string
   data?: {
     filePath: string
@@ -249,7 +250,7 @@ export function useInvoice() {
         file.serverPath = result.data.filePath
       } else {
         loadingMessage.close()
-        showUploadError(`${file.name} 识别失败：${result.message || '未知错误'}`)
+        showUploadError(result.message || `${file.name} 识别失败：未知错误`)
         removeFromFileList(file.uid, fileListParam)
       }
     } catch (error: any) {

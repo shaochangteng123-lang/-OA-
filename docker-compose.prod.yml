@@ -42,6 +42,8 @@ services:
       - NODE_ENV=production
       - PORT=8899
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/yulilog_worklog
+      - OCR_MODEL=${OCR_MODEL:-v4_mobile}
+      - OCR_V6_MODEL_ROOT=${OCR_V6_MODEL_ROOT:-/opt/paddleocr-v6-medium}
       - TZ=Asia/Shanghai
       - FRONTEND_URL=http://yuliseek.com
       - VITE_ENABLE_WORKLOG=
@@ -52,7 +54,15 @@ services:
       - ./uploads/production:/app/uploads
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8899/api/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8899/api/health",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3

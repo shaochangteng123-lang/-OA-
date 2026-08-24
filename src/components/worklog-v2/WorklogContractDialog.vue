@@ -9,6 +9,14 @@
     @open="loadData"
   >
     <div class="contract-panel">
+      <div v-if="formalContractId" class="formal-contract-notice">
+        <div>
+          <strong>该项目已启用正式合同管理</strong>
+          <p>合同金额和状态由合同全生命周期数据自动汇总，此处仅展示历史进度。</p>
+        </div>
+        <el-button type="primary" plain @click="goFormalContract">查看正式合同</el-button>
+      </div>
+
       <div class="contract-amount-row">
         <span class="label">合同总金额：</span>
         <template v-if="editingAmount">
@@ -21,17 +29,18 @@
             style="width: 160px"
           />
           <span style="margin-left: 4px; color: #909399">元</span>
-          <el-button size="small" type="primary" link @click="saveAmount" :loading="amountSaving">保存</el-button>
+          <el-button size="small" type="primary" link :loading="amountSaving" @click="saveAmount">保存</el-button>
           <el-button size="small" link @click="editingAmount = false">取消</el-button>
         </template>
         <template v-else>
-          <span v-if="totalAmount" class="amount-value">¥{{ Number(totalAmount).toLocaleString() }}</span>
+          <span v-if="totalAmount !== null" class="amount-value">¥{{ Number(totalAmount).toLocaleString() }}</span>
           <span v-else class="amount-empty">未填写</span>
-          <el-button size="small" link @click="startEditAmount">修改</el-button>
+          <el-tag v-if="formalContractId" size="small" type="info">自动汇总</el-tag>
+          <el-button v-else size="small" link @click="startEditAmount">修改</el-button>
         </template>
       </div>
 
-      <div class="contract-timeline" v-if="timeline.length > 0">
+      <div v-if="timeline.length > 0" class="contract-timeline">
         <div v-for="item in timeline" :key="item.id" class="timeline-item">
           <div class="timeline-dot" />
           <div class="timeline-content">
@@ -39,7 +48,7 @@
               <el-tag size="small" :type="tagType(item.status)">{{ item.status }}</el-tag>
               <span v-if="item.amount" class="timeline-amount">¥{{ Number(item.amount).toLocaleString() }}</span>
               <span class="timeline-meta">{{ item.createdByName }} · {{ formatTime(item.createdAt) }}</span>
-              <el-button size="small" link type="danger" @click="handleDelete(item)">删除</el-button>
+              <el-button v-if="!formalContractId" size="small" link type="danger" @click="handleDelete(item)">删除</el-button>
             </div>
             <div v-if="item.note" class="timeline-note">{{ item.note }}</div>
             <div v-if="item.attachments && item.attachments.length > 0" class="timeline-attachments">
@@ -68,7 +77,7 @@
       </div>
       <el-empty v-else description="暂无合同进度记录" :image-size="60" />
 
-      <div class="contract-add-form">
+      <div v-if="!formalContractId" class="contract-add-form">
         <div class="form-title">
           追加进度
           <el-tag v-if="isSettled" type="success" size="small" style="margin-left: 8px">已结清，无法追加</el-tag>
@@ -152,6 +161,7 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Close, Document } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
@@ -166,6 +176,8 @@ const props = defineProps<{
   projectName: string
 }>()
 
+const router = useRouter()
+
 const emit = defineEmits<{
   (e: 'update:visible', val: boolean): void
   (e: 'statusChanged', status: string | null): void
@@ -174,6 +186,7 @@ const emit = defineEmits<{
 const timeline = ref<WorklogContractProgress[]>([])
 const statuses = ref<DictItem[]>([])
 const totalAmount = ref<number | null>(null)
+const formalContractId = ref<string | null>(null)
 const adding = ref(false)
 const editingAmount = ref(false)
 const amountInput = ref<number | undefined>(undefined)
@@ -321,6 +334,12 @@ function handleClose() {
   emit('update:visible', false)
 }
 
+async function goFormalContract() {
+  if (!formalContractId.value) return
+  emit('update:visible', false)
+  await router.push(`/contracts/${formalContractId.value}`)
+}
+
 async function loadData() {
   form.status = ''
   form.amount = undefined
@@ -338,8 +357,12 @@ async function loadTimeline() {
       const d = resp.data.data
       timeline.value = d.progress || []
       totalAmount.value = d.contractTotalAmount ?? null
+      formalContractId.value = d.formalContractId || null
     }
-  } catch { timeline.value = [] }
+  } catch {
+    timeline.value = []
+    formalContractId.value = null
+  }
 }
 
 async function loadStatuses() {
@@ -464,6 +487,25 @@ function formatTime(iso: string) {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.formal-contract-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 14px 16px;
+  color: #1f4b45;
+  background: linear-gradient(135deg, #eef9f5 0%, #f5fbff 100%);
+  border: 1px solid #cbe8de;
+  border-radius: 10px;
+}
+
+.formal-contract-notice strong { font-size: 14px; }
+.formal-contract-notice p { margin: 4px 0 0; color: #5f7773; font-size: 12px; line-height: 1.6; }
+
+@media (max-width: 680px) {
+  .formal-contract-notice { align-items: flex-start; flex-direction: column; }
 }
 
 .contract-amount-row {

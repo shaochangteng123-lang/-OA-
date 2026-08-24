@@ -42,20 +42,37 @@ WORKDIR /app
 # ==========================================
 FROM base AS ocr-models
 
-RUN pip3 install --break-system-packages paddlepaddle paddleocr openpyxl
+RUN pip3 install --break-system-packages \
+    paddlepaddle==3.2.2 paddleocr==3.5.0 openpyxl
+
+COPY server/config/ocr-v6-medium.json ./server/config/
+COPY server/scripts/prepare_ocr_v6_medium_models.py ./server/scripts/
+
+RUN OCR_V6_MODEL_ROOT=/opt/paddleocr-v6-medium \
+    python3 server/scripts/prepare_ocr_v6_medium_models.py
 
 RUN PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
     HOME=/opt \
     python3 -c "\
+import gc; \
 from paddleocr import PaddleOCR; \
-PaddleOCR( \
-    use_textline_orientation=True, \
+model = PaddleOCR( \
+    use_textline_orientation=False, \
     use_doc_orientation_classify=False, \
     use_doc_unwarping=False, \
     lang='ch', \
     ocr_version='PP-OCRv4', \
 ); \
+del model; gc.collect(); \
+model = PaddleOCR( \
+    use_textline_orientation=False, \
+    use_doc_orientation_classify=False, \
+    use_doc_unwarping=False, \
+    text_detection_model_name='PP-OCRv5_server_det', \
+    text_recognition_model_name='PP-OCRv5_server_rec', \
+); \
+del model; gc.collect(); \
 print('Models downloaded successfully')"
 
 # ==========================================
@@ -67,6 +84,7 @@ FROM base AS development
 COPY --from=ocr-models /usr/local/lib /usr/local/lib
 COPY --from=ocr-models /usr/local/bin/python3* /usr/local/bin/
 COPY --from=ocr-models /opt/.paddlex /opt/.paddlex
+COPY --from=ocr-models /opt/paddleocr-v6-medium /opt/paddleocr-v6-medium
 
 COPY package.json package-lock.json ./
 RUN npm config set fetch-retries 5 && \
@@ -75,10 +93,16 @@ RUN npm config set fetch-retries 5 && \
     npm ci --legacy-peer-deps
 
 COPY server/scripts/paddle_ocr_worker.py ./server/scripts/
+COPY server/config/ocr-v6-medium.json ./server/config/
+COPY server/assets/tesseract ./server/assets/tesseract
+RUN cd /app/server/assets/tesseract && sha256sum -c SHA256SUMS
 
 ENV NODE_ENV=development \
+    OCR_MODEL=v4_mobile \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
+    TESSERACT_TESSDATA_PATH=/app/server/assets/tesseract \
+    TESSERACT_OCR_TIMEOUT_MS=120000 \
     HOME=/opt
 
 EXPOSE 8899 3000
@@ -112,6 +136,7 @@ COPY src ./src
 COPY server ./server
 COPY public ./public
 
+RUN cd /app/server/assets/tesseract && sha256sum -c SHA256SUMS
 RUN npm run build && npm run build:server
 
 # ==========================================
@@ -125,6 +150,7 @@ LABEL description="YuliLog 工作日志管理系统"
 COPY --from=ocr-models /usr/local/lib /usr/local/lib
 COPY --from=ocr-models /usr/local/bin/python3* /usr/local/bin/
 COPY --from=ocr-models /opt/.paddlex /opt/.paddlex
+COPY --from=ocr-models /opt/paddleocr-v6-medium /opt/paddleocr-v6-medium
 
 RUN addgroup --gid 1001 nodejs \
     && adduser --disabled-password --gecos "" --uid 1001 --ingroup nodejs yulilog
@@ -136,19 +162,29 @@ COPY --from=builder --chown=yulilog:nodejs /app/package.json ./
 COPY --from=prod-deps --chown=yulilog:nodejs /app/node_modules ./node_modules
 COPY --chown=yulilog:nodejs docker-entrypoint.sh ./
 COPY --chown=yulilog:nodejs server/scripts/paddle_ocr_worker.py ./server/scripts/
+COPY --chown=yulilog:nodejs server/config/ocr-v6-medium.json ./server/config/
+COPY --from=builder --chown=yulilog:nodejs /app/server/assets/tesseract ./dist/server/assets/tesseract
+COPY --from=builder --chown=yulilog:nodejs /app/server/assets/monthly-financial-report-template.xlsx ./dist/server/assets/monthly-financial-report-template.xlsx
+
+RUN cd /app/dist/server/assets/tesseract \
+    && sha256sum -c SHA256SUMS
 
 RUN chmod +x docker-entrypoint.sh \
     && mkdir -p /app/data /app/uploads/temp /app/uploads/invoices \
-    && chown -R yulilog:nodejs /app \
-    && chmod -R 755 /opt/.paddlex 2>/dev/null || true
+    && chown -R yulilog:nodejs /app
+
+RUN chmod -R 755 /opt/.paddlex /opt/paddleocr-v6-medium 2>/dev/null || true
 
 USER yulilog
 
 ENV NODE_ENV=production \
     PORT=8899 \
+    OCR_MODEL=v4_mobile \
     DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
+    TESSERACT_TESSDATA_PATH=/app/dist/server/assets/tesseract \
+    TESSERACT_OCR_TIMEOUT_MS=120000 \
     HOME=/opt
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
