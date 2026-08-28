@@ -96,6 +96,26 @@ describe("合同新增向导业务保护", () => {
       /if \(refreshOutdatedRecognition\) \{\s*await retryRecognition\(\);\s*\}/,
     );
     expect(backendSource).toContain("staleSucceededProjectNeedsRefresh");
+    expect(backendSource).toContain(
+      "staleSucceededProjectContinuationNeedsRefresh",
+    );
+    expect(backendSource).toContain("storedProjectContinuationNeedsRefresh");
+    expect(backendSource).toContain('contract.status === "draft"');
+    expect(backendSource).toContain('contract.relation_type === "main"');
+    expect(backendSource).toContain(
+      "/^前期手续(?:技术咨询服务|工程咨询服务|咨询服务|技术服务)$/u",
+    );
+    expect(backendSource).toContain(
+      "normalizeProjectRefreshText(anchorMatch[1]) !== current",
+    );
+    expect(backendSource).toContain(
+      "continuation.page_number !== anchor.page_number",
+    );
+    expect(backendSource).toContain(
+      "continuation.line_index - anchor.line_index > 3",
+    );
+    expect(backendSource).toContain("Number(continuation.confidence) < 0.9");
+    expect(backendSource).not.toContain('latestProjectValue.endsWith("工程")');
     expect(backendSource).toContain("staleSucceededPageFailureNeedsRefresh");
     expect(backendSource).toContain(
       "/第\\s*\\d+\\s*页(?:扫描|高清|超清)识别失败/u",
@@ -141,7 +161,7 @@ describe("合同新增向导业务保护", () => {
     expect(source).toContain('value: "house_rental"');
     expect(source).toContain('value: "vehicle_rental"');
     expect(source).toContain('value: "parking_space"');
-    expect(source).toContain('label: "车位合同"');
+    expect(source).toContain('label: "车位租赁"');
     expect(source).toContain("handleAssetSubtypeChange");
     expect(source).toContain('v-model="form.relationType"');
     expect(source).toContain('relationType: "",');

@@ -4,20 +4,42 @@
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
+import crypto from "crypto";
 import { execSync } from "child_process";
 import sharp from "sharp";
+import type { PoolClient } from "pg";
 import { callPaddleOcr } from "./ocrDaemon.js";
-import { db } from "../db/index.js";
+import {
+  extractPaymentProofPartyAccounts,
+  parsePaymentProofText,
+} from "./paymentProofOcr.js";
 import { nanoid } from "nanoid";
-import { recipientMatches } from "../utils/bank-receipt-match.js";
+import {
+  accountMatches,
+  nameMatches,
+  recipientMatches,
+} from "../utils/bank-receipt-match.js";
+import { isValidBankBusinessDate } from "../utils/bank-business-date.js";
+import {
+  findExistingPaymentProofIdentity,
+  lockPaymentProofIdentities,
+  normalizePaymentProofNo,
+} from "../utils/payment-proof-identity.js";
+
+export { isValidBankBusinessDate } from "../utils/bank-business-date.js";
 
 export interface BankReceiptOcrResult {
+  payer: string; // 付款人
+  payerAccount: string; // 付款账号
   payee: string; // 收款人
   payeeAccount: string; // 收款账号
   amount: number; // 金额
   remark: string; // 备注原文
   proofNo: string; // 电子回单号
+  transactionDate: string; // 银行实际交易日期（YYYY-MM-DD）
+  transactionDateCandidates: string[]; // 回单内全部交易日期候选
   rawText: string;
 }
 
@@ -37,6 +59,38 @@ export interface ReceiptMatchResult {
   matchedReimbursementIds?: string[]; // 多笔合并匹配时使用
 }
 
+function bankAmountToCents(value: unknown): number {
+  const amount = Number(value || 0);
+  const rawCents = amount * 100;
+  const cents = Math.round(rawCents);
+  if (
+    !Number.isFinite(amount) ||
+    !Number.isSafeInteger(cents) ||
+    cents <= 0 ||
+    Math.abs(rawCents - cents) > 1e-6
+  ) {
+    throw new Error("银行回单金额无效");
+  }
+  return cents;
+}
+
+function bankAmountToExactCents(value: unknown): bigint {
+  const normalized = String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .replace(/[,，￥¥\s]/gu, "");
+  const match = normalized.match(/^(\d+)(?:\.(\d{1,2}))?$/u);
+  if (!match) throw new Error("银行回单金额必须精确到分");
+  const cents =
+    BigInt(match[1]) * 100n + BigInt((match[2] || "").padEnd(2, "0"));
+  if (cents <= 0n) throw new Error("银行回单金额无效");
+  return cents;
+}
+
+async function loadBankReceiptDb() {
+  return (await import("../db/index.js")).db;
+}
+
 // ==================== PDF 处理 ====================
 
 /**
@@ -48,8 +102,11 @@ export function analyzePageXml(
   pdfPath: string,
   pageNo: number,
 ): { hasContent: boolean; splitY: number | null } {
+  const tempDirectory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "bank-receipt-xml-"),
+  );
   try {
-    const xmlPath = `/tmp/bank_receipt_${Date.now()}_${pageNo}`;
+    const xmlPath = path.join(tempDirectory, `page-${pageNo}`);
     execSync(
       `pdftohtml -xml -f ${pageNo} -l ${pageNo} "${pdfPath}" "${xmlPath}" 2>/dev/null`,
       { timeout: 10000 },
@@ -58,18 +115,6 @@ export function analyzePageXml(
     if (!fs.existsSync(xmlFile)) return { hasContent: false, splitY: null };
 
     const xml = fs.readFileSync(xmlFile, "utf-8");
-    fs.unlinkSync(xmlFile);
-    const dir = path.dirname(xmlPath);
-    const base = path.basename(xmlPath);
-    fs.readdirSync(dir)
-      .filter((f) => f.startsWith(base))
-      .forEach((f) => {
-        try {
-          fs.unlinkSync(path.join(dir, f));
-        } catch {
-          // 临时文件清理失败不影响当前回单识别。
-        }
-      });
 
     // 简化：直接匹配所有 image 标签
     const allImages = [...xml.matchAll(/<image[^>]+>/g)];
@@ -100,6 +145,8 @@ export function analyzePageXml(
     };
   } catch {
     return { hasContent: false, splitY: null };
+  } finally {
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
   }
 }
 
@@ -113,31 +160,167 @@ export async function splitImage(
   pdfPageHeight: number,
   outputDir: string,
   baseName: string,
+  options: {
+    detectWhitespaceBoundary?: boolean;
+    trimWhitespace?: boolean;
+  } = {},
 ): Promise<{ top: string; bottom: string }> {
   const meta = await sharp(imagePath).metadata();
   const imgHeight = meta.height || 1754;
   const imgWidth = meta.width || 1240;
 
   // PDF坐标 → 图片像素
-  const splitPixel = Math.round((splitY / pdfPageHeight) * imgHeight);
+  const approximateSplitPixel = Math.round(
+    (splitY / pdfPageHeight) * imgHeight,
+  );
+  const splitPixel = options.detectWhitespaceBoundary
+    ? await detectReceiptWhitespaceSplitPixel(
+        imagePath,
+        approximateSplitPixel,
+        imgWidth,
+        imgHeight,
+      )
+    : Math.max(1, Math.min(imgHeight - 1, approximateSplitPixel));
 
   const topPath = path.join(outputDir, `${baseName}_top.jpg`);
   const bottomPath = path.join(outputDir, `${baseName}_bottom.jpg`);
 
-  await sharp(imagePath)
-    .extract({ left: 0, top: 0, width: imgWidth, height: splitPixel })
-    .toFile(topPath);
-
-  await sharp(imagePath)
-    .extract({
+  await writeReceiptCrop(
+    imagePath,
+    { left: 0, top: 0, width: imgWidth, height: splitPixel },
+    topPath,
+    Boolean(options.trimWhitespace),
+  );
+  await writeReceiptCrop(
+    imagePath,
+    {
       left: 0,
       top: splitPixel,
       width: imgWidth,
       height: imgHeight - splitPixel,
-    })
-    .toFile(bottomPath);
+    },
+    bottomPath,
+    Boolean(options.trimWhitespace),
+  );
 
   return { top: topPath, bottom: bottomPath };
+}
+
+export function findReceiptWhitespaceSplitPixel(
+  rowInkCounts: readonly number[],
+  imageWidth: number,
+  approximateSplitPixel: number,
+): number {
+  const imageHeight = rowInkCounts.length;
+  if (imageHeight < 2) return 1;
+  const fallback = Math.max(
+    1,
+    Math.min(imageHeight - 1, Math.round(approximateSplitPixel)),
+  );
+  const searchRadius = Math.max(40, Math.round(imageHeight * 0.18));
+  const searchStart = Math.max(1, fallback - searchRadius);
+  const searchEnd = Math.min(imageHeight - 2, fallback + searchRadius);
+  const maxBlankInk = Math.max(1, Math.floor(imageWidth * 0.001));
+  const minimumGapHeight = Math.max(6, Math.round(imageHeight * 0.008));
+  const gaps: Array<{ start: number; end: number }> = [];
+  let gapStart = -1;
+
+  for (let row = searchStart; row <= searchEnd + 1; row += 1) {
+    const isBlank = row <= searchEnd && (rowInkCounts[row] || 0) <= maxBlankInk;
+    if (isBlank && gapStart < 0) {
+      gapStart = row;
+    } else if (!isBlank && gapStart >= 0) {
+      const gapEnd = row - 1;
+      if (gapEnd - gapStart + 1 >= minimumGapHeight) {
+        gaps.push({ start: gapStart, end: gapEnd });
+      }
+      gapStart = -1;
+    }
+  }
+
+  const bestGap = gaps.sort((left, right) => {
+    const heightDifference = right.end - right.start - (left.end - left.start);
+    if (heightDifference !== 0) return heightDifference;
+    const leftCenter = (left.start + left.end) / 2;
+    const rightCenter = (right.start + right.end) / 2;
+    return Math.abs(leftCenter - fallback) - Math.abs(rightCenter - fallback);
+  })[0];
+
+  return bestGap
+    ? Math.max(
+        1,
+        Math.min(
+          imageHeight - 1,
+          Math.round((bestGap.start + bestGap.end) / 2),
+        ),
+      )
+    : fallback;
+}
+
+async function detectReceiptWhitespaceSplitPixel(
+  imagePath: string,
+  approximateSplitPixel: number,
+  imageWidth: number,
+  imageHeight: number,
+): Promise<number> {
+  const { data, info } = await sharp(imagePath)
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const rowInkCounts = new Array<number>(info.height).fill(0);
+  for (let row = 0; row < info.height; row += 1) {
+    const rowOffset = row * info.width;
+    let inkCount = 0;
+    for (let column = 0; column < info.width; column += 1) {
+      if (data[rowOffset + column]! < 230) inkCount += 1;
+    }
+    rowInkCounts[row] = inkCount;
+  }
+  return findReceiptWhitespaceSplitPixel(
+    rowInkCounts,
+    imageWidth,
+    Math.round((approximateSplitPixel / imageHeight) * info.height),
+  );
+}
+
+async function writeReceiptCrop(
+  imagePath: string,
+  region: { left: number; top: number; width: number; height: number },
+  outputPath: string,
+  trimWhitespace: boolean,
+): Promise<void> {
+  const extracted = await sharp(imagePath).extract(region).toBuffer();
+  if (!trimWhitespace) {
+    await sharp(extracted).jpeg({ quality: 92 }).toFile(outputPath);
+    return;
+  }
+  try {
+    const trimmed = await sharp(extracted)
+      .trim({ background: "#fff", threshold: 8 })
+      .toBuffer();
+    const metadata = await sharp(trimmed).metadata();
+    const padding = Math.max(
+      12,
+      Math.min(
+        28,
+        Math.round(
+          Math.min(metadata.width || 600, metadata.height || 800) * 0.025,
+        ),
+      ),
+    );
+    await sharp(trimmed)
+      .extend({
+        top: padding,
+        bottom: padding,
+        left: padding,
+        right: padding,
+        background: "#fff",
+      })
+      .jpeg({ quality: 92 })
+      .toFile(outputPath);
+  } catch {
+    await sharp(extracted).jpeg({ quality: 92 }).toFile(outputPath);
+  }
 }
 
 // ==================== OCR 解析 ====================
@@ -181,16 +364,37 @@ function extractAmount(text: string): number {
       if (!isNaN(v) && v > 0) return v;
     }
   }
-  // 独立金额数字
-  const m = text.match(/\b(\d{1,3}(?:[,，]\d{3})*\.\d{2})\b/);
-  if (m?.[1]) {
-    const v = parseFloat(m[1].replace(/[,，]/g, ""));
-    if (!isNaN(v) && v > 0) return v;
-  }
+  // 不从全文任意小数猜测金额，避免把余额、利率或手续费误作票面金额。
   return 0;
 }
 
+function extractRoleAccount(text: string, role: "付款" | "收款"): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.normalize("NFKC").trim())
+    .filter(Boolean);
+  const roleIndex = lines.findIndex(
+    (line) => line === role || line === `${role}人`,
+  );
+  if (roleIndex < 0) return "";
+  const otherRole = role === "付款" ? "收款" : "付款";
+  for (
+    let index = roleIndex + 1;
+    index < Math.min(lines.length, roleIndex + 8);
+    index += 1
+  ) {
+    if (lines[index] === otherRole || lines[index] === `${otherRole}人`) break;
+    const compact = lines[index].replace(/\s+/g, "");
+    if (/^[0-9*]{6,25}$/u.test(compact) && /\d{6}/u.test(compact)) {
+      return compact;
+    }
+  }
+  return "";
+}
+
 function extractPayeeAccount(text: string): string {
+  const roleAccount = extractRoleAccount(text, "收款");
+  if (roleAccount) return roleAccount;
   const patterns = [/收款账号[：:]\s*([0-9\s]+)/, /收款账户[：:]\s*([0-9\s]+)/];
   for (const p of patterns) {
     const m = text.match(p);
@@ -207,6 +411,26 @@ function extractPayeeAccount(text: string): string {
   if (allNumbers.length >= 2) return allNumbers[1];
   if (allNumbers.length === 1) return allNumbers[0];
   return "";
+}
+
+function extractPayerAccount(text: string, payeeAccount: string): string {
+  const roleAccount = extractRoleAccount(text, "付款");
+  if (roleAccount) return roleAccount;
+  const patterns = [
+    /付款账号[：:]\s*([0-9\s]+)/,
+    /付款账户[：:]\s*([0-9\s]+)/,
+    /转出账号[：:]\s*([0-9\s]+)/,
+    /转出账户[：:]\s*([0-9\s]+)/,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) return match[1].replace(/\s+/g, "").trim();
+  }
+
+  const accounts = [...text.matchAll(/(?<!\d)(\d[\d\s]{11,28}\d)(?!\d)/g)]
+    .map((match) => match[1].replace(/\s+/g, ""))
+    .filter((value) => value.length >= 13 && value.length <= 25);
+  return accounts.find((value) => value !== payeeAccount) || "";
 }
 
 function extractPayee(text: string): string {
@@ -240,11 +464,37 @@ function extractPayee(text: string): string {
   return "";
 }
 
+function extractLayoutPartyNames(text: string): {
+  payer: string;
+  payee: string;
+} {
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/[|｜"“”]/g, "").trim())
+    .filter(Boolean);
+  const firstRoleIndex = lines.findIndex((line) =>
+    /^(?:户|户名|付款|付款人)$/u.test(line),
+  );
+  const scope = firstRoleIndex > 0 ? lines.slice(0, firstRoleIndex) : lines;
+  const candidates = scope.filter((line) => {
+    if (line.length < 2 || line.length > 50 || !/[\u3400-\u9fff]/u.test(line)) {
+      return false;
+    }
+    return !/(?:银行|回单|付款|收款|户名|账号|账户|开户|金额|摘要|用途|交易|人民币|补打|验证码|打印|记账)/u.test(
+      line,
+    );
+  });
+  const parties = candidates.slice(-2);
+  return {
+    payer: parties.length >= 2 ? parties[0]! : "",
+    payee: parties.length >= 2 ? parties[1]! : parties[0] || "",
+  };
+}
+
 function extractProofNo(text: string): string {
   const patterns = [
     /电子回单号码[：:\s]*([A-Za-z0-9][A-Za-z0-9-]{10,30})/,
     /电子回单号[：:\s]*([A-Za-z0-9][A-Za-z0-9-]{10,30})/,
-    /交易流水号[：:\s]*([A-Za-z0-9][A-Za-z0-9-]{10,30})/,
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -257,12 +507,28 @@ export async function recognizeBankReceiptImage(
   imagePath: string,
 ): Promise<BankReceiptOcrResult> {
   const text = await callPaddleOcr(imagePath);
+  const parsed = parsePaymentProofText(text);
+  const structuredAccounts = extractPaymentProofPartyAccounts(text);
+  const payeeAccount =
+    structuredAccounts.payeeAccount ||
+    extractPayeeAccount(text) ||
+    parsed.payeeAccount;
+  const layoutParties = extractLayoutPartyNames(text);
+  const parsedPayer = /^(?:付款|付款人|付款方)$/u.test(parsed.payer)
+    ? ""
+    : parsed.payer;
   return {
-    payee: extractPayee(text),
-    payeeAccount: extractPayeeAccount(text),
-    amount: extractAmount(text),
+    payer: layoutParties.payer || parsedPayer,
+    payerAccount:
+      structuredAccounts.payerAccount ||
+      extractPayerAccount(text, payeeAccount),
+    payee: layoutParties.payee || parsed.payee || extractPayee(text),
+    payeeAccount,
+    amount: parsed.amount || extractAmount(text),
     remark: extractRemark(text),
-    proofNo: extractProofNo(text),
+    proofNo: parsed.electronicReceiptNo || extractProofNo(text),
+    transactionDate: parsed.transactionDate,
+    transactionDateCandidates: parsed.transactionDateCandidates,
     rawText: text,
   };
 }
@@ -371,6 +637,7 @@ async function matchReimbursement(
   ocr: BankReceiptOcrResult,
   parsed: ParsedRemark,
 ): Promise<string[] | null> {
+  const db = await loadBankReceiptDb();
   const typeMap: Record<string, string> = {
     basic: "basic",
     large: "large",
@@ -381,6 +648,7 @@ async function matchReimbursement(
   // 财务在系统里"批量付款"时，已明确记录了哪几笔报销被合并付款
   // 回单金额 = payment_batches.total_amount，且批次内某笔报销的收款人匹配
   if (ocr.amount > 0) {
+    const receiptAmountCents = bankAmountToCents(ocr.amount);
     const batches = await db.all<{ id: string; total_amount: number }>(
       `
       SELECT DISTINCT pb.id, pb.total_amount
@@ -390,20 +658,24 @@ async function matchReimbursement(
       JOIN users u ON r.user_id = u.id
       LEFT JOIN employee_profiles ep ON ep.user_id = r.user_id
       WHERE pb.status = 'pending'
-        AND ABS(pb.total_amount - ?) < 0.01
+        AND r.status IN ('approved', 'paid')
+        AND r.is_deleted = false
+        AND ROUND(pb.total_amount * 100) = ?
     `,
-      ocr.amount,
+      receiptAmountCents,
     );
 
     for (const batch of batches) {
       // 查出该批次内所有报销单及其收款人信息
       const batchItems = await db.all<{
         reimbursement_id: string;
+        status: string;
+        item_amount: number;
         bank_account_name: string | null;
         bank_account_number: string | null;
       }>(
         `
-        SELECT pbi.reimbursement_id,
+        SELECT pbi.reimbursement_id, r.status, pbi.amount AS item_amount,
                COALESCE(ep.bank_account_name, u.bank_account_name) as bank_account_name,
                COALESCE(ep.bank_account_number, u.bank_account_number) as bank_account_number
         FROM payment_batch_items pbi
@@ -415,8 +687,12 @@ async function matchReimbursement(
         batch.id,
       );
 
-      // 只要批次内有一笔报销的收款人匹配，就认为整个批次都是这个人的
-      const personMatched = batchItems.some((item) => {
+      const itemAmountCents = batchItems.reduce(
+        (sum, item) => sum + bankAmountToCents(item.item_amount),
+        0,
+      );
+      // 批次创建时限定同一收款人；这里仍逐笔复核，避免历史脏数据误匹配。
+      const personMatched = batchItems.every((item) => {
         return recipientMatches(
           item.bank_account_name || "",
           item.bank_account_number || "",
@@ -425,11 +701,13 @@ async function matchReimbursement(
         );
       });
 
-      if (personMatched) {
+      if (
+        batchItems.length > 0 &&
+        itemAmountCents === receiptAmountCents &&
+        personMatched
+      ) {
         const ids = batchItems.map((item) => item.reimbursement_id);
-        console.log(
-          `✅ payment_batches 联动匹配成功：批次 ${batch.id}，共 ${ids.length} 笔，合计 ¥${batch.total_amount}`,
-        );
+        console.log(`✅ 付款批次联动匹配成功：共 ${ids.length} 笔`);
         return ids;
       }
     }
@@ -446,7 +724,7 @@ async function matchReimbursement(
     LEFT JOIN employee_profiles ep ON ep.user_id = r.user_id
     WHERE r.status = 'paid' AND r.is_deleted = false
   `;
-  const params: any[] = [];
+  const params: string[] = [];
 
   if (parsed.type) {
     sql += ` AND r.type = ?`;
@@ -483,13 +761,646 @@ async function matchReimbursement(
   if (ocr.amount > 0) {
     const ids = findSubsetByAmount(matched, ocr.amount);
     if (ids && ids.length > 0) {
-      console.log(`✅ 金额匹配成功：共 ${ids.length} 笔，合计 ¥${ocr.amount}`);
+      console.log(`✅ 回单金额匹配成功：共 ${ids.length} 笔`);
       return ids;
     }
   }
 
   // 金额匹配不上 → 人工认领
   return null;
+}
+
+export class BankReceiptPersistenceError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BankReceiptPersistenceError";
+  }
+}
+
+interface BankReceiptInsertInput {
+  mode: "insert";
+  receiptId: string;
+  sourceBatchId: string;
+  imagePath: string;
+  pageNo: number;
+  position: "full" | "top" | "bottom";
+  ocrResult: BankReceiptOcrResult;
+  parsed: ParsedRemark;
+  matchedReimbursementIds?: string[] | null;
+  uploadedBy: string;
+  now?: string;
+}
+
+interface BankReceiptClaimInput {
+  mode: "claim";
+  receiptId: string;
+  matchedReimbursementIds: string[];
+  uploadedBy: string;
+  now?: string;
+}
+
+export type PersistBankReceiptTransactionInput =
+  | BankReceiptInsertInput
+  | BankReceiptClaimInput;
+
+export interface PersistBankReceiptTransactionResult {
+  receiptId: string;
+  matchStatus: "matched" | "unmatched";
+  matchedReimbursementIds: string[];
+  paymentBatchId: string | null;
+}
+
+interface BankReceiptEvidence {
+  receiptId: string;
+  sourceBatchId: string;
+  imagePath: string;
+  pageNo: number;
+  position: "full" | "top" | "bottom";
+  ocrResult: BankReceiptOcrResult;
+  parsed: ParsedRemark;
+  fileHash: string;
+  insertReceipt: boolean;
+}
+
+interface LockedReimbursement {
+  id: string;
+  status: string;
+  total_amount: string;
+  payment_batch_id: string | null;
+  bank_account_name: string | null;
+  bank_account_number: string | null;
+}
+
+function formatBankCents(cents: bigint): string {
+  const integer = cents / 100n;
+  const fraction = (cents % 100n).toString().padStart(2, "0");
+  return `${integer}.${fraction}`;
+}
+
+function calculateBankReceiptFileHash(imagePath: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(imagePath))
+    .digest("hex");
+}
+
+function serializeBankReceiptEvidence(
+  evidence: BankReceiptEvidence,
+  matchedReimbursementIds: string[],
+): string {
+  const ocr = evidence.ocrResult;
+  return JSON.stringify({
+    payer: ocr.payer,
+    payerAccount: ocr.payerAccount,
+    payee: ocr.payee,
+    payeeAccount: ocr.payeeAccount,
+    proofNo: ocr.proofNo,
+    normalizedProofNo: normalizePaymentProofNo(ocr.proofNo),
+    transactionDate: ocr.transactionDate,
+    transactionDateCandidates: ocr.transactionDateCandidates,
+    fileHash: evidence.fileHash,
+    rawText: ocr.rawText.slice(0, 500),
+    matchedIds: matchedReimbursementIds,
+  });
+}
+
+async function loadClaimEvidence(
+  client: PoolClient,
+  receiptId: string,
+): Promise<BankReceiptEvidence> {
+  const result = await client.query<{
+    id: string;
+    batch_id: string;
+    image_path: string;
+    page_no: number;
+    position: "full" | "top" | "bottom";
+    ocr_payee: string | null;
+    ocr_amount: string | null;
+    ocr_remark: string | null;
+    ocr_raw_json: string | null;
+    parsed_type: ParsedRemark["type"];
+    parsed_name: string | null;
+    parsed_month: string | null;
+    match_status: string;
+  }>(
+    `SELECT id, batch_id, image_path, page_no, position, ocr_payee,
+            ocr_amount::text AS ocr_amount, ocr_remark, ocr_raw_json,
+            parsed_type, parsed_name, parsed_month, match_status
+       FROM bank_receipts
+      WHERE id = $1
+      FOR UPDATE`,
+    [receiptId],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new BankReceiptPersistenceError(
+      "BANK_RECEIPT_NOT_FOUND",
+      "银行回单不存在",
+    );
+  }
+  if (row.match_status !== "unmatched") {
+    throw new BankReceiptPersistenceError(
+      "BANK_RECEIPT_ALREADY_MATCHED",
+      "该银行回单已处理，不能重复认领",
+    );
+  }
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(row.ocr_raw_json || "{}") as Record<string, unknown>;
+  } catch {
+    raw = {};
+  }
+  const transactionDateCandidates = Array.isArray(raw.transactionDateCandidates)
+    ? raw.transactionDateCandidates.map(String)
+    : [];
+  const payer = String(raw.payer || "");
+  const payerAccount = String(raw.payerAccount || "");
+  const payee = String(raw.payee || row.ocr_payee || "");
+  const payeeAccount = String(raw.payeeAccount || "");
+  const proofNo = String(raw.proofNo || "");
+  const transactionDate = String(raw.transactionDate || "");
+  if (
+    !payee ||
+    !payeeAccount ||
+    !proofNo ||
+    !transactionDate ||
+    transactionDateCandidates.length !== 1
+  ) {
+    throw new BankReceiptPersistenceError(
+      "BANK_RECEIPT_EVIDENCE_INCOMPLETE",
+      "历史待认领回单缺少完整收款账号、电子回单号或唯一交易日期，请重新上传清晰原件",
+    );
+  }
+  const imagePath = path.resolve(process.cwd(), row.image_path);
+  if (!fs.existsSync(imagePath)) {
+    throw new BankReceiptPersistenceError(
+      "BANK_RECEIPT_FILE_MISSING",
+      "银行回单裁片不存在，请重新上传原件",
+    );
+  }
+  return {
+    receiptId: row.id,
+    sourceBatchId: row.batch_id,
+    imagePath: row.image_path,
+    pageNo: row.page_no,
+    position: row.position,
+    ocrResult: {
+      payer,
+      payerAccount,
+      payee,
+      payeeAccount,
+      amount: Number(row.ocr_amount || 0),
+      remark: row.ocr_remark || "",
+      proofNo,
+      transactionDate,
+      transactionDateCandidates,
+      rawText: String(raw.rawText || ""),
+    },
+    parsed: {
+      type: row.parsed_type,
+      name: row.parsed_name || "",
+      month: row.parsed_month || "",
+    },
+    fileHash: calculateBankReceiptFileHash(imagePath),
+    insertReceipt: false,
+  };
+}
+
+async function insertBankReceiptRow(
+  client: PoolClient,
+  evidence: BankReceiptEvidence,
+  matchedReimbursementIds: string[],
+  paymentBatchId: string | null,
+  uploadedBy: string,
+  now: string,
+): Promise<void> {
+  const matched = matchedReimbursementIds.length > 0;
+  await client.query(
+    `INSERT INTO bank_receipts(
+       id, batch_id, image_path, page_no, position, ocr_payee, ocr_amount,
+       ocr_remark, ocr_raw_json, parsed_type, parsed_name, parsed_month,
+       match_status, matched_reimbursement_id, payment_batch_id,
+       matched_by, matched_at, created_at
+     ) VALUES(
+       $1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+     )`,
+    [
+      evidence.receiptId,
+      evidence.sourceBatchId,
+      evidence.imagePath,
+      evidence.pageNo,
+      evidence.position,
+      evidence.ocrResult.payee || null,
+      evidence.ocrResult.amount > 0 ? evidence.ocrResult.amount : null,
+      evidence.ocrResult.remark || null,
+      serializeBankReceiptEvidence(evidence, matchedReimbursementIds),
+      evidence.parsed.type,
+      evidence.parsed.name || null,
+      evidence.parsed.month || null,
+      matched ? "matched" : "unmatched",
+      matchedReimbursementIds[0] || null,
+      paymentBatchId,
+      matched ? uploadedBy : null,
+      matched ? now : null,
+      now,
+    ],
+  );
+}
+
+async function updateBankReceiptBatchStatistics(
+  client: PoolClient,
+  sourceBatchId: string,
+  now: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE bank_receipt_batches
+        SET matched_count = (
+              SELECT COUNT(*) FROM bank_receipts
+               WHERE batch_id = bank_receipt_batches.id
+                 AND match_status = 'matched'
+            ),
+            unmatched_count = (
+              SELECT COUNT(*) FROM bank_receipts
+               WHERE batch_id = bank_receipt_batches.id
+                 AND match_status = 'unmatched'
+            ),
+            updated_at = $2
+      WHERE id = $1`,
+    [sourceBatchId, now],
+  );
+}
+
+/**
+ * 将一张整包回单的识别、付款批次、报销状态、防重和审批记录原子落库。
+ * `claim` 模式只接受回单编号和目标报销编号，权威 OCR 证据在事务内读取。
+ */
+export async function persistBankReceiptTransaction(
+  input: PersistBankReceiptTransactionInput,
+): Promise<PersistBankReceiptTransactionResult> {
+  const db = await loadBankReceiptDb();
+  const now = input.now || new Date().toISOString();
+  const preliminaryEvidence =
+    input.mode === "insert"
+      ? {
+          receiptId: input.receiptId,
+          sourceBatchId: input.sourceBatchId,
+          imagePath: input.imagePath,
+          pageNo: input.pageNo,
+          position: input.position,
+          ocrResult: input.ocrResult,
+          parsed: input.parsed,
+          fileHash: calculateBankReceiptFileHash(
+            path.resolve(process.cwd(), input.imagePath),
+          ),
+          insertReceipt: true,
+        }
+      : null;
+  const requestedIds = [
+    ...new Set(
+      (input.matchedReimbursementIds || []).map(String).filter(Boolean),
+    ),
+  ].sort();
+
+  return db.transaction(async (client) => {
+    const evidence =
+      preliminaryEvidence || (await loadClaimEvidence(client, input.receiptId));
+
+    if (requestedIds.length === 0) {
+      if (!evidence.insertReceipt) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_TARGET_REQUIRED",
+          "手工认领必须指定报销单",
+        );
+      }
+      await insertBankReceiptRow(
+        client,
+        evidence,
+        [],
+        null,
+        input.uploadedBy,
+        now,
+      );
+      await updateBankReceiptBatchStatistics(
+        client,
+        evidence.sourceBatchId,
+        now,
+      );
+      return {
+        receiptId: evidence.receiptId,
+        matchStatus: "unmatched",
+        matchedReimbursementIds: [],
+        paymentBatchId: null,
+      };
+    }
+
+    const ocr = evidence.ocrResult;
+    if (
+      ocr.transactionDateCandidates.length !== 1 ||
+      ocr.transactionDateCandidates[0] !== ocr.transactionDate ||
+      !isValidBankBusinessDate(ocr.transactionDate)
+    ) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_TRANSACTION_DATE_INVALID",
+        "银行回单必须具有唯一、有效的实际交易日期",
+      );
+    }
+    const receiptAmountCents = bankAmountToExactCents(ocr.amount);
+    const normalizedProofNo = normalizePaymentProofNo(ocr.proofNo);
+    const proofIdentity = {
+      fileHash: evidence.fileHash,
+      proofNo: normalizedProofNo,
+    };
+    await lockPaymentProofIdentities(client, [proofIdentity]);
+    if (await findExistingPaymentProofIdentity(client, [proofIdentity])) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_DUPLICATE",
+        "该付款回单文件或电子回单号已经使用",
+      );
+    }
+
+    const lockedRows = await client.query<LockedReimbursement>(
+      `SELECT r.id, r.status, r.total_amount::text, r.payment_batch_id,
+              COALESCE(ep.bank_account_name, u.bank_account_name) AS bank_account_name,
+              COALESCE(ep.bank_account_number, u.bank_account_number) AS bank_account_number
+         FROM reimbursements r
+         JOIN users u ON u.id = r.user_id
+         LEFT JOIN employee_profiles ep ON ep.user_id = r.user_id
+        WHERE r.id = ANY($1::text[])
+          AND r.is_deleted = FALSE
+        ORDER BY r.id
+        FOR UPDATE OF r`,
+      [requestedIds],
+    );
+    if (lockedRows.rows.length !== requestedIds.length) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_REIMBURSEMENT_NOT_FOUND",
+        "部分报销单不存在或已删除",
+      );
+    }
+    let reimbursementTotalCents = 0n;
+    for (const row of lockedRows.rows) {
+      reimbursementTotalCents += bankAmountToExactCents(row.total_amount);
+      if (
+        !row.bank_account_name ||
+        !row.bank_account_number ||
+        !ocr.payee ||
+        !ocr.payeeAccount ||
+        !accountMatches(row.bank_account_number, ocr.payeeAccount) ||
+        !nameMatches(row.bank_account_name, ocr.payee)
+      ) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_PAYEE_MISMATCH",
+          "回单收款人姓名或完整账号与报销申请人不一致",
+        );
+      }
+    }
+    if (reimbursementTotalCents !== receiptAmountCents) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_AMOUNT_MISMATCH",
+        "回单金额与目标报销单净额合计不一致",
+      );
+    }
+
+    const batchIds = [
+      ...new Set(
+        lockedRows.rows
+          .map((row) => row.payment_batch_id)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    if (
+      batchIds.length > 1 ||
+      (batchIds.length === 1 &&
+        lockedRows.rows.some((row) => !row.payment_batch_id))
+    ) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_BATCH_AMBIGUOUS",
+        "目标报销单分属于不同付款批次，不能使用同一张回单",
+      );
+    }
+
+    let paymentBatchId: string;
+    const amountText = formatBankCents(receiptAmountCents);
+    if (batchIds.length === 1) {
+      paymentBatchId = batchIds[0];
+      const batchResult = await client.query<{
+        id: string;
+        status: string;
+        total_amount: string;
+      }>(
+        `SELECT id, status, total_amount::text
+           FROM payment_batches
+          WHERE id = $1
+          FOR UPDATE`,
+        [paymentBatchId],
+      );
+      const paymentBatch = batchResult.rows[0];
+      if (!paymentBatch || paymentBatch.status !== "pending") {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_BATCH_NOT_PENDING",
+          "付款批次不存在或已处理",
+        );
+      }
+      if (
+        bankAmountToExactCents(paymentBatch.total_amount) !== receiptAmountCents
+      ) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_BATCH_AMOUNT_MISMATCH",
+          "付款批次快照金额与回单金额不一致",
+        );
+      }
+      const batchItems = await client.query<{
+        reimbursement_id: string;
+        amount: string;
+      }>(
+        `SELECT reimbursement_id, amount::text
+           FROM payment_batch_items
+          WHERE batch_id = $1
+          ORDER BY reimbursement_id
+          FOR UPDATE`,
+        [paymentBatchId],
+      );
+      const batchItemIds = batchItems.rows.map((row) => row.reimbursement_id);
+      const batchItemTotal = batchItems.rows.reduce(
+        (sum, row) => sum + bankAmountToExactCents(row.amount),
+        0n,
+      );
+      if (
+        JSON.stringify(batchItemIds) !== JSON.stringify(requestedIds) ||
+        batchItemTotal !== receiptAmountCents ||
+        lockedRows.rows.some(
+          (row) => !["approved", "paid"].includes(row.status),
+        )
+      ) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_BATCH_MEMBERSHIP_MISMATCH",
+          "付款批次成员、状态或明细金额已经变化",
+        );
+      }
+    } else {
+      if (lockedRows.rows.some((row) => row.status !== "paid")) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_REIMBURSEMENT_NOT_PAID",
+          "无付款批次的报销单必须先确认付款",
+        );
+      }
+      paymentBatchId = `pb_${nanoid(16)}`;
+      const dateText = now.slice(0, 10).replace(/-/gu, "");
+      const batchNo = `PAY${dateText}${nanoid(6).toUpperCase()}`;
+      await client.query(
+        `INSERT INTO payment_batches(
+           id, batch_no, total_amount, payer_id, payment_proof_path, pay_time,
+           payment_business_date, status, created_at, updated_at
+         ) VALUES($1,$2,$3::numeric,$4,$5,$6,$7::date,'uploaded',$6,$6)`,
+        [
+          paymentBatchId,
+          batchNo,
+          amountText,
+          input.uploadedBy,
+          evidence.imagePath,
+          now,
+          ocr.transactionDate,
+        ],
+      );
+      for (const row of lockedRows.rows) {
+        await client.query(
+          `INSERT INTO payment_batch_items(
+             id, batch_id, reimbursement_id, amount, created_at
+           ) VALUES($1,$2,$3,$4::numeric,$5)`,
+          [`pbi_${nanoid(16)}`, paymentBatchId, row.id, row.total_amount, now],
+        );
+      }
+    }
+
+    await client.query(
+      `INSERT INTO payment_proof_hashes(
+         id, file_hash, proof_no, batch_id, created_at
+       ) VALUES($1,$2,$3,$4,$5)`,
+      [
+        `pph_${nanoid(16)}`,
+        evidence.fileHash,
+        normalizedProofNo || null,
+        paymentBatchId,
+        now,
+      ],
+    );
+
+    const reimbursementUpdate = await client.query(
+      `UPDATE reimbursements
+          SET status = 'payment_uploaded', payment_proof_path = $2,
+              payment_upload_time = $3, pay_time = $3,
+              payment_business_date = $4::date,
+              payment_batch_id = $5, updated_at = $3
+        WHERE id = ANY($1::text[])
+          AND status = ANY($6::text[])
+          AND payment_batch_id IS NOT DISTINCT FROM $7::text
+          AND is_deleted = FALSE`,
+      [
+        requestedIds,
+        evidence.imagePath,
+        now,
+        ocr.transactionDate,
+        paymentBatchId,
+        batchIds.length === 1 ? ["approved", "paid"] : ["paid"],
+        batchIds.length === 1 ? paymentBatchId : null,
+      ],
+    );
+    if (reimbursementUpdate.rowCount !== requestedIds.length) {
+      throw new BankReceiptPersistenceError(
+        "BANK_RECEIPT_REIMBURSEMENT_STATE_CHANGED",
+        "报销单状态已经变化，请重新识别回单",
+      );
+    }
+
+    if (batchIds.length === 1) {
+      const batchUpdate = await client.query(
+        `UPDATE payment_batches
+            SET status = 'uploaded', payment_proof_path = $2,
+                pay_time = $3, payment_business_date = $4::date,
+                updated_at = $3
+          WHERE id = $1 AND status = 'pending'`,
+        [paymentBatchId, evidence.imagePath, now, ocr.transactionDate],
+      );
+      if (batchUpdate.rowCount !== 1) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_BATCH_STATE_CHANGED",
+          "付款批次状态已经变化，请重新识别回单",
+        );
+      }
+    }
+
+    for (const reimbursementId of requestedIds) {
+      const approvalInstance = await client.query<{ id: string }>(
+        `SELECT id
+           FROM approval_instances
+          WHERE target_id = $1 AND target_type = 'reimbursement'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [reimbursementId],
+      );
+      if (approvalInstance.rows[0]) {
+        await client.query(
+          `INSERT INTO approval_records(
+             id, instance_id, step, approver_id, action, comment, action_time
+           ) VALUES($1,$2,99,$3,'payment_uploaded',$4,$5)`,
+          [
+            `ar_${nanoid(10)}`,
+            approvalInstance.rows[0].id,
+            input.uploadedBy,
+            evidence.insertReceipt
+              ? requestedIds.length > 1
+                ? `系统自动上传付款回单（合并打款，共${requestedIds.length}笔）`
+                : "系统自动上传付款回单"
+              : "管理员手工认领付款回单",
+            now,
+          ],
+        );
+      }
+    }
+
+    if (evidence.insertReceipt) {
+      await insertBankReceiptRow(
+        client,
+        evidence,
+        requestedIds,
+        paymentBatchId,
+        input.uploadedBy,
+        now,
+      );
+    } else {
+      const receiptUpdate = await client.query(
+        `UPDATE bank_receipts
+            SET match_status = 'matched', matched_reimbursement_id = $2,
+                payment_batch_id = $3, matched_by = $4, matched_at = $5,
+                ocr_raw_json = $6
+          WHERE id = $1 AND match_status = 'unmatched'`,
+        [
+          evidence.receiptId,
+          requestedIds[0],
+          paymentBatchId,
+          input.uploadedBy,
+          now,
+          serializeBankReceiptEvidence(evidence, requestedIds),
+        ],
+      );
+      if (receiptUpdate.rowCount !== 1) {
+        throw new BankReceiptPersistenceError(
+          "BANK_RECEIPT_STATE_CHANGED",
+          "待认领回单状态已经变化，请刷新后重试",
+        );
+      }
+    }
+    await updateBankReceiptBatchStatistics(client, evidence.sourceBatchId, now);
+    return {
+      receiptId: evidence.receiptId,
+      matchStatus: "matched",
+      matchedReimbursementIds: requestedIds,
+      paymentBatchId,
+    };
+  });
 }
 
 // ==================== 主流程 ====================
@@ -623,141 +1534,45 @@ export async function processBankReceiptPdf(
           if (!ocr.rawText || ocr.rawText.trim().length < 10) return;
 
           const parsed = parseRemark(ocr.remark);
-          const matchedIds = await matchReimbursement(ocr, parsed);
-
           const receiptId = `br_${nanoid(10)}`;
-          const matchStatus =
-            matchedIds && matchedIds.length > 0 ? "matched" : "unmatched";
-          // 兼容旧字段：单笔时存第一个ID，多笔时也存第一个（matched_reimbursement_ids JSON存全部）
-          const primaryMatchedId = matchedIds?.[0] || null;
-
-          // 转为相对路径存储（供前端通过 /api/files/ 访问）
           const relativeImagePath = imagePath.replace(process.cwd() + "/", "");
-
-          // 查出 payment_batch_id（如果是通过批量付款匹配的）
-          let paymentBatchId: string | null = null;
-          if (matchedIds && matchedIds.length > 0) {
-            const r = await db.get<{ payment_batch_id: string | null }>(
-              `SELECT payment_batch_id FROM reimbursements WHERE id = ?`,
-              matchedIds[0],
-            );
-            paymentBatchId = r?.payment_batch_id || null;
-          }
-
-          // 保存到数据库
-          await db.run(
-            `INSERT INTO bank_receipts
-            (id, batch_id, image_path, page_no, position, ocr_payee, ocr_amount, ocr_remark,
-             ocr_raw_json, parsed_type, parsed_name, parsed_month,
-             match_status, matched_reimbursement_id, payment_batch_id, matched_by, matched_at, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          const hasUniqueBusinessDate =
+            ocr.transactionDateCandidates.length === 1 &&
+            ocr.transactionDateCandidates[0] === ocr.transactionDate &&
+            isValidBankBusinessDate(ocr.transactionDate);
+          const matchedIds = hasUniqueBusinessDate
+            ? await matchReimbursement(ocr, parsed)
+            : null;
+          const persistenceInput: BankReceiptInsertInput = {
+            mode: "insert",
             receiptId,
-            batchId,
-            relativeImagePath,
+            sourceBatchId: batchId,
+            imagePath: relativeImagePath,
             pageNo,
             position,
-            ocr.payee,
-            ocr.amount || null,
-            ocr.remark,
-            JSON.stringify({
-              proofNo: ocr.proofNo,
-              rawText: ocr.rawText.slice(0, 500),
-              matchedIds: matchedIds || [],
-            }),
-            parsed.type,
-            parsed.name || null,
-            parsed.month || null,
-            matchStatus,
-            primaryMatchedId,
-            paymentBatchId,
-            primaryMatchedId ? uploadedBy : null,
-            primaryMatchedId ? now : null,
+            ocrResult: ocr,
+            parsed,
+            matchedReimbursementIds: matchedIds,
+            uploadedBy,
             now,
-          );
-
-          // 匹配成功：为每笔匹配的报销单更新状态 + 写审批记录
-          if (matchedIds && matchedIds.length > 0) {
-            for (const rid of matchedIds) {
-              await db.run(
-                `UPDATE reimbursements
-               SET status = 'payment_uploaded',
-                   payment_proof_path = ?,
-                   payment_upload_time = ?,
-                   pay_time = ?,
-                   updated_at = ?
-               WHERE id = ?`,
-                relativeImagePath,
-                now,
-                now,
-                now,
-                rid,
+          };
+          let persisted: PersistBankReceiptTransactionResult;
+          try {
+            persisted = await persistBankReceiptTransaction(persistenceInput);
+          } catch (error) {
+            if (
+              matchedIds?.length &&
+              error instanceof BankReceiptPersistenceError
+            ) {
+              console.warn(
+                `⚠️ 第${pageNo}页自动匹配复验未通过，已回滚并转待认领：${error.message}`,
               );
-
-              // 查询审批实例，写入审批记录
-              const approvalInstance = await db.get<{ id: string }>(
-                `SELECT id FROM approval_instances WHERE target_id = ? AND target_type = 'reimbursement' ORDER BY created_at DESC LIMIT 1`,
-                rid,
-              );
-              if (approvalInstance) {
-                const recordId = `ar_${nanoid(10)}`;
-                const comment =
-                  matchedIds.length > 1
-                    ? `系统自动上传付款回单（合并打款，共${matchedIds.length}笔）`
-                    : "系统自动上传付款回单";
-                await db.run(
-                  `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                  recordId,
-                  approvalInstance.id,
-                  99,
-                  uploadedBy,
-                  "payment_uploaded",
-                  comment,
-                  now,
-                );
-              }
-            }
-
-            // 同步更新 payment_batches 状态：pending → uploaded
-            // 查出这批报销单所属的 payment_batch（批量付款批次）
-            const batchIds = new Set<string>();
-            for (const rid of matchedIds) {
-              const r = await db.get<{ payment_batch_id: string | null }>(
-                `SELECT payment_batch_id FROM reimbursements WHERE id = ?`,
-                rid,
-              );
-              if (r?.payment_batch_id) batchIds.add(r.payment_batch_id);
-            }
-
-            for (const pbId of batchIds) {
-              // 检查该 payment_batch 内所有报销单是否全部已上传回单
-              const batchReimbursements = await db.all<{ status: string }>(
-                `SELECT r.status FROM reimbursements r
-               JOIN payment_batch_items pbi ON pbi.reimbursement_id = r.id
-               WHERE pbi.batch_id = ?`,
-                pbId,
-              );
-              const allUploaded =
-                batchReimbursements.length > 0 &&
-                batchReimbursements.every(
-                  (r) => r.status === "payment_uploaded",
-                );
-
-              await db.run(
-                `UPDATE payment_batches
-               SET status = ?, payment_proof_path = ?, pay_time = ?, updated_at = ?
-               WHERE id = ? AND status = 'pending'`,
-                allUploaded ? "uploaded" : "pending",
-                relativeImagePath,
-                now,
-                now,
-                pbId,
-              );
-              if (allUploaded) {
-                console.log(
-                  `✅ payment_batches ${pbId} 全部回单已上传，状态更新为 uploaded`,
-                );
-              }
+              persisted = await persistBankReceiptTransaction({
+                ...persistenceInput,
+                matchedReimbursementIds: [],
+              });
+            } else {
+              throw error;
             }
           }
 
@@ -766,9 +1581,13 @@ export async function processBankReceiptPdf(
             imagePath: relativeImagePath,
             ocrResult: ocr,
             parsed,
-            matchStatus,
-            matchedReimbursementId: primaryMatchedId || undefined,
-            matchedReimbursementIds: matchedIds || undefined,
+            matchStatus: persisted.matchStatus,
+            matchedReimbursementId:
+              persisted.matchedReimbursementIds[0] || undefined,
+            matchedReimbursementIds:
+              persisted.matchedReimbursementIds.length > 0
+                ? persisted.matchedReimbursementIds
+                : undefined,
           });
         } catch (err) {
           console.error(`❌ 处理第${pageNo}页回单失败:`, err);
@@ -780,6 +1599,7 @@ export async function processBankReceiptPdf(
   // 更新批次统计
   const matched = results.filter((r) => r.matchStatus === "matched").length;
   const unmatched = results.filter((r) => r.matchStatus === "unmatched").length;
+  const db = await loadBankReceiptDb();
   await db.run(
     `UPDATE bank_receipt_batches
      SET total_pages = ?, total_receipts = ?, matched_count = ?, unmatched_count = ?,

@@ -526,11 +526,13 @@
       }"
       @transitionend="handleMainTransitionEnd"
     >
-      <router-view v-slot="{ Component }">
-        <transition name="fade" mode="out-in">
-          <component :is="Component" />
-        </transition>
-      </router-view>
+      <div class="app-route-content">
+        <router-view v-slot="{ Component }">
+          <transition name="fade" mode="out-in">
+            <component :is="Component" />
+          </transition>
+        </router-view>
+      </div>
     </main>
   </div>
 </template>
@@ -1171,6 +1173,8 @@ onUnmounted(() => {
 
 <style scoped>
 .app-layout {
+  width: 100%;
+  max-width: 100%;
   min-height: 100vh;
   background-color: #ffffff;
   position: relative;
@@ -1226,6 +1230,7 @@ onUnmounted(() => {
   --yl-main-padding-y: 24px;
   --yl-main-padding-x: 45px;
   width: calc(100% - 64px);
+  min-width: 0;
   margin-top: 60px;
   margin-left: 64px;
   min-height: calc(100vh - 60px);
@@ -1241,6 +1246,13 @@ onUnmounted(() => {
   /* 优化模块34：隐藏滚动条但保持滚动功能 */
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE 10+ */
+}
+
+/* 路由内容允许随主区域收缩，避免子页面固有宽度撑破布局 */
+.app-route-content {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .app-main.is-full-width-page {
@@ -1274,7 +1286,7 @@ onUnmounted(() => {
 @media (max-width: 1366px) {
   .app-main {
     --yl-main-padding-y: 16px;
-    --yl-main-padding-x: 20px;
+    --yl-main-padding-x: clamp(16px, 1.46vw, 20px);
   }
 }
 

@@ -16,6 +16,9 @@ export const MONTHLY_FINANCIAL_MANUAL_CATEGORIES = [
   "welfare_one_supplement",
   "welfare_two_supplement",
   "welfare_one_407",
+  "welfare_one_drinking_water",
+  "welfare_one_office",
+  "welfare_one_electricity",
   "welfare_one_407_ai",
   "welfare_one_8h_ai",
   "welfare_two_refreshment",
@@ -76,7 +79,25 @@ export interface MonthlyFinancialAutomaticSnapshot {
     description: string;
     personId?: string | null;
     personName?: string | null;
+    bankAccountCode?: "basic" | "general" | "business" | null;
+    electronicReceiptNo?: string | null;
+    previewUrl?: string | null;
+    linkStatus?: "matched" | "conflict" | "unmatched" | null;
   }>;
+  bank?: {
+    activeAccounts: Array<"basic" | "general" | "business">;
+    chargeAccounts?: Array<"general" | "business">;
+    generalInterest: string;
+    businessInterest: string;
+    generalBankFee: string;
+    businessBankFee: string;
+    internalTransferTotal: string;
+    partialAccounts: Array<"basic" | "general" | "business">;
+    reviewRequiredCount: number;
+    unclassifiedCount: number;
+    conflictCount: number;
+    updatedAt: string | null;
+  };
   generatedAt: string;
 }
 
@@ -108,6 +129,9 @@ export interface MonthlyFinancialReportView {
     businessBankFee: string;
     generalOtherExpense: string;
     welfareOne407: string;
+    welfareOneDrinkingWater: string;
+    welfareOneOffice: string;
+    welfareOneElectricity: string;
     welfareOne407Ai: string;
     welfareOne8hAi: string;
     welfareTwoRefreshment: string;
@@ -124,4 +148,30 @@ export interface MonthlyFinancialReportView {
     canReopen: boolean;
     canDownload: boolean;
   };
+}
+
+export interface MonthlyFinancialTrendPoint {
+  month: string;
+  status: MonthlyFinancialReportStatus | null;
+  valueState: "closed" | "current" | null;
+  actualReceipt: string | null;
+  settlementInflow: string | null;
+  totalOutflow: string | null;
+  netChange: string | null;
+  closingTotal: string | null;
+  accountClosing: Record<FinancialAccountCode, string | null>;
+}
+
+export interface MonthlyFinancialTrendWarning {
+  code: string;
+  message: string;
+  months: string[];
+}
+
+export interface MonthlyFinancialTrendData {
+  from: string;
+  to: string;
+  availableYears: number[];
+  points: MonthlyFinancialTrendPoint[];
+  warnings: MonthlyFinancialTrendWarning[];
 }

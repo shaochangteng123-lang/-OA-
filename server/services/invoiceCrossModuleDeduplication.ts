@@ -6,6 +6,12 @@ export interface CrossModuleInvoiceUsage {
   ownerId: string;
 }
 
+export interface ReimbursementInvoiceUsage extends CrossModuleInvoiceUsage {
+  source: "reimbursement";
+  usageKind: "invoice" | "deduction";
+  applicantName: string;
+}
+
 export function normalizeCrossModuleInvoiceNumber(value: unknown): string {
   return String(value || "")
     .normalize("NFKC")
@@ -75,29 +81,39 @@ export async function findReimbursementInvoiceUsage(
   client: PoolClient,
   normalizedInvoiceNumber: string,
   excludeReimbursementId: string | null = null,
-): Promise<CrossModuleInvoiceUsage | null> {
+): Promise<ReimbursementInvoiceUsage | null> {
   const result = await client.query<{
     source: "reimbursement";
+    usage_kind: "invoice" | "deduction";
     record_id: string;
     owner_id: string;
+    applicant_name: string;
   }>(
     `SELECT 'reimbursement'::text AS source,
-       invoice.id AS record_id, reimbursement.id AS owner_id
+       CASE WHEN COALESCE(invoice.is_deduction, 0) = 1
+         THEN 'deduction' ELSE 'invoice' END AS usage_kind,
+       invoice.id AS record_id, reimbursement.id AS owner_id,
+       reimbursement.applicant_name
      FROM reimbursement_invoices invoice
      JOIN reimbursements reimbursement
        ON reimbursement.id = invoice.reimbursement_id
      WHERE invoice.invoice_number IS NOT NULL
        AND SPLIT_PART(invoice.file_path, '/', -1) NOT LIKE 'receipt-%'
        AND UPPER(invoice.invoice_number) NOT LIKE 'RECEIPT-%'
+       AND reimbursement.status <> 'rejected'
+       AND COALESCE(reimbursement.is_deleted, FALSE) = FALSE
        AND ($2::text IS NULL OR reimbursement.id <> $2)
        AND UPPER(REGEXP_REPLACE(NORMALIZE(BTRIM(invoice.invoice_number), NFKC), '[^A-Za-z0-9]', '', 'g')) = $1
      UNION ALL
-     SELECT 'reimbursement'::text AS source,
-       deduction.id AS record_id, reimbursement.id AS owner_id
+     SELECT 'reimbursement'::text AS source, 'deduction'::text AS usage_kind,
+       deduction.id AS record_id, reimbursement.id AS owner_id,
+       reimbursement.applicant_name
      FROM reimbursement_deduction_invoices deduction
      JOIN reimbursements reimbursement
        ON reimbursement.id = deduction.reimbursement_id
      WHERE deduction.invoice_number IS NOT NULL
+       AND reimbursement.status <> 'rejected'
+       AND COALESCE(reimbursement.is_deleted, FALSE) = FALSE
        AND ($2::text IS NULL OR reimbursement.id <> $2)
        AND UPPER(REGEXP_REPLACE(NORMALIZE(BTRIM(deduction.invoice_number), NFKC), '[^A-Za-z0-9]', '', 'g')) = $1
      LIMIT 1`,
@@ -105,6 +121,12 @@ export async function findReimbursementInvoiceUsage(
   );
   const row = result.rows[0];
   return row
-    ? { source: row.source, recordId: row.record_id, ownerId: row.owner_id }
+    ? {
+        source: row.source,
+        usageKind: row.usage_kind,
+        recordId: row.record_id,
+        ownerId: row.owner_id,
+        applicantName: row.applicant_name,
+      }
     : null;
 }

@@ -32,7 +32,7 @@ describe("资产合同资金方式自动判断", () => {
     ).toBe("engineering_direct");
   });
 
-  it("双方均无工程咨询公司时使用工程咨询划拨科技支付", () => {
+  it("唯一我方签约主体不是工程咨询公司时使用内部划拨", () => {
     expect(
       inferAssetFundingMode(
         "asset",
@@ -40,6 +40,36 @@ describe("资产合同资金方式自动判断", () => {
         "北京羽隶科技有限公司",
       ),
     ).toBe("engineering_to_technology");
+  });
+
+  it("第三家已配置我方公司签约时仍使用内部划拨", () => {
+    expect(
+      inferAssetFundingMode(
+        "asset",
+        "外部供应商有限公司",
+        "北京羽隶设计有限公司",
+        [
+          {
+            name: "北京羽隶工程咨询有限公司",
+            taxId: "ENGINEERING-TAX-ID",
+          },
+          { name: "北京羽隶设计有限公司", taxId: "DESIGN-TAX-ID" },
+        ],
+      ),
+    ).toBe("engineering_to_technology");
+  });
+
+  it("我方签约主体未配置或双方均为内部主体时保持待核对", () => {
+    expect(
+      inferAssetFundingMode("asset", "外部供应商有限公司", "未配置集团公司"),
+    ).toBe("pending_review");
+    expect(
+      inferAssetFundingMode(
+        "asset",
+        "北京羽隶工程咨询有限公司",
+        "北京羽隶科技有限公司",
+      ),
+    ).toBe("pending_review");
   });
 
   it("非资产合同不生成资产资金方式", () => {

@@ -8,6 +8,7 @@ import {
   contractFinancialOcrEngineVersion,
   contractFinancialOcrParserVersion,
   allocateAdditionalContractFinancialAmounts,
+  allocateAvailableContractFinancialAmounts,
   allocateContractFinancialAmounts,
   allocatePartialContractFinancialAmounts,
   CONTRACT_COMPANY_SUBJECTS,
@@ -198,6 +199,74 @@ describe("合同财务凭证业务方向与客户端一致性门禁", () => {
       allocateAdditionalContractFinancialAmounts([600], [600], [1]),
     ).toThrow("已无可分配余额");
   });
+
+  describe("开放财务登记按可覆盖金额分配", () => {
+    it("无发票或无回单时不生成金额对应关系", () => {
+      expect(allocateAvailableContractFinancialAmounts([], [40])).toEqual([]);
+      expect(allocateAvailableContractFinancialAmounts([100], [])).toEqual([]);
+      expect(allocateAvailableContractFinancialAmounts([], [])).toEqual([]);
+    });
+
+    it("发票金额大于回款时完整分配当前回款", () => {
+      expect(allocateAvailableContractFinancialAmounts([100], [40])).toEqual([
+        { invoiceIndex: 0, settlementIndex: 0, allocatedAmount: 40 },
+      ]);
+    });
+
+    it("回款金额大于发票时只分配当前发票可覆盖金额", () => {
+      expect(allocateAvailableContractFinancialAmounts([40], [100])).toEqual([
+        { invoiceIndex: 0, settlementIndex: 0, allocatedAmount: 40 },
+      ]);
+    });
+
+    it("多发票多回款按固定顺序生成确定的可覆盖关系", () => {
+      const expected = [
+        { invoiceIndex: 0, settlementIndex: 0, allocatedAmount: 30 },
+        { invoiceIndex: 1, settlementIndex: 0, allocatedAmount: 20 },
+        { invoiceIndex: 1, settlementIndex: 1, allocatedAmount: 50 },
+      ];
+
+      expect(
+        allocateAvailableContractFinancialAmounts([30, 70], [50, 80]),
+      ).toEqual(expected);
+      expect(
+        allocateAvailableContractFinancialAmounts([30, 70], [50, 80]),
+      ).toEqual(expected);
+    });
+
+    it("小数金额按分精确分配且不产生浮点尾差", () => {
+      const allocations = allocateAvailableContractFinancialAmounts(
+        [0.03],
+        [0.01, 0.02],
+      );
+
+      expect(allocations).toEqual([
+        { invoiceIndex: 0, settlementIndex: 0, allocatedAmount: 0.01 },
+        { invoiceIndex: 0, settlementIndex: 1, allocatedAmount: 0.02 },
+      ]);
+      expect(
+        allocations.reduce(
+          (sum, allocation) =>
+            sum + Math.round(allocation.allocatedAmount * 100),
+          0,
+        ),
+      ).toBe(3);
+    });
+
+    it.each([
+      ["零发票", [0], [1]],
+      ["负数发票", [-1], [1]],
+      ["零回款", [1], [0]],
+      ["负数回款", [1], [-1]],
+      ["非数字回款", [1], [Number.NaN]],
+      ["无限大回款", [1], [Number.POSITIVE_INFINITY]],
+    ])("%s金额无效时拒绝分配", (_label, invoices, settlements) => {
+      expect(() =>
+        allocateAvailableContractFinancialAmounts(invoices, settlements),
+      ).toThrow("大于零的有效金额");
+    });
+  });
+
   it("只有基础设施失败或租约过期的处理中任务可自动重试", () => {
     const now = Date.parse("2026-08-06T01:00:00.000Z");
     expect(
@@ -281,7 +350,7 @@ describe("合同财务凭证业务方向与客户端一致性门禁", () => {
     expect(contractFinancialOcrEngineVersion("receipt")).toBe("v6_medium");
     expect(contractFinancialOcrEngineVersion("payment")).toBe("v6_medium");
     expect(contractFinancialOcrParserVersion("receipt")).toBe(
-      "contract-bank-receipt-parser-v10",
+      "contract-bank-receipt-parser-v11",
     );
   });
 

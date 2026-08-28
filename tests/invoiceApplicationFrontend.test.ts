@@ -134,7 +134,7 @@ describe("开票申请前端流程", () => {
     expect(listSource).toContain(
       "item.invoiceApplicationEligibility?.eligible === true",
     );
-    expect(listSource).toContain('v-if="canApplyInvoice(row)"');
+    expect(listSource).toContain('v-if="isEmployee && canApplyInvoice(row)"');
     expect(listSource).toContain('v-if="canApplyInvoice(item)"');
     expect(listSource).not.toContain(
       "getInvoiceApplicationEligibility(row.id)",

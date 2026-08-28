@@ -8,7 +8,7 @@ export type ContractFinancialCategory = "main_business" | "non_main" | "asset";
 
 export const CONTRACT_BANK_RECEIPT_OCR_ENGINE_VERSION = "v6_medium";
 export const CONTRACT_BANK_RECEIPT_OCR_PARSER_VERSION =
-  "contract-bank-receipt-parser-v10";
+  "contract-bank-receipt-parser-v11";
 export const CONTRACT_INVOICE_OCR_PARSER_VERSION =
   "contract-invoice-parser-v10";
 
@@ -262,6 +262,35 @@ export function allocatePartialContractFinancialAmounts(
     throw new Error("结算金额未能完整分配到发票可分配余额");
   }
   return allocations;
+}
+
+/**
+ * 将当前已经存在的发票与银行结算凭证按可覆盖金额建立对应关系。
+ *
+ * 与“部分结算”不同，这里允许任意一侧金额暂时更大：回款先到、发票后补时，
+ * 先分配两侧能够覆盖的部分，未覆盖金额继续留在同一财务登记中等待后续凭证。
+ * 任意一侧尚无凭证时返回空数组。
+ */
+export function allocateAvailableContractFinancialAmounts(
+  invoiceAmounts: readonly number[],
+  settlementAmounts: readonly number[],
+): ContractFinancialAmountAllocation[] {
+  if (!invoiceAmounts.length || !settlementAmounts.length) return [];
+  const invoiceCents = invoiceAmounts.map((amount) => Math.round(amount * 100));
+  const settlementCents = settlementAmounts.map((amount) =>
+    Math.round(amount * 100),
+  );
+  if (
+    invoiceCents.some(
+      (amount) => !Number.isSafeInteger(amount) || amount <= 0,
+    ) ||
+    settlementCents.some(
+      (amount) => !Number.isSafeInteger(amount) || amount <= 0,
+    )
+  ) {
+    throw new Error("发票和结算金额必须为大于零的有效金额");
+  }
+  return allocateContractFinancialAmountsByCents(invoiceCents, settlementCents);
 }
 
 /**

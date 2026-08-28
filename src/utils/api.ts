@@ -23,6 +23,8 @@ api.interceptors.response.use(
     return response
   },
   (error) => {
+    const isSilentError =
+      String(error.config?.headers?.['X-Silent-Error'] || '') === 'true'
     if (error.response) {
       // 对于检查会话的 401 错误，静默处理
       const isCheckSessionRequest =
@@ -40,13 +42,13 @@ api.interceptors.response.use(
           }
           break
         case 403:
-          ElMessage.error('没有权限访问该资源')
+          if (!isSilentError) ElMessage.error('没有权限访问该资源')
           break
         case 404:
-          ElMessage.error('请求的资源不存在')
+          if (!isSilentError) ElMessage.error('请求的资源不存在')
           break
         case 500:
-          ElMessage.error('服务器错误，请稍后重试')
+          if (!isSilentError) ElMessage.error('服务器错误，请稍后重试')
           break
         default:
           // 400 错误由业务代码自行处理，不在拦截器中提示
@@ -63,7 +65,10 @@ api.interceptors.response.use(
         '/api/worklog-ai/complete'
       ]
       const requestUrl = error.config?.url || ''
-      if (!silentUrls.some(url => requestUrl.includes(url))) {
+      if (
+        !isSilentError &&
+        !silentUrls.some(url => requestUrl.includes(url))
+      ) {
         ElMessage.error('网络错误，请检查网络连接')
       }
     } else {

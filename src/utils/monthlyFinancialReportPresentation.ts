@@ -1,4 +1,8 @@
-import type { MonthlyFinancialAutomaticDetail } from "@/types/monthlyFinancialReport";
+import type {
+  MonthlyFinancialAutomaticDetail,
+  MonthlyFinancialBankAccountCode,
+  MonthlyFinancialBankReceiptTransaction,
+} from "@/types/monthlyFinancialReport";
 
 const UNSIGNED_AMOUNT_PATTERN = /^(?:0|[1-9]\d{0,17})(?:\.\d{1,12})?$/;
 const SIGNED_AMOUNT_PATTERN = /^-?(?:0|[1-9]\d{0,17})(?:\.\d{1,12})?$/;
@@ -16,6 +20,41 @@ export function isMonthlyFinancialAmountText(
 export function isPositiveMonthlyFinancialAmountText(value: string): boolean {
   const text = value.trim();
   return isMonthlyFinancialAmountText(text) && !/^0(?:\.0+)?$/.test(text);
+}
+
+export function monthlyFinancialBankSourceLabel(
+  activeAccounts: readonly MonthlyFinancialBankAccountCode[] | null | undefined,
+  accountCode: MonthlyFinancialBankAccountCode,
+  chargeAccounts?: readonly ("general" | "business")[] | null,
+): "银行回单识别" | "手工录入" {
+  return activeAccounts?.includes(accountCode) ||
+    chargeAccounts?.includes(accountCode as "general" | "business")
+    ? "银行回单识别"
+    : "手工录入";
+}
+
+export function monthlyReimbursementLinkDisplay(
+  transaction: MonthlyFinancialBankReceiptTransaction,
+): {
+  label: string;
+  type: "success" | "warning" | "danger" | "info";
+} {
+  const link = transaction.reimbursementLink;
+  if (link?.status === "matched") {
+    return link.displayAction === "replaced"
+      ? { label: "已替换回单", type: "success" }
+      : { label: "已挂载回单", type: "success" };
+  }
+  if (link?.status === "conflict") {
+    return { label: "报销匹配待核对", type: "danger" };
+  }
+  if (transaction.employeeMatch?.status === "matched") {
+    return { label: "员工已匹配，待关联报销", type: "warning" };
+  }
+  if (transaction.employeeMatch?.status === "ambiguous") {
+    return { label: "员工匹配不唯一", type: "danger" };
+  }
+  return { label: "未关联报销", type: "info" };
 }
 
 export function aggregateAutomaticDetailsByPerson(

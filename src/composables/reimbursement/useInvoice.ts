@@ -12,6 +12,8 @@ import {
   validateInvoiceAmount,
 } from './useInvoiceValidation'
 import { UPLOAD_CONFIG, isTransportFuelCategory } from '@/utils/reimbursement/constants'
+import { useAuthStore } from '@/stores/auth'
+import { buildReimbursementInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
 
 // 发票明细类型定义
 export interface InvoiceItem {
@@ -52,6 +54,7 @@ export interface UploadResponse {
  * 发票管理 composable
  */
 export function useInvoice() {
+  const authStore = useAuthStore()
   // 发票明细列表
   const invoiceList = ref<InvoiceItem[]>([])
   // 文件列表（用于 el-upload）
@@ -111,7 +114,11 @@ export function useInvoice() {
    * 策略：任何失败都移除缩略图，只有识别成功时才保留缩略图。
    * 识别过程中若用户点击删除按钮，则中断请求并移除缩略图。
    */
-  async function handleFileChange(file: any, fileListParam: any[]): Promise<void> {
+  async function handleFileChange(
+    file: any,
+    fileListParam: any[],
+    reimbursementId?: string,
+  ): Promise<void> {
     // 校验文件格式
     const fileName = file.name?.toLowerCase() || ''
     const isImageFile =
@@ -151,6 +158,13 @@ export function useInvoice() {
       const uploadFormData = new FormData()
       uploadFormData.append('invoice', file.raw)
       uploadFormData.append('originalFileName', file.name)
+      const requestedReimbursementId = String(reimbursementId || '').trim()
+      if (
+        requestedReimbursementId &&
+        !/^(?:create|new|undefined|null)$/i.test(requestedReimbursementId)
+      ) {
+        uploadFormData.append('reimbursementId', requestedReimbursementId)
+      }
 
       const response = await fetch('/api/reimbursement/upload-invoice', {
         method: 'POST',
@@ -181,7 +195,10 @@ export function useInvoice() {
 
         // 校验重复（本地已有 + 并发处理中的发票号码）
         const allKnownNumbers = [...invoiceNumbers.value, ...pendingInvoiceNumbers]
-        const duplicateResult = validateInvoiceDuplicate(invoiceNumber, allKnownNumbers)
+        const duplicateResult = validateInvoiceDuplicate(
+          invoiceNumber,
+          allKnownNumbers,
+        )
         if (!duplicateResult.valid) {
           loadingMessage.close()
           showUploadError(duplicateResult.message)
@@ -208,7 +225,13 @@ export function useInvoice() {
             const dupData = await dupRes.json()
             if (dupData.success && dupData.data?.duplicate) {
               loadingMessage.close()
-              showUploadError(dupData.data.message || `${invoiceNumber}此发票已上传，请勿重复上传`)
+              showUploadError(
+                dupData.data.message ||
+                  buildReimbursementInvoiceDuplicateMessage(
+                    authStore.user?.name,
+                    'invoice',
+                  ),
+              )
               pendingInvoiceNumbers.delete(invoiceNumber)
               removeFromFileList(file.uid, fileListParam)
               return

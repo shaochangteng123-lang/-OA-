@@ -137,6 +137,38 @@ describe("合同台账前端筛选与动作", () => {
     });
   });
 
+  it("合同台账兼容映射合同族关联协议分类计数", async () => {
+    (api.get as jest.Mock).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: {
+          items: [
+            {
+              id: "main-with-agreements",
+              relationType: "main",
+              supplement_agreement_count: "2",
+              termination_agreement_count: 1,
+              related_agreement_count: "3",
+              historical_imported: true,
+            },
+          ],
+          total: 1,
+          summary: {},
+        },
+      },
+    });
+
+    const result = await getContracts();
+
+    expect(result.items[0]).toMatchObject({
+      id: "main-with-agreements",
+      supplementAgreementCount: 2,
+      terminationAgreementCount: 1,
+      relatedAgreementCount: 3,
+      historicalImported: true,
+    });
+  });
+
   it("页面地址保存关键词、筛选和分页并支持刷新恢复", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
@@ -161,6 +193,35 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).toContain("normalizedRouteQuery");
     expect(source).toContain("{ immediate: true }");
     expect(source).toContain("multiple");
+  });
+
+  it("从筛选后的合同台账进入详情并返回原筛选页面", () => {
+    const listSource = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractList.vue"),
+      "utf8",
+    );
+    const detailSource = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractDetail.vue"),
+      "utf8",
+    );
+
+    expect(listSource).toContain("function contractDetailReturnQuery(");
+    expect(listSource).toContain('from: "contract-ledger"');
+    expect(listSource).toContain("returnTo: route.fullPath");
+    expect(listSource).toContain(
+      'query: contractDetailReturnQuery({ tab: "auxiliary" })',
+    );
+    expect(listSource).toContain(
+      'query: contractDetailReturnQuery({ tab: "seal", action: "seal" })',
+    );
+    expect(listSource).toContain(
+      'query: contractDetailReturnQuery({ tab: "finance", action: "record" })',
+    );
+    expect(detailSource).toContain('route.query.from === "contract-ledger"');
+    expect(detailSource).toContain('returnTo.startsWith("/contracts?")');
+    expect(detailSource).toContain(
+      "historyBackPath === detailLedgerReturnPath.value",
+    );
   });
 
   it("合同日期筛选可在年、月、日三个选择层级间切换并默认显示双月日历", () => {
@@ -205,6 +266,17 @@ describe("合同台账前端筛选与动作", () => {
     expect(backendSource).toContain(
       "status IN ('effective', 'executing', 'completed')",
     );
+    expect(
+      backendSource.match(/CURRENT_DATE \+ INTERVAL '1 month'/g),
+    ).toHaveLength(4);
+    expect(backendSource).not.toContain("INTERVAL '3 months'");
+    expect(backendSource.match(/status <> 'completed'/g)).toHaveLength(4);
+    expect(backendSource).toContain(
+      "lease_source.lease_end_date >= TO_CHAR(\n                CURRENT_DATE, 'YYYY-MM-DD'",
+    );
+    expect(backendSource).toContain(
+      "c.lease_end_date >= TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')",
+    );
     expect(backendSource).not.toContain(
       "status NOT IN ('completed', 'rejected', 'terminated')",
     );
@@ -232,13 +304,16 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).toContain("含草稿、初始审批中和待盖章");
     expect(source).toContain('label="已付"');
     expect(source).toContain('label="责任人"');
-    expect(source).toContain('row.ownerName || "—"');
-    expect(source).toContain("canCreate && row.status === 'draft'");
+    expect(source).toContain("contractOwnerLabel(row)");
+    expect(source).toMatch(
+      /v-if="[\s\S]*?canCreate &&[\s\S]*?\['draft', 'pending_seal'\]\.includes\(row\.status\)[\s\S]*?"[\s\S]*?class="action-slot action-status"/,
+    );
+    expect(source).toContain("v-if=\"row.status === 'draft'\"");
     expect(source).not.toContain("canApproveItem");
     expect(source).not.toContain("openPendingApproval");
     expect(source).not.toContain(">待审批</el-button");
     expect(source).toContain("router.push('/contract-approvals')");
-    expect(source).toContain("canCreate && row.status === 'pending_seal'");
+    expect(source).toContain("v-else-if=\"row.status === 'pending_seal'\"");
     expect(source).toContain("openFinancialRegistration(row)");
     expect(source).toContain("row.relationType === 'main'");
     expect(source).toContain("item.relationType === 'main'");
@@ -249,8 +324,12 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).not.toContain(
       "['effective', 'executing', 'completed'].includes(row.status)",
     );
-    expect(source).toContain('query: { tab: "finance", action: "record" }');
-    expect(source).toContain('query: { tab: "seal", action: "seal" }');
+    expect(source).toContain(
+      'query: contractDetailReturnQuery({ tab: "finance", action: "record" })',
+    );
+    expect(source).toContain(
+      'query: contractDetailReturnQuery({ tab: "seal", action: "seal" })',
+    );
     expect(source).toContain("撤销此合同");
     expect(source).toContain("canCancelContract(row)");
     expect(source).toContain("canCancelContract(item)");
@@ -266,7 +345,7 @@ describe("合同台账前端筛选与动作", () => {
     );
   });
 
-  it("租赁期限右侧展示按根合同有效银行业务日期聚合的合同截至日期", () => {
+  it("台账隐藏合同截至日期，但接口保留核算日期供其他页面使用", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
@@ -283,15 +362,16 @@ describe("合同台账前端筛选与动作", () => {
       path.resolve(process.cwd(), "server/routes/contracts.ts"),
       "utf8",
     );
-    expect(source.indexOf('label="合同截至日期"')).toBeGreaterThan(
-      source.indexOf('label="租赁期限"'),
+    const settlementAccountingSource = fs.readFileSync(
+      path.resolve(
+        process.cwd(),
+        "server/services/contractSettlementAccounting.ts",
+      ),
+      "utf8",
     );
-    expect(source).toContain("displayedContractCutoffDate(row)");
-    expect(source).toContain("displayedContractCutoffDate(item)");
-    expect(source).toContain('item.relationType !== "main"');
-    expect(source).toContain(
-      'item.status !== "completed" && item.status !== "terminated"',
-    );
+    expect(source).not.toContain('label="合同截至日期"');
+    expect(source).not.toContain("displayedContractCutoffDate");
+    expect(source).not.toContain('"合同截至日期",');
     expect(typeSource).toContain("contractCutoffDate?: string | null");
     expect(apiSource).toContain("source.contract_cutoff_date");
     expect(backendSource).toContain("END AS contract_cutoff_date");
@@ -299,13 +379,12 @@ describe("合同台账前端筛选与动作", () => {
       "roots.root_status NOT IN ('completed', 'terminated') THEN NULL",
     );
     expect(backendSource).toContain("SELECT MAX(receipt.receipt_date)");
-    expect(backendSource).toContain("FROM contract_payments payment");
-    expect(backendSource).toContain("FROM contract_external_payments payment");
-    expect(backendSource).toContain(
-      "asset_funding_mode = 'engineering_to_technology' THEN GREATEST(",
+    expect(backendSource).toContain("contractCostSettlementLastDateSql");
+    expect(settlementAccountingSource).toContain(
+      '"contract_external_payments"',
     );
-    expect(backendSource).toContain(
-      "roots.asset_funding_mode = 'engineering_to_technology'",
+    expect(settlementAccountingSource).toContain(
+      "accounting_line.include_in_contract_accounting = TRUE",
     );
     expect(backendSource).toContain(
       "fm.contract_cutoff_date AS contract_cutoff_date",
@@ -358,53 +437,82 @@ describe("合同台账前端筛选与动作", () => {
     expect(typeSource).toContain("hasSealedContractFile?: boolean");
   });
 
-  it("资产类合同不占用项目名称列及导出字段", () => {
+  it("完整表和自适应表各保留一个项目名称主列，导出仍保留项目字段", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
-    expect(source).toContain(
+    const fullTableStart = source.indexOf("contract-table-full");
+    const fullTable = source.slice(
+      fullTableStart,
+      source.indexOf("</el-table>", fullTableStart),
+    );
+    const adaptiveTableStart = source.indexOf("contract-table-compact");
+    const adaptiveTable = source.slice(
+      adaptiveTableStart,
+      source.indexOf("</el-table>", adaptiveTableStart),
+    );
+    expect(fullTable.match(/label="项目名称"/g)).toHaveLength(1);
+    expect(adaptiveTable.match(/label="项目名称"/g)).toHaveLength(1);
+    expect(source).not.toContain(
       'row.category === "asset" ? "—" : row.projectName',
     );
-    expect(source).toContain("item.category !== 'asset'");
+    expect(source).not.toContain("item.category !== 'asset'");
     expect(source).toContain(
       'item.category === "asset" ? "" : item.projectName',
     );
   });
 
-  it("草拟合同名称缺失时显示上传文件名而不是系统编号", () => {
+  it("草拟合同项目名称缺失时显示待识别，不用文件名代替", () => {
     const backendSource = fs.readFileSync(
       path.resolve(process.cwd(), "server/routes/contracts.ts"),
       "utf8",
     );
     expect(backendSource).toContain("function contractListDisplayName");
     expect(backendSource).toContain("draft_file.file_name AS source_file_name");
-    expect(backendSource).toContain("? `草拟：${sourceFileName}`");
+    expect(backendSource).toContain(
+      'row.status === "draft" ? "项目名称待识别" : "—"',
+    );
+    expect(backendSource).not.toContain("? `草拟：${sourceFileName}`");
     expect(backendSource).toContain("name: contractListDisplayName(row)");
     expect(backendSource).not.toContain(
       'name: row.title || row.project_name || row.contract_no || "未命名合同"',
     );
   });
 
-  it("合同信息列显示合同名称和编号", () => {
+  it("项目名称列显示合同内项目名称和编号", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
-    const columnStart = source.indexOf('label="合同信息"');
+    const columnStart = source.indexOf('label="项目名称"');
     const columnEnd = source.indexOf("</el-table-column>", columnStart);
     const columnSource = source.slice(columnStart, columnEnd);
     expect(columnSource).toContain("contractDisplayName(row)");
     expect(columnSource).toContain("contractNumberText(row)");
+    expect(columnSource).toContain('min-width="640"');
     expect(source).toContain("function contractNumberText");
+    expect(source).toContain(
+      'const projectName = String(item.projectName || "").trim()',
+    );
+    expect(source).toContain('return item.status === "draft"');
+    expect(source).toContain('"项目名称待识别"');
+    expect(source).not.toContain(
+      'String(item.name || item.projectName || "未命名合同").trim()',
+    );
+    expect(source).not.toContain(
+      'return String(item.name || "未命名资产合同")',
+    );
+    expect(source).toContain("overflow-wrap: normal");
+    expect(source).toContain("white-space: nowrap");
   });
 
-  it("关联协议子行完整换行显示名称且不重复层级符号和协议标识", () => {
+  it("关联协议子行完整单行显示名称且不重复层级符号和协议标识", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
-    const columnStart = source.indexOf('label="合同信息"');
+    const columnStart = source.indexOf('label="项目名称"');
     const columnEnd = source.indexOf("</el-table-column>", columnStart);
     const columnSource = source.slice(columnStart, columnEnd);
     expect(columnSource).toContain(':title="contractDisplayName(row)"');
@@ -413,8 +521,8 @@ describe("合同台账前端筛选与动作", () => {
     expect(columnSource).not.toContain("show-overflow-tooltip");
     expect(source).toContain("function shouldShowRelationBadge");
     expect(source).toContain("!normalizedName.includes(normalizedLabel)");
-    expect(source).toContain("overflow-wrap: anywhere");
-    expect(source).toContain("white-space: normal");
+    expect(source).toContain("overflow-wrap: normal");
+    expect(source).toContain("white-space: nowrap");
     expect(source).not.toContain(
       "<template v-if=\"item.relationType !== 'main'\">↳ </template>",
     );
@@ -448,6 +556,9 @@ describe("合同台账前端筛选与动作", () => {
                   version: 1,
                   amount: 230000,
                   currentAmount: 230000,
+                  supplementAgreementCount: 2,
+                  terminationAgreementCount: 1,
+                  relatedAgreementCount: 3,
                   receivedAmount: 0,
                   completionRate: 0,
                 },
@@ -571,17 +682,46 @@ describe("合同台账前端筛选与动作", () => {
     await nextTick();
 
     const mainRows = wrapper
+      .find(".contract-table-full")
       .findAll("tr.el-table__row")
       .filter((row) => !row.classes().includes("related-contract-row"));
     expect(mainRows).toHaveLength(2);
     expect(mainRows.map((row) => row.find("td").text())).toEqual(["1", "2"]);
+    const desktopAgreementBadges = wrapper
+      .find(".contract-table-full")
+      .findAll(".agreement-type-badge");
+    expect(desktopAgreementBadges.map((badge) => badge.text())).toEqual([
+      "补充协议 2 份",
+      "解除协议 1 份",
+    ]);
+    expect(desktopAgreementBadges[0].classes()).toContain("is-supplement");
+    expect(desktopAgreementBadges[1].classes()).toContain("is-termination");
+    expect(
+      wrapper
+        .find(".contract-table-full .related-agreement-badges")
+        .attributes("aria-label"),
+    ).toBe("关联 3 份协议（补充 2 · 终止／解除 1）");
+
+    const compactAgreementBadges = wrapper
+      .find(".contract-table-compact")
+      .findAll(".agreement-type-badge");
+    expect(compactAgreementBadges.map((badge) => badge.text())).toEqual([
+      "补充协议 2 份",
+      "解除协议 1 份",
+    ]);
+    expect(
+      wrapper
+        .find(".mobile-agreement-summary")
+        .findAll(".agreement-type-badge")
+        .map((badge) => badge.text()),
+    ).toEqual(["补充协议 2 份", "解除协议 1 份"]);
 
     expect(
       wrapper.findAll(".mobile-contract-card.is-related-contract"),
     ).toHaveLength(0);
     const mobileToggle = wrapper
       .findAll(".mobile-card-actions button")
-      .find((button) => button.text().includes("展开 2 份关联协议"));
+      .find((button) => button.text().includes("展开 2 份待归档协议"));
     expect(mobileToggle).toBeDefined();
     await mobileToggle!.trigger("click");
     await nextTick();
@@ -594,7 +734,9 @@ describe("合同台账前端筛选与动作", () => {
     await expandButton.trigger("click");
     await nextTick();
 
-    const relatedRows = wrapper.findAll("tr.related-contract-row");
+    const relatedRows = wrapper
+      .find(".contract-table-full")
+      .findAll("tr.related-contract-row");
     expect(relatedRows).toHaveLength(2);
     expect(relatedRows[0].text()).toContain(supplementName);
     expect(relatedRows[1].text()).toContain(unsealedTerminationName);
@@ -620,6 +762,48 @@ describe("合同台账前端筛选与动作", () => {
     expect(ledgerSource).toContain("children: []");
     expect(ledgerSource).toContain("rootsById.get(rootId)");
     expect(ledgerSource).toContain("root.children!.push({ ...item })");
+  });
+
+  it("主合同台账一次性聚合全部有效补充及终止解除协议数量", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractList.vue"),
+      "utf8",
+    );
+    const backendSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
+    const typeSource = fs.readFileSync(
+      path.resolve(process.cwd(), "src/types/contract.ts"),
+      "utf8",
+    );
+
+    expect(backendSource).toContain("AS supplement_agreement_count");
+    expect(backendSource).toContain("AS termination_agreement_count");
+    expect(backendSource).toContain("AS related_agreement_count");
+    expect(backendSource).toContain("child.status <> 'rejected'");
+    expect(backendSource).toContain(
+      "child.relation_type IN ('supplement', 'termination')",
+    );
+    expect(source).toContain("relatedAgreementSummary(row)");
+    expect(source).toContain("relatedAgreementSummary(item)");
+    expect(source).toContain("relatedAgreementBadges(row)");
+    expect(source).toContain("relatedAgreementBadges(item)");
+    expect(source).toContain('label: "补充协议"');
+    expect(source).toContain('label: "解除协议"');
+    expect(source).toContain(".agreement-type-badge.is-supplement");
+    expect(source).toContain(".agreement-type-badge.is-termination");
+    expect(source).toContain("终止／解除");
+    expect(source).toContain("份待归档协议");
+    expect(typeSource).toContain("relatedAgreementCount?: number");
+    expect(typeSource).toContain("supplementAgreementCount?: number");
+    expect(typeSource).toContain("terminationAgreementCount?: number");
+    expect(typeSource).toContain("historicalImported?: boolean");
+    expect(source).toContain('item.historicalImported ? "待分配" : "—"');
+    expect(backendSource).toContain("creator.name AS owner_name");
+    expect(backendSource).not.toContain(
+      "THEN NULL ELSE creator.name END AS owner_name",
+    );
   });
 
   it("生效主合同提供快速补充协议入口并携带锁定的父合同参数", () => {
@@ -724,13 +908,13 @@ describe("合同台账前端筛选与动作", () => {
     expect(backendSource).toContain("无权查看已撤销合同文件");
   });
 
-  it("台账序号跨分页连续且桌面表格统一居中单行展示", () => {
+  it("台账序号跨分页连续且桌面表格操作按钮连续居中展示", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
     const sequenceColumn = source.indexOf('label="序号"');
-    const contractColumn = source.indexOf('label="合同信息"');
+    const contractColumn = source.indexOf('label="项目名称"');
 
     expect(sequenceColumn).toBeGreaterThan(-1);
     expect(contractColumn).toBeGreaterThan(sequenceColumn);
@@ -745,26 +929,66 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).not.toContain('align="left"');
     expect(source).toContain(".contract-table :deep(.cell)");
     expect(source).toContain("white-space: nowrap");
+    expect(source).toContain(".row-actions {");
+    expect(source).toContain("display: flex");
     expect(source).toContain("justify-content: center");
+    expect(source).toContain("gap: 8px");
+    expect(source).not.toContain(".row-actions.is-creator-actions");
+    expect(source).not.toContain(".row-actions.is-employee-actions");
+    expect(source).not.toContain(".row-actions.is-readonly-actions");
+    expect(source).not.toContain(
+      "grid-template-columns: 52px 104px 76px 52px 76px 96px 84px",
+    );
+    expect(source).toContain("contractActionColumnWidth");
+    expect(source).toContain('class="action-slot action-detail"');
+    expect(source).toContain('class="action-slot action-supplement"');
+    expect(source).toContain('class="action-slot action-finance"');
+    expect(source).toContain('class="action-slot action-renewal"');
+    expect(source).toContain('v-if="canCreate && canUploadSupplement(row)"');
+    expect(source).toContain(
+      'v-if="canCreate && canManageRentalLifecycle(row)"',
+    );
+    expect(source).toMatch(
+      /v-if="[\s\S]*?canCreate &&[\s\S]*?row\.relationType === 'main' &&[\s\S]*?\['effective', 'executing'\]\.includes\(row\.status\)[\s\S]*?"[\s\S]*?class="action-slot action-finance"/,
+    );
+    expect(source.indexOf("action-detail")).toBeLessThan(
+      source.indexOf("action-supplement"),
+    );
+    expect(source.indexOf("action-supplement")).toBeLessThan(
+      source.indexOf("action-finance"),
+    );
+    expect(source.indexOf("action-finance")).toBeLessThan(
+      source.indexOf("action-renewal"),
+    );
+    expect(source).toContain(".action-slot {");
+    expect(source).toMatch(/\.action-detail\s*\{\s*width:\s*52px;/);
+    expect(source).toMatch(/\.action-supplement\s*\{\s*width:\s*104px;/);
+    expect(source).toMatch(
+      /\.action-finance,\s*\.action-status\s*\{\s*width:\s*76px;/,
+    );
+    expect(source).toMatch(/\.action-renewal\s*\{\s*width:\s*52px;/);
   });
 
-  it("台账在项目名称右侧展示行政区域，并仅为已启用合同提供辅助材料入口", () => {
+  it("台账在分类右侧展示行政区域，并仅为已启用合同提供辅助材料入口", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
-    const projectColumn = source.indexOf('label="项目名称"');
-    const areaColumn = source.indexOf('label="行政区域"', projectColumn);
+    const categoryColumn = source.indexOf('label="分类"');
+    const areaColumn = source.indexOf('label="行政区域"', categoryColumn);
 
-    expect(projectColumn).toBeGreaterThan(-1);
-    expect(areaColumn).toBeGreaterThan(projectColumn);
+    expect(categoryColumn).toBeGreaterThan(-1);
+    expect(areaColumn).toBeGreaterThan(categoryColumn);
     expect(source).toContain('<el-option label="全部" value="" />');
     expect(source).toContain('row.area || "—"');
     expect(source).toContain(
       'v-if="canCreate && row.requiresAuxiliaryMaterials"',
     );
+    expect(source).toContain('class="action-slot action-auxiliary"');
     expect(source).toContain("添加辅助材料");
-    expect(source).toContain('query: { tab: "auxiliary" }');
+    expect(source).toContain(
+      'query: contractDetailReturnQuery({ tab: "auxiliary" })',
+    );
     expect(source).not.toContain("<ContractAuxiliaryPackageManager");
     expect(source).not.toContain('title="添加辅助材料"');
   });
@@ -787,42 +1011,133 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).toContain(".money-cell.is-expense");
   });
 
-  it("桌面筛选项保持同一行且仅移动端改为单列", () => {
+  it("合同页按屏幕宽度重排指标与筛选，并关闭自适应台账横向溢出", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
     const desktopStyles = source.slice(
       source.indexOf(".metric-grid {"),
-      source.indexOf("@media (max-width: 1366px)"),
+      source.indexOf("@media (max-width:"),
     );
-    const tabletStyles = source.slice(
-      source.indexOf("@media (max-width: 1366px)"),
+    const metricGridStyles = desktopStyles.slice(
+      desktopStyles.indexOf(".metric-grid {"),
+      desktopStyles.indexOf(".filter-panel {"),
+    );
+    const filterRowStyles = desktopStyles.slice(
+      desktopStyles.indexOf(".filter-row {"),
+      desktopStyles.indexOf(".date-filter {"),
+    );
+    expect(metricGridStyles).toMatch(
+      /grid-template-columns:\s*repeat\((?:auto-fit|auto-fill),\s*minmax\(/,
+    );
+    expect(metricGridStyles).not.toContain("grid-template-columns: repeat(7");
+    expect(metricGridStyles).not.toContain("overflow-x: auto");
+
+    expect(filterRowStyles).not.toContain("min-width: 1540px");
+    expect(filterRowStyles).toMatch(
+      /(?:flex-wrap:\s*wrap|grid-template-columns:\s*repeat\((?:auto-fit|auto-fill),)/,
+    );
+
+    expect(desktopStyles).toMatch(
+      /\.contract-table-compact-scroll\s*\{[\s\S]*?(?:width|max-width):\s*100%;[\s\S]*?overflow-x:\s*hidden;/,
+    );
+
+    expect(source).toMatch(/@media \(max-width:\s*(?:1024|1200|1366)px\)/);
+    expect(source).toContain("@media (max-width: 768px)");
+  });
+
+  it("所有桌面宽度使用十四列表头自适应表且不产生横向滚动", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractList.vue"),
+      "utf8",
+    );
+    const wideTableStart = source.indexOf("contract-table-full");
+    const wideTableEnd = source.indexOf("</el-table>", wideTableStart);
+    const wideTableSource = source.slice(wideTableStart, wideTableEnd);
+    const compactTableStart = source.indexOf("contract-table-compact");
+    const compactTableEnd = source.indexOf("</el-table>", compactTableStart);
+    const compactTableSource = source.slice(compactTableStart, compactTableEnd);
+    const compactStyles = source.slice(
+      source.indexOf(".contract-table-compact-scroll"),
+      source.indexOf(".lease-expiry-alert"),
+    );
+    const desktopMedia = source.slice(
+      source.indexOf("@media (min-width: 769px)"),
       source.indexOf("@media (max-width: 768px)"),
     );
-    const mobileStyles = source.slice(
+    const wideVisibilityStyles = source.slice(
+      source.indexOf(".contract-table-scroll"),
+      source.indexOf(".contract-table-compact-scroll"),
+    );
+    const mobileMedia = source.slice(
       source.indexOf("@media (max-width: 768px)"),
     );
 
-    expect(desktopStyles).toContain("overflow-x: auto");
-    expect(desktopStyles).toContain("min-width: 1540px");
-    expect(desktopStyles).toContain("repeat(5, minmax(125px, 1fr))");
-    expect(desktopStyles).toContain(
-      "grid-template-columns: repeat(7, minmax(190px, 1fr))",
+    expect(wideTableStart).toBeGreaterThan(-1);
+    expect(wideTableSource).toContain("desktop-wide-only");
+    const independentLabels = [
+      "序号",
+      "项目名称",
+      "分类",
+      "行政区域",
+      "合同日期",
+      "租赁期限",
+      "合同金额",
+      "已收",
+      "已付",
+      "执行进度",
+      "状态",
+      "责任人",
+      "更新时间",
+      "操作",
+    ];
+    for (const label of independentLabels) {
+      expect(wideTableSource).toContain(`label="${label}"`);
+    }
+    expect(wideVisibilityStyles).toMatch(
+      /\.contract-table-scroll\s*\{[\s\S]*?display:\s*none;/,
     );
-    expect(desktopStyles).toMatch(
-      /\.date-filter\s*\{[\s\S]*?grid-column: auto;/,
+    expect(wideVisibilityStyles).toMatch(
+      /\.desktop-wide-only\s*\{[\s\S]*?display:\s*none;/,
     );
-    expect(desktopStyles).toMatch(
-      /\.filter-actions\s*\{[\s\S]*?grid-column: auto;/,
+
+    expect(compactTableStart).toBeGreaterThan(-1);
+    expect(compactTableSource).toContain("laptop-only");
+    expect(compactTableSource.match(/<el-table-column/g)).toHaveLength(14);
+    for (const label of independentLabels) {
+      expect(compactTableSource).toContain(`label="${label}"`);
+    }
+    for (const mergedLabel of [
+      "合同概览",
+      "日期／租期",
+      "金额／收付",
+      "进度／状态",
+    ]) {
+      expect(source).not.toContain(`label="${mergedLabel}"`);
+    }
+    expect(compactTableSource).toContain('table-layout="fixed"');
+    expect(compactTableSource).toContain("compact-row-actions");
+    expect(compactStyles).toMatch(
+      /\.contract-table-compact-scroll\s*\{[\s\S]*?overflow-x:\s*hidden;/,
     );
-    expect(tabletStyles).not.toContain(".filter-row");
-    expect(tabletStyles).not.toContain(".metric-grid");
-    expect(mobileStyles).toMatch(
-      /\.filter-row\s*\{[\s\S]*?min-width: 0;[\s\S]*?grid-template-columns: 1fr;/,
+    expect(compactStyles).toMatch(
+      /\.contract-table-compact :deep\(\.el-table__body-wrapper\),[\s\S]*?overflow-x:\s*hidden(?:\s*!important)?;/,
     );
-    expect(mobileStyles).toMatch(
-      /\.metric-grid\s*\{[\s\S]*?grid-template-columns: 1fr;[\s\S]*?overflow-x: visible;/,
+    expect(compactStyles).toContain("table-layout: fixed");
+    expect(compactStyles).toContain("overflow-wrap: anywhere");
+    expect(compactStyles).toContain("white-space: normal");
+    expect(compactStyles).toContain("flex-wrap: wrap");
+    expect(compactStyles).toMatch(
+      /\.contract-table-compact[^{]*:deep\(\.el-scrollbar__bar\.is-horizontal\)\s*\{[\s\S]*?display:\s*none(?:\s*!important)?;/,
     );
+    expect(desktopMedia).toContain("min-width: 769px");
+    expect(desktopMedia).not.toMatch(/max-width:\s*\d+px/);
+    expect(desktopMedia).toContain(".contract-table-compact-scroll");
+    expect(desktopMedia).toContain("display: block");
+    expect(mobileMedia).toContain(".desktop-wide-only");
+    expect(mobileMedia).toContain(".contract-table-compact");
+    expect(mobileMedia).toContain("display: none");
+    expect(mobileMedia).toMatch(/\.mobile-only[\s\S]*?display:\s*grid;/);
   });
 });

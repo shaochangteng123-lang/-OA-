@@ -24,19 +24,20 @@
             <el-tag type="success" effect="light">已归档</el-tag>
             <el-tag type="info" effect="plain">不参与核算</el-tag>
           </div>
-          <el-dropdown v-if="canManage" trigger="click">
-            <el-button link :icon="MoreFilled">操作</el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="openNoteDialog(item)">
-                  编辑备注
-                </el-dropdown-item>
-                <el-dropdown-item divided @click="removePackage(item)">
-                  删除档案
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <div v-if="canManage" class="package-actions">
+            <el-button link type="primary" @click="openNoteDialog(item)">
+              编辑备注
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              :icon="Delete"
+              aria-label="删除辅助材料档案"
+              @click="removePackage(item)"
+            >
+              删除档案
+            </el-button>
+          </div>
         </div>
 
         <p v-if="item.note" class="package-note">
@@ -213,8 +214,8 @@ import {
   ArrowRight,
   ChatLineSquare,
   CircleCheckFilled,
+  Delete,
   Document,
-  MoreFilled,
   Plus,
   Upload,
 } from "@element-plus/icons-vue";
@@ -647,6 +648,10 @@ onBeforeUnmount(closePreview);
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+.package-card-head .package-actions {
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 .package-card-head small {
   color: #7b8c90;

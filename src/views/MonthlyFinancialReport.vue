@@ -33,14 +33,6 @@
           @change="handleMonthChange"
         />
         <el-button
-          :icon="Refresh"
-          :loading="loading"
-          :disabled="actionLoading"
-          @click="handleReloadReport"
-        >
-          重新加载
-        </el-button>
-        <el-button
           v-if="canRefresh"
           :icon="RefreshRight"
           :loading="activeAction === 'refresh'"
@@ -48,6 +40,19 @@
           @click="handleRefreshSources"
         >
           同步自动数据
+        </el-button>
+        <el-button
+          v-if="isAdminRole"
+          type="primary"
+          plain
+          :icon="UploadFilled"
+          :loading="bankReceiptBusy"
+          :disabled="
+            actionLoading || hasUnsavedChanges || !canUploadBankReceipts
+          "
+          @click="openBankReceiptUpload"
+        >
+          上传银行回单
         </el-button>
         <el-button
           v-if="canEdit"
@@ -72,15 +77,27 @@
           下载全部报表
         </el-button>
         <el-button
-          v-if="canClose"
+          v-if="canShowClose"
           type="primary"
           :icon="CircleCheck"
           :loading="activeAction === 'close'"
-          :disabled="actionLoading || hasUnsavedChanges"
+          :disabled="actionLoading || hasUnsavedChanges || !canClose"
+          :aria-describedby="
+            closeActionReason ? 'monthly-close-action-reason' : undefined
+          "
           @click="handleCloseReport"
         >
           执行月结
         </el-button>
+        <div
+          v-if="canShowClose && closeActionReason"
+          id="monthly-close-action-reason"
+          class="close-action-reason"
+          role="status"
+        >
+          <el-icon aria-hidden="true"><WarningFilled /></el-icon>
+          <span>暂不可月结：{{ closeActionReason }}</span>
+        </div>
         <el-button
           v-if="canReopen"
           type="warning"
@@ -143,46 +160,61 @@
     </el-empty>
 
     <template v-else-if="report">
-      <section class="metric-grid" aria-label="月度资金核心指标">
-        <article
-          v-for="metric in totalMetrics"
-          :key="metric.key"
-          class="metric-card"
-          :class="`metric-card--${metric.tone}`"
-        >
-          <span>{{ metric.label }}</span>
-          <strong :class="{ 'is-negative': isNegative(metric.value) }">
-            {{ formatAmount(metric.value) }}
-          </strong>
-          <small>{{ metric.note }}</small>
-        </article>
-      </section>
-
-      <el-alert
-        v-if="report.validations.blockers.length > 0"
-        class="page-alert"
-        title="当前存在月结阻断项"
-        :description="
-          report.validations.blockers.map((item) => item.message).join('；')
-        "
-        type="error"
-        :closable="false"
-        show-icon
-      />
-      <el-alert
-        v-else-if="report.validations.warnings.length > 0"
-        class="page-alert"
-        title="当前存在需要复核的提示"
-        :description="
-          report.validations.warnings.map((item) => item.message).join('；')
-        "
-        type="warning"
-        :closable="false"
-        show-icon
-      />
-
       <el-tabs v-model="activeTab" class="report-tabs">
+        <el-tab-pane label="财务趋势" name="trend">
+          <MonthlyFinancialTrendChart
+            :selected-year="trendSelectedYear"
+            :selected-month="selectedMonth"
+            :comparison-year="trendComparisonYear"
+            :available-years="trendAvailableYears"
+            :points="trendPoints"
+            :warnings="trendWarnings"
+            :loading="trendLoading"
+            :error="trendError"
+            @comparison-year-change="handleTrendComparisonYearChange"
+            @retry="handleTrendRetry"
+          />
+        </el-tab-pane>
+
         <el-tab-pane label="账户与结算" name="summary">
+          <section class="metric-grid" aria-label="月度资金核心指标">
+            <article
+              v-for="metric in totalMetrics"
+              :key="metric.key"
+              class="metric-card"
+              :class="`metric-card--${metric.tone}`"
+            >
+              <span>{{ metric.label }}</span>
+              <strong :class="{ 'is-negative': isNegative(metric.value) }">
+                {{ formatAmount(metric.value) }}
+              </strong>
+              <small>{{ metric.note }}</small>
+            </article>
+          </section>
+
+          <el-alert
+            v-if="report.validations.blockers.length > 0"
+            class="page-alert"
+            title="当前存在月结阻断项"
+            :description="
+              report.validations.blockers.map((item) => item.message).join('；')
+            "
+            type="error"
+            :closable="false"
+            show-icon
+          />
+          <el-alert
+            v-else-if="report.validations.warnings.length > 0"
+            class="page-alert"
+            title="当前存在需要复核的提示"
+            :description="
+              report.validations.warnings.map((item) => item.message).join('；')
+            "
+            type="warning"
+            :closable="false"
+            show-icon
+          />
+
           <section class="account-grid">
             <article
               v-for="account in report.accounts"
@@ -370,7 +402,7 @@
                           凭证引用
                         </th>
                         <th>项目合计</th>
-                        <th v-if="canEdit">操作</th>
+                        <th>操作</th>
                       </tr>
                       <template
                         v-for="(category, categoryIndex) in group.categories"
@@ -415,8 +447,18 @@
                           <td class="category-total-cell">
                             {{ formatAmount(category.totalAmount) }}
                           </td>
-                          <td v-if="canEdit" class="operation-cell">
+                          <td class="operation-cell">
+                            <el-tag
+                              v-if="category.bankControlled"
+                              class="manual-bank-match-tag"
+                              type="success"
+                              effect="plain"
+                              size="small"
+                            >
+                              回单自动匹配
+                            </el-tag>
                             <el-button
+                              v-else-if="canEdit"
                               link
                               type="primary"
                               :icon="Plus"
@@ -424,6 +466,7 @@
                             >
                               添加
                             </el-button>
+                            <span v-else>—</span>
                           </td>
                         </tr>
                         <tr
@@ -436,7 +479,7 @@
                           </td>
                           <td>
                             <el-date-picker
-                              v-if="canEdit"
+                              v-if="canEdit && !entry.bankDerived"
                               v-model="entry.item.occurredOn"
                               type="date"
                               value-format="YYYY-MM-DD"
@@ -449,7 +492,7 @@
                           </td>
                           <td>
                             <el-input
-                              v-if="canEdit"
+                              v-if="canEdit && !entry.bankDerived"
                               v-model="entry.item.amount"
                               inputmode="decimal"
                               maxlength="31"
@@ -464,7 +507,7 @@
                           </td>
                           <td>
                             <el-input
-                              v-if="canEdit"
+                              v-if="canEdit && !entry.bankDerived"
                               v-model="entry.item.description"
                               :placeholder="
                                 category.descriptionRequired
@@ -480,7 +523,7 @@
                           </td>
                           <td>
                             <el-input
-                              v-if="canEdit"
+                              v-if="canEdit && !entry.bankDerived"
                               v-model="entry.item.voucherReference"
                               placeholder="选填"
                               maxlength="120"
@@ -493,13 +536,25 @@
                           <td class="category-total-cell manual-line-amount">
                             {{ formatAmount(entry.item.amount) }}
                           </td>
-                          <td v-if="canEdit" class="operation-cell">
+                          <td class="operation-cell">
+                            <el-link
+                              v-if="entry.previewUrl"
+                              class="manual-proof-preview"
+                              :href="entry.previewUrl"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              type="primary"
+                            >
+                              在线预览
+                            </el-link>
                             <el-button
+                              v-else-if="canEdit && !entry.bankDerived"
                               link
                               type="danger"
                               @click="removeManualItem(entry.index)"
                               >删除</el-button
                             >
+                            <span v-else>—</span>
                           </td>
                         </tr>
                       </template>
@@ -610,6 +665,21 @@
             </el-card>
           </section>
         </el-tab-pane>
+
+        <el-tab-pane label="银行回单识别" name="bankReceipt">
+          <MonthlyBankReceiptPanel
+            ref="bankReceiptPanelRef"
+            :month="report.month"
+            :expected-version="report.version"
+            :can-upload="canUploadBankReceipts"
+            :disabled="actionLoading || hasUnsavedChanges"
+            @busy-change="bankReceiptBusy = $event"
+            @pending-change="bankReceiptPending = $event"
+            @uncertain-change="bankReceiptOutcomeUncertain = $event"
+            @report-refreshed="handleBankReceiptReportRefreshed"
+            @uploaded="handleBankReceiptUploaded"
+          />
+        </el-tab-pane>
       </el-tabs>
     </template>
   </div>
@@ -641,26 +711,32 @@ import {
   RefreshLeft,
   RefreshRight,
   Unlock,
+  UploadFilled,
   WarningFilled,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import MonthlyBankReceiptPanel from "@/components/monthly-financial/MonthlyBankReceiptPanel.vue";
+import MonthlyFinancialTrendChart from "@/components/monthly-financial/MonthlyFinancialTrendChart.vue";
 import { useAuthStore } from "@/stores/auth";
 import {
   addFinancialAmountTexts,
   aggregateAutomaticDetailsByPerson,
   isMonthlyFinancialAmountText,
   isPositiveMonthlyFinancialAmountText,
+  monthlyFinancialBankSourceLabel,
 } from "@/utils/monthlyFinancialReportPresentation";
 import {
   closeMonthlyFinancialReport,
   downloadMonthlyFinancialReport,
   getMonthlyFinancialReport,
   getMonthlyFinancialReportErrorMessage,
+  getMonthlyFinancialReportTrend,
   isMonthlyFinancialReportNotFound,
   isMonthlyFinancialReportVersionConflict,
   refreshMonthlyFinancialReport,
   reopenMonthlyFinancialReport,
   saveMonthlyFinancialManualItems,
+  type MonthlyFinancialBankReceiptUploadResult,
 } from "@/utils/monthlyFinancialReportApi";
 import type {
   MonthlyFinancialAccountCode,
@@ -672,9 +748,11 @@ import type {
   MonthlyFinancialOpeningBalances,
   MonthlyFinancialReport,
   MonthlyFinancialSourceStatus,
+  MonthlyFinancialTrendPoint,
+  MonthlyFinancialTrendWarning,
 } from "@/types/monthlyFinancialReport";
 
-type ReportTab = "summary" | "manual" | "quality";
+type ReportTab = "trend" | "summary" | "manual" | "quality" | "bankReceipt";
 type ActiveAction = "" | "save" | "refresh" | "close" | "reopen" | "download";
 
 interface ManualCategoryOption {
@@ -688,6 +766,13 @@ interface ManualCategoryOption {
 
 interface EditableManualItem extends MonthlyFinancialManualItem {
   clientKey: string;
+}
+
+interface ManualSheetEntry {
+  item: EditableManualItem;
+  index: number;
+  bankDerived: boolean;
+  previewUrl: string | null;
 }
 
 interface MonthActionContext {
@@ -705,7 +790,20 @@ const loadedMonth = ref("");
 const loading = ref(false);
 const loadError = ref("");
 const activeAction = ref<ActiveAction>("");
-const activeTab = ref<ReportTab>("summary");
+const activeTab = ref<ReportTab>("trend");
+const trendSelectedYear = ref(currentYearNumber());
+const trendComparisonYear = ref<number | null>(null);
+const trendAvailableYears = ref<number[]>([]);
+const trendPoints = ref<MonthlyFinancialTrendPoint[]>([]);
+const trendWarnings = ref<MonthlyFinancialTrendWarning[]>([]);
+const trendLoading = ref(false);
+const trendError = ref("");
+const bankReceiptBusy = ref(false);
+const bankReceiptPending = ref(false);
+const bankReceiptOutcomeUncertain = ref(false);
+const bankReceiptPanelRef = ref<InstanceType<
+  typeof MonthlyBankReceiptPanel
+> | null>(null);
 const expandedAccountCodes = ref<MonthlyFinancialAccountCode[]>([]);
 const manualItems = ref<EditableManualItem[]>([]);
 const manualItemsDirty = ref(false);
@@ -720,6 +818,7 @@ let requestSequence = 0;
 let clientKeySequence = 0;
 let monthViewSequence = 0;
 let allowNextMonthRouteChange = false;
+let trendRequestSequence = 0;
 
 const manualCategoryGroups: Array<{
   label: string;
@@ -765,7 +864,19 @@ const manualCategoryGroups: Array<{
         "welfare_one",
         "income",
       ),
-      categoryOption("welfare_one_407", "407费用", "welfare_one", "expense"),
+      categoryOption(
+        "welfare_one_drinking_water",
+        "饮用水",
+        "welfare_one",
+        "expense",
+      ),
+      categoryOption("welfare_one_office", "办公", "welfare_one", "expense"),
+      categoryOption(
+        "welfare_one_electricity",
+        "电费",
+        "welfare_one",
+        "expense",
+      ),
       categoryOption("welfare_one_407_ai", "407-AI", "welfare_one", "expense"),
       categoryOption("welfare_one_8h_ai", "8H-AI", "welfare_one", "expense"),
     ],
@@ -805,25 +916,72 @@ const manualCategoryOptions = manualCategoryGroups.flatMap(
   (group) => group.options,
 );
 
+const bankChargeCategories = new Set<MonthlyFinancialManualCategory>([
+  "general_interest",
+  "general_bank_fee",
+  "business_interest",
+  "business_bank_fee",
+]);
+
+function bankControlsManualCategory(category: ManualCategoryOption): boolean {
+  if (!bankChargeCategories.has(category.value)) return false;
+  const bankAccountCode = category.accountCode;
+  return Boolean(
+    (bankAccountCode === "general" || bankAccountCode === "business") &&
+    report.value?.bank?.chargeAccounts?.includes(bankAccountCode),
+  );
+}
+
+function bankChargeEntries(category: ManualCategoryOption): ManualSheetEntry[] {
+  if (!bankChargeCategories.has(category.value)) return [];
+  return (report.value?.manualItems || [])
+    .filter(
+      (item) =>
+        item.category === category.value &&
+        item.sourceType === "monthly_bank_transaction" &&
+        item.readOnly === true &&
+        item.effective !== false,
+    )
+    .map((item) => ({
+      item: {
+        ...item,
+        clientKey: item.id || nextClientKey(),
+      },
+      index: -1,
+      bankDerived: true,
+      previewUrl: item.previewUrl || null,
+    }));
+}
+
 const manualSheetGroups = computed(() =>
   manualCategoryGroups.map((group) => ({
     label: group.label,
     accountCode: group.options[0].accountCode,
-    categories: group.options.map((category) => ({
-      ...category,
-      entries: manualItems.value
-        .map((item, index) => ({ item, index }))
-        .filter(({ item }) => item.category === category.value),
-      totalAmount: manualItems.value
-        .filter((item) => item.category === category.value)
-        .reduce(
-          (total, item) =>
-            isMonthlyFinancialAmountText(item.amount)
-              ? addFinancialAmountTexts(total, item.amount)
+    categories: group.options.map((category) => {
+      const bankControlled = bankControlsManualCategory(category);
+      const entries: ManualSheetEntry[] = bankControlled
+        ? bankChargeEntries(category)
+        : manualItems.value
+            .map((item, index) => ({
+              item,
+              index,
+              bankDerived: false,
+              previewUrl: null,
+            }))
+            .filter(({ item }) => item.category === category.value);
+      return {
+        ...category,
+        bankControlled,
+        entries,
+        totalAmount: entries.reduce(
+          (total, entry) =>
+            isMonthlyFinancialAmountText(entry.item.amount)
+              ? addFinancialAmountTexts(total, entry.item.amount)
               : total,
           "0",
         ),
-    })),
+      };
+    }),
   })),
 );
 
@@ -831,7 +989,9 @@ const isAdminRole = computed(() => authStore.user?.role === "admin");
 const isGeneralManagerRole = computed(
   () => authStore.user?.role === "general_manager",
 );
-const actionLoading = computed(() => activeAction.value !== "");
+const actionLoading = computed(
+  () => activeAction.value !== "" || bankReceiptBusy.value,
+);
 const hasUnsavedChanges = computed(
   () => manualItemsDirty.value || openingBalancesDirty.value,
 );
@@ -845,6 +1005,12 @@ const canEdit = computed(
 const canRefresh = computed(
   () => canEdit.value && report.value?.permissions?.canRefresh !== false,
 );
+const canShowClose = computed(
+  () =>
+    isAdminRole.value &&
+    Boolean(report.value) &&
+    report.value?.status !== "closed",
+);
 const canClose = computed(
   () =>
     isAdminRole.value &&
@@ -853,6 +1019,21 @@ const canClose = computed(
     report.value?.validations.canClose &&
     report.value?.permissions?.canClose !== false,
 );
+const closeActionReason = computed(() => {
+  if (!canShowClose.value || !report.value) return "";
+  const reasons = [
+    ...(hasUnsavedChanges.value ? ["存在未保存修改，请先保存或撤销修改"] : []),
+    ...new Set(
+      report.value.validations.blockers
+        .map((item) => item.message.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!canClose.value && reasons.length === 0) {
+    reasons.push("当前账号或报表状态暂不允许执行月结");
+  }
+  return [...new Set(reasons)].join("；");
+});
 const canReopen = computed(
   () =>
     isAdminRole.value &&
@@ -865,6 +1046,7 @@ const canDownload = computed(
     Boolean(report.value) &&
     report.value?.permissions?.canDownload !== false,
 );
+const canUploadBankReceipts = computed(() => canEdit.value);
 
 const statusMeta = computed(() => {
   const metadata = {
@@ -919,7 +1101,7 @@ const totalMetrics = computed(() => {
       key: "closing",
       label: "期末资金合计",
       value: totals.closing,
-      note: report.value?.status === "closed" ? "月结快照" : "当前预估",
+      note: report.value?.status === "closed" ? "月结快照" : "当前值（未月结）",
       tone: "blue",
     },
     {
@@ -938,6 +1120,12 @@ const accountFlowDetails = computed(() => {
   const automaticDetails = report.value.automaticDetails || [];
   const account = (code: MonthlyFinancialAccountCode) =>
     accounts.find((item) => item.code === code)!;
+  const bankAccountSource = (code: "basic" | "general" | "business") =>
+    monthlyFinancialBankSourceLabel(
+      report.value?.bank?.activeAccounts,
+      code,
+      report.value?.bank?.chargeAccounts,
+    );
   const row = (
     label: string,
     value: MonthlyFinancialAmount,
@@ -967,10 +1155,20 @@ const accountFlowDetails = computed(() => {
       outflowTotal: account("general").outflow,
       inflows: [
         row("主营核算基数", income.accountingBase, "合同已确认回款"),
-        row("账户利息", income.generalInterest, "手工录入"),
+        row(
+          "一般账户利息",
+          income.generalInterest,
+          bankAccountSource("general"),
+        ),
       ],
       outflows: [
-        row("薪资／人力成本", expenses.humanCost, "人力成本", "human_cost"),
+        row(
+          "薪资／人力成本",
+          expenses.humanCost,
+          "人力成本",
+          "human_cost",
+          true,
+        ),
         row(
           "基础报销",
           expenses.basicReimbursement,
@@ -986,7 +1184,11 @@ const accountFlowDetails = computed(() => {
           true,
         ),
         row("资产行政支出", expenses.assetAdministration, "资产合同付款"),
-        row("跨行手续费", expenses.generalBankFee, "手工录入"),
+        row(
+          "一般账户跨行手续费",
+          expenses.generalBankFee,
+          bankAccountSource("general"),
+        ),
         row("其他支出", expenses.generalOther, "手工录入"),
       ],
     },
@@ -997,7 +1199,11 @@ const accountFlowDetails = computed(() => {
       inflows: [
         row("预扣营销", income.marketingReserve, "合同已确认回款"),
         row("商务费用计提", income.businessCost, "合同已确认回款"),
-        row("账户利息", income.businessInterest, "手工录入"),
+        row(
+          "商务账户利息",
+          income.businessInterest,
+          bankAccountSource("business"),
+        ),
       ],
       outflows: [
         row(
@@ -1007,7 +1213,11 @@ const accountFlowDetails = computed(() => {
           "business_reimbursement",
           true,
         ),
-        row("跨行手续费", expenses.businessBankFee, "手工录入"),
+        row(
+          "商务账户跨行手续费",
+          expenses.businessBankFee,
+          bankAccountSource("business"),
+        ),
       ],
     },
     {
@@ -1016,7 +1226,9 @@ const accountFlowDetails = computed(() => {
       outflowTotal: account("welfare_one").outflow,
       inflows: [row("补充收入", income.welfareOneSupplement, "手工录入")],
       outflows: [
-        row("407费用", expenses.welfareOne407, "手工录入"),
+        row("饮用水", expenses.welfareOneDrinkingWater, "手工录入"),
+        row("办公", expenses.welfareOneOffice, "手工录入"),
+        row("电费", expenses.welfareOneElectricity, "手工录入"),
         row("407-AI", expenses.welfareOne407Ai, "手工录入"),
         row("8H-AI", expenses.welfareOne8hAi, "手工录入"),
       ],
@@ -1073,6 +1285,7 @@ watch(
     }
     monthViewSequence += 1;
     selectedMonth.value = normalizedMonth;
+    void ensureTrendForMonth(normalizedMonth);
     if (report.value && loadedMonth.value === normalizedMonth) return;
     void loadReport(normalizedMonth, monthViewSequence);
   },
@@ -1083,6 +1296,22 @@ onBeforeRouteUpdate(async (to, from) => {
   const nextMonth = normalizedQueryMonth(to.query.month);
   const currentMonth = normalizedQueryMonth(from.query.month);
   if (nextMonth === currentMonth || allowNextMonthRouteChange) return true;
+  if (bankReceiptOutcomeUncertain.value) {
+    selectedMonth.value = loadedMonth.value || currentMonth;
+    ElMessage.warning("上一批银行回单结果仍待确认，请刷新回单状态后再切换月份");
+    return false;
+  }
+  if (bankReceiptBusy.value) {
+    selectedMonth.value = loadedMonth.value || currentMonth;
+    ElMessage.warning("银行回单仍在识别中，暂时不能切换月份");
+    return false;
+  }
+  const bankSelectionConfirmed =
+    await confirmDiscardPendingBankReceipts("切换月份");
+  if (!bankSelectionConfirmed) {
+    selectedMonth.value = loadedMonth.value || currentMonth;
+    return false;
+  }
   const confirmed = await confirmDiscardUnsavedChanges("切换月份");
   if (!confirmed) {
     selectedMonth.value = loadedMonth.value || currentMonth;
@@ -1090,10 +1319,30 @@ onBeforeRouteUpdate(async (to, from) => {
   return confirmed;
 });
 
-onBeforeRouteLeave(() => confirmDiscardUnsavedChanges("离开月度财务报表"));
+onBeforeRouteLeave(async () => {
+  if (bankReceiptOutcomeUncertain.value) {
+    ElMessage.warning(
+      "上一批银行回单结果仍待确认，请刷新回单状态后再离开月度财务报表",
+    );
+    return false;
+  }
+  if (bankReceiptBusy.value) {
+    ElMessage.warning("银行回单仍在识别中，暂时不能离开月度财务报表");
+    return false;
+  }
+  if (!(await confirmDiscardPendingBankReceipts("离开月度财务报表"))) {
+    return false;
+  }
+  return confirmDiscardUnsavedChanges("离开月度财务报表");
+});
 
 function handleBeforeUnload(event: globalThis.BeforeUnloadEvent) {
-  if (!hasUnsavedChanges.value) return;
+  if (
+    !hasUnsavedChanges.value &&
+    !bankReceiptBusy.value &&
+    !bankReceiptPending.value
+  )
+    return;
   event.preventDefault();
   event.returnValue = "";
 }
@@ -1103,10 +1352,200 @@ onBeforeUnmount(() =>
   window.removeEventListener("beforeunload", handleBeforeUnload),
 );
 
+async function ensureTrendForMonth(month: string) {
+  const year = yearFromMonth(month);
+  if (year === null) return;
+  const alreadyLoaded = trendPoints.value.some((point) =>
+    point.month.startsWith(`${year}-`),
+  );
+  if (
+    year === trendSelectedYear.value &&
+    (trendLoading.value || alreadyLoaded)
+  ) {
+    return;
+  }
+  trendSelectedYear.value = year;
+  trendComparisonYear.value = null;
+  await loadTrend(year);
+}
+
+async function loadTrend(
+  selectedYear = trendSelectedYear.value,
+  requestedComparisonYear = trendComparisonYear.value,
+) {
+  const sequence = ++trendRequestSequence;
+  trendLoading.value = true;
+  trendError.value = "";
+  try {
+    const selectedData = await getMonthlyFinancialReportTrend(
+      `${selectedYear}-01`,
+      `${selectedYear}-12`,
+    );
+    if (
+      sequence !== trendRequestSequence ||
+      selectedYear !== trendSelectedYear.value
+    ) {
+      return;
+    }
+
+    const availableYears = normalizeTrendYears(selectedData.availableYears);
+    const comparisonYear = resolveTrendComparisonYear(
+      selectedYear,
+      availableYears,
+      requestedComparisonYear,
+    );
+    const comparisonData =
+      comparisonYear === null
+        ? null
+        : await getMonthlyFinancialReportTrend(
+            `${comparisonYear}-01`,
+            `${comparisonYear}-12`,
+          );
+    if (
+      sequence !== trendRequestSequence ||
+      selectedYear !== trendSelectedYear.value
+    ) {
+      return;
+    }
+
+    trendAvailableYears.value = normalizeTrendYears([
+      ...availableYears,
+      ...(comparisonData?.availableYears || []),
+    ]);
+    trendComparisonYear.value = comparisonYear;
+    trendPoints.value = mergeTrendPoints([
+      ...selectedData.points,
+      ...(comparisonData?.points || []),
+    ]);
+    trendWarnings.value = mergeTrendWarnings([
+      ...selectedData.warnings,
+      ...(comparisonData?.warnings || []),
+    ]);
+  } catch (error) {
+    if (
+      sequence !== trendRequestSequence ||
+      selectedYear !== trendSelectedYear.value
+    ) {
+      return;
+    }
+    trendError.value = getMonthlyFinancialReportErrorMessage(
+      error,
+      "暂时无法获取年度趋势，请稍后重试。",
+    );
+  } finally {
+    if (sequence === trendRequestSequence) trendLoading.value = false;
+  }
+}
+
+function handleTrendComparisonYearChange(year: number | null) {
+  trendComparisonYear.value = year;
+  void loadTrend(trendSelectedYear.value, year);
+}
+
+function handleTrendRetry() {
+  void loadTrend(trendSelectedYear.value, trendComparisonYear.value);
+}
+
+function refreshTrendAfterReportMutation(month: string) {
+  if (yearFromMonth(month) !== trendSelectedYear.value) return;
+  void loadTrend(trendSelectedYear.value, trendComparisonYear.value);
+}
+
+function resolveTrendComparisonYear(
+  selectedYear: number,
+  availableYears: number[],
+  requestedYear: number | null,
+): number | null {
+  const historicalYears = availableYears.filter((year) => year < selectedYear);
+  if (requestedYear !== null && historicalYears.includes(requestedYear)) {
+    return requestedYear;
+  }
+  return historicalYears.at(-1) ?? null;
+}
+
+function normalizeTrendYears(years: number[]): number[] {
+  return [...new Set(years)]
+    .filter((year) => Number.isInteger(year) && year >= 1900 && year <= 9999)
+    .sort((left, right) => left - right);
+}
+
+function mergeTrendPoints(
+  points: MonthlyFinancialTrendPoint[],
+): MonthlyFinancialTrendPoint[] {
+  const pointByMonth = new Map<string, MonthlyFinancialTrendPoint>();
+  for (const point of points) pointByMonth.set(point.month, point);
+  return [...pointByMonth.values()].sort((left, right) =>
+    left.month.localeCompare(right.month),
+  );
+}
+
+function mergeTrendWarnings(
+  warnings: MonthlyFinancialTrendWarning[],
+): MonthlyFinancialTrendWarning[] {
+  const warningByKey = new Map<string, MonthlyFinancialTrendWarning>();
+  for (const warning of warnings) {
+    const key = `${warning.code}:${warning.message}`;
+    const existing = warningByKey.get(key);
+    warningByKey.set(key, {
+      ...warning,
+      months: [
+        ...new Set([...(existing?.months || []), ...warning.months]),
+      ].sort(),
+    });
+  }
+  return [...warningByKey.values()];
+}
+
 async function handleReloadReport() {
   const confirmed = await confirmDiscardUnsavedChanges("重新加载");
   if (!confirmed) return;
   await loadReport(loadedMonth.value || selectedMonth.value, monthViewSequence);
+}
+
+function openBankReceiptUpload() {
+  if (!report.value || !canUploadBankReceipts.value) {
+    if (report.value?.status === "closed") {
+      ElMessage.warning("已月结报表不能再上传银行回单，请先重新开启");
+    }
+    return;
+  }
+  if (hasUnsavedChanges.value) {
+    ElMessage.warning("请先保存或撤销当前维护数据，再上传银行回单");
+    return;
+  }
+  bankReceiptPanelRef.value?.openUploadDialog();
+}
+
+function handleBankReceiptUploaded(
+  result: MonthlyFinancialBankReceiptUploadResult,
+) {
+  if (
+    !report.value ||
+    result.report.month !== report.value.month ||
+    normalizedQueryMonth(route.query.month) !== result.report.month
+  ) {
+    return;
+  }
+  requestSequence += 1;
+  loading.value = false;
+  applyReport(result.report);
+  refreshTrendAfterReportMutation(result.report.month);
+}
+
+function handleBankReceiptReportRefreshed(
+  latestReport: MonthlyFinancialReport,
+) {
+  if (
+    !report.value ||
+    latestReport.month !== report.value.month ||
+    normalizedQueryMonth(route.query.month) !== latestReport.month
+  ) {
+    return;
+  }
+  requestSequence += 1;
+  loading.value = false;
+  applyReport(latestReport);
+  refreshTrendAfterReportMutation(latestReport.month);
 }
 
 async function loadReport(
@@ -1155,6 +1594,15 @@ async function handleMonthChange(value: string | null) {
     loadedMonth.value || normalizedQueryMonth(route.query.month);
   selectedMonth.value = previousMonth;
   if (value === normalizedQueryMonth(route.query.month)) return;
+  if (bankReceiptOutcomeUncertain.value) {
+    ElMessage.warning("上一批银行回单结果仍待确认，请刷新回单状态后再切换月份");
+    return;
+  }
+  if (bankReceiptBusy.value) {
+    ElMessage.warning("银行回单仍在处理中，暂时不能切换月份");
+    return;
+  }
+  if (!(await confirmDiscardPendingBankReceipts("切换月份"))) return;
   const confirmed = await confirmDiscardUnsavedChanges("切换月份");
   if (!confirmed) return;
   await replaceMonthRouteWithoutPrompt(value);
@@ -1169,8 +1617,12 @@ async function handleRefreshSources() {
       context.month,
       context.version,
     );
+    const applied = applyActionReport(result.report, context);
+    if (applied) {
+      await bankReceiptPanelRef.value?.refreshBankState();
+    }
     notifyActionResult(
-      applyActionReport(result.report, context),
+      applied,
       mutationSuccessMessage(result, "自动数据已同步"),
       context.month,
     );
@@ -1345,10 +1797,16 @@ function applyReport(nextReport: MonthlyFinancialReport) {
   report.value = nextReport;
   selectedMonth.value = nextReport.month;
   loadedMonth.value = nextReport.month;
-  manualItems.value = nextReport.manualItems.map((item) => ({
-    ...item,
-    clientKey: item.id || nextClientKey(),
-  }));
+  manualItems.value = nextReport.manualItems
+    .filter(
+      (item) =>
+        item.sourceType !== "monthly_bank_transaction" &&
+        item.readOnly !== true,
+    )
+    .map((item) => ({
+      ...item,
+      clientKey: item.id || nextClientKey(),
+    }));
   for (const account of nextReport.accounts) {
     openingBalances[account.code] = account.opening;
   }
@@ -1388,6 +1846,7 @@ function applyActionReport(
   requestSequence += 1;
   loading.value = false;
   applyReport(nextReport);
+  refreshTrendAfterReportMutation(nextReport.month);
   return true;
 }
 
@@ -1420,10 +1879,16 @@ function mutationSuccessMessage(
 
 function resetManualItems() {
   if (!report.value) return;
-  manualItems.value = report.value.manualItems.map((item) => ({
-    ...item,
-    clientKey: item.id || nextClientKey(),
-  }));
+  manualItems.value = report.value.manualItems
+    .filter(
+      (item) =>
+        item.sourceType !== "monthly_bank_transaction" &&
+        item.readOnly !== true,
+    )
+    .map((item) => ({
+      ...item,
+      clientKey: item.id || nextClientKey(),
+    }));
   for (const account of report.value.accounts) {
     openingBalances[account.code] = account.opening;
   }
@@ -1559,6 +2024,7 @@ function sourceName(key: string): string {
       payroll: "人力成本",
       reimbursements: "报销付款",
       asset_payments: "资产合同付款",
+      monthly_bank_receipts: "月度银行回单",
     }[key] || key
   );
 }
@@ -1628,6 +2094,16 @@ function currentMonthKey(): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
+function currentYearNumber(): number {
+  return new Date().getFullYear();
+}
+
+function yearFromMonth(month: string): number | null {
+  if (!validMonth(month)) return null;
+  const year = Number(month.slice(0, 4));
+  return Number.isInteger(year) ? year : null;
+}
+
 function queryText(value: unknown): string {
   return Array.isArray(value) ? String(value[0] || "") : String(value || "");
 }
@@ -1656,6 +2132,26 @@ async function confirmDiscardUnsavedChanges(action: string): Promise<boolean> {
         type: "warning",
         confirmButtonText: "丢弃并继续",
         cancelButtonText: "继续编辑",
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function confirmDiscardPendingBankReceipts(
+  action: string,
+): Promise<boolean> {
+  if (!bankReceiptPending.value) return true;
+  try {
+    await ElMessageBox.confirm(
+      `${action}将丢弃已经选择但尚未上传的银行回单，是否继续？`,
+      "存在未上传银行回单",
+      {
+        type: "warning",
+        confirmButtonText: "丢弃并继续",
+        cancelButtonText: "继续上传",
       },
     );
     return true;
@@ -1783,6 +2279,31 @@ function isMessageBoxCancel(error: unknown): boolean {
 
 .hero-actions :deep(.el-button + .el-button) {
   margin-left: 0;
+}
+
+.close-action-reason {
+  display: flex;
+  min-width: 0;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid #f0d7a8;
+  border-radius: 8px;
+  background: #fff9ec;
+  color: #8b641c;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.close-action-reason :deep(.el-icon) {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.close-action-reason span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .month-picker {
@@ -2152,7 +2673,7 @@ function isMessageBoxCancel(error: unknown): boolean {
 
 .manual-sheet table {
   width: 100%;
-  min-width: 1180px;
+  min-width: 1260px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -2201,7 +2722,7 @@ function isMessageBoxCancel(error: unknown): boolean {
   width: 130px;
 }
 .manual-sheet th:nth-child(9) {
-  width: 72px;
+  width: 144px;
 }
 
 .manual-entry-row:hover td,
@@ -2244,7 +2765,41 @@ function isMessageBoxCancel(error: unknown): boolean {
 }
 
 .operation-cell {
+  padding-right: 12px !important;
+  padding-left: 12px !important;
   text-align: center !important;
+  white-space: nowrap;
+}
+
+.manual-bank-match-tag {
+  min-width: 108px;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+.manual-proof-preview {
+  display: inline-flex;
+  min-width: 88px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid #a8ccf4;
+  border-radius: 6px;
+  background: #f1f7ff;
+  line-height: 26px;
+  white-space: nowrap;
+}
+
+.manual-proof-preview:hover {
+  border-color: #409eff;
+  background: #e8f3ff;
+  text-decoration: none;
+}
+
+.manual-proof-preview :deep(.el-link__inner) {
+  white-space: nowrap;
 }
 
 .manual-sheet :deep(.el-date-editor.el-input) {

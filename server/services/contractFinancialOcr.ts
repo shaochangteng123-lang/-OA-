@@ -1,5 +1,8 @@
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
+import path from "path";
+import sharp from "sharp";
 
 import {
   extractContractFinancialPdfFirstPageTextLayer,
@@ -62,7 +65,7 @@ export interface ContractFinancialOcrContext {
   }[];
   /**
    * 当前合同唯一匹配的签约公司主体。凭证中的内部购销方或收付方必须与其一致，
-   * 防止把科技公司的发票或付款误挂到工程咨询公司签署的合同（反之亦然）。
+   * 防止把其他我方公司的发票或付款误挂到工程咨询公司签署的合同（反之亦然）。
    */
   contractCompanySubject?: {
     name: string;
@@ -876,6 +879,266 @@ interface BankChannelRecognition {
   fields: ContractBankReceiptOcrFields;
   status: ContractFinancialDocumentStatus;
   conflicts: ContractFinancialBlockingReason[];
+}
+
+type BankRoleFieldCode = "payer" | "payerAccount" | "payee" | "payeeAccount";
+
+interface BankRoleEvidence {
+  values: Pick<
+    ContractBankReceiptOcrFields,
+    "payer" | "payerAccount" | "payee" | "payeeAccount"
+  >;
+  explicitFields: Set<BankRoleFieldCode>;
+  conflicts: ContractFinancialBlockingReason[];
+}
+
+const ENHANCED_BANK_ROLE_MINIMUM_CONFIDENCE = 0.9;
+
+function bankRoleFieldLabel(field: BankRoleFieldCode): string {
+  return {
+    payer: "付款方",
+    payerAccount: "付款账号",
+    payee: "收款方",
+    payeeAccount: "收款账号",
+  }[field];
+}
+
+/** 只读取明确角色标签同行值，或标签右侧同水平带坐标值。 */
+function extractExplicitBankRoleEvidence(
+  lines: readonly PaddleOcrLine[],
+): BankRoleEvidence {
+  const values = {
+    payer: "",
+    payerAccount: "",
+    payee: "",
+    payeeAccount: "",
+  };
+  const explicitFields = new Set<BankRoleFieldCode>();
+  const conflicts: ContractFinancialBlockingReason[] = [];
+  const candidates = new Map<BankRoleFieldCode, string[]>();
+  const addCandidate = (field: BankRoleFieldCode, rawValue: string) => {
+    const value = field.endsWith("Account")
+      ? normalizeAccount(rawValue)
+      : cleanPartyName(rawValue);
+    if (!value) return;
+    const fieldCandidates = candidates.get(field) || [];
+    if (!fieldCandidates.includes(value)) fieldCandidates.push(value);
+    candidates.set(field, fieldCandidates);
+  };
+
+  for (const line of lines) {
+    if (Number(line.confidence) < ENHANCED_BANK_ROLE_MINIMUM_CONFIDENCE) {
+      continue;
+    }
+    const text = line.text.normalize("NFKC").trim();
+    const matches: Array<[BankRoleFieldCode, string | undefined]> = [
+      ["payer", text.match(/^付款(?:人|方)\s*[：:]\s*(.{2,100})$/u)?.[1]],
+      ["payee", text.match(/^收款(?:人|方)\s*[：:]\s*(.{2,100})$/u)?.[1]],
+      [
+        "payerAccount",
+        text.match(/^付款(?:账号|账户)\s*[：:]\s*([0-9\s]{6,30})$/u)?.[1],
+      ],
+      [
+        "payeeAccount",
+        text.match(/^收款(?:账号|账户)\s*[：:]\s*([0-9\s]{6,30})$/u)?.[1],
+      ],
+    ];
+    for (const [field, value] of matches) {
+      if (value) addCandidate(field, value);
+    }
+  }
+
+  const positionedLines = lines.filter(
+    (line) =>
+      Number(line.confidence) >= ENHANCED_BANK_ROLE_MINIMUM_CONFIDENCE &&
+      lineBounds(line) !== null,
+  );
+  const addCoordinateCandidate = (
+    field: BankRoleFieldCode,
+    labelPattern: RegExp,
+    candidatePattern: RegExp,
+  ) => {
+    const labels = positionedLines.filter((line) =>
+      labelPattern.test(line.text.normalize("NFKC").replace(/\s+/gu, "")),
+    );
+    const valueLines = positionedLines.filter((line) =>
+      candidatePattern.test(line.text.normalize("NFKC").replace(/\s+/gu, "")),
+    );
+    for (const label of labels) {
+      const value = findRightColumnValue([label], valueLines, 0);
+      if (value) addCandidate(field, value);
+    }
+  };
+  addCoordinateCandidate(
+    "payer",
+    /^付款(?:人|方)[：:]?$/u,
+    /^[\u3400-\u9fff]{2,100}$/u,
+  );
+  addCoordinateCandidate(
+    "payee",
+    /^收款(?:人|方)[：:]?$/u,
+    /^[\u3400-\u9fff]{2,100}$/u,
+  );
+  addCoordinateCandidate(
+    "payerAccount",
+    /^付款(?:账号|账户)[：:]?$/u,
+    /^\d{6,25}$/u,
+  );
+  addCoordinateCandidate(
+    "payeeAccount",
+    /^收款(?:账号|账户)[：:]?$/u,
+    /^\d{6,25}$/u,
+  );
+
+  for (const field of [
+    "payer",
+    "payerAccount",
+    "payee",
+    "payeeAccount",
+  ] as const) {
+    const fieldCandidates = candidates.get(field) || [];
+    if (fieldCandidates.length > 1) {
+      conflicts.push(
+        blockingReason(
+          "BANK_ENHANCED_ROLE_CONFLICT",
+          `增强复扫识别到多个不同的${bankRoleFieldLabel(field)}，禁止自动采用`,
+          field,
+        ),
+      );
+      continue;
+    }
+    if (!fieldCandidates[0]) continue;
+    values[field] = fieldCandidates[0];
+    explicitFields.add(field);
+  }
+  return { values, explicitFields, conflicts };
+}
+
+function mergeEnhancedBankRoleEvidence(
+  primaryFields: ContractBankReceiptOcrFields,
+  originalEvidence: BankRoleEvidence,
+  enhancedEvidence: BankRoleEvidence,
+): {
+  fields: ContractBankReceiptOcrFields;
+  conflicts: ContractFinancialBlockingReason[];
+  recoveredFields: BankRoleFieldCode[];
+} {
+  const fields = { ...primaryFields };
+  const conflicts = [...enhancedEvidence.conflicts];
+  const recoveredFields: BankRoleFieldCode[] = [];
+  for (const field of [
+    "payer",
+    "payerAccount",
+    "payee",
+    "payeeAccount",
+  ] as const) {
+    if (!enhancedEvidence.explicitFields.has(field)) continue;
+    const enhancedValue = enhancedEvidence.values[field];
+    const originalValue = originalEvidence.explicitFields.has(field)
+      ? originalEvidence.values[field]
+      : "";
+    const valuesEqual = field.endsWith("Account")
+      ? normalizeAccount(originalValue) === normalizeAccount(enhancedValue)
+      : normalizeIdentity(originalValue) === normalizeIdentity(enhancedValue);
+    if (originalValue && !valuesEqual) {
+      conflicts.push(
+        blockingReason(
+          "BANK_ENHANCED_ORIGINAL_CONFLICT",
+          `原图与增强复扫的${bankRoleFieldLabel(field)}不一致，禁止自动采用增强值`,
+          field,
+        ),
+      );
+      continue;
+    }
+    if (!originalValue || !fields[field]) {
+      fields[field] = enhancedValue;
+      recoveredFields.push(field);
+    }
+  }
+  return { fields, conflicts, recoveredFields };
+}
+
+/** 根据首扫角色、账号、开户行和金额坐标动态裁出收付主体信息带。 */
+async function createEnhancedBankRoleRegion(
+  imagePath: string,
+  lines: readonly PaddleOcrLine[],
+): Promise<{ filePath: string; cleanup: () => Promise<void> } | null> {
+  let temporaryDirectory = "";
+  try {
+    const metadata = await sharp(imagePath).metadata();
+    const width = Number(metadata.width || 0);
+    const height = Number(metadata.height || 0);
+    if (width < 500 || height < 300) return null;
+    const roleBounds = lines
+      .filter((line) =>
+        /(?:付款|收款).*(?:人|方|账号|账户|开户行)/u.test(
+          line.text.normalize("NFKC").replace(/\s+/gu, ""),
+        ),
+      )
+      .map(lineBounds)
+      .filter((bounds): bounds is OcrLineBounds => bounds !== null);
+    if (roleBounds.length < 2) return null;
+    const amountBounds = lines
+      .filter((line) =>
+        /(?:交易|转账|付款)?金额/u.test(
+          line.text.normalize("NFKC").replace(/\s+/gu, ""),
+        ),
+      )
+      .map(lineBounds)
+      .filter((bounds): bounds is OcrLineBounds => bounds !== null)
+      .sort((leftBounds, rightBounds) => leftBounds.minY - rightBounds.minY)[0];
+    const minimumX = Math.min(...roleBounds.map((bounds) => bounds.minX));
+    const maximumX = Math.max(...roleBounds.map((bounds) => bounds.maxX));
+    const minimumY = Math.min(...roleBounds.map((bounds) => bounds.minY));
+    const maximumY = Math.max(...roleBounds.map((bounds) => bounds.maxY));
+    const left = Math.max(0, Math.floor(minimumX - width * 0.04));
+    const right = Math.min(
+      width,
+      Math.ceil(Math.max(maximumX + width * 0.2, width * 0.82)),
+    );
+    const top = Math.max(0, Math.floor(minimumY - height * 0.07));
+    const inferredBottom = Math.ceil(maximumY + height * 0.05);
+    const bottom = Math.min(
+      height,
+      amountBounds && amountBounds.minY > minimumY
+        ? Math.max(
+            maximumY + 1,
+            Math.min(inferredBottom, amountBounds.minY + 20),
+          )
+        : inferredBottom,
+    );
+    const cropWidth = right - left;
+    const cropHeight = bottom - top;
+    if (cropWidth < 300 || cropHeight < 100) return null;
+    temporaryDirectory = await fs.promises.mkdtemp(
+      path.join(os.tmpdir(), "contract-bank-role-"),
+    );
+    const enhancedPath = path.join(temporaryDirectory, "enhanced.png");
+    await sharp(imagePath)
+      .extract({ left, top, width: cropWidth, height: cropHeight })
+      .greyscale()
+      .normalize()
+      .sharpen({ sigma: 1.1 })
+      .resize({
+        width: Math.min(5000, Math.round(cropWidth * 2.5)),
+        kernel: "lanczos3",
+      })
+      .png()
+      .toFile(enhancedPath);
+    return {
+      filePath: enhancedPath,
+      cleanup: () =>
+        fs.promises.rm(temporaryDirectory, { recursive: true, force: true }),
+    };
+  } catch {
+    if (temporaryDirectory) {
+      await fs.promises.rm(temporaryDirectory, {
+        recursive: true,
+        force: true,
+      });
+    }
+    return null;
+  }
 }
 
 function parseBankRecognitionChannel(
@@ -2184,8 +2447,69 @@ async function recognizePreparedBankReceiptDocument(
     );
   }
   const primary = parseBankRecognitionChannel(text, detailed.lines);
-  const fields = primary.fields;
+  let fields = primary.fields;
   const status = primary.status;
+  const enhancedConflicts: ContractFinancialBlockingReason[] = [];
+  const missingRoleFields = (
+    ["payer", "payerAccount", "payee", "payeeAccount"] as const
+  ).filter((field) => !fields[field]);
+  if (status === "normal" && pageCount === 1 && missingRoleFields.length > 0) {
+    const enhancedRegion = await createEnhancedBankRoleRegion(
+      ocrFilePath,
+      detailed.lines,
+    );
+    if (enhancedRegion) {
+      try {
+        const enhanced = await callPaddleOcrDetailed(
+          enhancedRegion.filePath,
+          "v6_medium",
+        );
+        const enhancedModelMatches =
+          enhanced.modelVersion === "v6_medium" &&
+          enhanced.lines.every(
+            (line) => !line.modelVersion || line.modelVersion === "v6_medium",
+          );
+        if (!enhancedModelMatches) {
+          enhancedConflicts.push(
+            blockingReason(
+              "BANK_ENHANCED_OCR_MODEL_MISMATCH",
+              "回单主体增强复扫未完整使用PP-OCRv6_medium，禁止采用增强值",
+              "recognitionModel",
+            ),
+          );
+        } else {
+          const originalEvidence = extractExplicitBankRoleEvidence(
+            detailed.lines,
+          );
+          const enhancedEvidence = extractExplicitBankRoleEvidence(
+            enhanced.lines,
+          );
+          const merged = mergeEnhancedBankRoleEvidence(
+            fields,
+            originalEvidence,
+            enhancedEvidence,
+          );
+          fields = merged.fields;
+          enhancedConflicts.push(...merged.conflicts);
+          warnings.push(
+            merged.recoveredFields.length > 0
+              ? `回单主体区域已执行一次灰度对比度增强复扫，恢复字段：${merged.recoveredFields.map(bankRoleFieldLabel).join("、")}`
+              : "回单主体区域已执行一次灰度对比度增强复扫，未形成可安全采用的新字段",
+          );
+        }
+      } catch {
+        warnings.push(
+          "回单主体区域增强复扫暂不可用，保留整图识别结果并安全阻断",
+        );
+      } finally {
+        await enhancedRegion.cleanup().catch(() => undefined);
+      }
+    } else {
+      warnings.push(
+        "回单主体区域无法生成受限增强图，保留整图识别结果并安全阻断",
+      );
+    }
+  }
 
   const direction = bankDirection(fields.payer, fields.payee, context);
   const meta = buildRecognitionMeta(text, detailed.lines, "paddle_ocr");
@@ -2194,7 +2518,11 @@ async function recognizePreparedBankReceiptDocument(
     detailed.lines.every(
       (line) => !line.modelVersion || line.modelVersion === "v6_medium",
     );
-  const reasons = [...primary.conflicts, ...confidenceReasons(meta, context)];
+  const reasons = [
+    ...primary.conflicts,
+    ...enhancedConflicts,
+    ...confidenceReasons(meta, context),
+  ];
   if (!modelVersionMatches) {
     reasons.push(
       blockingReason(

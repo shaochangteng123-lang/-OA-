@@ -73,7 +73,22 @@ export const MANUAL_CATEGORY_RULES: Record<
   welfare_one_407: {
     accountCode: "welfare_one",
     direction: "expense",
-    label: "407费用",
+    label: "407费用（历史）",
+  },
+  welfare_one_drinking_water: {
+    accountCode: "welfare_one",
+    direction: "expense",
+    label: "饮用水",
+  },
+  welfare_one_office: {
+    accountCode: "welfare_one",
+    direction: "expense",
+    label: "办公",
+  },
+  welfare_one_electricity: {
+    accountCode: "welfare_one",
+    direction: "expense",
+    label: "电费",
   },
   welfare_one_407_ai: {
     accountCode: "welfare_one",
@@ -326,10 +341,24 @@ export function buildMonthlyFinancialReportView(input: {
   }
 
   const manual = input.manualItems;
+  const activeBankAccounts = new Set(
+    input.automatic.bank?.activeAccounts || [],
+  );
+  const chargeBankAccounts = new Set(
+    input.automatic.bank?.chargeAccounts ||
+      [...activeBankAccounts].filter(
+        (code): code is "general" | "business" =>
+          code === "general" || code === "business",
+      ),
+  );
   const income = {
     ...input.automatic.income,
-    generalInterest: sumManualCategory(manual, "general_interest"),
-    businessInterest: sumManualCategory(manual, "business_interest"),
+    generalInterest: chargeBankAccounts.has("general")
+      ? input.automatic.bank?.generalInterest || "0"
+      : sumManualCategory(manual, "general_interest"),
+    businessInterest: chargeBankAccounts.has("business")
+      ? input.automatic.bank?.businessInterest || "0"
+      : sumManualCategory(manual, "business_interest"),
     welfareOneSupplementIncome: sumManualCategory(
       manual,
       "welfare_one_supplement",
@@ -341,10 +370,20 @@ export function buildMonthlyFinancialReportView(input: {
   };
   const expenses = {
     ...input.automatic.expenses,
-    generalBankFee: sumManualCategory(manual, "general_bank_fee"),
-    businessBankFee: sumManualCategory(manual, "business_bank_fee"),
+    generalBankFee: chargeBankAccounts.has("general")
+      ? input.automatic.bank?.generalBankFee || "0"
+      : sumManualCategory(manual, "general_bank_fee"),
+    businessBankFee: chargeBankAccounts.has("business")
+      ? input.automatic.bank?.businessBankFee || "0"
+      : sumManualCategory(manual, "business_bank_fee"),
     generalOtherExpense: sumManualCategory(manual, "general_other"),
     welfareOne407: sumManualCategory(manual, "welfare_one_407"),
+    welfareOneDrinkingWater: sumManualCategory(
+      manual,
+      "welfare_one_drinking_water",
+    ),
+    welfareOneOffice: sumManualCategory(manual, "welfare_one_office"),
+    welfareOneElectricity: sumManualCategory(manual, "welfare_one_electricity"),
     welfareOne407Ai: sumManualCategory(manual, "welfare_one_407_ai"),
     welfareOne8hAi: sumManualCategory(manual, "welfare_one_8h_ai"),
     welfareTwoRefreshment: sumManualCategory(manual, "welfare_two_refreshment"),
@@ -391,6 +430,9 @@ export function buildMonthlyFinancialReportView(input: {
       income: income.welfareOneSupplementIncome,
       expense: addFinancialAmounts(
         expenses.welfareOne407,
+        expenses.welfareOneDrinkingWater,
+        expenses.welfareOneOffice,
+        expenses.welfareOneElectricity,
         expenses.welfareOne407Ai,
         expenses.welfareOne8hAi,
       ),

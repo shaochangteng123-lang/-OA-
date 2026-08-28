@@ -72,6 +72,10 @@ import { ref, computed } from 'vue'
 import { Plus, Document, Delete, InfoFilled, WarningFilled, Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { showUploadError } from '@/utils/uploadError'
+import {
+  buildCrossUploadInvoiceDuplicateMessage,
+  buildUploadingInvoiceDuplicateMessage,
+} from '@/utils/reimbursement/invoiceDuplicateMessage'
 
 export interface DeductionItem {
   id?: string
@@ -111,8 +115,16 @@ const fileList = ref<any[]>([])
 const isDragging = ref(false)
 // 正在识别中的核减上传请求：fileUid → AbortController
 const deductionAbortMap = new Map<string | number, AbortController>()
+const reservedInvoiceNumbers = new Set<string>()
 
 const deductionItems = computed(() => props.modelValue || [])
+
+function normalizeInvoiceNumber(value: unknown): string {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+}
 
 // displayList = 已识别成功（来自 props.modelValue） + 正在识别中（临时条目）
 // 两份数据各自独立维护，不互相干扰
@@ -151,9 +163,6 @@ async function handleDrop(e: DragEvent): Promise<void> {
   // 并发上传所有文件，互不阻塞
   await Promise.all(validFiles.map(fakeFile => onFileChange(fakeFile)))
 }
-
-
-
 function beforeUpload(file: File): boolean {
   // 检查是否是图片文件（与发票上传逻辑一致）
   const fileName = file.name.toLowerCase()
@@ -208,10 +217,15 @@ async function onFileChange(file: any): Promise<void> {
     type: 'info',
     duration: 0, // 不自动关闭，需要手动关闭
   })
+  let reservedInvoiceNumber = ''
+  let acceptedInvoice = false
 
   try {
     const formData = new FormData()
     formData.append('invoice', file.raw)
+    if (props.reimbursementId) {
+      formData.append('reimbursementId', props.reimbursementId)
+    }
 
     const res = await fetch('/api/reimbursement/upload-deduction-invoice', {
       method: 'POST',
@@ -227,22 +241,94 @@ async function onFileChange(file: any): Promise<void> {
 
     if (data.success) {
       const { filePath, fileHash, ocrResult } = data.data
+      const normalizedInvoiceNumber = normalizeInvoiceNumber(
+        ocrResult.invoiceNumber,
+      )
+      if (
+        normalizedInvoiceNumber &&
+        reservedInvoiceNumbers.has(normalizedInvoiceNumber)
+      ) {
+        showUploadError(
+          buildUploadingInvoiceDuplicateMessage(ocrResult.invoiceNumber),
+        )
+        uploadingList.value = uploadingList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
+        fileList.value = fileList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
+        return
+      }
+      if (normalizedInvoiceNumber) {
+        reservedInvoiceNumbers.add(normalizedInvoiceNumber)
+        reservedInvoiceNumber = normalizedInvoiceNumber
+      }
 
       // 前端查重1：检查核减列表中是否已存在
       const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === fileHash)
       if (duplicateInDeduction) {
-        showUploadError('此核减发票已上传，请勿重复上传')
+        showUploadError(
+          buildUploadingInvoiceDuplicateMessage(ocrResult.invoiceNumber),
+        )
         uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
         fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+        return
+      }
+
+      const duplicateNumberInDeduction = normalizedInvoiceNumber
+        ? deductionItems.value.find(
+            item =>
+              normalizeInvoiceNumber(item.invoiceNumber) ===
+              normalizedInvoiceNumber,
+          )
+        : undefined
+      if (duplicateNumberInDeduction) {
+        showUploadError(
+          buildUploadingInvoiceDuplicateMessage(ocrResult.invoiceNumber),
+        )
+        uploadingList.value = uploadingList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
+        fileList.value = fileList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
         return
       }
 
       // 前端查重2：检查发票列表中是否已存在（交叉查重）
       const duplicateInInvoice = props.existingInvoices?.find((inv: any) => inv.fileHash === fileHash)
       if (duplicateInInvoice) {
-        showUploadError('此发票已在发票上传中上传，请勿重复上传')
+        showUploadError(
+          buildCrossUploadInvoiceDuplicateMessage(
+            ocrResult.invoiceNumber,
+            'invoice',
+          ),
+        )
         uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
         fileList.value = fileList.value.filter((f: any) => f.uid !== file.uid)
+        return
+      }
+
+      const duplicateNumberInInvoice = normalizedInvoiceNumber
+        ? props.existingInvoices?.find(
+            (inv: any) =>
+              normalizeInvoiceNumber(inv.invoiceNumber) ===
+              normalizedInvoiceNumber,
+          )
+        : undefined
+      if (duplicateNumberInInvoice) {
+        showUploadError(
+          buildCrossUploadInvoiceDuplicateMessage(
+            ocrResult.invoiceNumber,
+            'invoice',
+          ),
+        )
+        uploadingList.value = uploadingList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
+        fileList.value = fileList.value.filter(
+          (f: any) => f.uid !== file.uid,
+        )
         return
       }
 
@@ -258,6 +344,7 @@ async function onFileChange(file: any): Promise<void> {
       const updated = [...deductionItems.value, newItem]
       emit('update:modelValue', updated)
       emit('file-change', newItem)
+      acceptedInvoice = true
       ElMessage.success(`核减发票识别成功，金额：¥${newItem.amount.toFixed(2)}`)
     } else {
       showUploadError(data.message || '上传失败')
@@ -278,6 +365,9 @@ async function onFileChange(file: any): Promise<void> {
     showUploadError(errorMessage)
     uploadingList.value = uploadingList.value.filter((f: any) => f.uid !== file.uid)
   } finally {
+    if (reservedInvoiceNumber && !acceptedInvoice) {
+      reservedInvoiceNumbers.delete(reservedInvoiceNumber)
+    }
     uploadingCount.value = Math.max(0, uploadingCount.value - 1)
     deductionAbortMap.delete(file.uid)
   }
@@ -322,6 +412,10 @@ function handlePreview(file: any): void {
 }
 
 function removeItem(idx: number): void {
+  const removed = deductionItems.value[idx]
+  if (removed?.invoiceNumber) {
+    reservedInvoiceNumbers.delete(normalizeInvoiceNumber(removed.invoiceNumber))
+  }
   const updated = deductionItems.value.filter((_, i) => i !== idx)
   emit('update:modelValue', updated)
   emit('delete-item', idx)

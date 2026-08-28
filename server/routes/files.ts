@@ -18,6 +18,45 @@ import { sendConvertedPdf, CONVERTIBLE_EXT } from "../utils/doc-preview.js";
 import { isSystemAdminEquivalentRole } from "../utils/boss-role.js";
 
 const router = express.Router();
+const monthlySalaryBankRoot = path.resolve(
+  process.cwd(),
+  "uploads",
+  "monthly-financial-bank",
+);
+
+async function resolveMonthlySalaryBankEvidencePath(
+  storedPath: string,
+): Promise<string | null> {
+  if (
+    !storedPath.startsWith("uploads/monthly-financial-bank/") ||
+    !validateFilePath(storedPath)
+  ) {
+    return null;
+  }
+  const candidatePath = path.resolve(process.cwd(), storedPath);
+  if (
+    candidatePath === monthlySalaryBankRoot ||
+    !candidatePath.startsWith(`${monthlySalaryBankRoot}${path.sep}`)
+  ) {
+    return null;
+  }
+  try {
+    const [realCandidate, realRoot] = await Promise.all([
+      fs.promises.realpath(candidatePath),
+      fs.promises.realpath(monthlySalaryBankRoot),
+    ]);
+    if (
+      realCandidate === realRoot ||
+      !realCandidate.startsWith(`${realRoot}${path.sep}`)
+    ) {
+      return null;
+    }
+    const stats = await fs.promises.stat(realCandidate);
+    return stats.isFile() ? realCandidate : null;
+  } catch {
+    return null;
+  }
+}
 
 // 下载发票文件
 router.get("/invoices/*", requireAuth, async (req, res) => {
@@ -154,6 +193,60 @@ router.get("/payment-proofs/*", requireAuth, async (req, res) => {
   }
 });
 
+// 预览由月底银行原件自动挂载或替换的报销付款回单
+router.get("/monthly-bank-proofs/*", requireAuth, async (req, res) => {
+  try {
+    const relativePath = String((req.params as any)[0] || "")
+      .replace(/^\/+/, "")
+      .trim();
+    const userId = req.session.userId!;
+    const storedPath = `uploads/monthly-financial-bank/${relativePath}`;
+    if (!relativePath || !validateFilePath(storedPath)) {
+      return res.status(403).json({ success: false, message: "非法文件路径" });
+    }
+
+    const proof = await db.get<{ user_id: string; type: string }>(
+      `SELECT user_id, type
+       FROM reimbursements
+       WHERE is_deleted = FALSE
+         AND payment_proof_path LIKE ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      `%${storedPath}%`,
+    );
+    if (!proof) {
+      return res.status(404).json({ success: false, message: "文件不存在" });
+    }
+
+    const user = await db.get<{ role: string }>(
+      "SELECT role FROM users WHERE id = ?",
+      userId,
+    );
+    const isAdmin =
+      user?.role === "admin" || isSystemAdminEquivalentRole(user?.role);
+    const isGMForBusiness =
+      user?.role === "general_manager" && proof.type === "business";
+    if (proof.user_id !== userId && !isAdmin && !isGMForBusiness) {
+      return res
+        .status(403)
+        .json({ success: false, message: "无权访问此文件" });
+    }
+
+    const root = path.resolve(process.cwd(), "uploads/monthly-financial-bank");
+    const fullPath = path.resolve(process.cwd(), storedPath);
+    if (fullPath !== root && !fullPath.startsWith(`${root}${path.sep}`)) {
+      return res.status(403).json({ success: false, message: "非法文件路径" });
+    }
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ success: false, message: "文件不存在" });
+    }
+    res.sendFile(fullPath);
+  } catch (error) {
+    console.error("读取月底银行付款回单失败:", error);
+    res.status(500).json({ success: false, message: "读取付款回单失败" });
+  }
+});
+
 // 下载银行回单图片
 router.get("/bank-receipts/*", requireAuth, async (req, res) => {
   try {
@@ -191,6 +284,152 @@ router.get("/bank-receipts/*", requireAuth, async (req, res) => {
     res.sendFile(fullPath);
   } catch {
     res.status(500).json({ success: false, message: "下载失败" });
+  }
+});
+
+// 预览月报基本账户中已严格挂到员工工资明细的单笔工资回单。
+router.get(
+  "/monthly-salary-receipts/:transactionId",
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const receipt = await db.get<{
+        crop_path: string;
+        payee_name: string | null;
+        amount: string;
+      }>(
+        `SELECT transaction.crop_path,
+                transaction.payee_name,
+                transaction.amount::text AS amount
+         FROM monthly_financial_bank_transactions transaction
+         JOIN monthly_financial_bank_files file
+           ON file.id = transaction.current_file_id
+          AND file.is_active = TRUE
+         JOIN monthly_financial_bank_transaction_links employee_link
+           ON employee_link.transaction_id = transaction.id
+          AND employee_link.business_object_type = 'employee_profile'
+          AND employee_link.link_kind = 'classification_basis'
+          AND employee_link.match_status = 'active'
+          AND employee_link.is_active = TRUE
+         WHERE transaction.id = ?
+           AND transaction.is_current = TRUE
+           AND transaction.account_code = 'basic'
+           AND transaction.category = 'salary'
+           AND transaction.direction = 'outflow'
+           AND transaction.recognition_status = 'recognized'
+           AND EXISTS (
+             SELECT 1
+             FROM monthly_financial_bank_transaction_links evidence_link
+             LEFT JOIN human_cost_receipt_items previous_item
+               ON evidence_link.business_object_type =
+                    'human_cost_receipt_item'
+              AND previous_item.id = evidence_link.business_object_id
+             WHERE evidence_link.transaction_id = transaction.id
+               AND evidence_link.link_kind = 'display_replacement'
+               AND evidence_link.match_status = 'active'
+               AND evidence_link.is_active = TRUE
+               AND (
+                 (
+                   evidence_link.business_object_type = 'employee_profile'
+                   AND evidence_link.business_object_id =
+                         employee_link.business_object_id
+                 )
+                 OR (
+                   evidence_link.business_object_type =
+                     'human_cost_receipt_item'
+                   AND previous_item.employee_id =
+                         employee_link.business_object_id
+                 )
+               )
+           )
+         LIMIT 1`,
+        req.params.transactionId,
+      );
+      if (!receipt?.crop_path) {
+        return res
+          .status(404)
+          .json({ success: false, message: "员工工资回单不存在或关联已失效" });
+      }
+      const fullPath = await resolveMonthlySalaryBankEvidencePath(
+        receipt.crop_path,
+      );
+      if (!fullPath) {
+        return res.status(403).json({
+          success: false,
+          message: "工资回单预览路径不安全或文件不存在",
+        });
+      }
+      res.type("image/jpeg");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename*=UTF-8''${encodeURIComponent(`${receipt.payee_name || "员工"}-${receipt.amount}-月报工资回单.jpg`)}`,
+      );
+      return res.sendFile(fullPath);
+    } catch (error) {
+      console.error("预览月报员工工资回单失败:", error);
+      return res.status(500).json({ success: false, message: "预览失败" });
+    }
+  },
+);
+
+// 预览“实发工资”付款凭证位置展示的基本账户月报原件。
+router.get("/monthly-salary-files/:fileId", requireAdmin, async (req, res) => {
+  try {
+    const file = await db.get<{
+      storage_path: string;
+      mime_type: string;
+      original_name: string;
+    }>(
+      `SELECT file.storage_path, file.mime_type, file.original_name
+         FROM monthly_financial_bank_files file
+         WHERE file.id = ?
+           AND file.account_code = 'basic'
+           AND file.is_active = TRUE
+           AND EXISTS (
+             SELECT 1
+             FROM monthly_financial_bank_transactions transaction
+             JOIN monthly_financial_bank_transaction_links evidence_link
+               ON evidence_link.transaction_id = transaction.id
+              AND evidence_link.link_kind = 'display_replacement'
+              AND evidence_link.business_object_type IN (
+                'employee_profile', 'human_cost_receipt_item'
+              )
+              AND evidence_link.match_status = 'active'
+              AND evidence_link.is_active = TRUE
+             WHERE transaction.current_file_id = file.id
+               AND transaction.is_current = TRUE
+               AND transaction.account_code = 'basic'
+               AND transaction.category = 'salary'
+               AND transaction.direction = 'outflow'
+               AND transaction.recognition_status = 'recognized'
+           )
+         LIMIT 1`,
+      req.params.fileId,
+    );
+    if (!file) {
+      return res.status(404).json({
+        success: false,
+        message: "基本账户工资回单文件不存在或尚未完成员工挂载",
+      });
+    }
+    const fullPath = await resolveMonthlySalaryBankEvidencePath(
+      file.storage_path,
+    );
+    if (!fullPath) {
+      return res.status(403).json({
+        success: false,
+        message: "工资回单文件路径不安全或文件不存在",
+      });
+    }
+    res.setHeader("Content-Type", file.mime_type || "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename*=UTF-8''${encodeURIComponent(normalizeUploadFileName(file.original_name))}`,
+    );
+    return res.sendFile(fullPath);
+  } catch (error) {
+    console.error("预览月报工资回单原件失败:", error);
+    return res.status(500).json({ success: false, message: "预览失败" });
   }
 });
 

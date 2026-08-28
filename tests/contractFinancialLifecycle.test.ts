@@ -8,12 +8,14 @@ import path from "path";
 import {
   backfillLegacyPostedContractFinancialSettlements,
   confirmContractFinancialRegistration,
+  confirmContractFinancialRegistrationInTransaction,
   confirmContractFinancialRecord,
   deleteContractFinancialOcrUpload,
   deleteContractFinancialRegistrationDraft,
   deleteContractFinancialDraft,
   financialDirectionFromContractCategory,
   postContractFinancialSettlements,
+  rebuildContractFinancialRegistrationMatches,
   reverseContractFinancialRegistration,
   reverseContractFinancialRecord,
 } from "../server/services/contractService";
@@ -23,6 +25,8 @@ function createRegistrationConfirmationClient(options: {
   invoiceAmount: number;
   receiptAmount: number;
   allocatedAmounts: number[];
+  invoiceSeller?: string;
+  receiptPayee?: string;
 }) {
   const registration = {
     id: "registration-closure",
@@ -60,6 +64,14 @@ function createRegistrationConfirmationClient(options: {
     financial_document_status: "normal",
     financial_direction: direction,
     financial_can_auto_post: true,
+    invoice_seller:
+      direction === "output"
+        ? options.invoiceSeller || "北京羽隶工程咨询有限公司"
+        : null,
+    settlement_payee:
+      direction === "receipt"
+        ? options.receiptPayee || "北京羽隶工程咨询有限公司"
+        : null,
   });
   return {
     query: jest.fn(async (sql: string) => {
@@ -111,6 +123,52 @@ function createRegistrationConfirmationClient(options: {
 describe("合同财务记录三态闭环", () => {
   afterEach(() => {
     jest.clearAllMocks();
+  });
+
+  it("公共财务登记确认入口继续在数据库事务内执行", async () => {
+    const client = {
+      query: jest.fn(async () => ({ rows: [] })),
+    };
+    (db.transaction as jest.Mock).mockImplementationOnce(async (callback) =>
+      callback(client),
+    );
+
+    await expect(
+      confirmContractFinancialRegistration(
+        "registration-wrapper",
+        "finance-1",
+        "admin",
+        "contract-wrapper",
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM contract_financial_registrations"),
+      ["registration-wrapper"],
+    );
+  });
+
+  it("事务内财务登记确认入口复用传入连接且不重复开启事务", async () => {
+    const client = {
+      query: jest.fn(async () => ({ rows: [] })),
+    };
+
+    await expect(
+      confirmContractFinancialRegistrationInTransaction(
+        client as never,
+        "registration-in-transaction",
+        "finance-1",
+        "admin",
+        "contract-in-transaction",
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("FROM contract_financial_registrations"),
+      ["registration-in-transaction"],
+    );
   });
 
   it("合同分类唯一决定收入或支出方向", () => {
@@ -287,6 +345,308 @@ describe("合同财务记录三态闭环", () => {
         String(sql).includes("UPDATE contract_receipts"),
       ),
     ).toBe(false);
+  });
+
+  it("主营实际回款在没有发票分配时仍可先确认并按银行日期入账", async () => {
+    let contractStatus = "effective";
+    const client = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        if (
+          sql.includes("FROM contract_financial_registrations") &&
+          sql.includes("FOR UPDATE")
+        ) {
+          return {
+            rows: [
+              {
+                id: "registration-pending-invoice",
+                contract_id: "contract-pending-invoice",
+                settlement_kind: "receipt",
+                financial_direction: "income",
+                direction_invoice_record_id: null,
+                status: "draft",
+              },
+            ],
+          };
+        }
+        if (sql.includes("FROM contract_financial_registration_items")) {
+          return {
+            rows: [
+              {
+                record_id: "receipt-pending-invoice",
+                amount: "40000.00",
+                allocated_amount: "0.00",
+              },
+            ],
+          };
+        }
+        if (sql.includes("SELECT * FROM contracts")) {
+          return {
+            rows: [
+              {
+                id: "contract-pending-invoice",
+                root_contract_id: "contract-pending-invoice",
+                status: contractStatus,
+                category: "main_business",
+                financial_direction: "income",
+                project_id: null,
+              },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE contract_receipts AS receipt")) {
+          return { rows: [{ id: "receipt-pending-invoice" }] };
+        }
+        if (sql.includes("AS contract_total")) {
+          return {
+            rows: [
+              {
+                contract_total: "100000.00",
+                invoice_count: 0,
+                invoice_total: "0.00",
+                receipt_total: "40000.00",
+                payment_total: "0.00",
+                external_payment_total: "0.00",
+              },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE contracts SET status = $2")) {
+          contractStatus = String(params?.[1] || "executing");
+          return {
+            rows: [
+              {
+                id: "contract-pending-invoice",
+                root_contract_id: "contract-pending-invoice",
+                status: contractStatus,
+                category: "main_business",
+                financial_direction: "income",
+                project_id: null,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    await expect(
+      postContractFinancialSettlements(client as never, {
+        contractId: "contract-pending-invoice",
+        registrationId: "registration-pending-invoice",
+        settlementKind: "receipt",
+        settlementRecordIds: ["receipt-pending-invoice"],
+        financialDirection: "income",
+        directionInvoiceRecordId: null,
+        allowUnallocatedSettlement: true,
+        actorId: "finance-1",
+        actorRole: "admin",
+        now: "2026-06-30T09:00:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "executing" });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE contract_receipts AS receipt"),
+      expect.arrayContaining([
+        ["receipt-pending-invoice"],
+        "contract-pending-invoice",
+      ]),
+    );
+  });
+
+  it("工程咨询向动态签约公司的内部划拨允许未分配发票先行入账", async () => {
+    let contractStatus = "effective";
+    const client = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        if (
+          sql.includes("FROM contract_financial_registrations") &&
+          sql.includes("FOR UPDATE")
+        ) {
+          return {
+            rows: [
+              {
+                id: "registration-internal-funding",
+                contract_id: "contract-internal-funding",
+                settlement_kind: "payment",
+                financial_direction: "cost",
+                direction_invoice_record_id: null,
+                status: "draft",
+              },
+            ],
+          };
+        }
+        if (sql.includes("FROM contract_financial_registration_items")) {
+          return {
+            rows: [
+              {
+                record_id: "payment-internal-funding",
+                amount: "81641.84",
+                allocated_amount: "0.00",
+                payer: "北京羽隶工程咨询有限公司",
+                payee: "北京羽隶科技有限公司",
+              },
+            ],
+          };
+        }
+        if (sql.includes("SELECT * FROM contracts")) {
+          return {
+            rows: [
+              {
+                id: "contract-internal-funding",
+                root_contract_id: "contract-internal-funding",
+                status: contractStatus,
+                category: "asset",
+                declared_category: "asset",
+                asset_funding_mode: "engineering_to_technology",
+                financial_direction: "cost",
+                party_a: "国航物业酒店管理有限公司国航大厦分公司",
+                party_b: "北京羽隶科技有限公司",
+                project_id: null,
+              },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE contract_payments AS payment")) {
+          return { rows: [{ id: "payment-internal-funding" }] };
+        }
+        if (sql.includes("AS contract_total")) {
+          return {
+            rows: [
+              {
+                contract_total: "635952.00",
+                invoice_count: 19,
+                invoice_total: "381162.52",
+                receipt_total: "0.00",
+                payment_total: "81641.84",
+                external_payment_total: "460656.52",
+              },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE contracts SET status = $2")) {
+          contractStatus = String(params?.[1] || "executing");
+          return {
+            rows: [
+              {
+                id: "contract-internal-funding",
+                root_contract_id: "contract-internal-funding",
+                status: contractStatus,
+                category: "asset",
+                declared_category: "asset",
+                asset_funding_mode: "engineering_to_technology",
+                financial_direction: "cost",
+                party_a: "国航物业酒店管理有限公司国航大厦分公司",
+                party_b: "北京羽隶科技有限公司",
+                project_id: null,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    await expect(
+      postContractFinancialSettlements(client as never, {
+        contractId: "contract-internal-funding",
+        registrationId: "registration-internal-funding",
+        settlementKind: "payment",
+        settlementRecordIds: ["payment-internal-funding"],
+        financialDirection: "cost",
+        directionInvoiceRecordId: null,
+        allowUnallocatedSettlement: true,
+        actorId: "finance-1",
+        actorRole: "admin",
+        now: "2026-08-27T10:30:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "executing" });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE contract_payments AS payment"),
+      expect.arrayContaining([
+        ["payment-internal-funding"],
+        "contract-internal-funding",
+      ]),
+    );
+  });
+
+  it("后补发票后按当前全部发票与跨月多笔回款重建金额对应关系", async () => {
+    const insertedMatches: unknown[][] = [];
+    const client = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        if (
+          sql.includes("JOIN contract_receipts record") &&
+          sql.includes("item.item_kind = $3")
+        ) {
+          return {
+            rows: [
+              {
+                item_id: "receipt-item-june",
+                record_id: "receipt-june",
+                amount: "40000.00",
+              },
+              {
+                item_id: "receipt-item-july",
+                record_id: "receipt-july",
+                amount: "60000.00",
+              },
+            ],
+          };
+        }
+        if (sql.includes("JOIN contract_invoices invoice")) {
+          return {
+            rows: [
+              {
+                item_id: "invoice-item-late",
+                record_id: "invoice-late",
+                amount: "100000.00",
+              },
+            ],
+          };
+        }
+        if (
+          sql.includes("INSERT INTO contract_financial_registration_matches")
+        ) {
+          insertedMatches.push(params || []);
+        }
+        return { rows: [] };
+      }),
+    };
+
+    const rebuilt = await rebuildContractFinancialRegistrationMatches(
+      client as never,
+      {
+        registrationId: "registration-cross-month",
+        contractId: "contract-cross-month",
+        settlementKind: "receipt",
+        now: "2026-07-10T10:00:00.000Z",
+      },
+    );
+
+    expect(rebuilt).toMatchObject({
+      invoiceRecordIds: ["invoice-late"],
+      settlementRecordIds: ["receipt-june", "receipt-july"],
+      invoiceTotalCents: 10000000,
+      settlementTotalCents: 10000000,
+      allocatedTotalCents: 10000000,
+      directionInvoiceRecordId: "invoice-late",
+    });
+    expect(rebuilt.matches).toEqual([
+      {
+        invoiceRecordId: "invoice-late",
+        settlementRecordId: "receipt-june",
+        allocatedAmount: 40000,
+      },
+      {
+        invoiceRecordId: "invoice-late",
+        settlementRecordId: "receipt-july",
+        allocatedAmount: 60000,
+      },
+    ]);
+    expect(insertedMatches).toHaveLength(2);
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "DELETE FROM contract_financial_registration_matches",
+      ),
+      ["registration-cross-month", "receipt"],
+    );
   });
 
   it("启动补处理将旧部分回款登记按验证链安全转为即时入账", async () => {
@@ -820,6 +1180,10 @@ describe("合同财务记录三态闭环", () => {
       financial_document_status: "normal",
       financial_direction: direction,
       financial_can_auto_post: true,
+      invoice_seller:
+        direction === "output" ? "北京羽隶工程咨询有限公司" : null,
+      settlement_payee:
+        direction === "receipt" ? "北京羽隶工程咨询有限公司" : null,
     });
     const client = {
       query: jest.fn(async (sql: string, params?: unknown[]) => {
@@ -910,6 +1274,34 @@ describe("合同财务记录三态闭环", () => {
       expect.stringContaining("INSERT INTO contract_audit_logs"),
       expect.arrayContaining(["financial_registration_confirmed"]),
     );
+  });
+
+  it("后补发票销售方与既有回款收款人不一致时禁止关闭登记", async () => {
+    const client = createRegistrationConfirmationClient({
+      invoiceAmount: 100,
+      receiptAmount: 100,
+      allocatedAmounts: [100],
+      invoiceSeller: "其他公司",
+      receiptPayee: "北京羽隶工程咨询有限公司",
+    });
+
+    await expect(
+      confirmContractFinancialRegistrationInTransaction(
+        client as never,
+        "registration-closure",
+        "finance-1",
+        "admin",
+        "contract-closure",
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 422,
+      code: "FINANCIAL_REGISTRATION_PARTY_MISMATCH",
+    });
+    expect(
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("UPDATE contract_financial_registrations"),
+      ),
+    ).toBe(false);
   });
 
   it("发票100但仅回款40时阻断确认且不写入确认状态或核算", async () => {
@@ -1123,6 +1515,8 @@ describe("合同财务记录三态闭环", () => {
                 financial_document_status: "normal",
                 financial_direction: "output",
                 financial_can_auto_post: true,
+                invoice_seller: "北京羽隶工程咨询有限公司",
+                settlement_payee: null,
               },
             ],
           };
@@ -1139,6 +1533,8 @@ describe("合同财务记录三态闭环", () => {
                 financial_document_status: "normal",
                 financial_direction: "receipt",
                 financial_can_auto_post: true,
+                invoice_seller: null,
+                settlement_payee: "北京羽隶工程咨询有限公司",
               },
             ],
           };
@@ -1786,7 +2182,7 @@ describe("合同财务记录三态闭环", () => {
     expect(routeSource).not.toContain(
       "existingExternalCents + newExternalCents > fundingTotalCents",
     );
-    expect(routeSource).not.toContain("累计科技对外付款不能超过发票合计");
+    expect(routeSource).not.toContain("累计签约公司对外付款不能超过发票合计");
     expect(routeSource).toContain("createExternalPaymentRegistrationShell");
     expect(routeSource).toContain("findOpenFinancialRegistrationId");
     expect(routeSource).toContain("openRegistrationId");
@@ -1795,6 +2191,24 @@ describe("合同财务记录三态闭环", () => {
     expect(routeSource).toContain("partyValidationInvoices");
     expect(routeSource).toContain("invoiceRows.rows.length");
     expect(routeSource).toContain("external_payment_registration_created");
+    const externalRouteStart = routeSource.indexOf(
+      '"/:id/financial-registrations/external-payments"',
+    );
+    const externalRouteEnd = routeSource.indexOf(
+      '"/:id/financial-registrations/:registrationId/external-payments"',
+      externalRouteStart,
+    );
+    const externalRouteSource = routeSource.slice(
+      externalRouteStart,
+      externalRouteEnd,
+    );
+    expect(externalRouteSource).toContain("appendExternalPaymentJobs(");
+    expect(externalRouteSource).not.toContain(
+      "createFinancialRegistrationFromJobs(",
+    );
+    expect(externalRouteSource).not.toContain(
+      "appendFinancialRegistrationSettlementJobs(",
+    );
     expect(routeSource).toContain("remainingInvoiceCents");
     expect(routeSource).toContain("allocatableBankDocuments");
     expect(source).toContain("EXTERNAL_PAYMENT_NOT_CLOSED");
@@ -1807,7 +2221,7 @@ describe("合同财务记录三态闭环", () => {
     );
   });
 
-  it("内部划拨模式仅凭发票与科技对外付款即可确认合同核算", async () => {
+  it("内部划拨模式仅凭发票与签约公司对外付款即可确认合同核算", async () => {
     const contract = {
       id: "contract-external-accounting",
       root_contract_id: "contract-external-accounting",
@@ -1915,7 +2329,7 @@ describe("合同财务记录三态闭环", () => {
     );
   });
 
-  it("科技对外付款未保存明细同时提供在线预览和删除", () => {
+  it("签约公司对外付款未保存明细同时提供在线预览和删除", () => {
     const source = fs.readFileSync(
       path.resolve(
         process.cwd(),
@@ -1951,8 +2365,11 @@ describe("合同财务记录三态闭环", () => {
     expect(source).toContain("contract_financial_ocr_jobs");
     expect(source).toContain("FINANCIAL_FILE_HASH_DUPLICATE");
     expect(source).toContain(
-      "工程咨询划拨回单必须由北京羽隶工程咨询有限公司付款、北京羽隶科技有限公司收款",
+      "工程咨询划拨回单必须由北京羽隶工程咨询有限公司付款",
     );
+    expect(source).toContain("contractCompanySubjectName || invoice.buyer");
+    expect(source).toContain("payeeName: contractCompanySubject!.name");
+    expect(source).not.toContain("北京羽隶科技有限公司收款");
     expect(source).toContain("existing.record_id === null");
     expect(source).toContain("FINANCIAL_CLIENT_VALUE_MISMATCH");
     expect(source).toContain("normalizedTransactionSerialNo");
@@ -1965,6 +2382,16 @@ describe("合同财务记录三态闭环", () => {
     expect(source).toContain("decideStoredContractFinancialOcrReuse");
     expect(source).toContain('reuseDecision === "retry_strategy_upgrade"');
     expect(source).toContain('"recognition_strategy_upgrade"');
+    expect(source).toContain('"/:id/financial-ocr/:jobId/retry"');
+    expect(source).toContain("FINANCIAL_OCR_RETRY_NOT_ALLOWED");
+    expect(source).toContain("FINANCIAL_OCR_RETRY_NOT_REQUIRED");
+    expect(source).toContain("CONTRACT_FINANCIAL_OCR_ADMIN_ONLY");
+    expect(source).toContain("preserveStoredFileOnReuse");
+    expect(source).toContain("requiresRefresh:");
+    expect(source).toContain("job.parser_version !==");
+    expect(source).toContain(
+      "contractFinancialOcrParserVersion(job.record_kind)",
+    );
     expect(source).not.toContain("companyBankAccountConfigurationCompleted");
     expect(source).not.toContain(
       '"company_bank_account_configuration_completed"',

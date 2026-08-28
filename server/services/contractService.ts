@@ -9,6 +9,7 @@ import {
   MAX_CONTRACT_AMOUNT_CENTS,
   toCents,
 } from "./contractAccounting.js";
+import { contractCostSettlementAmountSql } from "./contractSettlementAccounting.js";
 import {
   CONTRACT_PROJECT_AUTOMATIC_ADOPTION_MINIMUM_SCORE_GAP,
   extractContractBusinessNumber,
@@ -32,6 +33,11 @@ import {
   lockInvoiceApplicationRootByFinancialSource,
   reconcileInvoiceApplicationAllocations,
 } from "./invoiceApplication.js";
+import {
+  allocateAvailableContractFinancialAmounts,
+  CONTRACT_COMPANY_SUBJECTS,
+  resolveContractFinancialCompanySubject,
+} from "./contractFinancialWorkflow.js";
 
 export type ContractCategory = "main_business" | "non_main" | "asset";
 export type ContractDeclaredSubtype =
@@ -73,15 +79,19 @@ export function inferAssetFundingMode(
   category: ContractCategory | null,
   partyA: unknown,
   partyB: unknown,
+  companySubjects: readonly {
+    name: string;
+    taxId?: string;
+  }[] = CONTRACT_COMPANY_SUBJECTS,
 ): ContractAssetFundingMode | null {
   if (category !== "asset") return null;
-  const normalize = (value: unknown) =>
-    String(value || "")
-      .normalize("NFKC")
-      .replace(/\s+/gu, "")
-      .trim();
-  const parties = [normalize(partyA), normalize(partyB)];
-  return parties.includes("北京羽隶工程咨询有限公司")
+  const subject = resolveContractFinancialCompanySubject(
+    [partyA, partyB],
+    companySubjects,
+  );
+  if (!subject) return "pending_review";
+  return subject.name.normalize("NFKC").replace(/\s+/gu, "").trim() ===
+    "北京羽隶工程咨询有限公司"
     ? "engineering_direct"
     : "engineering_to_technology";
 }
@@ -789,23 +799,33 @@ export async function calculateTerminationSettlementSnapshot(
             0,
         )
       : Number(target.amount_delta || 0);
-  const table =
+  const settlementAmountSql =
     financialDirection === "income"
-      ? "contract_receipts"
-      : root.asset_funding_mode === "engineering_to_technology"
-        ? "contract_external_payments"
-        : "contract_payments";
-  const dateColumn =
-    table === "contract_receipts" ? "receipt_date" : "payment_date";
+      ? `COALESCE((
+          SELECT SUM(settlement_receipt.amount)
+          FROM contract_receipts settlement_receipt
+          JOIN contracts settlement_contract
+            ON settlement_contract.id = settlement_receipt.contract_id
+          WHERE COALESCE(
+              settlement_contract.root_contract_id,
+              settlement_contract.id
+            ) = settlement_root.id
+            AND settlement_contract.is_deleted = FALSE
+            AND settlement_contract.status <> 'rejected'
+            AND settlement_receipt.status = 'confirmed'
+            AND ($2::text IS NULL OR settlement_receipt.receipt_date <= $2)
+        ), 0)`
+      : contractCostSettlementAmountSql({
+          rootAlias: "settlement_root",
+          rootIdExpression: "settlement_root.id",
+          paymentDatePredicate:
+            "$2::text IS NULL OR settlement_payment.payment_date <= $2",
+        });
   const settlementResult = await client.query<{ settled_amount: number }>(
-    `SELECT COALESCE(SUM(record.amount), 0) AS settled_amount
-     FROM ${table} record
-     JOIN contracts linked ON linked.id = record.contract_id
-     WHERE COALESCE(linked.root_contract_id, linked.id) = $1
-       AND linked.is_deleted = FALSE
-       AND linked.status <> 'rejected'
-       AND record.status = 'confirmed'
-       AND ($2::text IS NULL OR record.${dateColumn} <= $2)`,
+    `SELECT ${settlementAmountSql} AS settled_amount
+     FROM contracts settlement_root
+     WHERE settlement_root.id = $1
+       AND settlement_root.is_deleted = FALSE`,
     [root.id, cutoffDate || null],
   );
   const currentCents = Math.max(0, toCents(currentEffectiveAmount));
@@ -1282,37 +1302,27 @@ export async function assertRootAmountAfterAdjustment(
   }
   const settlement = await client.query<{
     received_amount: number;
-    paid_amount: number;
-    external_paid_amount: number;
+    cost_settled_amount: number;
   }>(
     `SELECT
        COALESCE((SELECT SUM(r.amount)
          FROM contract_receipts r
          JOIN contracts c ON c.id = r.contract_id
-         WHERE COALESCE(c.root_contract_id, c.id) = $1
+         WHERE COALESCE(c.root_contract_id, c.id) = settlement_root.id
            AND c.status <> 'rejected'
            AND r.status = 'confirmed'), 0) AS received_amount,
-       COALESCE((SELECT SUM(p.amount)
-         FROM contract_payments p
-         JOIN contracts c ON c.id = p.contract_id
-         WHERE COALESCE(c.root_contract_id, c.id) = $1
-           AND c.status <> 'rejected'
-           AND p.status = 'confirmed'), 0) AS paid_amount,
-       COALESCE((SELECT SUM(p.amount)
-         FROM contract_external_payments p
-         JOIN contracts c ON c.id = p.contract_id
-         WHERE COALESCE(c.root_contract_id, c.id) = $1
-           AND c.status <> 'rejected'
-           AND p.status = 'confirmed'), 0) AS external_paid_amount`,
+       ${contractCostSettlementAmountSql({
+         rootAlias: "settlement_root",
+         rootIdExpression: "settlement_root.id",
+       })} AS cost_settled_amount
+     FROM contracts settlement_root
+     WHERE settlement_root.id = $1
+       AND settlement_root.is_deleted = FALSE`,
     [rootId],
   );
   const settledAmount =
     contract.category === "asset"
-      ? Number(
-          contract.asset_funding_mode === "engineering_to_technology"
-            ? settlement.rows[0]?.external_paid_amount || 0
-            : settlement.rows[0]?.paid_amount || 0,
-        )
+      ? Number(settlement.rows[0]?.cost_settled_amount || 0)
       : Number(settlement.rows[0]?.received_amount || 0);
   if (nextTotal < settledAmount) {
     throw new ContractDomainError(
@@ -5415,6 +5425,8 @@ interface LockedFinancialRecord {
   financial_document_status: string | null;
   financial_direction: string | null;
   financial_can_auto_post: boolean | null;
+  invoice_seller: string | null;
+  settlement_payee: string | null;
 }
 
 interface FinancialArtifactToDelete {
@@ -5432,6 +5444,7 @@ interface LockedFinancialOcrUpload {
   record_kind: FinancialRecordKind;
   status: string;
   record_id: string | null;
+  business_purpose: string | null;
 }
 
 async function hardDeleteFinancialArtifacts(
@@ -5590,6 +5603,8 @@ async function getLockedFinancialRecord(
   const result = await client.query<LockedFinancialRecord>(
     `SELECT record.contract_id, record.file_id, record.amount, record.status,
        file.file_path,
+       ${kind === "invoice" ? "record.seller" : "NULL::text"} AS invoice_seller,
+       ${kind === "receipt" ? "record.payee" : "NULL::text"} AS settlement_payee,
        record.financial_ocr_job_id,
        financial_ocr.status AS financial_ocr_status,
        financial_ocr.validation_status AS financial_validation_status,
@@ -5673,14 +5688,15 @@ export async function recalculateContractExecutionStatus(
     receipt_total: string | number;
     payment_total: string | number;
     external_payment_total: string | number;
+    cost_settlement_total: string | number;
   }>(
     `SELECT
-       COALESCE((SELECT COALESCE(
+       COALESCE(
          root.current_effective_amount,
          root.original_contract_amount,
          root.amount_delta,
          0
-       ) FROM contracts root WHERE root.id = $1), 0)::text AS contract_total,
+       )::text AS contract_total,
        COALESCE((SELECT COUNT(*) FROM contract_invoices i
          JOIN contracts c ON c.id = i.contract_id
          WHERE COALESCE(c.root_contract_id, c.id) = $1
@@ -5700,7 +5716,13 @@ export async function recalculateContractExecutionStatus(
        COALESCE((SELECT SUM(p.amount) FROM contract_external_payments p
          JOIN contracts c ON c.id = p.contract_id
          WHERE COALESCE(c.root_contract_id, c.id) = $1
-           AND c.status <> 'rejected' AND p.status = 'confirmed'), 0)::text AS external_payment_total`,
+           AND c.status <> 'rejected' AND p.status = 'confirmed'), 0)::text AS external_payment_total,
+       ${contractCostSettlementAmountSql({
+         rootAlias: "root",
+         rootIdExpression: "root.id",
+       })}::text AS cost_settlement_total
+     FROM contracts root
+     WHERE root.id = $1 AND root.is_deleted = FALSE`,
     [rootId],
   );
   const summary = totals.rows[0];
@@ -5711,12 +5733,19 @@ export async function recalculateContractExecutionStatus(
   const externalPaymentTotalCents = toCents(
     String(summary?.external_payment_total || 0),
   );
+  const costSettlementTotalCents = toCents(
+    String(
+      summary?.cost_settlement_total ??
+        (contract.asset_funding_mode === "engineering_to_technology"
+          ? summary?.external_payment_total
+          : summary?.payment_total) ??
+        0,
+    ),
+  );
   if (!contract.financial_direction) return contract;
   const settlementTotalCents =
     contract.financial_direction === "cost"
-      ? contract.asset_funding_mode === "engineering_to_technology"
-        ? externalPaymentTotalCents
-        : paymentTotalCents
+      ? costSettlementTotalCents
       : receiptTotalCents;
   const hasActivity =
     Number(summary?.invoice_count || 0) > 0 ||
@@ -5759,13 +5788,185 @@ export async function recalculateContractExecutionStatus(
   return result.rows[0];
 }
 
+export interface RebuiltContractFinancialMatches {
+  invoiceRecordIds: string[];
+  settlementRecordIds: string[];
+  invoiceTotalCents: number;
+  settlementTotalCents: number;
+  allocatedTotalCents: number;
+  directionInvoiceRecordId: string | null;
+  matches: Array<{
+    invoiceRecordId: string;
+    settlementRecordId: string;
+    allocatedAmount: number;
+  }>;
+}
+
+/**
+ * 重新按当前全部发票和银行凭证计算可覆盖金额。
+ *
+ * 该函数允许“先回款、后补发票”及“先开票、后分期回款”，因此只为两侧
+ * 已经实际存在的重叠金额生成对应关系，剩余差额继续保留在原财务登记中。
+ */
+export async function rebuildContractFinancialRegistrationMatches(
+  client: PoolClient,
+  input: {
+    registrationId: string;
+    contractId: string;
+    settlementKind: "receipt" | "payment";
+    now: string;
+  },
+): Promise<RebuiltContractFinancialMatches> {
+  const settlementTable = financialTable(input.settlementKind);
+  const settlementAmountSql =
+    input.settlementKind === "payment"
+      ? `(record.amount - COALESCE((
+           SELECT SUM(detail.amount)
+           FROM contract_payment_purpose_details detail
+           WHERE detail.payment_record_id=record.id
+             AND detail.purpose='lease_deposit'
+         ),CASE WHEN EXISTS(
+           SELECT 1 FROM contract_payment_purpose_details purpose
+           WHERE purpose.payment_record_id=record.id
+         ) THEN 0 ELSE (
+           SELECT SUM(receipt.confirmed_amount)
+           FROM contract_payment_deposit_receipts receipt
+           WHERE receipt.payment_record_id=record.id
+             AND receipt.status='confirmed'
+         ) END,0))`
+      : "record.amount";
+  const settlementItems = await client.query<{
+    item_id: string;
+    record_id: string;
+    amount: string | number;
+  }>(
+    `SELECT item.id AS item_id,item.record_id,
+         ${settlementAmountSql} AS amount
+       FROM contract_financial_registration_items item
+       JOIN ${settlementTable} record ON record.id = item.record_id
+      WHERE item.registration_id = $1 AND item.contract_id = $2
+        AND item.item_kind = $3 AND record.status <> 'reversed'
+      ORDER BY item.created_at, item.id
+      FOR UPDATE OF item, record`,
+    [input.registrationId, input.contractId, input.settlementKind],
+  );
+  const invoiceItems = await client.query<{
+    item_id: string;
+    record_id: string;
+    amount: string | number;
+  }>(
+    `SELECT item.id AS item_id, item.record_id, invoice.amount
+       FROM contract_financial_registration_items item
+       JOIN contract_invoices invoice ON invoice.id = item.record_id
+      WHERE item.registration_id = $1 AND item.contract_id = $2
+        AND item.item_kind = 'invoice' AND invoice.status <> 'reversed'
+      ORDER BY item.created_at, item.id
+      FOR UPDATE OF item, invoice`,
+    [input.registrationId, input.contractId],
+  );
+  await client.query(
+    `DELETE FROM contract_financial_registration_matches match
+      USING contract_financial_registration_items settlement
+      WHERE match.registration_id = $1
+        AND settlement.id = match.settlement_item_id
+        AND settlement.item_kind = $2`,
+    [input.registrationId, input.settlementKind],
+  );
+  const allocatableSettlementItems = settlementItems.rows.filter(
+    (item) => toCents(item.amount) > 0,
+  );
+  const allocations = allocateAvailableContractFinancialAmounts(
+    invoiceItems.rows.map((item) => Number(item.amount)),
+    allocatableSettlementItems.map((item) => Number(item.amount)),
+  );
+  const matches = allocations.map((allocation) => ({
+    invoiceRecordId: invoiceItems.rows[allocation.invoiceIndex]!.record_id,
+    settlementRecordId:
+      allocatableSettlementItems[allocation.settlementIndex]!.record_id,
+    allocatedAmount: allocation.allocatedAmount,
+  }));
+  for (const allocation of allocations) {
+    await client.query(
+      `INSERT INTO contract_financial_registration_matches(
+         id, registration_id, contract_id, invoice_item_id,
+         settlement_item_id, allocated_amount, created_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        nanoid(),
+        input.registrationId,
+        input.contractId,
+        invoiceItems.rows[allocation.invoiceIndex]!.item_id,
+        allocatableSettlementItems[allocation.settlementIndex]!.item_id,
+        allocation.allocatedAmount,
+        input.now,
+      ],
+    );
+  }
+  const invoiceTotalCents = invoiceItems.rows.reduce(
+    (sum, item) => sum + toCents(item.amount),
+    0,
+  );
+  const settlementTotalCents = settlementItems.rows.reduce(
+    (sum, item) => sum + toCents(item.amount),
+    0,
+  );
+  const allocatedTotalCents = allocations.reduce(
+    (sum, allocation) => sum + toCents(allocation.allocatedAmount),
+    0,
+  );
+  return {
+    invoiceRecordIds: invoiceItems.rows.map((item) => item.record_id),
+    settlementRecordIds: settlementItems.rows.map((item) => item.record_id),
+    invoiceTotalCents,
+    settlementTotalCents,
+    allocatedTotalCents,
+    directionInvoiceRecordId: invoiceItems.rows[0]?.record_id || null,
+    matches,
+  };
+}
+
+async function invoiceRequiredSettlementAmountCents(
+  client: PoolClient,
+  input: {
+    itemKind: FinancialStoredRecordKind;
+    recordId: string;
+    amount: string | number;
+  },
+): Promise<number> {
+  const grossCents = toCents(input.amount);
+  if (input.itemKind !== "payment" && input.itemKind !== "external_payment") {
+    return grossCents;
+  }
+  const recordColumn =
+    input.itemKind === "external_payment"
+      ? "external_payment_record_id"
+      : "payment_record_id";
+  const result = await client.query<{ deposit_amount: string | number }>(
+    `SELECT COALESCE((
+       SELECT SUM(detail.amount)
+       FROM contract_payment_purpose_details detail
+       WHERE detail.${recordColumn}=$1 AND detail.purpose='lease_deposit'
+     ),CASE WHEN EXISTS(
+       SELECT 1 FROM contract_payment_purpose_details purpose
+       WHERE purpose.${recordColumn}=$1
+     ) THEN 0 ELSE (
+       SELECT SUM(receipt.confirmed_amount)
+       FROM contract_payment_deposit_receipts receipt
+       WHERE receipt.${recordColumn}=$1 AND receipt.status='confirmed'
+     ) END,0) AS deposit_amount`,
+    [input.recordId],
+  );
+  return Math.max(0, grossCents - toCents(result.rows[0]?.deposit_amount || 0));
+}
+
 export interface PostContractFinancialSettlementsInput {
   contractId: string;
   registrationId: string;
   settlementKind: "receipt" | "payment";
   settlementRecordIds: readonly string[];
   financialDirection: "income" | "cost";
-  directionInvoiceRecordId: string;
+  directionInvoiceRecordId: string | null;
+  allowUnallocatedSettlement?: boolean;
   actorId: string;
   actorRole: string;
   now: string;
@@ -5805,7 +6006,8 @@ export async function postContractFinancialSettlements(
     registration.status !== "draft" ||
     registration.settlement_kind !== input.settlementKind ||
     registration.financial_direction !== input.financialDirection ||
-    registration.direction_invoice_record_id !== input.directionInvoiceRecordId
+    (registration.direction_invoice_record_id || null) !==
+      (input.directionInvoiceRecordId || null)
   ) {
     throw new ContractDomainError(
       409,
@@ -5818,8 +6020,10 @@ export async function postContractFinancialSettlements(
     record_id: string;
     amount: string | number;
     allocated_amount: string | number;
+    payer: string | null;
+    payee: string | null;
   }>(
-    `SELECT item.record_id, record.amount,
+    `SELECT item.record_id,record.amount,record.payer,record.payee,
        COALESCE((
          SELECT SUM(match.allocated_amount)
          FROM contract_financial_registration_matches match
@@ -5845,6 +6049,7 @@ export async function postContractFinancialSettlements(
     );
   }
   if (
+    !input.allowUnallocatedSettlement &&
     registeredItems.rows.some(
       (item) => toCents(item.amount) !== toCents(item.allocated_amount),
     )
@@ -5865,6 +6070,40 @@ export async function postContractFinancialSettlements(
       409,
       "合同分类尚未完成，不能确定收入或支出方向",
       "FINANCIAL_CONTRACT_CATEGORY_REQUIRED",
+    );
+  }
+  const internalFundingContractSubject = resolveContractFinancialCompanySubject(
+    [root.party_a, root.party_b],
+    CONTRACT_COMPANY_SUBJECTS,
+  );
+  const allowsEngineeringInternalFunding =
+    rootCategory === "asset" &&
+    root.asset_funding_mode === "engineering_to_technology" &&
+    input.financialDirection === "cost" &&
+    input.settlementKind === "payment" &&
+    Boolean(internalFundingContractSubject) &&
+    registeredItems.rows.every(
+      (item) =>
+        normalizeContractPartyIdentity(item.payer || "") ===
+          normalizeContractPartyIdentity("北京羽隶工程咨询有限公司") &&
+        normalizeContractPartyIdentity(item.payee || "") ===
+          normalizeContractPartyIdentity(
+            internalFundingContractSubject?.name || "",
+          ),
+    );
+  if (
+    input.allowUnallocatedSettlement &&
+    !(
+      (rootCategory === "main_business" &&
+        input.financialDirection === "income" &&
+        input.settlementKind === "receipt") ||
+      allowsEngineeringInternalFunding
+    )
+  ) {
+    throw new ContractDomainError(
+      409,
+      "只有主营实际回款或工程咨询向签约公司的内部划拨可以未分配发票先行入账",
+      "FINANCIAL_REGISTRATION_MATCH_AMOUNT_MISMATCH",
     );
   }
   const categoryDirection =
@@ -6313,7 +6552,8 @@ export async function deleteContractFinancialOcrUpload(
   return db.transaction(async (client) => {
     const result = await client.query<LockedFinancialOcrUpload>(
       `SELECT job.id, job.contract_id, job.file_id, file.file_path,
-         job.file_hash, job.record_kind, job.status, job.record_id
+         job.file_hash, job.record_kind, job.status, job.record_id,
+         job.business_purpose
        FROM contract_financial_ocr_jobs AS job
        JOIN contract_files AS file ON file.id = job.file_id
        WHERE job.id = $1
@@ -6323,6 +6563,13 @@ export async function deleteContractFinancialOcrUpload(
     const upload = result.rows[0];
     if (!upload || upload.contract_id !== contractId) {
       throw new ContractDomainError(404, "财务识别上传记录不存在");
+    }
+    if (upload.business_purpose) {
+      throw new ContractDomainError(
+        409,
+        "押金结算回单识别任务必须通过押金专用入口移除",
+        "CONTRACT_DEPOSIT_RETURN_OCR_SPECIAL_ROUTE_REQUIRED",
+      );
     }
     if (upload.record_id) {
       throw new ContractDomainError(
@@ -6384,6 +6631,29 @@ export async function deleteContractFinancialOcrUpload(
   });
 }
 
+async function assertFinancialRecordsNotLinkedToDeposit(
+  client: PoolClient,
+  paymentRecordIds: readonly string[],
+  externalPaymentRecordIds: readonly string[],
+): Promise<void> {
+  if (!paymentRecordIds.length && !externalPaymentRecordIds.length) return;
+  const linked = await client.query<{ id: string }>(
+    `SELECT id FROM contract_deposits
+     WHERE payment_record_id=ANY($1::text[])
+        OR external_payment_record_id=ANY($2::text[])
+     LIMIT 1
+     FOR UPDATE`,
+    [paymentRecordIds, externalPaymentRecordIds],
+  );
+  if (linked.rows[0]) {
+    throw new ContractDomainError(
+      409,
+      "付款已关联租赁押金，请先处理押金登记后再冲销财务记录",
+      "CONTRACT_DEPOSIT_PAYMENT_REVERSAL_BLOCKED",
+    );
+  }
+}
+
 export async function reverseContractFinancialRecord(
   kind: FinancialRecordKind,
   recordId: string,
@@ -6409,6 +6679,9 @@ export async function reverseContractFinancialRecord(
       record.contract_id,
       expectedContractId,
     );
+    if (kind === "payment") {
+      await assertFinancialRecordsNotLinkedToDeposit(client, [recordId], []);
+    }
     if (record.status !== "confirmed") {
       throw new ContractDomainError(
         409,
@@ -6473,95 +6746,115 @@ function assertRegistrationEvidence(
   }
 }
 
-export async function confirmContractFinancialRegistration(
+export async function confirmContractFinancialRegistrationInTransaction(
+  client: PoolClient,
   registrationId: string,
   actorId: string,
   actorRole: string,
   expectedContractId?: string,
 ): Promise<ContractRow> {
-  return db.transaction(async (client) => {
-    await lockInvoiceApplicationRootByFinancialSource(
-      client,
-      "registration",
-      registrationId,
+  await lockInvoiceApplicationRootByFinancialSource(
+    client,
+    "registration",
+    registrationId,
+  );
+  const registration = await getLockedFinancialRegistration(
+    client,
+    registrationId,
+  );
+  await assertFinancialRecordContractGroup(
+    client,
+    registration.contract_id,
+    expectedContractId,
+  );
+  if (registration.status !== "draft") {
+    throw new ContractDomainError(
+      409,
+      registration.status === "confirmed"
+        ? "该财务登记已经确认"
+        : "已冲正的财务登记不能确认",
+      "FINANCIAL_REGISTRATION_NOT_DRAFT",
     );
-    const registration = await getLockedFinancialRegistration(
-      client,
-      registrationId,
-    );
-    await assertFinancialRecordContractGroup(
-      client,
-      registration.contract_id,
-      expectedContractId,
-    );
-    if (registration.status !== "draft") {
-      throw new ContractDomainError(
-        409,
-        registration.status === "confirmed"
-          ? "该财务登记已经确认"
-          : "已冲正的财务登记不能确认",
-        "FINANCIAL_REGISTRATION_NOT_DRAFT",
-      );
-    }
-    const items = await getLockedFinancialRegistrationItems(
-      client,
-      registration,
-    );
-    const contract = await getLockedContract(client, registration.contract_id);
-    const rootId = contract.root_contract_id || contract.id;
-    const rootContract =
-      rootId === contract.id
-        ? contract
-        : await getLockedContract(client, rootId);
-    const usesExternalSettlement =
-      (rootContract.declared_category || rootContract.category) === "asset" &&
-      rootContract.asset_funding_mode === "engineering_to_technology";
-    const accountingSettlementKind: FinancialStoredRecordKind =
+  }
+  const items = await getLockedFinancialRegistrationItems(client, registration);
+  const contract = await getLockedContract(client, registration.contract_id);
+  const rootId = contract.root_contract_id || contract.id;
+  const rootContract =
+    rootId === contract.id ? contract : await getLockedContract(client, rootId);
+  const usesExternalSettlement =
+    (rootContract.declared_category || rootContract.category) === "asset" &&
+    rootContract.asset_funding_mode === "engineering_to_technology";
+  const accountingSettlementKind: FinancialStoredRecordKind =
+    usesExternalSettlement ? "external_payment" : registration.settlement_kind;
+  if (!items.some((item) => item.item_kind === accountingSettlementKind)) {
+    throw new ContractDomainError(
+      409,
       usesExternalSettlement
-        ? "external_payment"
-        : registration.settlement_kind;
-    if (!items.some((item) => item.item_kind === accountingSettlementKind)) {
-      throw new ContractDomainError(
-        409,
-        usesExternalSettlement
-          ? "该财务登记尚未收到科技向合同对方付款回单，不能确认"
-          : "该财务登记尚未收到银行回单，不能确认",
-        "FINANCIAL_REGISTRATION_SETTLEMENT_REQUIRED",
-      );
-    }
-    const records: Array<{
-      item: LockedFinancialRegistrationItem;
-      record: LockedFinancialRecord;
-    }> = [];
-    for (const item of items) {
-      records.push({
-        item,
-        record: await getLockedFinancialRecord(
-          client,
-          item.item_kind,
-          item.record_id,
-        ),
-      });
-    }
-    const registrationStatusesValid = records.every(({ item, record }) =>
-      item.item_kind === "invoice"
-        ? ["draft", "confirmed"].includes(record.status)
-        : (item.item_kind === registration.settlement_kind ||
-            item.item_kind === "external_payment") &&
-          ["draft", "confirmed"].includes(record.status),
+        ? "该财务登记尚未收到科技向合同对方付款回单，不能确认"
+        : "该财务登记尚未收到银行回单，不能确认",
+      "FINANCIAL_REGISTRATION_SETTLEMENT_REQUIRED",
     );
-    if (!registrationStatusesValid) {
+  }
+  const records: Array<{
+    item: LockedFinancialRegistrationItem;
+    record: LockedFinancialRecord;
+  }> = [];
+  for (const item of items) {
+    records.push({
+      item,
+      record: await getLockedFinancialRecord(
+        client,
+        item.item_kind,
+        item.record_id,
+      ),
+    });
+  }
+  const registrationStatusesValid = records.every(({ item, record }) =>
+    item.item_kind === "invoice"
+      ? ["draft", "confirmed"].includes(record.status)
+      : (item.item_kind === registration.settlement_kind ||
+          item.item_kind === "external_payment") &&
+        ["draft", "confirmed"].includes(record.status),
+  );
+  if (!registrationStatusesValid) {
+    throw new ContractDomainError(
+      409,
+      "财务登记中的发票和回单状态不一致，不能确认",
+      "FINANCIAL_REGISTRATION_STATUS_MISMATCH",
+    );
+  }
+  if (registration.financial_direction === "income") {
+    const invoiceSellers = records
+      .filter(({ item }) => item.item_kind === "invoice")
+      .map(({ record }) =>
+        normalizeContractPartyIdentity(String(record.invoice_seller || "")),
+      );
+    const receiptPayees = records
+      .filter(({ item }) => item.item_kind === "receipt")
+      .map(({ record }) =>
+        normalizeContractPartyIdentity(String(record.settlement_payee || "")),
+      );
+    if (
+      !invoiceSellers.length ||
+      !receiptPayees.length ||
+      invoiceSellers.some((value) => !value) ||
+      receiptPayees.some((value) => !value) ||
+      new Set(invoiceSellers).size !== 1 ||
+      new Set(receiptPayees).size !== 1 ||
+      invoiceSellers[0] !== receiptPayees[0]
+    ) {
       throw new ContractDomainError(
-        409,
-        "财务登记中的发票和回单状态不一致，不能确认",
-        "FINANCIAL_REGISTRATION_STATUS_MISMATCH",
+        422,
+        "营收登记要求全部销项发票销售方与全部回款回单收款人一致",
+        "FINANCIAL_REGISTRATION_PARTY_MISMATCH",
       );
     }
-    const matches = await client.query<{
-      allocated_amount: string | number;
-      settlement_kind: FinancialStoredRecordKind;
-    }>(
-      `SELECT match.allocated_amount::text AS allocated_amount,
+  }
+  const matches = await client.query<{
+    allocated_amount: string | number;
+    settlement_kind: FinancialStoredRecordKind;
+  }>(
+    `SELECT match.allocated_amount::text AS allocated_amount,
          settlement.item_kind AS settlement_kind
        FROM contract_financial_registration_matches match
        JOIN contract_financial_registration_items settlement
@@ -6569,115 +6862,140 @@ export async function confirmContractFinancialRegistration(
        WHERE match.registration_id = $1
        ORDER BY match.id
        FOR UPDATE OF match`,
-      [registration.id],
+    [registration.id],
+  );
+  if (!matches.rows.length) {
+    throw new ContractDomainError(
+      409,
+      "发票与银行回单尚未建立金额对应关系，不能确认",
+      "FINANCIAL_REGISTRATION_MATCH_REQUIRED",
     );
-    if (!matches.rows.length) {
-      throw new ContractDomainError(
-        409,
-        "发票与银行回单尚未建立金额对应关系，不能确认",
-        "FINANCIAL_REGISTRATION_MATCH_REQUIRED",
-      );
+  }
+  const invoiceTotalCents = records
+    .filter(({ item }) => item.item_kind === "invoice")
+    .reduce((sum, { record }) => sum + toCents(record.amount), 0);
+  const invoiceRequiredSettlementCents = new Map<string, number>();
+  for (const { item, record } of records) {
+    if (item.item_kind !== "payment" && item.item_kind !== "external_payment") {
+      continue;
     }
-    const invoiceTotalCents = records
-      .filter(({ item }) => item.item_kind === "invoice")
-      .reduce((sum, { record }) => sum + toCents(record.amount), 0);
-    const accountingSettlementTotalCents = records
-      .filter(({ item }) => item.item_kind === accountingSettlementKind)
-      .reduce((sum, { record }) => sum + toCents(record.amount), 0);
-    const externalTotalCents = records
-      .filter(({ item }) => item.item_kind === "external_payment")
-      .reduce((sum, { record }) => sum + toCents(record.amount), 0);
-    const accountingAllocatedTotalCents = matches.rows
-      .filter((match) => match.settlement_kind === accountingSettlementKind)
-      .reduce((sum, match) => sum + toCents(match.allocated_amount), 0);
-    const externalAllocatedTotalCents = matches.rows
-      .filter((match) => match.settlement_kind === "external_payment")
-      .reduce((sum, match) => sum + toCents(match.allocated_amount), 0);
-    if (invoiceTotalCents !== accountingSettlementTotalCents) {
-      const settlementLabel = usesExternalSettlement
-        ? "科技向合同对方付款回单"
-        : registration.settlement_kind === "receipt"
-          ? "回单"
-          : "付款凭证";
-      throw new ContractDomainError(
-        409,
-        `发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元与${settlementLabel}合计${centsToAmount(accountingSettlementTotalCents).toFixed(2)}元不一致，不能确认`,
-        "FINANCIAL_REGISTRATION_AMOUNT_MISMATCH",
-      );
-    }
-    if (accountingAllocatedTotalCents !== invoiceTotalCents) {
-      throw new ContractDomainError(
-        409,
-        `发票与核算凭证对应金额合计${centsToAmount(accountingAllocatedTotalCents).toFixed(2)}元未完整覆盖发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元，不能确认`,
-        "FINANCIAL_REGISTRATION_MATCH_AMOUNT_MISMATCH",
-      );
-    }
-    if (
-      !registration.financial_direction ||
-      !registration.direction_invoice_record_id
-    ) {
-      throw new ContractDomainError(
-        409,
-        "财务登记缺少合同类型收支方向快照，不能确认",
-        "FINANCIAL_DIRECTION_UNCONFIRMED",
-      );
-    }
-    const expectedInvoiceDirection =
-      registration.financial_direction === "income" ? "output" : "input";
-    if (
-      (registration.financial_direction === "income" &&
-        registration.settlement_kind !== "receipt") ||
-      (registration.financial_direction === "cost" &&
-        registration.settlement_kind !== "payment")
-    ) {
-      throw new ContractDomainError(
-        409,
-        "财务登记的发票方向与银行回单类型不一致",
-        "FINANCIAL_DIRECTION_CONFLICT",
-      );
-    }
-    for (const { item, record } of records) {
-      assertRegistrationEvidence(
-        record,
-        item.item_kind === "invoice"
-          ? expectedInvoiceDirection
-          : registration.settlement_kind,
-      );
-    }
-    const now = new Date().toISOString();
-    const rootCategory =
-      rootContract.declared_category || rootContract.category;
-    if (!rootCategory) {
-      throw new ContractDomainError(
-        409,
-        "合同分类尚未完成，不能确定收入或支出方向",
-        "FINANCIAL_CONTRACT_CATEGORY_REQUIRED",
-      );
-    }
-    const categoryDirection =
-      financialDirectionFromContractCategory(rootCategory);
-    if (registration.financial_direction !== categoryDirection) {
-      throw new ContractDomainError(
-        409,
-        rootCategory === "asset"
-          ? "资产类合同只能确认支出登记"
-          : "主营和非主营合同只能确认收入登记",
-        "FINANCIAL_DIRECTION_CONFLICT",
-      );
-    }
-    if (
-      rootContract.financial_direction &&
-      rootContract.financial_direction !== categoryDirection
-    ) {
-      throw new ContractDomainError(
-        409,
-        "本次发票方向与合同类型规定的收支方向不一致",
-        "FINANCIAL_DIRECTION_CONFLICT",
-      );
-    }
-    if (!rootContract.financial_direction) {
-      await client.query(
-        `UPDATE contracts SET financial_direction = $2,
+    invoiceRequiredSettlementCents.set(
+      `${item.item_kind}:${item.record_id}`,
+      await invoiceRequiredSettlementAmountCents(client, {
+        itemKind: item.item_kind,
+        recordId: item.record_id,
+        amount: record.amount,
+      }),
+    );
+  }
+  const settlementAmountCents = (
+    item: LockedFinancialRegistrationItem,
+    record: LockedFinancialRecord,
+  ) =>
+    invoiceRequiredSettlementCents.get(`${item.item_kind}:${item.record_id}`) ??
+    toCents(record.amount);
+  const accountingSettlementTotalCents = records
+    .filter(({ item }) => item.item_kind === accountingSettlementKind)
+    .reduce(
+      (sum, { item, record }) => sum + settlementAmountCents(item, record),
+      0,
+    );
+  const externalTotalCents = records
+    .filter(({ item }) => item.item_kind === "external_payment")
+    .reduce(
+      (sum, { item, record }) => sum + settlementAmountCents(item, record),
+      0,
+    );
+  const accountingAllocatedTotalCents = matches.rows
+    .filter((match) => match.settlement_kind === accountingSettlementKind)
+    .reduce((sum, match) => sum + toCents(match.allocated_amount), 0);
+  const externalAllocatedTotalCents = matches.rows
+    .filter((match) => match.settlement_kind === "external_payment")
+    .reduce((sum, match) => sum + toCents(match.allocated_amount), 0);
+  if (invoiceTotalCents !== accountingSettlementTotalCents) {
+    const settlementLabel = usesExternalSettlement
+      ? "科技向合同对方付款回单"
+      : registration.settlement_kind === "receipt"
+        ? "回单"
+        : "付款凭证";
+    throw new ContractDomainError(
+      409,
+      `发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元与${settlementLabel}合计${centsToAmount(accountingSettlementTotalCents).toFixed(2)}元不一致，不能确认`,
+      "FINANCIAL_REGISTRATION_AMOUNT_MISMATCH",
+    );
+  }
+  if (accountingAllocatedTotalCents !== invoiceTotalCents) {
+    throw new ContractDomainError(
+      409,
+      `发票与核算凭证对应金额合计${centsToAmount(accountingAllocatedTotalCents).toFixed(2)}元未完整覆盖发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元，不能确认`,
+      "FINANCIAL_REGISTRATION_MATCH_AMOUNT_MISMATCH",
+    );
+  }
+  if (
+    !registration.financial_direction ||
+    !registration.direction_invoice_record_id
+  ) {
+    throw new ContractDomainError(
+      409,
+      "财务登记缺少合同类型收支方向快照，不能确认",
+      "FINANCIAL_DIRECTION_UNCONFIRMED",
+    );
+  }
+  const expectedInvoiceDirection =
+    registration.financial_direction === "income" ? "output" : "input";
+  if (
+    (registration.financial_direction === "income" &&
+      registration.settlement_kind !== "receipt") ||
+    (registration.financial_direction === "cost" &&
+      registration.settlement_kind !== "payment")
+  ) {
+    throw new ContractDomainError(
+      409,
+      "财务登记的发票方向与银行回单类型不一致",
+      "FINANCIAL_DIRECTION_CONFLICT",
+    );
+  }
+  for (const { item, record } of records) {
+    assertRegistrationEvidence(
+      record,
+      item.item_kind === "invoice"
+        ? expectedInvoiceDirection
+        : registration.settlement_kind,
+    );
+  }
+  const now = new Date().toISOString();
+  const rootCategory = rootContract.declared_category || rootContract.category;
+  if (!rootCategory) {
+    throw new ContractDomainError(
+      409,
+      "合同分类尚未完成，不能确定收入或支出方向",
+      "FINANCIAL_CONTRACT_CATEGORY_REQUIRED",
+    );
+  }
+  const categoryDirection =
+    financialDirectionFromContractCategory(rootCategory);
+  if (registration.financial_direction !== categoryDirection) {
+    throw new ContractDomainError(
+      409,
+      rootCategory === "asset"
+        ? "资产类合同只能确认支出登记"
+        : "主营和非主营合同只能确认收入登记",
+      "FINANCIAL_DIRECTION_CONFLICT",
+    );
+  }
+  if (
+    rootContract.financial_direction &&
+    rootContract.financial_direction !== categoryDirection
+  ) {
+    throw new ContractDomainError(
+      409,
+      "本次发票方向与合同类型规定的收支方向不一致",
+      "FINANCIAL_DIRECTION_CONFLICT",
+    );
+  }
+  if (!rootContract.financial_direction) {
+    await client.query(
+      `UPDATE contracts SET financial_direction = $2,
            financial_direction_source = 'contract_category',
            financial_direction_invoice_id = NULL,
            financial_direction_confirmed_by = NULL,
@@ -6685,44 +7003,44 @@ export async function confirmContractFinancialRegistration(
            financial_direction_version = financial_direction_version + 1,
            updated_by = $3, updated_at = $4, version = version + 1
          WHERE id = $1`,
-        [rootId, categoryDirection, actorId, now],
-      );
-    }
-    if (
-      rootCategory === "asset" &&
-      rootContract.asset_funding_mode === "engineering_to_technology" &&
-      (externalTotalCents !== invoiceTotalCents ||
-        externalAllocatedTotalCents !== invoiceTotalCents)
-    ) {
-      throw new ContractDomainError(
-        409,
-        `科技公司最终对外付款${centsToAmount(externalTotalCents).toFixed(2)}元尚未完整覆盖发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元，不能关闭资金链`,
-        "EXTERNAL_PAYMENT_NOT_CLOSED",
-      );
-    }
-    const invoiceRecordIds = items
-      .filter((item) => item.item_kind === "invoice")
-      .map((item) => item.record_id);
-    const settlementRecordIds = items
-      .filter((item) => item.item_kind === registration.settlement_kind)
-      .map((item) => item.record_id);
-    const externalPaymentRecordIds = items
-      .filter((item) => item.item_kind === "external_payment")
-      .map((item) => item.record_id);
-    await client.query(
-      `UPDATE contract_invoices
+      [rootId, categoryDirection, actorId, now],
+    );
+  }
+  if (
+    rootCategory === "asset" &&
+    rootContract.asset_funding_mode === "engineering_to_technology" &&
+    (externalTotalCents !== invoiceTotalCents ||
+      externalAllocatedTotalCents !== invoiceTotalCents)
+  ) {
+    throw new ContractDomainError(
+      409,
+      `签约公司最终对外付款${centsToAmount(externalTotalCents).toFixed(2)}元尚未完整覆盖发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元，不能关闭资金链`,
+      "EXTERNAL_PAYMENT_NOT_CLOSED",
+    );
+  }
+  const invoiceRecordIds = items
+    .filter((item) => item.item_kind === "invoice")
+    .map((item) => item.record_id);
+  const settlementRecordIds = items
+    .filter((item) => item.item_kind === registration.settlement_kind)
+    .map((item) => item.record_id);
+  const externalPaymentRecordIds = items
+    .filter((item) => item.item_kind === "external_payment")
+    .map((item) => item.record_id);
+  await client.query(
+    `UPDATE contract_invoices
        SET status = 'confirmed', confirmed_by = $2, confirmed_at = $3,
          updated_at = $3
        WHERE id = ANY($1::text[])`,
-      [invoiceRecordIds, actorId, now],
-    );
-    await reconcileInvoiceApplicationAllocations(
-      client,
-      registration.contract_id,
-    );
-    if (registration.settlement_kind === "receipt") {
-      await client.query(
-        `UPDATE contract_receipts AS receipt
+    [invoiceRecordIds, actorId, now],
+  );
+  await reconcileInvoiceApplicationAllocations(
+    client,
+    registration.contract_id,
+  );
+  if (registration.settlement_kind === "receipt") {
+    await client.query(
+      `UPDATE contract_receipts AS receipt
          SET status = 'confirmed',
            confirmed_by = COALESCE(receipt.confirmed_by, $2),
            confirmed_at = COALESCE(receipt.confirmed_at, $3),
@@ -6743,63 +7061,79 @@ export async function confirmContractFinancialRegistration(
              ) AS latest
            ))
          WHERE receipt.id = ANY($1::text[])`,
-        [settlementRecordIds, actorId, now],
-      );
-    } else {
-      await client.query(
-        `UPDATE contract_payments AS payment
-         SET status = 'confirmed',
-           confirmed_by = COALESCE(payment.confirmed_by, $2),
-           confirmed_at = COALESCE(payment.confirmed_at, $3),
-           updated_at = $3
-         WHERE payment.id = ANY($1::text[])`,
-        [settlementRecordIds, actorId, now],
-      );
-    }
-    if (externalPaymentRecordIds.length) {
-      await client.query(
-        `UPDATE contract_external_payments AS payment
-         SET status = 'confirmed',
-           confirmed_by = COALESCE(payment.confirmed_by, $2),
-           confirmed_at = COALESCE(payment.confirmed_at, $3),
-           updated_at = $3
-         WHERE payment.id = ANY($1::text[])`,
-        [externalPaymentRecordIds, actorId, now],
-      );
-    }
+      [settlementRecordIds, actorId, now],
+    );
+  } else {
     await client.query(
-      `UPDATE contract_financial_registrations
+      `UPDATE contract_payments AS payment
+         SET status = 'confirmed',
+           confirmed_by = COALESCE(payment.confirmed_by, $2),
+           confirmed_at = COALESCE(payment.confirmed_at, $3),
+           updated_at = $3
+         WHERE payment.id = ANY($1::text[])`,
+      [settlementRecordIds, actorId, now],
+    );
+  }
+  if (externalPaymentRecordIds.length) {
+    await client.query(
+      `UPDATE contract_external_payments AS payment
+         SET status = 'confirmed',
+           confirmed_by = COALESCE(payment.confirmed_by, $2),
+           confirmed_at = COALESCE(payment.confirmed_at, $3),
+           updated_at = $3
+         WHERE payment.id = ANY($1::text[])`,
+      [externalPaymentRecordIds, actorId, now],
+    );
+  }
+  await client.query(
+    `UPDATE contract_financial_registrations
        SET status = 'confirmed', confirmed_by = $2, confirmed_at = $3,
          updated_at = $3
        WHERE id = $1`,
-      [registration.id, actorId, now],
-    );
-    await insertAudit(client, {
-      contractId: registration.contract_id,
-      action: "financial_registration_confirmed",
-      actorId,
-      actorRole,
-      changes: {
-        registrationId: registration.id,
-        financialDirection: registration.financial_direction,
-        directionInvoiceRecordId: registration.direction_invoice_record_id,
-        invoiceRecordIds,
-        settlementRecordIds,
-        externalPaymentRecordIds,
-        fromStatus: "draft",
-        toStatus: "confirmed",
-      },
-      now,
-    });
-    const updated = await recalculateContractExecutionStatus(
-      client,
-      registration.contract_id,
-      actorId,
-      actorRole,
-    );
-    await syncProjectContractTotal(client, updated.project_id);
-    return updated;
+    [registration.id, actorId, now],
+  );
+  await insertAudit(client, {
+    contractId: registration.contract_id,
+    action: "financial_registration_confirmed",
+    actorId,
+    actorRole,
+    changes: {
+      registrationId: registration.id,
+      financialDirection: registration.financial_direction,
+      directionInvoiceRecordId: registration.direction_invoice_record_id,
+      invoiceRecordIds,
+      settlementRecordIds,
+      externalPaymentRecordIds,
+      fromStatus: "draft",
+      toStatus: "confirmed",
+    },
+    now,
   });
+  const updated = await recalculateContractExecutionStatus(
+    client,
+    registration.contract_id,
+    actorId,
+    actorRole,
+  );
+  await syncProjectContractTotal(client, updated.project_id);
+  return updated;
+}
+
+export async function confirmContractFinancialRegistration(
+  registrationId: string,
+  actorId: string,
+  actorRole: string,
+  expectedContractId?: string,
+): Promise<ContractRow> {
+  return db.transaction((client) =>
+    confirmContractFinancialRegistrationInTransaction(
+      client,
+      registrationId,
+      actorId,
+      actorRole,
+      expectedContractId,
+    ),
+  );
 }
 
 export async function deleteContractFinancialRegistrationDraft(
@@ -6834,16 +7168,20 @@ export async function deleteContractFinancialRegistrationDraft(
       client,
       registration,
     );
-    const records = await Promise.all(
-      items.map(async (item) => ({
+    const records: Array<{
+      item: (typeof items)[number];
+      record: LockedFinancialRecord;
+    }> = [];
+    for (const item of items) {
+      records.push({
         item,
         record: await getLockedFinancialRecord(
           client,
           item.item_kind,
           item.record_id,
         ),
-      })),
-    );
+      });
+    }
     if (
       records.some(
         ({ item, record }) =>
@@ -7016,6 +7354,11 @@ export async function reverseContractFinancialRegistration(
     const externalPaymentRecordIds = items
       .filter((item) => item.item_kind === "external_payment")
       .map((item) => item.record_id);
+    await assertFinancialRecordsNotLinkedToDeposit(
+      client,
+      registration.settlement_kind === "payment" ? settlementRecordIds : [],
+      externalPaymentRecordIds,
+    );
     await client.query(
       `UPDATE contract_invoices SET status = 'reversed', reversed_by = $2,
        reversed_at = $3, reverse_reason = $4, updated_at = $3 WHERE id = ANY($1::text[])`,

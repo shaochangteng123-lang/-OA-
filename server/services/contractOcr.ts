@@ -11,12 +11,20 @@ import type {
   PaddleOcrRequestModel,
 } from "./ocrDaemon.js";
 import { extractContractSealCopyCount } from "./contractSealCopyCount.js";
+import {
+  recognizeContractDeposit,
+  type ContractDepositRecognition,
+} from "./contractDepositRecognition.js";
+import type {
+  ContractAssetCategory,
+  ContractDeclaredSubtype,
+} from "../types/database.js";
 
 /**
  * 合同字段结构解析版本。解析规则或安全候选结构发生变化时必须升级，
  * 使历史草稿可以自动复跑，避免继续沿用旧规则的部分结果。
  */
-export const CONTRACT_OCR_PARSER_VERSION = "contract-structure-v17";
+export const CONTRACT_OCR_PARSER_VERSION = "contract-structure-v19";
 
 const execFileAsync = promisify(execFile);
 
@@ -143,6 +151,8 @@ export interface ContractRecognitionResult {
   warnings: string[];
   ocrLines: ContractRawOcrLine[];
   modelVersion?: PaddleOcrModelVersion;
+  /** 租赁二级分类触发的独立押金结论；不得计入合同总金额。 */
+  depositRecognition?: ContractDepositRecognition;
   /** 同一任务自动补扫后仍未形成可用文字来源的 PDF（便携式文档格式）页码。 */
   unrecognizedPageNumbers?: number[];
 }
@@ -646,6 +656,10 @@ export interface ParseContractTextOptions {
   defaultConfidence?: number;
   /** 上传前预选分类是合同类型的业务事实，不参与 OCR（光学字符识别）。 */
   expectedCategory?: "main_business" | "non_main" | "asset";
+  /** 上传前锁定的二级分类，只用于决定是否启动押金条款识别。 */
+  expectedDeclaredSubtype?: ContractDeclaredSubtype;
+  /** 上传前锁定的资产分类，只用于决定是否启动押金条款识别。 */
+  expectedAssetCategory?: ContractAssetCategory;
   /**
    * 合同层级决定金额字段语义：一级合同为合同总额，补充/终止协议为本次增减额。
    * 未明确给出本次增减额时不得用变更后总额替代。
@@ -827,7 +841,12 @@ interface ContractPaddleOcrLine {
 
 export interface ContractRecognitionOptions extends Pick<
   ParseContractTextOptions,
-  "expectedCategory" | "relationType" | "leaseOperationType" | "renewalMain"
+  | "expectedCategory"
+  | "expectedDeclaredSubtype"
+  | "expectedAssetCategory"
+  | "relationType"
+  | "leaseOperationType"
+  | "renewalMain"
 > {
   /** 仅覆盖本次识别使用的模型，不修改全局 OCR_MODEL（识别模型配置）。 */
   ocrModel?: PaddleOcrRequestModel;
@@ -1560,6 +1579,23 @@ function hasExplicitProjectContinuationMarker(value: string): boolean {
   return /(?:[、/／，,：:]|以及|并且|并|及|与|和|暨|或)$/u.test(compacted);
 }
 
+/**
+ * 明确项目名称字段可能在一个完整工程主体后换行，把闭合的前期手续服务尾词
+ * 排到下一有效行。只接受强项目主体结尾和完整短语的组合；带字段标签、正文
+ * 句式或其他自由文本继续由既有边界拒绝，不能借此扩写自然结束的项目名称。
+ */
+function isSafeExplicitProcedureProjectContinuation(
+  currentValue: string,
+  continuationValue: string,
+): boolean {
+  const current = normalizeLine(currentValue).replace(/\s+/g, "");
+  const continuation = normalizeLine(continuationValue).replace(/\s+/g, "");
+  return (
+    /(?:项目|工程|变电站|线路|电缆隧道)$/u.test(current) &&
+    /^前期手续(?:技术咨询服务|咨询服务|技术服务|办理)$/u.test(continuation)
+  );
+}
+
 function looksLikeUnmarkedProjectContinuation(value: string): boolean {
   const compacted = normalizeLine(value);
   return (
@@ -1616,6 +1652,7 @@ function isSafeUnmarkedProjectContinuation(
   }
   if (/^[（(][^（）()]{1,40}[）)]$/u.test(compacted)) return true;
   if (/^\d{2,4}(?:[kK][vV]|千伏)/u.test(compacted)) return true;
+  if (/千伏变$/u.test(current) && /^电站/u.test(compacted)) return true;
   if (
     /^证[、，,]施工许可证(?:技术服务合同)?$/u.test(compacted) &&
     /工程规划许可$/u.test(current)
@@ -1636,7 +1673,7 @@ function isSafeUnmarkedProjectContinuation(
     return true;
   }
   if (
-    /^(?:工许可证|施工许可证|规划许可证|建设工程|临时建设|不动产权|国有建设用地|输变电工程|变电站|电缆隧道|土地复垦|方案编制|房屋质量|结构检测|安全鉴定|咨询服务|技术服务|手续办理)/u.test(
+    /^(?:工许可证|施工许可证|规划许可证|建设工程|临时建设|不动产权|国有建设用地|输变电工程|送电工程|变电站|电缆隧道|土地复垦|方案编制|房屋质量|结构检测|安全鉴定|咨询服务|技术服务|手续办理)/u.test(
       compacted,
     )
   ) {
@@ -2502,11 +2539,16 @@ function collectProjectCandidates(
               hasUnclosedParenthesis(originalValue) ||
               hasExplicitProjectContinuationMarker(originalValue);
             const hasStructuredExplicitServiceContinuation =
-              distance === 1 &&
-              /[）)]\s*$/u.test(originalValue) &&
-              /^前期手续(?:[（(][^（）()]{1,40}[）)])?咨询服务$/u.test(
-                continuation.normalized.replace(/\s+/g, ""),
-              );
+              (distance === 1 &&
+                /[）)]\s*$/u.test(originalValue) &&
+                /^前期手续(?:[（(][^（）()]{1,40}[）)])?咨询服务$/u.test(
+                  continuation.normalized.replace(/\s+/g, ""),
+                )) ||
+              (explicitProjectNameField &&
+                isSafeExplicitProcedureProjectContinuation(
+                  originalValue,
+                  continuation.normalized,
+                ));
             const hasSafeUnmarkedContinuation =
               hasStructuredExplicitServiceContinuation ||
               isSafeUnmarkedProjectContinuation(
@@ -8216,6 +8258,10 @@ export function parseContractText(
     );
   synchronizeFieldScoring(fields);
   const warnings = fields.flatMap((field) => field.warnings || []);
+  const leaseTermsForDeposit = extractContractLeaseTerms(
+    text,
+    options.expectedCategory,
+  );
   const result: ContractRecognitionResult = {
     status: relationConflictWarning ? "failed" : resultStatus(fields),
     failureKind: relationConflictWarning ? "document" : undefined,
@@ -8224,6 +8270,14 @@ export function parseContractText(
     method: "plain_text",
     warnings: [...new Set(warnings)],
     ocrLines: [],
+    depositRecognition: recognizeContractDeposit({
+      text,
+      declaredSubtype: options.expectedDeclaredSubtype,
+      assetCategory: options.expectedAssetCategory,
+      monthlyRent: leaseTermsForDeposit.monthlyRent,
+      monthlyPropertyManagementFee:
+        leaseTermsForDeposit.monthlyPropertyManagementFee,
+    }),
   };
   contractAmountBreakdowns.set(result, amountBreakdown);
   contractAmountAutomaticAdoptionContexts.set(
@@ -9899,7 +9953,11 @@ function parseFromSources(
   sources: readonly ContractTextSource[],
   options: Pick<
     ParseContractTextOptions,
-    "expectedCategory" | "relationType" | "candidateFunnelDiagnostics"
+    | "expectedCategory"
+    | "expectedDeclaredSubtype"
+    | "expectedAssetCategory"
+    | "relationType"
+    | "candidateFunnelDiagnostics"
   > = {},
 ): ContractRecognitionResult {
   const rawText = sourcesRawText(sources);
@@ -10474,6 +10532,8 @@ export async function recognizeContractFile(
         defaultSource: "docx_text",
         defaultConfidence: 99,
         expectedCategory: options.expectedCategory,
+        expectedDeclaredSubtype: options.expectedDeclaredSubtype,
+        expectedAssetCategory: options.expectedAssetCategory,
         relationType: options.relationType,
         candidateFunnelDiagnostics: options.candidateFunnelDiagnostics,
       });
@@ -10488,6 +10548,8 @@ export async function recognizeContractFile(
         defaultSource: "docx_text",
         defaultConfidence: 99,
         expectedCategory: options.expectedCategory,
+        expectedDeclaredSubtype: options.expectedDeclaredSubtype,
+        expectedAssetCategory: options.expectedAssetCategory,
         relationType: options.relationType,
         candidateFunnelDiagnostics: options.candidateFunnelDiagnostics,
       });

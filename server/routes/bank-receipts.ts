@@ -6,13 +6,33 @@ import { nanoid } from 'nanoid'
 import { PDFDocument } from 'pdf-lib'
 import { requireAdmin } from '../middleware/auth.js'
 import { db } from '../db/index.js'
-import { processBankReceiptPdf } from '../services/bankReceiptProcessor.js'
+import {
+  BankReceiptPersistenceError,
+  persistBankReceiptTransaction,
+  processBankReceiptPdf,
+} from '../services/bankReceiptProcessor.js'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
 
 const uploadsDir = path.join(process.cwd(), 'uploads')
 const tempDir = path.join(uploadsDir, 'temp')
+
+interface BankReceiptDatabaseRow extends Record<string, unknown> {
+  ocr_raw_json: unknown
+  matched_reimbursement_id: string | null
+  payment_batch_id: string | null
+}
+
+interface MatchedReimbursementSummary {
+  id: string
+  title: string
+  type: string
+  total_amount: number
+  approve_time: string | null
+  applicant_name: string
+}
+
 ;[uploadsDir, tempDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
 })
@@ -40,7 +60,7 @@ router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, re
     return
   }
 
-  const currentUserId = (req.session as any).userId
+  const currentUserId = String(req.session.userId || '')
   const batchId = `brb_${nanoid(10)}`
   const now = new Date().toISOString()
   const pdfFileName = `batch-${batchId}.pdf`
@@ -62,8 +82,14 @@ router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, re
       }
       fs.writeFileSync(pdfPath, await merged.save())
     }
-  } catch (err) {
-    files.forEach(f => { try { fs.unlinkSync(f.path) } catch {} })
+  } catch {
+    files.forEach(file => {
+      try {
+        fs.unlinkSync(file.path)
+      } catch {
+        // 临时文件可能已经移动或删除，不影响错误响应。
+      }
+    })
     res.status(500).json({ success: false, message: 'PDF 合并失败' })
     return
   }
@@ -99,18 +125,30 @@ router.get('/batch/:batchId', requireAdmin, async (req, res) => {
     res.status(404).json({ success: false, message: '批次不存在' })
     return
   }
-  const receipts = await db.all(`SELECT * FROM bank_receipts WHERE batch_id = ? ORDER BY page_no, position`, batchId)
+  const receipts = await db.all<BankReceiptDatabaseRow>(
+    `SELECT * FROM bank_receipts WHERE batch_id = ? ORDER BY page_no, position`,
+    batchId,
+  )
 
   // 为每张回单展开匹配的报销单列表（支持合并打款多笔）
-  const enrichedReceipts = await Promise.all(receipts.map(async (receipt: any) => {
-    let matchedReimbursements: any[] = []
+  const enrichedReceipts = await Promise.all(receipts.map(async receipt => {
+    let matchedReimbursements: MatchedReimbursementSummary[] = []
 
     // 从 ocr_raw_json.matchedIds 取所有匹配的报销单 ID
     let matchedIds: string[] = []
     try {
-      const raw = typeof receipt.ocr_raw_json === 'string' ? JSON.parse(receipt.ocr_raw_json) : receipt.ocr_raw_json
-      if (Array.isArray(raw?.matchedIds) && raw.matchedIds.length > 0) {
-        matchedIds = raw.matchedIds
+      const raw: unknown =
+        typeof receipt.ocr_raw_json === 'string'
+          ? JSON.parse(receipt.ocr_raw_json)
+          : receipt.ocr_raw_json
+      const rawMatchedIds =
+        raw && typeof raw === 'object'
+          ? (raw as { matchedIds?: unknown }).matchedIds
+          : null
+      if (Array.isArray(rawMatchedIds) && rawMatchedIds.length > 0) {
+        matchedIds = rawMatchedIds.filter(
+          (value): value is string => typeof value === 'string',
+        )
       } else if (receipt.matched_reimbursement_id) {
         matchedIds = [receipt.matched_reimbursement_id]
       }
@@ -120,7 +158,7 @@ router.get('/batch/:batchId', requireAdmin, async (req, res) => {
 
     if (matchedIds.length > 0) {
       const placeholders = matchedIds.map(() => '?').join(',')
-      matchedReimbursements = await db.all(
+      matchedReimbursements = await db.all<MatchedReimbursementSummary>(
         `SELECT r.id, r.title, r.type, r.total_amount, r.approve_time,
                 u.name as applicant_name
          FROM reimbursements r
@@ -171,69 +209,65 @@ router.get('/unmatched', requireAdmin, async (req, res) => {
  * 人工指定匹配报销单
  */
 router.post('/:id/match', requireAdmin, async (req, res) => {
-  const { id } = req.params
-  const { reimbursementId } = req.body
-  const currentUserId = (req.session as any).userId
+  const receiptId = String(req.params.id || '').trim()
+  const reimbursementId =
+    typeof req.body?.reimbursementId === 'string'
+      ? req.body.reimbursementId.trim()
+      : ''
+  const currentUserId = String(req.session.userId || '').trim()
 
+  if (!currentUserId) {
+    res.status(401).json({ success: false, message: '登录信息已失效' })
+    return
+  }
+  if (!receiptId) {
+    res.status(400).json({ success: false, message: '请指定银行回单编号' })
+    return
+  }
   if (!reimbursementId) {
-    res.status(400).json({ success: false, message: '请指定报销单ID' })
+    res.status(400).json({ success: false, message: '请指定报销单编号' })
     return
   }
 
-  const receipt = await db.get(`SELECT * FROM bank_receipts WHERE id = ?`, id)
-  if (!receipt) {
-    res.status(404).json({ success: false, message: '回单不存在' })
-    return
+  try {
+    const result = await persistBankReceiptTransaction({
+      mode: 'claim',
+      receiptId,
+      matchedReimbursementIds: [reimbursementId],
+      uploadedBy: currentUserId,
+    })
+    res.json({ success: true, data: result, message: '银行回单认领成功' })
+  } catch (error) {
+    if (error instanceof BankReceiptPersistenceError) {
+      const notFoundCodes = new Set([
+        'BANK_RECEIPT_NOT_FOUND',
+        'BANK_RECEIPT_REIMBURSEMENT_NOT_FOUND',
+      ])
+      const conflictCodes = new Set([
+        'BANK_RECEIPT_ALREADY_MATCHED',
+        'BANK_RECEIPT_DUPLICATE',
+        'BANK_RECEIPT_BATCH_NOT_PENDING',
+        'BANK_RECEIPT_BATCH_AMBIGUOUS',
+        'BANK_RECEIPT_BATCH_MEMBERSHIP_MISMATCH',
+        'BANK_RECEIPT_REIMBURSEMENT_STATE_CHANGED',
+        'BANK_RECEIPT_BATCH_STATE_CHANGED',
+        'BANK_RECEIPT_STATE_CHANGED',
+      ])
+      const status = notFoundCodes.has(error.code)
+        ? 404
+        : conflictCodes.has(error.code)
+          ? 409
+          : 400
+      res.status(status).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      })
+      return
+    }
+    console.error('银行回单手工认领失败:', error)
+    res.status(500).json({ success: false, message: '银行回单认领失败' })
   }
-
-  const reimbursement = await db.get(
-    `SELECT id, status FROM reimbursements WHERE id = ? AND status = 'approved' AND is_deleted = false`,
-    reimbursementId,
-  )
-  if (!reimbursement) {
-    res.status(400).json({ success: false, message: '报销单不存在或状态不符' })
-    return
-  }
-
-  const now = new Date().toISOString()
-
-  await db.run(
-    `UPDATE bank_receipts SET match_status = 'matched', matched_reimbursement_id = ?,
-     matched_by = ?, matched_at = ? WHERE id = ?`,
-    reimbursementId, currentUserId, now, id,
-  )
-
-  await db.run(
-    `UPDATE reimbursements SET status = 'payment_uploaded', payment_proof_path = ?,
-     payment_upload_time = ?, pay_time = ?, updated_at = ? WHERE id = ?`,
-    receipt.image_path, now, now, now, reimbursementId,
-  )
-
-  // 写审批记录，让审批流程和详情页显示付款凭证节点
-  const approvalInstance = await db.get<{ id: string }>(
-    `SELECT id FROM approval_instances WHERE target_id = ? AND target_type = 'reimbursement' ORDER BY created_at DESC LIMIT 1`,
-    reimbursementId,
-  )
-  if (approvalInstance) {
-    const { nanoid } = await import('nanoid')
-    const recordId = `ar_${nanoid(10)}`
-    await db.run(
-      `INSERT INTO approval_records (id, instance_id, step, approver_id, action, comment, action_time)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      recordId, approvalInstance.id, 99, currentUserId, 'payment_uploaded', '财务手动上传付款回单', now,
-    )
-  }
-
-  // 更新批次统计
-  await db.run(`
-    UPDATE bank_receipt_batches SET
-      matched_count = (SELECT COUNT(*) FROM bank_receipts WHERE batch_id = bank_receipt_batches.id AND match_status = 'matched'),
-      unmatched_count = (SELECT COUNT(*) FROM bank_receipts WHERE batch_id = bank_receipt_batches.id AND match_status = 'unmatched'),
-      updated_at = ?
-    WHERE id = ?
-  `, now, receipt.batch_id)
-
-  res.json({ success: true })
 })
 
 /**
@@ -295,7 +329,9 @@ router.get('/by-reimbursement/:reimbursementId', async (req, res) => {
       if (Array.isArray(raw?.matchedIds) && raw.matchedIds.length > 1) {
         matchedIds = raw.matchedIds
       }
-    } catch {}
+    } catch {
+      // 历史识别数据无法解析时按单笔兼容数据处理。
+    }
 
     // 只有多笔合并时才返回（单笔不需要展示）
     if (matchedIds.length <= 1) {

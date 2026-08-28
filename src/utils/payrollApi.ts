@@ -48,8 +48,14 @@ export interface SalaryReceiptLink {
   payee_name: string;
   amount: string;
   page_no: number;
-  position: "full" | "top" | "bottom";
+  position: "single" | "full" | "top" | "bottom" | "unknown";
   file_name: string;
+  source: "human_cost" | "monthly_bank";
+  transaction_id: string | null;
+  electronic_receipt_no: string | null;
+  transaction_date: string | null;
+  previous_receipt_item_id: string | null;
+  previous_file_name: string | null;
 }
 
 export type PayrollAmountField =
@@ -113,8 +119,22 @@ export interface HumanCostReceipt {
   recognition_version: number;
   matched_employee_count: number;
   unmatched_employee_count: number;
+  audit_locked: boolean;
   recognition_error: string | null;
   created_at: string;
+  updated_at: string;
+}
+
+export interface MonthlySalaryBankReceipt {
+  id: string;
+  file_name: string;
+  file_size: number;
+  mime_type: "application/pdf";
+  recognition_status: string;
+  total_item_count: number;
+  linked_item_count: number;
+  conflict_item_count: number;
+  recognized_amount: string;
   updated_at: string;
 }
 
@@ -138,6 +158,7 @@ export interface HumanCostReceiptSummary {
   list: HumanCostReceipt[];
   totals: Record<HumanCostReceiptCategory, string>;
   processing_count: number;
+  monthly_salary_bank: MonthlySalaryBankReceipt | null;
   tax_detail: PayrollTaxDetailFile | null;
   accepted_count?: number;
   duplicates?: string[];
@@ -226,6 +247,18 @@ export function getPayrollTaxDetailPreviewUrl(fileId: string): string {
   return `/api/files/payroll-tax-details/${fileId}`;
 }
 
-export function getSalaryReceiptItemPreviewUrl(itemId: string): string {
+export function getSalaryReceiptItemPreviewUrl(
+  receipt: Pick<SalaryReceiptLink, "id" | "source" | "transaction_id">,
+): string {
+  return receipt.source === "monthly_bank"
+    ? `/api/files/monthly-salary-receipts/${receipt.transaction_id || receipt.id}`
+    : `/api/files/human-cost-receipt-items/${receipt.id}`;
+}
+
+export function getMonthlySalaryBankFilePreviewUrl(fileId: string): string {
+  return `/api/files/monthly-salary-files/${fileId}`;
+}
+
+export function getPreviousSalaryReceiptItemPreviewUrl(itemId: string): string {
   return `/api/files/human-cost-receipt-items/${itemId}`;
 }

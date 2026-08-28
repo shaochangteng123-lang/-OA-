@@ -756,6 +756,72 @@ describe("合同文字字段识别", () => {
     expect(project.warnings?.join(" ") || "").not.toContain("无标志续行");
   });
 
+  it.each([
+    "前期手续技术咨询服务",
+    "前期手续咨询服务",
+    "前期手续技术服务",
+    "前期手续办理",
+  ])("明确项目字段将同页下一有效行的闭合手续尾词安全拼接：%s", (suffix) => {
+    const project = field(
+      parseContractText("", {
+        sources: samePageIndependentSources(
+          [
+            "项目名称：姜庄湖220千伏变电站110千伏送出工程",
+            suffix,
+            "委托方（甲方）：国网北京市电力公司",
+          ].join("\n"),
+        ),
+      }),
+      "project_name",
+    );
+
+    expect(project.normalizedValue).toBe(
+      `姜庄湖220千伏变电站110千伏送出工程${suffix}`,
+    );
+    expect(project.warnings?.join(" ") || "").not.toContain("无标志续行");
+  });
+
+  it.each([
+    "服务内容：前期手续技术咨询服务",
+    "前期手续技术咨询服务工作由乙方负责。",
+    "前期工作安排",
+  ])("明确项目字段不吞入标签、正文句或非闭合续行：%s", (nextLine) => {
+    const project = field(
+      parseContractText(
+        ["项目名称：姜庄湖220千伏变电站110千伏送出工程", nextLine].join("\n"),
+      ),
+      "project_name",
+    );
+
+    expect(project.normalizedValue).toBe("姜庄湖220千伏变电站110千伏送出工程");
+  });
+
+  it("明确项目字段不跨页拼接前期手续服务尾词", () => {
+    const project = field(
+      parseContractText("", {
+        sources: [
+          {
+            source: "ocr_300",
+            pageNumber: 1,
+            confidence: 0.99,
+            recognitionEngine: "paddleocr",
+            text: "项目名称：姜庄湖220千伏变电站110千伏送出工程",
+          },
+          {
+            source: "ocr_300",
+            pageNumber: 2,
+            confidence: 0.99,
+            recognitionEngine: "paddleocr",
+            text: "前期手续技术咨询服务",
+          },
+        ],
+      }),
+      "project_name",
+    );
+
+    expect(project.normalizedValue).toBe("姜庄湖220千伏变电站110千伏送出工程");
+  });
+
   it("东玉河项目名称跨行拼接并在甲方字段前停止", () => {
     const project = field(
       parseContractText(
@@ -3643,6 +3709,68 @@ describe("合同文字字段识别", () => {
     );
     expect(project.candidates).toHaveLength(1);
     expect(project.warnings?.join(" ") || "").not.toContain("候选冲突");
+  });
+
+  it("项目名称在电压等级后分行时继续拼接送电工程业务尾段", () => {
+    const result = parseContractText("", {
+      sources: [
+        {
+          source: "ocr_300",
+          pageNumber: 1,
+          confidence: 0.97,
+          recognitionEngine: "paddleocr",
+          text: [
+            "项目名称：国网北京海淀供电公司理工大学110千伏",
+            "国团",
+            "送电工程规划许可和施工许可",
+            "委托方（甲方）：国网北京市电力公司",
+          ].join("\n"),
+        },
+        {
+          source: "ocr_480",
+          pageNumber: 1,
+          confidence: 0.96,
+          recognitionEngine: "paddleocr",
+          text: [
+            "项目名称：国网北京海淀供电公司理工大学110千伏",
+            "送电工程规划许可和施工许可",
+            "委托方（甲方）：国网北京市电力公司",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(field(result, "project_name").originalValue).toBe(
+      "国网北京海淀供电公司理工大学110千伏送电工程规划许可和施工许可",
+    );
+    expect(field(result, "project_name").normalizedValue).toBe(
+      "理工大学110千伏送电工程规划许可和施工许可",
+    );
+  });
+
+  it("项目名称在千伏变字后分行时继续拼接电站不动产权尾段", () => {
+    const result = parseContractText("", {
+      sources: [
+        {
+          source: "ocr_300",
+          pageNumber: 1,
+          confidence: 0.98,
+          recognitionEngine: "paddleocr",
+          text: [
+            "项目名称：国网北京海淀供电公司创新园110千伏变",
+            "电站不动产权（国有建设用地）",
+            "委托方（甲方）：国网北京市电力公司",
+          ].join("\n"),
+        },
+      ],
+    });
+
+    expect(field(result, "project_name").originalValue).toBe(
+      "国网北京海淀供电公司创新园110千伏变电站不动产权(国有建设用地)",
+    );
+    expect(field(result, "project_name").normalizedValue).toBe(
+      "创新园110千伏变电站不动产权（国有建设用地）",
+    );
   });
 
   it("忽略重复地名加服务尾词的项目残片并采用完整项目名称", () => {

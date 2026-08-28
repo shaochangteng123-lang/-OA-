@@ -175,12 +175,11 @@ function handleActivate() {
 
 .metric-value {
   margin-top: 4px;
-  overflow: hidden;
   color: #1c3349;
   font-size: clamp(20px, 2vw, 28px);
   line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .metric-note {

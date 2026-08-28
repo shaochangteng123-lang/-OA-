@@ -125,6 +125,7 @@ interface StoredHumanCostReceipt {
   recognition_version: number;
   matched_employee_count: number;
   unmatched_employee_count: number;
+  audit_locked: boolean;
   recognition_error: string | null;
   created_at: string;
   updated_at: string;
@@ -137,8 +138,27 @@ interface StoredSalaryReceiptLink {
   payee_name: string;
   amount: string;
   page_no: number;
-  position: "full" | "top" | "bottom";
+  position: "single" | "full" | "top" | "bottom" | "unknown";
   file_name: string;
+  source: "human_cost" | "monthly_bank";
+  transaction_id: string | null;
+  electronic_receipt_no: string | null;
+  transaction_date: string | null;
+  previous_receipt_item_id: string | null;
+  previous_file_name: string | null;
+}
+
+interface StoredMonthlySalaryBankReceipt {
+  id: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  recognition_status: string;
+  total_item_count: number;
+  linked_item_count: number;
+  conflict_item_count: number;
+  recognized_amount: string;
+  updated_at: string;
 }
 
 interface StoredPayrollTaxDetailFile {
@@ -375,6 +395,16 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
          WHERE hcri.receipt_id = human_cost_receipts.id
            AND hcri.match_status <> 'matched'
        ) AS unmatched_employee_count,
+       EXISTS (
+         SELECT 1
+         FROM human_cost_receipt_items audit_item
+         JOIN monthly_financial_bank_transaction_links audit_link
+           ON audit_link.business_object_type = 'human_cost_receipt_item'
+          AND audit_link.business_object_id = audit_item.id
+          AND audit_link.link_kind = 'display_replacement'
+         WHERE audit_item.receipt_id = human_cost_receipts.id
+           AND audit_link.match_key_json ->> 'displayAction' = 'replaced'
+       ) AS audit_locked,
        recognition_error,
        created_at, updated_at
      FROM human_cost_receipts
@@ -397,6 +427,147 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
     HUMAN_COST_RECEIPT_CATEGORIES.map((category) => [category, "0.00"]),
   ) as Record<HumanCostReceiptCategory, string>;
   for (const row of totalRows) totals[row.category] = row.recognized_total;
+  const monthlySalaryBank = await db.get<StoredMonthlySalaryBankReceipt>(
+    `SELECT file.id, file.original_name AS file_name, file.file_size,
+            file.mime_type, file.recognition_status,
+            salary_summary.total_item_count,
+            salary_summary.linked_item_count,
+            salary_summary.conflict_item_count,
+            salary_summary.recognized_amount,
+            file.updated_at
+     FROM monthly_financial_bank_files file
+     JOIN LATERAL (
+       SELECT COUNT(*)::int AS total_item_count,
+              COUNT(*) FILTER (
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM monthly_financial_bank_transaction_links evidence_link
+                  LEFT JOIN human_cost_receipt_items previous_item
+                    ON evidence_link.business_object_type =
+                         'human_cost_receipt_item'
+                   AND previous_item.id = evidence_link.business_object_id
+                  WHERE evidence_link.transaction_id = transaction.id
+                    AND evidence_link.link_kind = 'display_replacement'
+                    AND evidence_link.match_status = 'active'
+                    AND evidence_link.is_active = TRUE
+                    AND (
+                      evidence_link.business_object_type = 'employee_profile'
+                      OR previous_item.id IS NOT NULL
+                    )
+                )
+              )::int AS linked_item_count,
+              COUNT(*) FILTER (
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM monthly_financial_bank_transaction_links conflict_link
+                  WHERE conflict_link.transaction_id = transaction.id
+                    AND conflict_link.link_kind = 'display_replacement'
+                    AND conflict_link.business_object_type IN (
+                      'employee_profile', 'human_cost_receipt_item'
+                    )
+                    AND conflict_link.match_status = 'conflict'
+                )
+              )::int AS conflict_item_count,
+              COALESCE(SUM(transaction.amount) FILTER (
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM monthly_financial_bank_transaction_links evidence_link
+                  LEFT JOIN human_cost_receipt_items previous_item
+                    ON evidence_link.business_object_type =
+                         'human_cost_receipt_item'
+                   AND previous_item.id = evidence_link.business_object_id
+                  WHERE evidence_link.transaction_id = transaction.id
+                    AND evidence_link.link_kind = 'display_replacement'
+                    AND evidence_link.match_status = 'active'
+                    AND evidence_link.is_active = TRUE
+                    AND (
+                      evidence_link.business_object_type = 'employee_profile'
+                      OR previous_item.id IS NOT NULL
+                    )
+                )
+              ), 0)::text AS recognized_amount
+       FROM monthly_financial_bank_transactions transaction
+       WHERE transaction.current_file_id = file.id
+         AND transaction.report_month = file.report_month
+         AND transaction.account_code = 'basic'
+         AND transaction.category = 'salary'
+         AND transaction.direction = 'outflow'
+         AND transaction.recognition_status = 'recognized'
+         AND transaction.is_current = TRUE
+     ) salary_summary ON salary_summary.total_item_count > 0
+     WHERE file.report_month = ?
+       AND file.account_code = 'basic'
+       AND file.is_active = TRUE
+     ORDER BY file.file_version DESC
+     LIMIT 1`,
+    payrollMonth,
+  );
+  const effectiveSalaryReceiptTotal = await db.get<{ amount: string }>(
+    `SELECT (
+       COALESCE((
+         SELECT SUM(item.amount)
+         FROM human_cost_receipt_items item
+         JOIN human_cost_receipts receipt ON receipt.id = item.receipt_id
+         WHERE receipt.payroll_month = ?
+           AND receipt.category = 'net_salary'
+           AND receipt.recognition_status IN ('recognized', 'partial')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM monthly_financial_bank_transaction_links replacement_link
+             JOIN monthly_financial_bank_transactions replacement_transaction
+               ON replacement_transaction.id = replacement_link.transaction_id
+              AND replacement_transaction.is_current = TRUE
+              AND replacement_transaction.account_code = 'basic'
+              AND replacement_transaction.category = 'salary'
+              AND replacement_transaction.recognition_status = 'recognized'
+             JOIN monthly_financial_bank_files replacement_file
+               ON replacement_file.id =
+                    replacement_transaction.current_file_id
+              AND replacement_file.is_active = TRUE
+             WHERE replacement_link.business_object_type =
+                     'human_cost_receipt_item'
+               AND replacement_link.business_object_id = item.id
+               AND replacement_link.link_kind = 'display_replacement'
+               AND replacement_link.match_status = 'active'
+               AND replacement_link.is_active = TRUE
+           )
+       ), 0) +
+       COALESCE((
+         SELECT SUM(transaction.amount)
+         FROM monthly_financial_bank_transactions transaction
+         JOIN monthly_financial_bank_files file
+           ON file.id = transaction.current_file_id
+          AND file.is_active = TRUE
+         WHERE transaction.report_month = ?
+           AND transaction.account_code = 'basic'
+           AND transaction.category = 'salary'
+           AND transaction.direction = 'outflow'
+           AND transaction.recognition_status = 'recognized'
+           AND transaction.is_current = TRUE
+           AND EXISTS (
+             SELECT 1
+             FROM monthly_financial_bank_transaction_links evidence_link
+             LEFT JOIN human_cost_receipt_items previous_item
+               ON evidence_link.business_object_type =
+                    'human_cost_receipt_item'
+              AND previous_item.id = evidence_link.business_object_id
+             WHERE evidence_link.transaction_id = transaction.id
+               AND evidence_link.link_kind = 'display_replacement'
+               AND evidence_link.match_status = 'active'
+               AND evidence_link.is_active = TRUE
+               AND (
+                 evidence_link.business_object_type = 'employee_profile'
+                 OR previous_item.id IS NOT NULL
+               )
+           )
+       ), 0)
+     )::text AS amount`,
+    payrollMonth,
+    payrollMonth,
+  );
+  if (monthlySalaryBank && effectiveSalaryReceiptTotal) {
+    totals.net_salary = effectiveSalaryReceiptTotal.amount;
+  }
   const taxDetail = await db.get<StoredPayrollTaxDetailFile>(
     `SELECT
        id, payroll_month, file_name, file_size, mime_type,
@@ -417,6 +588,12 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
     processing_count: list.filter(
       (receipt) => receipt.recognition_status === "processing",
     ).length,
+    monthly_salary_bank: monthlySalaryBank
+      ? {
+          ...monthlySalaryBank,
+          file_name: normalizeUploadFileName(monthlySalaryBank.file_name),
+        }
+      : null,
     tax_detail: taxDetail
       ? {
           ...taxDetail,
@@ -740,17 +917,119 @@ async function loadPayrollRows(payrollMonth: string): Promise<
        hcri.amount::text AS amount,
        hcri.page_no,
        hcri.position,
-       hcr.file_name
+       hcr.file_name,
+       'human_cost'::text AS source,
+       NULL::text AS transaction_id,
+       hcri.proof_no AS electronic_receipt_no,
+       NULL::text AS transaction_date,
+       NULL::text AS previous_receipt_item_id,
+       NULL::text AS previous_file_name
      FROM human_cost_receipt_items hcri
      JOIN human_cost_receipts hcr ON hcr.id = hcri.receipt_id
      WHERE hcr.payroll_month = ?
        AND hcr.category = 'net_salary'
        AND hcri.match_status = 'matched'
        AND hcri.employee_id IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1
+         FROM monthly_financial_bank_transaction_links replacement_link
+         JOIN monthly_financial_bank_transactions replacement_transaction
+           ON replacement_transaction.id = replacement_link.transaction_id
+          AND replacement_transaction.is_current = TRUE
+          AND replacement_transaction.account_code = 'basic'
+          AND replacement_transaction.category = 'salary'
+          AND replacement_transaction.recognition_status = 'recognized'
+         JOIN monthly_financial_bank_files replacement_file
+           ON replacement_file.id = replacement_transaction.current_file_id
+          AND replacement_file.is_active = TRUE
+         WHERE replacement_link.business_object_type =
+                 'human_cost_receipt_item'
+           AND replacement_link.business_object_id = hcri.id
+           AND replacement_link.link_kind = 'display_replacement'
+           AND replacement_link.match_status = 'active'
+           AND replacement_link.is_active = TRUE
+       )
      ORDER BY hcr.created_at ASC, hcri.page_no ASC,
        CASE hcri.position WHEN 'top' THEN 1 WHEN 'bottom' THEN 2 ELSE 0 END`,
     payrollMonth,
   );
+  const monthlyBankSalaryReceiptRows = await db.all<StoredSalaryReceiptLink>(
+    `SELECT DISTINCT ON (transaction.id)
+       transaction.id,
+       file.id AS receipt_id,
+       employee_link.business_object_id AS employee_id,
+       COALESCE(transaction.payee_name, employee.name) AS payee_name,
+       transaction.amount::text AS amount,
+       transaction.page_number AS page_no,
+       transaction.receipt_position AS position,
+       file.original_name AS file_name,
+       'monthly_bank'::text AS source,
+       transaction.id AS transaction_id,
+       transaction.electronic_receipt_no,
+       transaction.transaction_date,
+       CASE
+         WHEN evidence_link.business_object_type =
+              'human_cost_receipt_item'
+           THEN evidence_link.business_object_id
+         ELSE NULL
+       END AS previous_receipt_item_id,
+       previous_receipt.file_name AS previous_file_name
+     FROM monthly_financial_bank_transactions transaction
+     JOIN monthly_financial_bank_files file
+       ON file.id = transaction.current_file_id
+      AND file.is_active = TRUE
+     JOIN monthly_financial_bank_transaction_links employee_link
+       ON employee_link.transaction_id = transaction.id
+      AND employee_link.business_object_type = 'employee_profile'
+      AND employee_link.link_kind = 'classification_basis'
+      AND employee_link.match_status = 'active'
+      AND employee_link.is_active = TRUE
+     JOIN employee_profiles employee
+       ON employee.id = employee_link.business_object_id
+     JOIN LATERAL (
+       SELECT link.business_object_type, link.business_object_id,
+              link.updated_at, link.id
+       FROM monthly_financial_bank_transaction_links link
+       LEFT JOIN human_cost_receipt_items linked_item
+         ON link.business_object_type = 'human_cost_receipt_item'
+        AND linked_item.id = link.business_object_id
+       WHERE link.transaction_id = transaction.id
+         AND link.link_kind = 'display_replacement'
+         AND link.match_status = 'active'
+         AND link.is_active = TRUE
+         AND (
+           (
+             link.business_object_type = 'employee_profile'
+             AND link.business_object_id = employee_link.business_object_id
+           )
+           OR (
+             link.business_object_type = 'human_cost_receipt_item'
+             AND linked_item.employee_id = employee_link.business_object_id
+           )
+         )
+       ORDER BY
+         CASE link.business_object_type
+           WHEN 'human_cost_receipt_item' THEN 0 ELSE 1
+         END,
+         link.updated_at DESC, link.id DESC
+       LIMIT 1
+     ) evidence_link ON TRUE
+     LEFT JOIN human_cost_receipt_items previous_item
+       ON evidence_link.business_object_type = 'human_cost_receipt_item'
+      AND previous_item.id = evidence_link.business_object_id
+     LEFT JOIN human_cost_receipts previous_receipt
+       ON previous_receipt.id = previous_item.receipt_id
+     WHERE transaction.report_month = ?
+       AND transaction.account_code = 'basic'
+       AND transaction.category = 'salary'
+       AND transaction.direction = 'outflow'
+       AND transaction.recognition_status = 'recognized'
+       AND transaction.is_current = TRUE
+     ORDER BY transaction.id, evidence_link.updated_at DESC,
+              evidence_link.id DESC`,
+    payrollMonth,
+  );
+  salaryReceiptRows.push(...monthlyBankSalaryReceiptRows);
   const receiptsByEmployee = new Map<string, StoredSalaryReceiptLink[]>();
   for (const receipt of salaryReceiptRows) {
     const employeeReceipts = receiptsByEmployee.get(receipt.employee_id) || [];
@@ -1240,10 +1519,21 @@ router.delete("/receipts/:receiptId", requireAdmin, async (req, res) => {
     const receipt = await db.get<{
       file_path: string;
       recognition_status: string;
+      audit_locked: boolean;
     }>(
-      `SELECT file_path, recognition_status
-       FROM human_cost_receipts
-       WHERE id = ?`,
+      `SELECT receipt.file_path, receipt.recognition_status,
+              EXISTS (
+                SELECT 1
+                FROM human_cost_receipt_items item
+                JOIN monthly_financial_bank_transaction_links link
+                  ON link.business_object_type = 'human_cost_receipt_item'
+                 AND link.business_object_id = item.id
+                 AND link.link_kind = 'display_replacement'
+                WHERE item.receipt_id = receipt.id
+                  AND link.match_key_json ->> 'displayAction' = 'replaced'
+              ) AS audit_locked
+       FROM human_cost_receipts receipt
+       WHERE receipt.id = ?`,
       req.params.receiptId,
     );
     if (!receipt) {
@@ -1255,6 +1545,13 @@ router.delete("/receipts/:receiptId", requireAdmin, async (req, res) => {
       return res
         .status(409)
         .json({ success: false, message: "回单正在识别，请稍后再删除" });
+    }
+    if (receipt.audit_locked) {
+      return res.status(409).json({
+        success: false,
+        code: "HUMAN_COST_RECEIPT_AUDIT_LOCKED",
+        message: "该工资回单已作为银行证据替换前的原件留档，不能删除",
+      });
     }
     if (!receipt.file_path.startsWith("uploads/human-cost-receipts/")) {
       throw new Error("人力成本回单文件路径无效");

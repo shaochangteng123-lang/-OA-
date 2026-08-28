@@ -265,353 +265,686 @@
         </div>
       </div>
 
-      <el-table
+      <div v-if="items.length || loading" class="contract-table-scroll">
+        <el-table
+          class="contract-table contract-table-full desktop-wide-only"
+          :data="ledgerItems"
+          stripe
+          row-key="id"
+          :tree-props="{ children: 'children' }"
+          :row-class-name="contractRowClassName"
+          @row-dblclick="openDetail"
+        >
+          <el-table-column
+            label="序号"
+            width="72"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              {{ ledgerSequence(row) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="项目名称"
+            min-width="640"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="contract-name-cell">
+                <strong :title="contractDisplayName(row)">
+                  {{ contractDisplayName(row) }}
+                </strong>
+                <span class="contract-name-meta">
+                  <span
+                    v-if="shouldShowRelationBadge(row)"
+                    class="relation-badge"
+                    :class="`is-${row.relationType}`"
+                  >
+                    {{ contractRelationLabel(row) }}
+                  </span>
+                  <span
+                    v-if="
+                      row.relationType === 'main' &&
+                      relatedAgreementTotal(row) > 0
+                    "
+                    class="related-agreement-badges"
+                    :aria-label="relatedAgreementSummary(row)"
+                    :title="relatedAgreementSummary(row)"
+                  >
+                    <span
+                      v-for="badge in relatedAgreementBadges(row)"
+                      :key="badge.type"
+                      class="agreement-type-badge"
+                      :class="`is-${badge.type}`"
+                    >
+                      {{ badge.label }} {{ badge.count }} 份
+                    </span>
+                  </span>
+                  <span class="contract-number">{{
+                    contractNumberText(row)
+                  }}</span>
+                </span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="分类"
+            width="140"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="category-direction-cell">
+                <span>{{ contractCategoryLabel(row.category) }}</span>
+                <small
+                  class="direction-badge"
+                  :class="contractDirectionClass(row)"
+                >
+                  {{ contractDirectionLabel(row) }}
+                </small>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="行政区域"
+            width="110"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">{{ row.area || "—" }}</template>
+          </el-table-column>
+          <el-table-column
+            label="合同日期"
+            width="120"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">{{
+              formatContractDate(row.contractDate)
+            }}</template>
+          </el-table-column>
+          <el-table-column
+            label="租赁期限"
+            width="210"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <span v-if="row.leaseStartDate || row.leaseEndDate">
+                {{ formatContractDate(row.leaseStartDate) }} 至
+                {{ formatContractDate(row.leaseEndDate) }}
+              </span>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="合同金额"
+            width="205"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div
+                v-if="
+                  row.relationType === 'supplement' &&
+                  hasSupplementAmountChain(row)
+                "
+                class="supplement-amount-chain"
+              >
+                <span
+                  v-if="row.supplementChangeType === 'payment_terms_only'"
+                  class="payment-terms-badge"
+                  >仅变更付款方式</span
+                >
+                <small
+                  >原始
+                  {{
+                    formatContractMoney(row.originalContractAmount, "—")
+                  }}</small
+                >
+                <small
+                  >生效前
+                  {{ formatContractMoney(row.amountBeforeChange, "—") }}</small
+                >
+                <span
+                  >本次增减
+                  {{ formatContractMoney(supplementAmountDelta(row)) }}</span
+                >
+                <strong
+                  >生效后
+                  {{ formatContractMoney(row.amountAfterChange, "—") }}</strong
+                >
+                <small
+                  >当前有效
+                  {{
+                    formatContractMoney(row.currentEffectiveAmount, "—")
+                  }}</small
+                >
+              </div>
+              <div
+                v-else-if="hasProjectedAmountChange(row)"
+                class="ledger-amount-change"
+              >
+                <small
+                  >变更前 {{ formatContractMoney(row.currentAmount) }}</small
+                >
+                <strong
+                  >变更后 {{ formatContractMoney(row.projectedAmount) }}</strong
+                >
+                <span>{{ row.pendingSupplementCount }} 份补充协议待生效</span>
+              </div>
+              <strong
+                v-else
+                class="money-cell"
+                :class="contractDirectionClass(row)"
+                >{{ formatContractMoney(displayContractAmount(row)) }}</strong
+              >
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="已收"
+            width="125"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <span
+                v-if="row.category !== 'asset'"
+                class="money-cell is-income"
+                >{{ formatContractMoney(row.receivedAmount) }}</span
+              >
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="已付"
+            width="125"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <span
+                v-if="row.category === 'asset'"
+                class="money-cell is-expense"
+                >{{ formatContractMoney(row.paidAmount) }}</span
+              >
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="执行进度"
+            width="150"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="progress-cell">
+                <el-progress
+                  :percentage="
+                    clampPercent(normalizeProgress(row.completionRate))
+                  "
+                  :stroke-width="7"
+                  :show-text="false"
+                />
+                <span>{{ normalizeProgress(row.completionRate) }}%</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="状态"
+            width="110"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <ContractStatusTag :status="row.status" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="责任人"
+            width="110"
+            align="center"
+            header-align="center"
+            show-overflow-tooltip
+          >
+            <template #default="{ row }">{{
+              contractOwnerLabel(row)
+            }}</template>
+          </el-table-column>
+          <el-table-column
+            label="更新时间"
+            width="120"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">{{
+              formatContractDate(row.updatedAt)
+            }}</template>
+          </el-table-column>
+          <el-table-column
+            label="操作"
+            :width="contractActionColumnWidth"
+            fixed="right"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="row-actions">
+                <span class="action-slot action-detail">
+                  <el-button type="primary" link @click.stop="openDetail(row)"
+                    >详情</el-button
+                  >
+                </span>
+                <span
+                  v-if="canCreate && canUploadSupplement(row)"
+                  class="action-slot action-supplement"
+                >
+                  <el-button
+                    type="warning"
+                    link
+                    @click.stop="openSupplementUpload(row)"
+                    >上传补充协议</el-button
+                  >
+                </span>
+                <span
+                  v-if="
+                    canCreate &&
+                    row.relationType === 'main' &&
+                    ['effective', 'executing'].includes(row.status)
+                  "
+                  class="action-slot action-finance"
+                >
+                  <el-button
+                    type="success"
+                    link
+                    @click.stop="openFinancialRegistration(row)"
+                    >财务登记</el-button
+                  >
+                </span>
+                <span
+                  v-if="canCreate && canManageRentalLifecycle(row)"
+                  class="action-slot action-renewal"
+                >
+                  <el-button
+                    type="success"
+                    link
+                    @click.stop="openRentalRenewal(row)"
+                    >续签</el-button
+                  >
+                </span>
+                <span
+                  v-if="
+                    canCreate && ['draft', 'pending_seal'].includes(row.status)
+                  "
+                  class="action-slot action-status"
+                >
+                  <el-button
+                    v-if="row.status === 'draft'"
+                    type="primary"
+                    link
+                    @click.stop="continueEditing(row)"
+                    >继续编辑</el-button
+                  >
+                  <el-button
+                    v-else-if="row.status === 'pending_seal'"
+                    type="primary"
+                    link
+                    @click.stop="openSealArchive(row)"
+                    >盖章</el-button
+                  >
+                </span>
+                <span
+                  v-if="canCreate && row.requiresAuxiliaryMaterials"
+                  class="action-slot action-auxiliary"
+                >
+                  <el-button
+                    type="primary"
+                    link
+                    @click.stop="openAuxiliaryMaterials(row)"
+                    >添加辅助材料</el-button
+                  >
+                </span>
+                <span v-if="isEmployee" class="action-slot action-download">
+                  <el-button
+                    type="success"
+                    link
+                    @click.stop="openDownloadRequest(row)"
+                    >申请下载</el-button
+                  >
+                </span>
+                <span
+                  v-if="isEmployee && canApplyInvoice(row)"
+                  class="action-slot action-invoice"
+                >
+                  <el-button
+                    type="primary"
+                    link
+                    @click.stop="openInvoiceApplication(row)"
+                    >开票申请</el-button
+                  >
+                </span>
+                <span
+                  v-if="canCreate && canCancelContract(row)"
+                  class="action-slot action-cancel"
+                >
+                  <el-button
+                    type="danger"
+                    link
+                    :loading="cancellingContractId === row.id"
+                    @click.stop="cancelContract(row)"
+                    >撤销此合同</el-button
+                  >
+                </span>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <div
         v-if="items.length || loading"
-        class="contract-table desktop-only"
-        :data="ledgerItems"
-        stripe
-        row-key="id"
-        :tree-props="{ children: 'children' }"
-        :row-class-name="contractRowClassName"
-        @row-dblclick="openDetail"
+        class="contract-table-compact-scroll laptop-only"
       >
-        <el-table-column
-          label="序号"
-          width="72"
-          align="center"
-          header-align="center"
+        <el-table
+          class="contract-table-compact laptop-only"
+          :data="ledgerItems"
+          stripe
+          row-key="id"
+          table-layout="fixed"
+          :tree-props="{ children: 'children' }"
+          :row-class-name="contractRowClassName"
+          @row-dblclick="openDetail"
         >
-          <template #default="{ row }">
-            {{ ledgerSequence(row) }}
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="合同信息"
-          min-width="360"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div class="contract-name-cell">
-              <strong :title="contractDisplayName(row)">
-                {{ contractDisplayName(row) }}
-              </strong>
-              <span class="contract-name-meta">
+          <el-table-column label="序号" align="center" header-align="center">
+            <template #default="{ row }">
+              {{ ledgerSequence(row) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="项目名称"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="compact-project-cell">
+                <strong :title="contractDisplayName(row)">
+                  {{ contractDisplayName(row) }}
+                </strong>
                 <span
                   v-if="shouldShowRelationBadge(row)"
                   class="relation-badge"
+                  :class="`is-${row.relationType}`"
                 >
                   {{ contractRelationLabel(row) }}
                 </span>
                 <span
-                  v-if="row.relationType === 'main' && row.children?.length"
-                  class="child-count-badge"
+                  v-if="
+                    row.relationType === 'main' &&
+                    relatedAgreementTotal(row) > 0
+                  "
+                  class="related-agreement-badges"
+                  :aria-label="relatedAgreementSummary(row)"
+                  :title="relatedAgreementSummary(row)"
                 >
-                  {{ row.children.length }} 份关联协议
+                  <span
+                    v-for="badge in relatedAgreementBadges(row)"
+                    :key="badge.type"
+                    class="agreement-type-badge"
+                    :class="`is-${badge.type}`"
+                  >
+                    {{ badge.label }} {{ badge.count }} 份
+                  </span>
                 </span>
-                <span class="contract-number">{{
-                  contractNumberText(row)
-                }}</span>
+                <span>{{ contractNumberText(row) }}</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="分类" align="center" header-align="center">
+            <template #default="{ row }">
+              <div class="category-direction-cell">
+                <span>{{ contractCategoryLabel(row.category) }}</span>
+                <small
+                  class="direction-badge"
+                  :class="contractDirectionClass(row)"
+                >
+                  {{ contractDirectionLabel(row) }}
+                </small>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="行政区域"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">{{ row.area || "—" }}</template>
+          </el-table-column>
+          <el-table-column
+            label="合同日期"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              {{ formatContractDate(row.contractDate) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="租赁期限"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <span v-if="row.leaseStartDate || row.leaseEndDate">
+                {{ formatContractDate(row.leaseStartDate) }} 至
+                {{ formatContractDate(row.leaseEndDate) }}
               </span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="分类"
-          width="140"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div class="category-direction-cell">
-              <span>{{ contractCategoryLabel(row.category) }}</span>
-              <small
-                class="direction-badge"
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="合同金额"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div
+                v-if="
+                  row.relationType === 'supplement' &&
+                  hasSupplementAmountChain(row)
+                "
+                class="supplement-amount-chain"
+              >
+                <span
+                  v-if="row.supplementChangeType === 'payment_terms_only'"
+                  class="payment-terms-badge"
+                  >仅变更付款方式</span
+                >
+                <small
+                  >原始
+                  {{
+                    formatContractMoney(row.originalContractAmount, "—")
+                  }}</small
+                >
+                <small
+                  >生效前
+                  {{ formatContractMoney(row.amountBeforeChange, "—") }}</small
+                >
+                <span
+                  >本次增减
+                  {{ formatContractMoney(supplementAmountDelta(row)) }}</span
+                >
+                <strong
+                  >生效后
+                  {{ formatContractMoney(row.amountAfterChange, "—") }}</strong
+                >
+                <small
+                  >当前有效
+                  {{
+                    formatContractMoney(row.currentEffectiveAmount, "—")
+                  }}</small
+                >
+              </div>
+              <div
+                v-else-if="hasProjectedAmountChange(row)"
+                class="ledger-amount-change"
+              >
+                <small
+                  >变更前 {{ formatContractMoney(row.currentAmount) }}</small
+                >
+                <strong
+                  >变更后 {{ formatContractMoney(row.projectedAmount) }}</strong
+                >
+                <span>{{ row.pendingSupplementCount }} 份补充协议待生效</span>
+              </div>
+              <strong
+                v-else
+                class="money-cell"
                 :class="contractDirectionClass(row)"
               >
-                {{ contractDirectionLabel(row) }}
-              </small>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column
-          prop="projectName"
-          label="项目名称"
-          min-width="180"
-          align="center"
-          header-align="center"
-          show-overflow-tooltip
-        >
-          <template #default="{ row }">
-            {{ row.category === "asset" ? "—" : row.projectName }}
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="行政区域"
-          width="110"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">{{ row.area || "—" }}</template>
-        </el-table-column>
-        <el-table-column
-          label="合同日期"
-          width="120"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">{{
-            formatContractDate(row.contractDate)
-          }}</template>
-        </el-table-column>
-        <el-table-column
-          label="租赁期限"
-          width="210"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <span v-if="row.leaseStartDate || row.leaseEndDate">
-              {{ formatContractDate(row.leaseStartDate) }} 至
-              {{ formatContractDate(row.leaseEndDate) }}
-            </span>
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="合同截至日期"
-          width="130"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            {{ formatContractDate(displayedContractCutoffDate(row)) }}
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="合同金额"
-          width="205"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div
-              v-if="
-                row.relationType === 'supplement' &&
-                hasSupplementAmountChain(row)
-              "
-              class="supplement-amount-chain"
-            >
+                {{ formatContractMoney(displayContractAmount(row)) }}
+              </strong>
+            </template>
+          </el-table-column>
+          <el-table-column label="已收" align="center" header-align="center">
+            <template #default="{ row }">
               <span
-                v-if="row.supplementChangeType === 'payment_terms_only'"
-                class="payment-terms-badge"
-                >仅变更付款方式</span
+                v-if="row.category !== 'asset'"
+                class="money-cell is-income"
               >
-              <small
-                >原始
-                {{
-                  formatContractMoney(row.originalContractAmount, "—")
-                }}</small
-              >
-              <small
-                >生效前
-                {{ formatContractMoney(row.amountBeforeChange, "—") }}</small
-              >
+                {{ formatContractMoney(row.receivedAmount) }}
+              </span>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="已付" align="center" header-align="center">
+            <template #default="{ row }">
               <span
-                >本次增减
-                {{ formatContractMoney(supplementAmountDelta(row)) }}</span
+                v-if="row.category === 'asset'"
+                class="money-cell is-expense"
               >
-              <strong
-                >生效后
-                {{ formatContractMoney(row.amountAfterChange, "—") }}</strong
-              >
-              <small
-                >当前有效
-                {{
-                  formatContractMoney(row.currentEffectiveAmount, "—")
-                }}</small
-              >
-            </div>
-            <div
-              v-else-if="hasProjectedAmountChange(row)"
-              class="ledger-amount-change"
-            >
-              <small>变更前 {{ formatContractMoney(row.currentAmount) }}</small>
-              <strong
-                >变更后 {{ formatContractMoney(row.projectedAmount) }}</strong
-              >
-              <span>{{ row.pendingSupplementCount }} 份补充协议待生效</span>
-            </div>
-            <strong
-              v-else
-              class="money-cell"
-              :class="contractDirectionClass(row)"
-              >{{ formatContractMoney(displayContractAmount(row)) }}</strong
-            >
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="已收"
-          width="125"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <span
-              v-if="row.category !== 'asset'"
-              class="money-cell is-income"
-              >{{ formatContractMoney(row.receivedAmount) }}</span
-            >
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="已付"
-          width="125"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <span
-              v-if="row.category === 'asset'"
-              class="money-cell is-expense"
-              >{{ formatContractMoney(row.paidAmount) }}</span
-            >
-            <span v-else>—</span>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="执行进度"
-          width="150"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div class="progress-cell">
-              <el-progress
-                :percentage="
-                  clampPercent(normalizeProgress(row.completionRate))
-                "
-                :stroke-width="7"
-                :show-text="false"
-              />
-              <span>{{ normalizeProgress(row.completionRate) }}%</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="状态"
-          width="110"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <ContractStatusTag :status="row.status" size="small" />
-          </template>
-        </el-table-column>
-        <el-table-column
-          label="责任人"
-          width="110"
-          align="center"
-          header-align="center"
-          show-overflow-tooltip
-        >
-          <template #default="{ row }">{{ row.ownerName || "—" }}</template>
-        </el-table-column>
-        <el-table-column
-          label="更新时间"
-          width="120"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">{{
-            formatContractDate(row.updatedAt)
-          }}</template>
-        </el-table-column>
-        <el-table-column
-          label="操作"
-          width="330"
-          fixed="right"
-          align="center"
-          header-align="center"
-        >
-          <template #default="{ row }">
-            <div class="row-actions">
-              <el-button type="primary" link @click.stop="openDetail(row)"
-                >详情</el-button
-              >
-              <el-button
-                v-if="isEmployee"
-                type="success"
-                link
-                @click.stop="openDownloadRequest(row)"
-                >申请下载</el-button
-              >
-              <el-button
-                v-if="canApplyInvoice(row)"
-                type="primary"
-                link
-                @click.stop="openInvoiceApplication(row)"
-                >开票申请</el-button
-              >
-              <el-button
-                v-if="canCreate && row.requiresAuxiliaryMaterials"
-                type="primary"
-                link
-                @click.stop="openAuxiliaryMaterials(row)"
-                >添加辅助材料</el-button
-              >
-              <el-button
-                v-if="canManageRentalLifecycle(row)"
-                type="success"
-                link
-                @click.stop="openRentalRenewal(row)"
-                >续签</el-button
-              >
-              <el-button
-                v-if="canUploadSupplement(row)"
-                type="warning"
-                link
-                @click.stop="openSupplementUpload(row)"
-                >上传补充协议</el-button
-              >
-              <el-button
-                v-if="canCreate && row.status === 'draft'"
-                type="primary"
-                link
-                @click.stop="continueEditing(row)"
-                >继续编辑</el-button
-              >
-              <el-button
-                v-if="canCreate && row.status === 'pending_seal'"
-                type="primary"
-                link
-                @click.stop="openSealArchive(row)"
-                >盖章</el-button
-              >
-              <el-button
-                v-if="
-                  canCreate &&
-                  row.relationType === 'main' &&
-                  ['effective', 'executing'].includes(row.status)
-                "
-                type="success"
-                link
-                @click.stop="openFinancialRegistration(row)"
-                >财务登记</el-button
-              >
-              <el-button
-                v-if="canCancelContract(row)"
-                type="danger"
-                link
-                :loading="cancellingContractId === row.id"
-                @click.stop="cancelContract(row)"
-                >撤销此合同</el-button
-              >
-            </div>
-          </template>
-        </el-table-column>
-      </el-table>
+                {{ formatContractMoney(row.paidAmount) }}
+              </span>
+              <span v-else>—</span>
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="执行进度"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              <div class="compact-progress-cell">
+                <el-progress
+                  :percentage="
+                    clampPercent(normalizeProgress(row.completionRate))
+                  "
+                  :stroke-width="6"
+                  :show-text="false"
+                />
+                <span>{{ normalizeProgress(row.completionRate) }}%</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" align="center" header-align="center">
+            <template #default="{ row }">
+              <ContractStatusTag :status="row.status" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column label="责任人" align="center" header-align="center">
+            <template #default="{ row }">
+              {{ contractOwnerLabel(row) }}
+            </template>
+          </el-table-column>
+          <el-table-column
+            label="更新时间"
+            align="center"
+            header-align="center"
+          >
+            <template #default="{ row }">
+              {{ formatContractDate(row.updatedAt) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" align="center" header-align="center">
+            <template #default="{ row }">
+              <div class="compact-row-actions">
+                <el-button type="primary" link @click.stop="openDetail(row)"
+                  >详情</el-button
+                >
+                <el-button
+                  v-if="canCreate && canUploadSupplement(row)"
+                  type="warning"
+                  link
+                  @click.stop="openSupplementUpload(row)"
+                  >上传补充协议</el-button
+                >
+                <el-button
+                  v-if="
+                    canCreate &&
+                    row.relationType === 'main' &&
+                    ['effective', 'executing'].includes(row.status)
+                  "
+                  type="success"
+                  link
+                  @click.stop="openFinancialRegistration(row)"
+                  >财务登记</el-button
+                >
+                <el-button
+                  v-if="canCreate && canManageRentalLifecycle(row)"
+                  type="success"
+                  link
+                  @click.stop="openRentalRenewal(row)"
+                  >续签</el-button
+                >
+                <el-button
+                  v-if="canCreate && row.status === 'draft'"
+                  type="primary"
+                  link
+                  @click.stop="continueEditing(row)"
+                  >继续编辑</el-button
+                >
+                <el-button
+                  v-else-if="canCreate && row.status === 'pending_seal'"
+                  type="primary"
+                  link
+                  @click.stop="openSealArchive(row)"
+                  >盖章</el-button
+                >
+                <el-button
+                  v-if="canCreate && row.requiresAuxiliaryMaterials"
+                  type="primary"
+                  link
+                  @click.stop="openAuxiliaryMaterials(row)"
+                  >添加辅助材料</el-button
+                >
+                <el-button
+                  v-if="isEmployee"
+                  type="success"
+                  link
+                  @click.stop="openDownloadRequest(row)"
+                  >申请下载</el-button
+                >
+                <el-button
+                  v-if="isEmployee && canApplyInvoice(row)"
+                  type="primary"
+                  link
+                  @click.stop="openInvoiceApplication(row)"
+                  >开票申请</el-button
+                >
+                <el-button
+                  v-if="canCreate && canCancelContract(row)"
+                  type="danger"
+                  link
+                  :loading="cancellingContractId === row.id"
+                  @click.stop="cancelContract(row)"
+                  >撤销此合同</el-button
+                >
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
 
       <div v-if="items.length" class="mobile-contract-list mobile-only">
         <article
@@ -633,18 +966,31 @@
               <ContractStatusTag :status="item.status" size="small" />
             </span>
             <span
+              v-if="
+                item.relationType === 'main' && relatedAgreementTotal(item) > 0
+              "
+              class="mobile-agreement-summary"
+              :aria-label="relatedAgreementSummary(item)"
+              :title="relatedAgreementSummary(item)"
+            >
+              <span
+                v-for="badge in relatedAgreementBadges(item)"
+                :key="badge.type"
+                class="agreement-type-badge"
+                :class="`is-${badge.type}`"
+              >
+                {{ badge.label }} {{ badge.count }} 份
+              </span>
+            </span>
+            <span
               v-if="item.relationType !== 'main'"
               class="mobile-relation-label"
+              :class="`is-${item.relationType}`"
             >
-              挂接于上方主合同
+              {{ contractRelationLabel(item) }} · 挂接于上方主合同
             </span>
             <span class="mobile-category-line">
-              <span>
-                {{ contractCategoryLabel(item.category)
-                }}<template v-if="item.category !== 'asset'">
-                  · {{ item.projectName }}</template
-                >
-              </span>
+              <span>{{ contractCategoryLabel(item.category) }}</span>
               <small
                 class="direction-badge"
                 :class="contractDirectionClass(item)"
@@ -654,15 +1000,11 @@
             <span>行政区域 {{ item.area || "—" }}</span>
             <span
               >合同日期 {{ formatContractDate(item.contractDate) }} · 责任人
-              {{ item.ownerName || "—" }}</span
+              {{ contractOwnerLabel(item) }}</span
             >
             <span v-if="item.leaseStartDate || item.leaseEndDate">
               租赁期限 {{ formatContractDate(item.leaseStartDate) }} 至
               {{ formatContractDate(item.leaseEndDate) }}
-            </span>
-            <span>
-              合同截至日期
-              {{ formatContractDate(displayedContractCutoffDate(item)) }}
             </span>
             <span
               v-if="
@@ -735,8 +1077,8 @@
             >
               {{
                 expandedMobileRootIds.has(item.id)
-                  ? "收起关联协议"
-                  : `展开 ${item.children.length} 份关联协议`
+                  ? "收起待归档协议"
+                  : `展开 ${item.children.length} 份待归档协议`
               }}
             </el-button>
             <el-button type="primary" link @click="openDetail(item)"
@@ -898,6 +1240,11 @@ const adminRoles = new Set(["super_admin", "chairman", "admin"]);
 const approvalCenterRoles = new Set(["general_manager"]);
 const canCreate = computed(() => adminRoles.has(authStore.user?.role || ""));
 const isEmployee = computed(() => authStore.user?.role === "user");
+const contractActionColumnWidth = computed(() => {
+  if (canCreate.value) return 590;
+  if (isEmployee.value) return 250;
+  return 100;
+});
 const canExportContracts = computed(
   () =>
     adminRoles.has(authStore.user?.role || "") ||
@@ -1296,7 +1643,20 @@ function resetFilters() {
 }
 
 function openDetail(item: ContractListItem) {
-  void router.push(`/contracts/${item.id}`);
+  void router.push({
+    path: `/contracts/${item.id}`,
+    query: contractDetailReturnQuery(),
+  });
+}
+
+function contractDetailReturnQuery(
+  query: Record<string, string> = {},
+): Record<string, string> {
+  return {
+    ...query,
+    from: "contract-ledger",
+    returnTo: route.fullPath,
+  };
 }
 
 function openDownloadRequest(item: ContractListItem) {
@@ -1328,7 +1688,7 @@ function openAuxiliaryMaterials(item: ContractListItem) {
   if (!canCreate.value || !item.requiresAuxiliaryMaterials) return;
   void router.push({
     path: `/contracts/${item.id}`,
-    query: { tab: "auxiliary" },
+    query: contractDetailReturnQuery({ tab: "auxiliary" }),
   });
 }
 
@@ -1386,7 +1746,7 @@ function openSealArchive(item: ContractListItem) {
   if (!canCreate.value || item.status !== "pending_seal") return;
   void router.push({
     path: `/contracts/${item.id}`,
-    query: { tab: "seal", action: "seal" },
+    query: contractDetailReturnQuery({ tab: "seal", action: "seal" }),
   });
 }
 
@@ -1400,7 +1760,7 @@ function openFinancialRegistration(item: ContractListItem) {
   }
   void router.push({
     path: `/contracts/${item.id}`,
-    query: { tab: "finance", action: "record" },
+    query: contractDetailReturnQuery({ tab: "finance", action: "record" }),
   });
 }
 
@@ -1497,6 +1857,96 @@ function toggleMobileContractGroup(rootId: string) {
   expandedMobileRootIds.value = next;
 }
 
+function normalizedAgreementCount(value: unknown): number {
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? Math.trunc(count) : 0;
+}
+
+function relatedAgreementCounts(item: ContractLedgerRow): {
+  total: number;
+  supplements: number;
+  terminations: number;
+} {
+  const activeChildren = (item.children || []).filter(
+    (child) => child.status !== "rejected",
+  );
+  const childSupplements = activeChildren.filter(
+    (child) => child.relationType === "supplement",
+  ).length;
+  const childTerminations = activeChildren.filter(
+    (child) => child.relationType === "termination",
+  ).length;
+  const supplements = Math.max(
+    0,
+    normalizedAgreementCount(item.supplementAgreementCount),
+    childSupplements,
+  );
+  const terminations = Math.max(
+    0,
+    normalizedAgreementCount(item.terminationAgreementCount),
+    childTerminations,
+  );
+  return {
+    total: Math.max(
+      0,
+      normalizedAgreementCount(item.relatedAgreementCount),
+      supplements + terminations,
+    ),
+    supplements,
+    terminations,
+  };
+}
+
+function relatedAgreementTotal(item: ContractLedgerRow): number {
+  return relatedAgreementCounts(item).total;
+}
+
+function relatedAgreementSummary(item: ContractLedgerRow): string {
+  const { total, supplements, terminations } = relatedAgreementCounts(item);
+  const details = [
+    supplements > 0 ? `补充 ${supplements}` : "",
+    terminations > 0 ? `终止／解除 ${terminations}` : "",
+  ].filter(Boolean);
+  return details.length
+    ? `关联 ${total} 份协议（${details.join(" · ")}）`
+    : `关联 ${total} 份协议`;
+}
+
+type RelatedAgreementBadge = {
+  type: "supplement" | "termination" | "related";
+  label: string;
+  count: number;
+};
+
+function relatedAgreementBadges(
+  item: ContractLedgerRow,
+): RelatedAgreementBadge[] {
+  const { total, supplements, terminations } = relatedAgreementCounts(item);
+  const badges: RelatedAgreementBadge[] = [];
+  if (supplements > 0) {
+    badges.push({
+      type: "supplement",
+      label: "补充协议",
+      count: supplements,
+    });
+  }
+  if (terminations > 0) {
+    badges.push({
+      type: "termination",
+      label: "解除协议",
+      count: terminations,
+    });
+  }
+  if (!badges.length && total > 0) {
+    badges.push({ type: "related", label: "关联协议", count: total });
+  }
+  return badges;
+}
+
+function contractOwnerLabel(item: ContractListItem): string {
+  return item.ownerName || (item.historicalImported ? "待分配" : "—");
+}
+
 function contractCategoryLabel(category: unknown): string {
   return CONTRACT_CATEGORY_LABELS[category as ContractCategory] || "未知分类";
 }
@@ -1506,7 +1956,9 @@ function contractRelationLabel(item: ContractListItem): string {
 }
 
 function contractDisplayName(item: ContractListItem): string {
-  return String(item.name || item.projectName || "未命名合同").trim();
+  const projectName = String(item.projectName || "").trim();
+  if (projectName) return projectName;
+  return item.status === "draft" ? "项目名称待识别" : "—";
 }
 
 function shouldShowRelationBadge(item: ContractListItem): boolean {
@@ -1521,16 +1973,6 @@ function contractNumberText(item: ContractListItem): string {
   return item.declaredCategory === "main_business"
     ? "原件合同编号待识别"
     : "系统编号待生成";
-}
-
-function displayedContractCutoffDate(
-  item: ContractListItem,
-): string | null | undefined {
-  if (item.relationType !== "main") return null;
-  if (item.status !== "completed" && item.status !== "terminated") {
-    return null;
-  }
-  return item.contractCutoffDate;
 }
 
 function displayContractAmount(item: ContractListItem): string | number {
@@ -1613,7 +2055,6 @@ async function exportContracts() {
       "甲方",
       "乙方",
       "合同日期",
-      "合同截至日期",
       "合同金额或协议调整额",
       "已收金额",
       "已付金额",
@@ -1630,11 +2071,10 @@ async function exportContracts() {
       item.partyA,
       item.partyB,
       item.contractDate || "",
-      displayedContractCutoffDate(item) || "",
       displayContractAmount(item),
       item.category === "asset" ? "" : item.receivedAmount || 0,
       item.category === "asset" ? item.paidAmount || 0 : "",
-      item.ownerName || "",
+      contractOwnerLabel(item),
       CONTRACT_STATUS_LABELS[item.status],
     ]);
     const content = `\uFEFF${[header, ...rows]
@@ -1704,13 +2144,20 @@ onMounted(loadMeta);
 
 <style scoped>
 .contract-page {
+  box-sizing: border-box;
+  width: auto;
+  min-width: 0;
   min-height: calc(100vh - 60px);
-  margin: -24px -45px;
+  margin: calc(-1 * var(--yl-main-padding-y, 24px))
+    calc(-1 * var(--yl-main-padding-x, 45px));
   padding: 24px 32px 48px;
   background:
     radial-gradient(circle at 5% 2%, rgb(42 104 148 / 8%), transparent 22%),
     #f5f7fa;
   color: #1c3349;
+}
+.contract-list-page > * {
+  min-width: 0;
 }
 .contract-hero {
   display: flex;
@@ -1724,6 +2171,9 @@ onMounted(loadMeta);
     radial-gradient(circle at 95% 0, rgb(62 183 167 / 13%), transparent 30%),
     linear-gradient(135deg, #fff, #f6f9fc);
   box-shadow: 0 14px 36px rgb(31 55 78 / 8%);
+}
+.hero-copy {
+  min-width: 0;
 }
 .hero-copy h1 {
   margin: 4px 0 6px;
@@ -1763,14 +2213,17 @@ onMounted(loadMeta);
 }
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(7, minmax(190px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 12px;
-  overflow-x: auto;
   margin-top: 16px;
-  padding-bottom: 2px;
+}
+.metric-grid :deep(.metric-value) {
+  overflow: visible;
+  font-size: clamp(19px, 1.45vw, 26px);
+  letter-spacing: -0.02em;
+  text-overflow: clip;
 }
 .filter-panel {
-  overflow-x: auto;
   margin-top: 16px;
   padding: 14px;
   border: 1px solid #e1e8ee;
@@ -1779,26 +2232,30 @@ onMounted(loadMeta);
   box-shadow: 0 8px 24px rgb(28 49 70 / 5%);
 }
 .filter-row {
-  display: grid;
-  min-width: 1540px;
-  grid-template-columns:
-    minmax(200px, 1.35fr) minmax(140px, 1fr) repeat(5, minmax(125px, 1fr))
-    minmax(300px, 2fr) max-content;
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
 }
+.filter-row > * {
+  min-width: 0;
+  flex: 1 1 150px;
+}
+.filter-row > .keyword-input {
+  flex-basis: 230px;
+}
 .date-filter {
-  display: grid;
-  grid-column: auto;
-  grid-template-columns: minmax(300px, 1fr);
-  align-items: center;
+  flex: 1.8 1 320px;
 }
 .date-filter :deep(.el-date-editor) {
   width: 100%;
+  min-width: 0;
 }
 .filter-actions {
   display: flex;
-  grid-column: auto;
+  min-width: max-content;
+  flex: 0 0 auto;
   flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 8px;
@@ -1811,6 +2268,8 @@ onMounted(loadMeta);
 }
 .ledger-card {
   min-height: 260px;
+  min-width: 0;
+  overflow: hidden;
   margin-top: 16px;
   padding: 18px;
   border: 1px solid #e1e7ed;
@@ -1838,7 +2297,138 @@ onMounted(loadMeta);
   font-size: 12px;
 }
 .contract-table {
+  width: 100%;
+  max-width: 100%;
   border-radius: 10px;
+}
+.contract-table-scroll {
+  display: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+.desktop-wide-only {
+  display: none;
+}
+.contract-table-compact-scroll {
+  display: none;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+.contract-table-compact {
+  width: 100%;
+  max-width: 100%;
+  font-size: 11px;
+  table-layout: fixed;
+}
+.contract-table-compact :deep(col) {
+  width: auto !important;
+}
+.contract-table-compact :deep(col:nth-child(1)) {
+  width: 3% !important;
+}
+.contract-table-compact :deep(col:nth-child(2)) {
+  width: 14% !important;
+}
+.contract-table-compact :deep(col:nth-child(3)) {
+  width: 6% !important;
+}
+.contract-table-compact :deep(col:nth-child(4)) {
+  width: 5% !important;
+}
+.contract-table-compact :deep(col:nth-child(5)) {
+  width: 6% !important;
+}
+.contract-table-compact :deep(col:nth-child(6)) {
+  width: 8% !important;
+}
+.contract-table-compact :deep(col:nth-child(7)) {
+  width: 8% !important;
+}
+.contract-table-compact :deep(col:nth-child(8)),
+.contract-table-compact :deep(col:nth-child(9)),
+.contract-table-compact :deep(col:nth-child(12)) {
+  width: 5% !important;
+}
+.contract-table-compact :deep(col:nth-child(10)) {
+  width: 7% !important;
+}
+.contract-table-compact :deep(col:nth-child(11)),
+.contract-table-compact :deep(col:nth-child(13)) {
+  width: 6% !important;
+}
+.contract-table-compact :deep(col:nth-child(14)) {
+  width: 16% !important;
+}
+.contract-table-compact :deep(.cell) {
+  padding-right: 6px;
+  padding-left: 6px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.contract-table-compact :deep(.el-table__body-wrapper),
+.contract-table-compact :deep(.el-scrollbar__wrap),
+.contract-table-compact :deep(.el-table__inner-wrapper),
+.contract-table-compact :deep(.el-scrollbar),
+.contract-table-compact :deep(.el-scrollbar__view) {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden !important;
+}
+.contract-table-compact :deep(.el-table__header),
+.contract-table-compact :deep(.el-table__body) {
+  width: 100% !important;
+  max-width: 100% !important;
+  table-layout: fixed !important;
+}
+.contract-table-compact :deep(.el-scrollbar__bar.is-horizontal) {
+  display: none !important;
+}
+.compact-project-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.35;
+}
+.compact-project-cell strong {
+  color: #284a68;
+}
+.compact-project-cell span,
+.compact-project-cell small {
+  color: #7d8b98;
+  font-size: 10px;
+}
+.compact-progress-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+.compact-progress-cell :deep(.el-progress) {
+  width: 100%;
+}
+.compact-progress-cell span {
+  color: #1e7180;
+  font-weight: 700;
+}
+.compact-row-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 2px 8px;
+  white-space: normal;
+}
+.compact-row-actions :deep(.el-button),
+.compact-row-actions :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 .lease-expiry-alert {
   margin-top: 16px;
@@ -1879,18 +2469,18 @@ onMounted(loadMeta);
   justify-content: center;
   gap: 4px;
   overflow: visible;
-  white-space: normal;
+  white-space: nowrap;
 }
 .contract-name-cell strong {
-  width: 100%;
+  width: auto;
   min-width: 0;
   overflow: visible;
   color: #284a68;
   line-height: 1.35;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
   text-align: center;
   text-overflow: clip;
-  white-space: normal;
+  white-space: nowrap;
 }
 .contract-table :deep(.related-contract-row .contract-name-cell strong) {
   text-align: left;
@@ -1912,17 +2502,64 @@ onMounted(loadMeta);
   white-space: nowrap;
 }
 .contract-name-cell .relation-badge,
+.compact-project-cell .relation-badge,
 .mobile-relation-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  padding: 2px 8px;
+  border: 1px solid #b9ded8;
+  border-radius: 999px;
+  background: #e8f7f4;
   color: #277f73;
   font-size: 11px;
   font-weight: 700;
+  line-height: 1.4;
 }
-.contract-name-cell .child-count-badge {
+.relation-badge.is-termination,
+.mobile-relation-label.is-termination {
+  border-color: #f2b8b2;
+  background: #fff0ef;
+  color: #b42318;
+}
+.related-agreement-badges,
+.mobile-agreement-summary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.agreement-type-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 2px 7px;
+  border: 1px solid transparent;
   border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.agreement-type-badge.is-supplement {
+  border-color: #f1d29c;
   background: #fff3dc;
   color: #9a651b;
-  font-weight: 700;
+}
+.agreement-type-badge.is-termination {
+  border-color: #f2b8b2;
+  background: #fff0ef;
+  color: #b42318;
+}
+.agreement-type-badge.is-related {
+  border-color: #b9ded8;
+  background: #e8f7f4;
+  color: #277f73;
+}
+.compact-project-cell .agreement-type-badge {
+  font-size: 10px;
 }
 .category-direction-cell {
   display: flex;
@@ -2038,10 +2675,46 @@ onMounted(loadMeta);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0 7px;
+  gap: 8px;
   white-space: nowrap;
 }
-.row-actions :deep(.el-button + .el-button) {
+.action-slot {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+.action-detail {
+  width: 52px;
+}
+.action-supplement {
+  width: 104px;
+}
+.action-finance,
+.action-status {
+  width: 76px;
+}
+.action-renewal {
+  width: 52px;
+}
+.action-auxiliary {
+  width: 96px;
+}
+.action-download {
+  width: 82px;
+}
+.action-invoice {
+  width: 72px;
+}
+.action-cancel {
+  width: 84px;
+}
+.action-slot :deep(.el-button) {
+  width: 100%;
+  justify-content: center;
+}
+.action-slot :deep(.el-button + .el-button) {
   margin-left: 0;
 }
 .ledger-pagination {
@@ -2056,17 +2729,36 @@ onMounted(loadMeta);
 .mobile-only {
   display: none;
 }
+.laptop-only {
+  display: none;
+}
 
 @media (max-width: 1366px) {
   .contract-page {
-    margin: -16px -20px;
     padding: 20px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .contract-hero {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .hero-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (min-width: 769px) {
+  .contract-table-compact-scroll.laptop-only,
+  .contract-table-compact.laptop-only {
+    display: block;
   }
 }
 
 @media (max-width: 768px) {
   .contract-page {
-    margin: -16px -20px;
     padding: 14px;
   }
   .contract-hero {
@@ -2081,24 +2773,37 @@ onMounted(loadMeta);
   }
   .metric-grid {
     grid-template-columns: 1fr;
-    overflow-x: visible;
   }
   .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-row > *,
+  .filter-row > .keyword-input,
+  .date-filter {
+    width: 100%;
     min-width: 0;
-    grid-template-columns: 1fr;
+    flex: 0 0 auto;
   }
   .date-filter {
-    grid-column: auto;
-    grid-template-columns: 1fr;
+    display: block;
   }
   .filter-actions {
     width: 100%;
-    grid-column: auto;
   }
   .filter-actions :deep(.el-button) {
     flex: 1;
   }
   .desktop-only {
+    display: none;
+  }
+  .contract-table-scroll {
+    display: none;
+  }
+  .contract-table-compact-scroll,
+  .contract-table-compact,
+  .desktop-wide-only,
+  .laptop-only {
     display: none;
   }
   .mobile-only {
@@ -2155,6 +2860,11 @@ onMounted(loadMeta);
   .ledger-pagination {
     overflow-x: auto;
     justify-content: flex-start;
+  }
+  .ledger-heading {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
   }
 }
 

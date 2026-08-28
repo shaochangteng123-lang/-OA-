@@ -3,8 +3,14 @@ import {
   nameMatches,
   recipientMatches,
 } from "../server/utils/bank-receipt-match";
+import { isValidBankBusinessDate } from "../server/utils/bank-business-date";
 
 describe("银行回单收款人匹配", () => {
+  it("只接受真实的银行交易日期", () => {
+    expect(isValidBankBusinessDate("2026-06-30")).toBe(true);
+    expect(isValidBankBusinessDate("2026-02-29")).toBe(false);
+    expect(isValidBankBusinessDate("")).toBe(false);
+  });
   it("两字姓名只允许完整匹配", () => {
     expect(nameMatches("刘行", "刘行")).toBe(true);
     expect(nameMatches("刘行", "行")).toBe(false);

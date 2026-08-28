@@ -39,7 +39,11 @@ export async function compareContractOcrModels(
   mimeType: string,
   options: Pick<
     ContractRecognitionOptions,
-    "expectedCategory" | "relationType" | "renewalMain"
+    | "expectedCategory"
+    | "expectedDeclaredSubtype"
+    | "expectedAssetCategory"
+    | "relationType"
+    | "renewalMain"
   > = {},
 ): Promise<ContractOcrModelComparisonResult[]> {
   const results: ContractOcrModelComparisonResult[] = [];

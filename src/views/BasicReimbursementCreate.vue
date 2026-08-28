@@ -123,6 +123,8 @@ import type { DeductionItem } from '@/components/reimbursement/DeductionUploader
 // 导入工具函数和常量
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
+import { buildCrossUploadInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
+import { showUploadError } from '@/utils/uploadError'
 
 const router = useRouter()
 
@@ -145,6 +147,25 @@ const receiptFileList = ref<any[]>([])
 
 // 核减发票列表
 const deductionItems = ref<DeductionItem[]>([])
+
+function findDeductionDuplicate(invoiceItem: any): DeductionItem | undefined {
+  const normalizedInvoiceNumber = String(invoiceItem?.invoiceNumber || '')
+    .normalize('NFKC')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+  return deductionItems.value.find((item) => {
+    if (invoiceItem?.fileHash && item.fileHash === invoiceItem.fileHash) {
+      return true
+    }
+    return Boolean(
+      normalizedInvoiceNumber &&
+        String(item.invoiceNumber || '')
+          .normalize('NFKC')
+          .replace(/[^A-Za-z0-9]/g, '')
+          .toUpperCase() === normalizedInvoiceNumber,
+    )
+  })
+}
 
 // 年度累计核减金额
 const yearlyDeductionUsed = ref(0)
@@ -193,13 +214,20 @@ const handleFileChange = async (file: any, fileList: any[]) => {
   await invoice.handleFileChange(file, fileList)
 
   // 上传成功后，检查最新添加的发票是否与核减列表中的文件重复
-  const latestInvoice = invoice.invoiceList.value[invoice.invoiceList.value.length - 1]
+  const latestInvoice = invoice.invoiceList.value.find(
+    (item) => item.fileUid === file.uid,
+  )
   if (latestInvoice && latestInvoice.fileHash) {
-    const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === latestInvoice.fileHash)
+    const duplicateInDeduction = findDeductionDuplicate(latestInvoice)
 
     if (duplicateInDeduction) {
       // 发现重复，删除刚上传的发票
-      ElMessage.error('此发票已在核减上传中上传，请勿重复上传')
+      showUploadError(
+        buildCrossUploadInvoiceDuplicateMessage(
+          latestInvoice.invoiceNumber,
+          'deduction',
+        ),
+      )
       invoice.deleteInvoiceById(latestInvoice.id)
       return
     }
@@ -214,13 +242,20 @@ const handleReceiptChange = async (file: any, fileList: any[]) => {
   await invoice.handleReceiptChange(file, fileList)
 
   // 上传成功后，检查最新添加的发票是否与核减列表中的文件重复
-  const latestInvoice = invoice.invoiceList.value[invoice.invoiceList.value.length - 1]
+  const latestInvoice = invoice.invoiceList.value.find(
+    (item) => item.fileUid === file.uid,
+  )
   if (latestInvoice && latestInvoice.fileHash) {
-    const duplicateInDeduction = deductionItems.value.find(item => item.fileHash === latestInvoice.fileHash)
+    const duplicateInDeduction = findDeductionDuplicate(latestInvoice)
 
     if (duplicateInDeduction) {
       // 发现重复，删除刚上传的发票
-      ElMessage.error('此发票已在核减上传中上传，请勿重复上传')
+      showUploadError(
+        buildCrossUploadInvoiceDuplicateMessage(
+          latestInvoice.invoiceNumber,
+          'deduction',
+        ),
+      )
       invoice.deleteInvoiceById(latestInvoice.id)
     }
   }

@@ -3,6 +3,7 @@ jest.mock("../server/services/ocrDaemon", () => ({
 }));
 
 import {
+  buildInvoiceXmlArgs,
   extractInvoiceItemNameFromPositionedText,
   extractInvoicePartyFieldsFromPositionedText,
   extractInvoiceTaxAmountFromPositionedText,
@@ -58,6 +59,27 @@ describe("报销发票购买方公司主体校验", () => {
     expect(result.buyerTaxId).toBe(COMPANY_TAX_ID);
     expect(isReimbursementCompanyInvoice(result)).toBe(true);
     expect(() => assertReimbursementCompanyInvoice(result)).not.toThrow();
+  });
+
+  it("报销多页发票可读取全部页面，合同等调用默认仍只读取第一页", () => {
+    expect(buildInvoiceXmlArgs("invoice.pdf")).toEqual([
+      "-xml",
+      "-stdout",
+      "-nodrm",
+      "-i",
+      "-f",
+      "1",
+      "-l",
+      "1",
+      "invoice.pdf",
+    ]);
+    expect(buildInvoiceXmlArgs("invoice.pdf", { pageScope: "all" })).toEqual([
+      "-xml",
+      "-stdout",
+      "-nodrm",
+      "-i",
+      "invoice.pdf",
+    ]);
   });
 
   it("左右并排字段按坐标分别提取，不会把购买方和销售方税号串接或互换", () => {

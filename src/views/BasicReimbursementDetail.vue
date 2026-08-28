@@ -103,6 +103,7 @@
                     :total-invoice-amount="invoice.totalAmount.value"
                     :yearly-deduction-used="0"
                     :existing-invoices="invoice.invoiceList.value"
+                    :reimbursement-id="reimbursement.reimbursementId.value || undefined"
                     :disabled="isReadonly"
                   />
                 </el-form-item>
@@ -242,6 +243,8 @@ import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
 import { getTypeLabel } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
 import { toFileUrl } from '@/utils/file'
+import { buildCrossUploadInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
+import { showUploadError } from '@/utils/uploadError'
 
 const router = useRouter()
 
@@ -283,6 +286,25 @@ const receiptFileList = ref<any[]>([])
 
 // 核减发票列表
 const deductionItems = ref<DeductionItem[]>([])
+
+function findDeductionDuplicate(invoiceItem: any): DeductionItem | undefined {
+  const normalizedInvoiceNumber = String(invoiceItem?.invoiceNumber || '')
+    .normalize('NFKC')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+  return deductionItems.value.find((item) => {
+    if (invoiceItem?.fileHash && item.fileHash === invoiceItem.fileHash) {
+      return true
+    }
+    return Boolean(
+      normalizedInvoiceNumber &&
+        String(item.invoiceNumber || '')
+          .normalize('NFKC')
+          .replace(/[^A-Za-z0-9]/g, '')
+          .toUpperCase() === normalizedInvoiceNumber,
+    )
+  })
+}
 
 // 表单引用
 const formRef = ref<FormInstance>()
@@ -388,7 +410,24 @@ function handleTypeSelect(type: string): void {
 
 // 处理文件变化
 async function handleFileChange(file: any, fileList: any[]): Promise<void> {
-  await invoice.handleFileChange(file, fileList)
+  await invoice.handleFileChange(
+    file,
+    fileList,
+    reimbursement.reimbursementId.value,
+  )
+  const latestInvoice = invoice.invoiceList.value.find(
+    (item) => item.fileUid === file.uid,
+  )
+  if (latestInvoice && findDeductionDuplicate(latestInvoice)) {
+    showUploadError(
+      buildCrossUploadInvoiceDuplicateMessage(
+        latestInvoice.invoiceNumber,
+        'deduction',
+      ),
+    )
+    invoice.deleteInvoiceById(latestInvoice.id)
+    return
+  }
   // 每次上传发票后,重新获取当月已使用额度（编辑模式下排除当前报销单）
   await invoice.fetchMonthlyUsedQuota(reimbursement.reimbursementId.value)
 }

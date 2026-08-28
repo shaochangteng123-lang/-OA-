@@ -8,8 +8,13 @@ import {
   aggregateAutomaticDetailsByPerson,
   isMonthlyFinancialAmountText,
   isPositiveMonthlyFinancialAmountText,
+  monthlyFinancialBankSourceLabel,
+  monthlyReimbursementLinkDisplay,
 } from "../src/utils/monthlyFinancialReportPresentation";
-import type { MonthlyFinancialAutomaticDetail } from "../src/types/monthlyFinancialReport";
+import type {
+  MonthlyFinancialAutomaticDetail,
+  MonthlyFinancialBankReceiptTransaction,
+} from "../src/types/monthlyFinancialReport";
 
 function source(relativePath: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relativePath), "utf8");
@@ -19,6 +24,9 @@ describe("月度财务报表前端权限与金额口径", () => {
   const layoutSource = source("src/layouts/MainLayout.vue");
   const routerSource = source("src/router/index.ts");
   const pageSource = source("src/views/MonthlyFinancialReport.vue");
+  const trendSource = source(
+    "src/components/monthly-financial/MonthlyFinancialTrendChart.vue",
+  );
   const apiSource = source("src/utils/monthlyFinancialReportApi.ts");
   const presentationSource = source(
     "src/utils/monthlyFinancialReportPresentation.ts",
@@ -61,10 +69,29 @@ describe("月度财务报表前端权限与金额口径", () => {
     );
     expect(pageSource).toContain('authStore.user?.role === "general_manager"');
     expect(pageSource).toContain('v-if="canEdit"');
-    expect(pageSource).toContain('v-if="canClose"');
+    expect(pageSource).toContain('v-if="canShowClose"');
     expect(pageSource).toContain('v-if="canReopen"');
     expect(pageSource).toContain('v-if="canDownload"');
     expect(pageSource).toContain("下载全部报表");
+  });
+
+  it("管理员未月结报表始终显示月结按钮并直接展示阻断原因", () => {
+    expect(pageSource).toContain("const canShowClose = computed");
+    expect(pageSource).toContain('report.value?.status !== "closed"');
+    expect(pageSource).toContain(
+      ':disabled="actionLoading || hasUnsavedChanges || !canClose"',
+    );
+    expect(pageSource).toContain("const closeActionReason = computed");
+    expect(pageSource).toContain("report.value.validations.blockers");
+    expect(pageSource).toContain("暂不可月结：{{ closeActionReason }}");
+    expect(pageSource).toContain("存在未保存修改，请先保存或撤销修改");
+    expect(pageSource).toContain('return [...new Set(reasons)].join("；")');
+    expect(pageSource).toContain(
+      "if (!canClose.value && reasons.length === 0)",
+    );
+    expect(pageSource).toContain(".close-action-reason {");
+    expect(pageSource).toContain("grid-column: 1 / -1");
+    expect(pageSource).not.toContain('v-if="canClose"');
   });
 
   it("顶部月份与操作按钮使用三列等宽网格并适配窄屏", () => {
@@ -131,6 +158,21 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).not.toContain("请选择项目分类");
   });
 
+  it("福利账户一按需求表提供饮用水、办公、电费和两个 AI 分类", () => {
+    for (const category of [
+      "welfare_one_drinking_water",
+      "welfare_one_office",
+      "welfare_one_electricity",
+      "welfare_one_407_ai",
+      "welfare_one_8h_ai",
+    ]) {
+      expect(pageSource).toContain(`"${category}"`);
+    }
+    expect(pageSource).not.toContain(
+      'categoryOption("welfare_one_407", "407费用"',
+    );
+  });
+
   it("账户与结算为四个账户分别展示流入和流出明细", () => {
     expect(pageSource).toContain('class="flow-columns account-card-flows"');
     expect(pageSource).toContain(
@@ -151,6 +193,196 @@ describe("月度财务报表前端权限与金额口径", () => {
     ]) {
       expect(pageSource).toContain(account);
     }
+  });
+
+  it("财务趋势为首个默认页签且原指标与校验归入账户页签", () => {
+    const trendTab = pageSource.indexOf(
+      '<el-tab-pane label="财务趋势" name="trend">',
+    );
+    const summaryTab = pageSource.indexOf(
+      '<el-tab-pane label="账户与结算" name="summary">',
+    );
+    const manualTab = pageSource.indexOf(
+      '<el-tab-pane label="手工项目" name="manual">',
+    );
+    const qualityTab = pageSource.indexOf(
+      '<el-tab-pane label="数据来源与校验" name="quality">',
+    );
+    const bankReceiptTab = pageSource.indexOf(
+      '<el-tab-pane label="银行回单识别" name="bankReceipt">',
+    );
+    const bankReceiptPanel = pageSource.indexOf("<MonthlyBankReceiptPanel");
+    const metricGrid = pageSource.indexOf(
+      '<section class="metric-grid" aria-label="月度资金核心指标">',
+    );
+    const validationAlert = pageSource.indexOf('title="当前存在月结阻断项"');
+
+    expect(trendTab).toBeGreaterThan(-1);
+    expect(summaryTab).toBeGreaterThan(trendTab);
+    expect(summaryTab).toBeGreaterThan(-1);
+    expect(manualTab).toBeGreaterThan(summaryTab);
+    expect(qualityTab).toBeGreaterThan(manualTab);
+    expect(bankReceiptTab).toBeGreaterThan(qualityTab);
+    expect(bankReceiptPanel).toBeGreaterThan(bankReceiptTab);
+    expect(pageSource.slice(summaryTab, manualTab)).not.toContain(
+      "<MonthlyBankReceiptPanel",
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).toContain(
+      "<MonthlyFinancialTrendChart",
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).toContain(
+      ':selected-month="selectedMonth"',
+    );
+    expect(metricGrid).toBeGreaterThan(summaryTab);
+    expect(metricGrid).toBeLessThan(manualTab);
+    expect(validationAlert).toBeGreaterThan(summaryTab);
+    expect(validationAlert).toBeLessThan(manualTab);
+    expect(pageSource).toContain(
+      'type ReportTab = "trend" | "summary" | "manual" | "quality" | "bankReceipt";',
+    );
+    expect(pageSource).toContain('const activeTab = ref<ReportTab>("trend")');
+  });
+
+  it("财务趋势使用双年度单指标折线并保持字符串金额精度", () => {
+    for (const label of [
+      "期末资金",
+      "主营实际到账",
+      "四账户结算流入",
+      "四账户结算流出",
+      "四账户净变化",
+    ]) {
+      expect(trendSource).toContain(`label: "${label}"`);
+    }
+    expect(trendSource).toContain(
+      'const activeMetricKey = ref<TrendMetricKey>("closingTotal")',
+    );
+    expect(trendSource).toContain("historyYearOptions");
+    expect(trendSource).toContain("yearPoint(year, index)");
+    expect(trendSource).toContain("current.index !== previous.index + 1");
+    expect(trendSource).toContain("formatExactAmount");
+    expect(trendSource).toContain("空心点表示当前值（未月结）");
+    expect(trendSource).toContain("查看月份");
+    expect(trendSource).toContain("handleViewMonthChange");
+    expect(trendSource).toContain("monthIndexForYear");
+    expect(trendSource).toContain("金额明细来自服务端精确金额字符串");
+    expect(trendSource).toContain("缺失月份不按零金额参与连线");
+    expect(trendSource).toContain("不代表利润");
+    expect(trendSource).toContain('class="series-edge"');
+    expect(trendSource).not.toContain("buildSmoothPath");
+  });
+
+  it("财务趋势接口按范围读取并防止跨年度旧响应覆盖", () => {
+    expect(typeSource).toContain("export interface MonthlyFinancialTrendData");
+    expect(typeSource).toContain('valueState: "closed" | "current" | null');
+    for (const field of [
+      "actualReceipt",
+      "settlementInflow",
+      "totalOutflow",
+      "netChange",
+      "closingTotal",
+      "accountClosing",
+    ]) {
+      expect(typeSource).toContain(field);
+    }
+    expect(apiSource).toContain("getMonthlyFinancialReportTrend");
+    expect(apiSource).toContain("`${BASE_PATH}/trend`");
+    expect(apiSource).toContain("params: { from, to }");
+    expect(pageSource).toContain("trendRequestSequence");
+    expect(pageSource).toContain("sequence !== trendRequestSequence");
+    expect(pageSource).toContain("resolveTrendComparisonYear");
+    expect(pageSource).toContain("historicalYears.at(-1) ?? null");
+  });
+
+  it("财务趋势具备局部加载失败空态和窄屏适配", () => {
+    expect(trendSource).toContain('v-if="loading"');
+    expect(trendSource).toContain('v-else-if="error"');
+    expect(trendSource).toContain('v-else-if="!hasData"');
+    expect(trendSource).toContain("重新加载趋势");
+    expect(trendSource).toContain("window.ResizeObserver");
+    expect(trendSource).toContain("resizeObserver?.disconnect()");
+    expect(trendSource).toContain("@media (max-width: 720px)");
+    expect(trendSource).toContain("visibleMonthIndexes");
+  });
+
+  it("一般和商务回单利息手续费独立展示并按活动账户切换来源", () => {
+    const flowStart = pageSource.indexOf("const accountFlowDetails = computed");
+    const flowEnd = pageSource.indexOf("function accountDetail", flowStart);
+    const flowBlock = pageSource.slice(flowStart, flowEnd);
+    for (const label of [
+      "一般账户利息",
+      "商务账户利息",
+      "一般账户跨行手续费",
+      "商务账户跨行手续费",
+    ]) {
+      expect(flowBlock.match(new RegExp(`\\"${label}\\"`, "g"))).toHaveLength(
+        1,
+      );
+    }
+    expect(flowBlock).toContain('bankAccountSource("general")');
+    expect(flowBlock).toContain('bankAccountSource("business")');
+    expect(
+      monthlyFinancialBankSourceLabel(["basic", "business"], "general"),
+    ).toBe("手工录入");
+    expect(
+      monthlyFinancialBankSourceLabel(["basic", "business"], "business"),
+    ).toBe("银行回单识别");
+    expect(monthlyFinancialBankSourceLabel([], "general", ["general"])).toBe(
+      "银行回单识别",
+    );
+    expect(monthlyFinancialBankSourceLabel([], "business", ["general"])).toBe(
+      "手工录入",
+    );
+    expect(pageSource).toContain('monthly_bank_receipts: "月度银行回单"');
+    expect(pageSource).not.toContain('categoryOption("basic_interest"');
+    expect(pageSource).not.toContain('"basic_bank_fee"');
+  });
+
+  it("手工项目中的银行利息手续费只读展示并可预览回单", () => {
+    expect(pageSource).toContain("bankControlsManualCategory");
+    expect(pageSource).toContain("bankChargeEntries");
+    expect(pageSource).toContain("回单自动匹配");
+    expect(pageSource).toContain("在线预览");
+    expect(pageSource).toContain('class="manual-bank-match-tag"');
+    expect(pageSource).toContain('class="manual-proof-preview"');
+    expect(pageSource).toContain("width: 144px");
+    expect(pageSource).toContain("white-space: nowrap");
+    expect(pageSource).toContain(
+      'item.sourceType !== "monthly_bank_transaction"',
+    );
+    expect(pageSource).toContain("item.readOnly !== true");
+  });
+
+  it("报销回单区分员工匹配、自动挂载、替换和冲突", () => {
+    const transaction = {
+      category: "basic_reimbursement",
+      linkStatus: "matched",
+      employeeMatch: {
+        status: "matched",
+        employeeId: "employee-1",
+        employeeName: "测试员工",
+      },
+    } as MonthlyFinancialBankReceiptTransaction;
+    expect(monthlyReimbursementLinkDisplay(transaction).label).toBe(
+      "员工已匹配，待关联报销",
+    );
+    transaction.reimbursementLink = {
+      status: "matched",
+      displayAction: "attached",
+      reasons: [],
+      linkedReimbursements: [],
+    };
+    expect(monthlyReimbursementLinkDisplay(transaction).label).toBe(
+      "已挂载回单",
+    );
+    transaction.reimbursementLink.displayAction = "replaced";
+    expect(monthlyReimbursementLinkDisplay(transaction).label).toBe(
+      "已替换回单",
+    );
+    transaction.reimbursementLink.status = "conflict";
+    transaction.reimbursementLink.displayAction = "none";
+    expect(monthlyReimbursementLinkDisplay(transaction).label).toBe(
+      "报销匹配待核对",
+    );
   });
 
   it("顶部收入明确展示主营业务银行实际到账口径", () => {
@@ -327,6 +559,26 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).toContain(
       ':disabled="actionLoading || hasUnsavedChanges"',
     );
+    const monthChangeBlock = pageSource.slice(
+      pageSource.indexOf("async function handleMonthChange"),
+      pageSource.indexOf("async function handleRefreshSources"),
+    );
+    expect(monthChangeBlock).toContain("bankReceiptOutcomeUncertain.value");
+    expect(monthChangeBlock).toContain("bankReceiptBusy.value");
+    expect(monthChangeBlock).toContain("confirmDiscardPendingBankReceipts");
+  });
+
+  it("顶部操作区不再展示重新加载按钮", () => {
+    const heroActions = pageSource.slice(
+      pageSource.indexOf('<div class="hero-actions">'),
+      pageSource.indexOf(
+        "</section>",
+        pageSource.indexOf('<div class="hero-actions">'),
+      ),
+    );
+    expect(heroActions).not.toContain("重新加载");
+    expect(heroActions).not.toContain('@click="handleReloadReport"');
+    expect(heroActions).toContain("同步自动数据");
   });
 
   it("重新开启原因前端限制为500字", () => {
@@ -340,6 +592,19 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(apiSource).toContain("affectedMonths");
     expect(pageSource).toContain("mutationSuccessMessage");
     expect(pageSource).toContain("已标记为待重新核算");
+  });
+
+  it("同步自动数据成功后立即刷新银行回单匹配状态", () => {
+    const refreshBlock = pageSource.slice(
+      pageSource.indexOf("async function handleRefreshSources"),
+      pageSource.indexOf("async function handleSaveManualItems"),
+    );
+    expect(refreshBlock).toContain(
+      "const applied = applyActionReport(result.report, context)",
+    );
+    expect(refreshBlock).toContain(
+      "await bankReceiptPanelRef.value?.refreshBankState()",
+    );
   });
 
   it("已重新开启报表优先显示重新开启时间而不是旧月结时间", () => {

@@ -181,7 +181,7 @@ describe("主合同解除结算", () => {
     });
     expect(
       client.query.mock.calls.some(([sql]) =>
-        String(sql).includes("FROM contract_receipts record"),
+        String(sql).includes("FROM contract_receipts settlement_receipt"),
       ),
     ).toBe(true);
   });
@@ -226,9 +226,52 @@ describe("主合同解除结算", () => {
     });
     expect(
       client.query.mock.calls.some(([sql]) =>
-        String(sql).includes("FROM contract_external_payments record"),
+        String(sql).includes(
+          "FROM contract_external_payments settlement_payment",
+        ),
       ),
     ).toBe(true);
+  });
+
+  it("内部划拨房租解除时优先按发票明细匹配额排除保证金和电费", async () => {
+    const root = mainContract({
+      category: "asset",
+      declared_category: "asset",
+      declared_subtype: "house_rental",
+      asset_category: "house_rental",
+      financial_direction: "cost",
+      asset_funding_mode: "engineering_to_technology",
+    });
+    const client = settlementClient({ root, settledAmount: 100 });
+
+    await expect(
+      calculateTerminationSettlementSnapshot(
+        client as never,
+        root.id,
+        "2026-08-18",
+      ),
+    ).resolves.toMatchObject({
+      settledAmount: 100,
+      unperformedAmount: 0,
+      amountDelta: 0,
+    });
+
+    const settlementSql = String(
+      client.query.mock.calls.find(([sql]) =>
+        String(sql).includes("AS settled_amount"),
+      )?.[0] || "",
+    );
+    expect(settlementSql).toContain(
+      "settlement_item.item_kind = 'external_payment'",
+    );
+    expect(settlementSql).toContain(
+      "line.include_in_contract_accounting = TRUE",
+    );
+    expect(settlementSql.indexOf("WHEN EXISTS (")).toBeLessThan(
+      settlementSql.lastIndexOf(
+        "WHEN settlement_root.asset_funding_mode = 'engineering_to_technology'",
+      ),
+    );
   });
 
   it.each([

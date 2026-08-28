@@ -395,7 +395,11 @@ function isImageFilePath(filePath?: string): boolean {
 
 // 处理文件变化
 function handleFileChange(file: any, fileList: any[]): void {
-  invoice.handleFileChange(file, fileList)
+  invoice.handleFileChange(
+    file,
+    fileList,
+    reimbursement.reimbursementId.value,
+  )
 }
 
 // 处理无票上传变化

@@ -7,6 +7,15 @@ function source(relativePath: string): string {
 
 describe("报销付款事实与月报数据库完整性", () => {
   const reimbursementRouteSource = source("server/routes/reimbursement.ts");
+  const fileRouteSource = source("server/routes/files.ts");
+  const fileUrlSource = source("src/utils/file.ts");
+  const bankReceiptRouteSource = source("server/routes/bank-receipts.ts");
+  const bankReceiptProcessorSource = source(
+    "server/services/bankReceiptProcessor.ts",
+  );
+  const paymentProofIdentitySource = source(
+    "server/utils/payment-proof-identity.ts",
+  );
   const databaseSource = source("server/db/index.ts");
 
   it("仅允许本人删除草稿或已驳回报销，并在事务内锁定状态", () => {
@@ -60,6 +69,109 @@ describe("报销付款事实与月报数据库完整性", () => {
     expect(reimbursementRouteSource.slice(batchProofStart)).not.toContain(
       "payment_business_date = COALESCE(payment_business_date, ?)",
     );
+  });
+
+  it("审批中心整包回单自动匹配和手工认领共用原子事务并写真实交易日期", () => {
+    expect(bankReceiptProcessorSource).toContain(
+      "isValidBankBusinessDate(ocr.transactionDate)",
+    );
+    expect(bankReceiptProcessorSource).toContain(
+      "payment_business_date = $4::date",
+    );
+    expect(bankReceiptProcessorSource).toContain(
+      "transactionDate: ocr.transactionDate",
+    );
+    expect(bankReceiptProcessorSource).toContain(
+      "return db.transaction(async (client)",
+    );
+    expect(bankReceiptProcessorSource).toContain("FOR UPDATE OF r");
+    expect(bankReceiptProcessorSource).toContain(
+      "INSERT INTO payment_proof_hashes",
+    );
+    expect(bankReceiptProcessorSource).toContain("INSERT INTO payment_batches");
+    expect(bankReceiptRouteSource).toContain("persistBankReceiptTransaction({");
+    expect(bankReceiptRouteSource).toContain("mode: 'claim'");
+    expect(bankReceiptRouteSource).not.toContain(
+      "UPDATE reimbursements SET status = 'payment_uploaded'",
+    );
+  });
+
+  it("三条付款路径共用规范化回单身份锁并执行条件状态更新", () => {
+    const singleStart = reimbursementRouteSource.indexOf(
+      "router.post('/:id/complete-with-proof'",
+    );
+    const batchCreateStart = reimbursementRouteSource.indexOf(
+      "router.post('/payment-batch/create'",
+      singleStart,
+    );
+    const batchCompleteStart = reimbursementRouteSource.indexOf(
+      "'/payment-batch/:batchId/complete'",
+      batchCreateStart,
+    );
+    const singleSection = reimbursementRouteSource.slice(
+      singleStart,
+      batchCreateStart,
+    );
+    const batchCreateSection = reimbursementRouteSource.slice(
+      batchCreateStart,
+      batchCompleteStart,
+    );
+    const batchCompleteSection =
+      reimbursementRouteSource.slice(batchCompleteStart);
+
+    expect(paymentProofIdentitySource).toContain(
+      "normalizePaymentProofNo(value: unknown)",
+    );
+    expect(paymentProofIdentitySource).toContain("lockPaymentProofIdentities");
+    expect(paymentProofIdentitySource).toContain("reimbursement-proof-file:");
+    expect(paymentProofIdentitySource).toContain("reimbursement-proof-no:");
+    expect(bankReceiptProcessorSource).toContain(
+      'from "../utils/payment-proof-identity.js"',
+    );
+    expect(bankReceiptProcessorSource).not.toContain(
+      "function normalizeBankProofNo",
+    );
+    expect(bankReceiptProcessorSource).toContain(
+      "payment_batch_id IS NOT DISTINCT FROM $7::text",
+    );
+
+    for (const section of [singleSection, batchCompleteSection]) {
+      expect(section).toContain("lockPaymentProofIdentities(");
+      expect(section).toContain("findExistingPaymentProofIdentity(");
+      expect(section).toContain("FOR UPDATE");
+      expect(section).toContain("movedPaymentProofPaths");
+      expect(section).toContain("fs.rmSync(movedPath, { force: true })");
+      expect(section).toContain("commitOutcomeUncertain");
+    }
+    expect(singleSection).toContain("AND status = 'paid'");
+    expect(singleSection).toContain("AND payment_batch_id IS NULL");
+    expect(batchCompleteSection).toContain(
+      "WHERE id = ? AND status = 'pending'",
+    );
+    expect(batchCompleteSection).toContain("AND status = 'approved'");
+    expect(batchCompleteSection).toContain("AND payment_batch_id = ?");
+    expect(batchCreateSection).toContain("FOR UPDATE");
+    expect(batchCreateSection).toContain(
+      "payment_batch_id IS NOT DISTINCT FROM ?",
+    );
+  });
+
+  it("数据库规范化旧回单号并以同口径唯一索引失败关闭冲突", () => {
+    expect(databaseSource).toContain("PAYMENT_PROOF_NORMALIZED_CONFLICT");
+    expect(databaseSource).toContain("throw error");
+    expect(databaseSource).toContain("uq_payment_proof_no_normalized");
+    expect(databaseSource).toContain("NORMALIZE(BTRIM(proof_no), NFKC)");
+    expect(databaseSource).toContain("'[^A-Za-z0-9]+'");
+    expect(databaseSource).toContain("HAVING COUNT(*) > 1");
+  });
+
+  it("月底银行裁片自动挂载后可由报销申请人受控预览", () => {
+    expect(fileRouteSource).toContain('router.get("/monthly-bank-proofs/*"');
+    expect(fileRouteSource).toContain("payment_proof_path LIKE ?");
+    expect(fileRouteSource).toContain("proof.user_id !== userId");
+    expect(fileRouteSource).toContain("uploads/monthly-financial-bank");
+    expect(fileUrlSource).toContain("uploads\\/monthly-financial-bank");
+    expect(fileUrlSource).toContain("/api/files/monthly-bank-proofs/");
   });
 
   it("历史付款日期不按管理员时间臆测，新付款由约束要求回单交易日期", () => {

@@ -31,9 +31,17 @@ import { db } from '../db/index.js'
 import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 import {
   findContractFinancialInvoiceUsage,
+  findReimbursementInvoiceUsage,
   lockCrossModuleInvoiceNumbers,
   normalizeCrossModuleInvoiceNumber,
 } from '../services/invoiceCrossModuleDeduplication.js'
+import {
+  findExistingPaymentProofIdentity,
+  hasDuplicatePaymentProofIdentities,
+  lockPaymentProofIdentities,
+  normalizePaymentProofIdentities,
+  type PaymentProofIdentity,
+} from '../utils/payment-proof-identity.js'
 
 const router = Router()
 
@@ -65,6 +73,7 @@ const deductionOcrCache = new Map<
   string,
   {
     amount: number
+    date: string
     invoiceNumber: string
     fileHash: string
     timestamp: number
@@ -136,6 +145,77 @@ function isRouteError(error: unknown): error is RouteError {
 
 const CROSS_MODULE_INVOICE_DUPLICATE_CODE =
   'INVOICE_ALREADY_USED_IN_OTHER_MODULE'
+const REIMBURSEMENT_INVOICE_DUPLICATE_CODE =
+  'INVOICE_ALREADY_USED_IN_REIMBURSEMENT'
+
+function reimbursementInvoiceDuplicateMessage(
+  applicantName: unknown,
+  usageKind: 'invoice' | 'deduction',
+): string {
+  const displayName = String(applicantName || '').trim() || '该申请人'
+  const uploadArea = usageKind === 'deduction' ? '核减上传' : '发票上传'
+  return `${displayName} 已在${uploadArea}中上传此发票，请勿重复上传`
+}
+
+function uploadingInvoiceDuplicateMessage(invoiceNumber: unknown): string {
+  const displayNumber = String(invoiceNumber || '').trim()
+  return displayNumber
+    ? `发票号码 ${displayNumber}已在报销模块使用，请勿重复上传`
+    : '此发票已在报销模块使用，请勿重复上传'
+}
+
+function crossUploadInvoiceDuplicateMessage(
+  invoiceNumber: unknown,
+  existingUsageKind: 'invoice' | 'deduction',
+): string {
+  const displayNumber = String(invoiceNumber || '').trim()
+  const uploadArea =
+    existingUsageKind === 'deduction' ? '核减发票上传' : '发票上传'
+  return displayNumber
+    ? `发票号码 ${displayNumber}已在${uploadArea}报销模块使用，请勿重复上传`
+    : `此发票已在${uploadArea}报销模块使用，请勿重复上传`
+}
+
+function currentUploadInvoiceDuplicateMessage(
+  invoiceNumber: unknown,
+  existingUsageKind: 'invoice' | 'deduction',
+  incomingUsageKind: 'invoice' | 'deduction',
+): string {
+  return existingUsageKind === incomingUsageKind
+    ? uploadingInvoiceDuplicateMessage(invoiceNumber)
+    : crossUploadInvoiceDuplicateMessage(invoiceNumber, existingUsageKind)
+}
+
+function findCurrentUploadDuplicate(
+  invoices: readonly Record<string, unknown>[],
+): {
+  invoiceNumber: string
+  existingUsageKind: 'invoice' | 'deduction'
+  incomingUsageKind: 'invoice' | 'deduction'
+} | null {
+  const firstUsageByNumber = new Map<
+    string,
+    'invoice' | 'deduction'
+  >()
+  for (const invoice of invoices) {
+    const normalizedNumber = normalizeCrossModuleInvoiceNumber(
+      invoice.invoiceNumber,
+    )
+    if (!normalizedNumber) continue
+    const incomingUsageKind = invoice.isDeduction ? 'deduction' : 'invoice'
+    const existingUsageKind = firstUsageByNumber.get(normalizedNumber)
+    if (existingUsageKind) {
+      return {
+        invoiceNumber:
+          String(invoice.invoiceNumber || '').trim() || normalizedNumber,
+        existingUsageKind,
+        incomingUsageKind,
+      }
+    }
+    firstUsageByNumber.set(normalizedNumber, incomingUsageKind)
+  }
+  return null
+}
 
 async function assertInvoicesNotUsedInContractFinancial(
   client: PoolClient,
@@ -181,6 +261,146 @@ async function contractFinancialInvoiceUsageExists(
       await findContractFinancialInvoiceUsage(client, normalizedInvoiceNumber),
     ),
   )
+}
+
+async function reimbursementInvoiceUsage(
+  invoiceNumber: unknown,
+  excludeReimbursementId: string | null = null,
+) {
+  const normalizedInvoiceNumber = normalizeCrossModuleInvoiceNumber(invoiceNumber)
+  if (!normalizedInvoiceNumber) return null
+  return db.transaction((client) =>
+    findReimbursementInvoiceUsage(
+      client,
+      normalizedInvoiceNumber,
+      excludeReimbursementId,
+    ),
+  )
+}
+
+async function assertInvoicesNotUsedInReimbursement(
+  client: PoolClient,
+  invoiceNumbers: readonly unknown[],
+  excludeReimbursementId: string | null = null,
+): Promise<void> {
+  const normalizedNumbers = await lockCrossModuleInvoiceNumbers(
+    client,
+    invoiceNumbers,
+  )
+  for (const normalizedInvoiceNumber of normalizedNumbers) {
+    const usage = await findReimbursementInvoiceUsage(
+      client,
+      normalizedInvoiceNumber,
+      excludeReimbursementId,
+    )
+    if (usage) {
+      throw new RouteError(
+        409,
+        reimbursementInvoiceDuplicateMessage(
+          usage.applicantName,
+          usage.usageKind,
+        ),
+        { code: REIMBURSEMENT_INVOICE_DUPLICATE_CODE },
+      )
+    }
+  }
+}
+
+async function lockReimbursementInvoiceFileHashes(
+  client: PoolClient,
+  fileHashes: readonly unknown[],
+): Promise<void> {
+  const hashes = [
+    ...new Set(
+      fileHashes
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ].sort((left, right) => left.localeCompare(right))
+  for (const fileHash of hashes) {
+    await client.query(
+      `SELECT pg_advisory_xact_lock(
+         hashtextextended('reimbursement-invoice-file:' || $1, 0)
+       )`,
+      [fileHash],
+    )
+  }
+}
+
+async function verifyDeductionInvoicePayloads(
+  invoices: any[],
+  userId: string,
+  existingReimbursementId: string | null = null,
+): Promise<any[]> {
+  const verified: any[] = []
+  for (const invoice of invoices) {
+    const submittedFilePath = String(invoice?.filePath || '')
+    const isDeductionInvoice =
+      Boolean(invoice?.isDeduction) ||
+      path.basename(submittedFilePath).startsWith('deduction-')
+    if (!isDeductionInvoice) {
+      verified.push({ ...invoice, deductedAmount: 0 })
+      continue
+    }
+    const filePath = submittedFilePath
+    if (!filePath || !validateFilePath(filePath)) {
+      throw new RouteError(403, '核减发票文件路径不合法')
+    }
+    if (existingReimbursementId) {
+      const stored = (await db
+        .prepare(
+          `SELECT amount, invoice_date, invoice_number, file_hash
+           FROM reimbursement_invoices
+           WHERE reimbursement_id = ? AND file_path = ? AND is_deduction = 1`,
+        )
+        .get(existingReimbursementId, filePath)) as
+        | {
+            amount: number
+            invoice_date: string
+            invoice_number: string | null
+            file_hash: string | null
+          }
+        | undefined
+      if (stored) {
+        verified.push({
+          ...invoice,
+          amount: Number(stored.amount),
+          invoiceDate: stored.invoice_date,
+          invoiceNumber: stored.invoice_number || '',
+          fileHash: stored.file_hash || '',
+          deductedAmount: 0,
+          isDeduction: true,
+        })
+        continue
+      }
+    }
+    const fileName = path.basename(filePath)
+    const cachedOcr = deductionOcrCache.get(fileName)
+    if (!cachedOcr || Date.now() - cachedOcr.timestamp > 30 * 60 * 1000) {
+      throw new RouteError(
+        400,
+        '核减发票识别结果已过期，请重新上传文件',
+      )
+    }
+    const uploadedRecord = await db
+      .prepare(
+        `SELECT id FROM user_uploaded_files WHERE user_id = ? AND file_path = ?`,
+      )
+      .get(userId, filePath)
+    if (!uploadedRecord) {
+      throw new RouteError(403, '核减发票文件不属于当前用户')
+    }
+    verified.push({
+      ...invoice,
+      amount: cachedOcr.amount,
+      invoiceDate: cachedOcr.date,
+      invoiceNumber: cachedOcr.invoiceNumber,
+      fileHash: cachedOcr.fileHash,
+      deductedAmount: 0,
+      isDeduction: true,
+    })
+  }
+  return verified
 }
 
 function reimbursementInvoiceNumbersForCrossModule(
@@ -391,27 +611,20 @@ router.post('/check-invoice-duplicate', requireAuth, async (req, res) => {
       return res.json({ success: true, data: { duplicate: false } })
     }
 
-    const { db } = await import('../db/index.js')
+    // 普通发票和独立核减发票使用同一套规范化号码查重；草稿也占用号码，
+    // 已驳回或已删除记录不占用。
+    const existingUsage = await reimbursementInvoiceUsage(invoiceNumber)
 
-    // 查询数据库中是否已存在该发票号码（排除草稿、已驳回和已软删除的报销单）
-    const existing = (await db
-      .prepare(
-        `
-      SELECT ri.invoice_number, r.id as reimbursement_id, r.title, r.status, r.applicant_name
-      FROM reimbursement_invoices ri
-      JOIN reimbursements r ON ri.reimbursement_id = r.id
-      WHERE ri.invoice_number = ? AND r.status NOT IN ('draft', 'rejected') AND COALESCE(r.is_deleted, FALSE) = FALSE
-      LIMIT 1
-    `,
-      )
-      .get(invoiceNumber)) as any
-
-    if (existing) {
+    if (existingUsage) {
       return res.json({
         success: true,
         data: {
           duplicate: true,
-          message: `${invoiceNumber}此发票${existing.applicant_name}已上传，请勿重复上传`,
+          code: REIMBURSEMENT_INVOICE_DUPLICATE_CODE,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingUsage.applicantName,
+            existingUsage.usageKind,
+          ),
         },
       })
     }
@@ -542,6 +755,40 @@ router.post(
       const tempFilePath = req.file.path
       const fileSize = req.file.size
       const maxSize = 5 * 1024 * 1024 // 5MB
+      let currentReimbursementId: string | null = null
+      const rawRequestedReimbursementId = String(
+        req.body.reimbursementId || '',
+      ).trim()
+      const requestedReimbursementId = /^(?:create|new|undefined|null)$/i.test(
+        rawRequestedReimbursementId,
+      )
+        ? ''
+        : rawRequestedReimbursementId
+      if (requestedReimbursementId) {
+        const uploadUserId = req.session.user?.id || req.session.userId
+        const editableReimbursement = (await db
+          .prepare(
+            `SELECT id FROM reimbursements
+             WHERE id = ? AND user_id = ?
+               AND status IN ('draft', 'rejected')
+               AND COALESCE(is_deleted, FALSE) = FALSE`,
+          )
+          .get(requestedReimbursementId, uploadUserId)) as
+          | { id: string }
+          | undefined
+        if (!editableReimbursement) {
+          try {
+            fs.unlinkSync(tempFilePath)
+          } catch {
+            /* 已清理时忽略 */
+          }
+          return res.status(403).json({
+            success: false,
+            message: '当前报销单不可编辑或不属于当前用户',
+          })
+        }
+        currentReimbursementId = editableReimbursement.id
+      }
 
       // 先计算文件哈希，快速查重（在 OCR 之前）
       const fileBuffer = fs.readFileSync(tempFilePath)
@@ -555,7 +802,8 @@ router.post(
       const existingInvoice = (await db
         .prepare(
           `
-      SELECT ri.file_hash, r.applicant_name
+      SELECT ri.file_hash, ri.invoice_number, r.id AS reimbursement_id,
+        r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE ri.file_hash = ? AND COALESCE(ri.is_deduction, 0) = 0 AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
@@ -563,7 +811,12 @@ router.post(
     `,
         )
         .get(fileHash)) as
-        | { file_hash: string; applicant_name: string }
+        | {
+            file_hash: string
+            invoice_number: string | null
+            reimbursement_id: string
+            applicant_name: string
+          }
         | undefined
 
       if (existingInvoice) {
@@ -575,7 +828,17 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingInvoice.applicant_name} 已在发票上传中上传此发票，请勿重复上传`,
+          message:
+            currentReimbursementId === existingInvoice.reimbursement_id
+              ? currentUploadInvoiceDuplicateMessage(
+                  existingInvoice.invoice_number,
+                  'invoice',
+                  'invoice',
+                )
+              : reimbursementInvoiceDuplicateMessage(
+                  existingInvoice.applicant_name,
+                  'invoice',
+                ),
         })
       }
 
@@ -583,7 +846,8 @@ router.post(
       const existingDeductionInInvoices = (await db
         .prepare(
           `
-      SELECT ri.file_hash, r.applicant_name
+      SELECT ri.file_hash, ri.invoice_number, r.id AS reimbursement_id,
+        r.applicant_name
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE ri.file_hash = ? AND COALESCE(ri.is_deduction, 0) = 1 AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
@@ -591,7 +855,12 @@ router.post(
     `,
         )
         .get(fileHash)) as
-        | { file_hash: string; applicant_name: string }
+        | {
+            file_hash: string
+            invoice_number: string | null
+            reimbursement_id: string
+            applicant_name: string
+          }
         | undefined
 
       if (existingDeductionInInvoices) {
@@ -603,7 +872,18 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingDeductionInInvoices.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
+          message:
+            currentReimbursementId ===
+            existingDeductionInInvoices.reimbursement_id
+              ? currentUploadInvoiceDuplicateMessage(
+                  existingDeductionInInvoices.invoice_number,
+                  'deduction',
+                  'invoice',
+                )
+              : reimbursementInvoiceDuplicateMessage(
+                  existingDeductionInInvoices.applicant_name,
+                  'deduction',
+                ),
         })
       }
 
@@ -611,15 +891,22 @@ router.post(
       const existingDeduction = (await db
         .prepare(
           `
-      SELECT rdi.file_hash, r.applicant_name
+      SELECT rdi.file_hash, rdi.invoice_number, r.id AS reimbursement_id,
+        r.applicant_name
       FROM reimbursement_deduction_invoices rdi
       JOIN reimbursements r ON rdi.reimbursement_id = r.id
-      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      WHERE rdi.file_hash = ? AND r.status <> 'rejected'
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `,
         )
         .get(fileHash)) as
-        | { file_hash: string; applicant_name: string }
+        | {
+            file_hash: string
+            invoice_number: string | null
+            reimbursement_id: string
+            applicant_name: string
+          }
         | undefined
 
       if (existingDeduction) {
@@ -631,7 +918,17 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
+          message:
+            currentReimbursementId === existingDeduction.reimbursement_id
+              ? currentUploadInvoiceDuplicateMessage(
+                  existingDeduction.invoice_number,
+                  'deduction',
+                  'invoice',
+                )
+              : reimbursementInvoiceDuplicateMessage(
+                  existingDeduction.applicant_name,
+                  'deduction',
+                ),
         })
       }
 
@@ -686,6 +983,34 @@ router.post(
           success: false,
           message: '此不是有效发票，请重新上传',
           isValidInvoice: false,
+        })
+      }
+
+      const existingReimbursementUsage = ocrResult.invoiceNumber
+        ? await reimbursementInvoiceUsage(ocrResult.invoiceNumber)
+        : null
+      if (existingReimbursementUsage) {
+        for (const candidatePath of new Set([tempFilePath, finalFilePath])) {
+          try {
+            fs.unlinkSync(candidatePath)
+          } catch {
+            /* 已清理时忽略 */
+          }
+        }
+        return res.status(409).json({
+          success: false,
+          code: REIMBURSEMENT_INVOICE_DUPLICATE_CODE,
+          message:
+            currentReimbursementId === existingReimbursementUsage.ownerId
+              ? currentUploadInvoiceDuplicateMessage(
+                  ocrResult.invoiceNumber,
+                  existingReimbursementUsage.usageKind,
+                  'invoice',
+                )
+              : reimbursementInvoiceDuplicateMessage(
+                  existingReimbursementUsage.applicantName,
+                  existingReimbursementUsage.usageKind,
+                ),
         })
       }
 
@@ -850,7 +1175,8 @@ router.post(
       SELECT rdi.file_hash, r.applicant_name
       FROM reimbursement_deduction_invoices rdi
       JOIN reimbursements r ON rdi.reimbursement_id = r.id
-      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      WHERE rdi.file_hash = ? AND r.status <> 'rejected'
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `,
         )
@@ -867,7 +1193,10 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingDeduction.applicant_name,
+            'deduction',
+          ),
         })
       }
 
@@ -1020,6 +1349,41 @@ router.post(
       const tempFilePath = req.file.path
       console.log('📄 收到核减发票上传:', req.file.originalname)
 
+      let duplicateExcludeId: string | null = null
+      const rawRequestedReimbursementId = String(
+        req.body.reimbursementId || '',
+      ).trim()
+      const requestedReimbursementId = /^(?:create|new|undefined|null)$/i.test(
+        rawRequestedReimbursementId,
+      )
+        ? ''
+        : rawRequestedReimbursementId
+      if (requestedReimbursementId) {
+        const uploadUserId = req.session.user?.id || req.session.userId
+        const editableReimbursement = (await db
+          .prepare(
+            `SELECT id FROM reimbursements
+             WHERE id = ? AND user_id = ?
+               AND status IN ('draft', 'rejected')
+               AND COALESCE(is_deleted, FALSE) = FALSE`,
+          )
+          .get(requestedReimbursementId, uploadUserId)) as
+          | { id: string }
+          | undefined
+        if (!editableReimbursement) {
+          try {
+            fs.unlinkSync(tempFilePath)
+          } catch {
+            /* 已清理时忽略 */
+          }
+          return res.status(403).json({
+            success: false,
+            message: '当前报销单不可编辑或不属于当前用户',
+          })
+        }
+        duplicateExcludeId = editableReimbursement.id
+      }
+
       // 计算文件哈希查重
       const fileBuffer = fs.readFileSync(tempFilePath)
       const fileHash = crypto
@@ -1034,11 +1398,13 @@ router.post(
       SELECT rdi.file_hash, r.applicant_name
       FROM reimbursement_deduction_invoices rdi
       JOIN reimbursements r ON rdi.reimbursement_id = r.id
-      WHERE rdi.file_hash = ? AND COALESCE(r.is_deleted, FALSE) = FALSE
+      WHERE rdi.file_hash = ? AND (?::text IS NULL OR r.id <> ?)
+        AND r.status <> 'rejected'
+        AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `,
         )
-        .get(fileHash)) as
+        .get(fileHash, duplicateExcludeId, duplicateExcludeId)) as
         | { file_hash: string; applicant_name: string }
         | undefined
 
@@ -1050,7 +1416,10 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingDeduction.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingDeduction.applicant_name,
+            'deduction',
+          ),
         })
       }
 
@@ -1062,13 +1431,14 @@ router.post(
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE ri.file_hash = ?
+        AND (?::text IS NULL OR r.id <> ?)
         AND COALESCE(ri.is_deduction, 0) = 0
         AND r.status != 'rejected'
         AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `,
         )
-        .get(fileHash)) as
+        .get(fileHash, duplicateExcludeId, duplicateExcludeId)) as
         | { file_hash: string; applicant_name: string }
         | undefined
 
@@ -1080,7 +1450,10 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingInvoice.applicant_name} 已在发票上传中上传此发票，请勿重复上传`,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingInvoice.applicant_name,
+            'invoice',
+          ),
         })
       }
 
@@ -1092,13 +1465,14 @@ router.post(
       FROM reimbursement_invoices ri
       JOIN reimbursements r ON ri.reimbursement_id = r.id
       WHERE ri.file_hash = ?
+        AND (?::text IS NULL OR r.id <> ?)
         AND COALESCE(ri.is_deduction, 0) = 1
         AND r.status != 'rejected'
         AND COALESCE(r.is_deleted, FALSE) = FALSE
       LIMIT 1
     `,
         )
-        .get(fileHash)) as
+        .get(fileHash, duplicateExcludeId, duplicateExcludeId)) as
         | { file_hash: string; applicant_name: string }
         | undefined
 
@@ -1110,7 +1484,10 @@ router.post(
         }
         return res.status(400).json({
           success: false,
-          message: `${existingDeductionInInvoices.applicant_name} 已在核减发票上传中上传此发票，请勿重复上传`,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingDeductionInInvoices.applicant_name,
+            'deduction',
+          ),
         })
       }
 
@@ -1171,6 +1548,28 @@ router.post(
         })
       }
 
+      const existingReimbursementUsage = ocrResult.invoiceNumber
+        ? await reimbursementInvoiceUsage(
+            ocrResult.invoiceNumber,
+            duplicateExcludeId,
+          )
+        : null
+      if (existingReimbursementUsage) {
+        try {
+          fs.unlinkSync(tempFilePath)
+        } catch {
+          /* 已清理时忽略 */
+        }
+        return res.status(409).json({
+          success: false,
+          code: REIMBURSEMENT_INVOICE_DUPLICATE_CODE,
+          message: reimbursementInvoiceDuplicateMessage(
+            existingReimbursementUsage.applicantName,
+            existingReimbursementUsage.usageKind,
+          ),
+        })
+      }
+
       // 验证发票日期：核减发票只能是当年的
       if (ocrResult.date) {
         const invoiceDate = new Date(ocrResult.date)
@@ -1222,6 +1621,7 @@ router.post(
       // 缓存核减发票OCR结果（防客户端篡改金额）
       deductionOcrCache.set(finalFileName, {
         amount: ocrResult.amount,
+        date: ocrResult.date || new Date().toISOString().slice(0, 10),
         invoiceNumber: ocrResult.invoiceNumber || '',
         fileHash,
         timestamp: Date.now(),
@@ -1291,9 +1691,9 @@ router.get('/:id/deduction-invoices', requireAuth, async (req, res) => {
 
     const reimbursement = (await db
       .prepare(
-        `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`,
+        `SELECT id, user_id, status FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`,
       )
-      .get(id)) as { id: string; user_id: string } | undefined
+      .get(id)) as { id: string; user_id: string; status: string } | undefined
 
     if (!reimbursement) {
       return res.status(404).json({ success: false, message: '报销单不存在' })
@@ -1348,9 +1748,9 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
     // 确认报销单归属
     const reimbursement = (await db
       .prepare(
-        `SELECT id, user_id FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`,
+        `SELECT id, user_id, status FROM reimbursements WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE`,
       )
-      .get(id)) as { id: string; user_id: string } | undefined
+      .get(id)) as { id: string; user_id: string; status: string } | undefined
 
     if (!reimbursement) {
       return res.status(404).json({ success: false, message: '报销单不存在' })
@@ -1358,9 +1758,17 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
     if (reimbursement.user_id !== userId) {
       return res.status(403).json({ success: false, message: '无权操作' })
     }
+    if (!['draft', 'rejected'].includes(reimbursement.status)) {
+      return res.status(409).json({
+        success: false,
+        message: '只有草稿或已驳回报销单可以新增核减发票',
+      })
+    }
 
     // 防篡改校验：从缓存中读取服务端识别的金额，与客户端提交的金额对比
     const fileName = filePath.split('/').pop()
+    let verifiedAmount = Number(amount)
+    let verifiedInvoiceDate = String(invoiceDate || '')
     let verifiedInvoiceNumber = String(invoiceNumber || '')
     let verifiedFileHash = String(fileHash || '')
     if (fileName) {
@@ -1373,6 +1781,8 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
             message: `金额校验失败：客户端提交 ${amount} 元，服务端识别 ${cachedOcr.amount} 元，请勿篡改金额`,
           })
         }
+        verifiedAmount = cachedOcr.amount
+        verifiedInvoiceDate = cachedOcr.date
         verifiedInvoiceNumber = cachedOcr.invoiceNumber
         verifiedFileHash = cachedOcr.fileHash
       } else {
@@ -1390,14 +1800,53 @@ router.post('/:id/deduction-invoices', requireAuth, async (req, res) => {
       await assertInvoicesNotUsedInContractFinancial(client, [
         verifiedInvoiceNumber,
       ])
+      await assertInvoicesNotUsedInReimbursement(client, [
+        verifiedInvoiceNumber,
+      ])
+      await lockReimbursementInvoiceFileHashes(client, [verifiedFileHash])
+      if (verifiedFileHash) {
+        const existingByHash = await txGet<{
+          applicant_name: string
+          usage_kind: 'invoice' | 'deduction'
+        }>(
+          client,
+          `SELECT applicant_name, usage_kind FROM (
+             SELECT r.applicant_name,
+               CASE WHEN COALESCE(ri.is_deduction, 0) = 1
+                 THEN 'deduction' ELSE 'invoice' END AS usage_kind
+             FROM reimbursement_invoices ri
+             JOIN reimbursements r ON r.id = ri.reimbursement_id
+             WHERE ri.file_hash = ? AND r.status <> 'rejected'
+               AND COALESCE(r.is_deleted, FALSE) = FALSE
+             UNION ALL
+             SELECT r.applicant_name, 'deduction'::text AS usage_kind
+             FROM reimbursement_deduction_invoices rdi
+             JOIN reimbursements r ON r.id = rdi.reimbursement_id
+             WHERE rdi.file_hash = ? AND r.status <> 'rejected'
+               AND COALESCE(r.is_deleted, FALSE) = FALSE
+           ) duplicate_file LIMIT 1`,
+          verifiedFileHash,
+          verifiedFileHash,
+        )
+        if (existingByHash) {
+          throw new RouteError(
+            409,
+            reimbursementInvoiceDuplicateMessage(
+              existingByHash.applicant_name,
+              existingByHash.usage_kind,
+            ),
+            { code: REIMBURSEMENT_INVOICE_DUPLICATE_CODE },
+          )
+        }
+      }
       await txRun(
         client,
         `INSERT INTO reimbursement_deduction_invoices (id, reimbursement_id, amount, invoice_date, invoice_number, file_path, created_at, file_hash)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         invoiceId,
         id,
-        amount,
-        invoiceDate || now.slice(0, 10),
+        verifiedAmount,
+        verifiedInvoiceDate || now.slice(0, 10),
         verifiedInvoiceNumber,
         filePath,
         now,
@@ -1436,7 +1885,7 @@ router.delete(
 
       const invoice = (await db
         .prepare(
-          `SELECT rdi.*, r.user_id FROM reimbursement_deduction_invoices rdi
+          `SELECT rdi.*, r.user_id, r.status FROM reimbursement_deduction_invoices rdi
        JOIN reimbursements r ON rdi.reimbursement_id = r.id
        WHERE rdi.id = ?`,
         )
@@ -1448,6 +1897,12 @@ router.delete(
           .json({ success: false, message: '核减发票不存在' })
       if (invoice.user_id !== userId)
         return res.status(403).json({ success: false, message: '无权操作' })
+      if (!['draft', 'rejected'].includes(invoice.status)) {
+        return res.status(409).json({
+          success: false,
+          message: '只有草稿或已驳回报销单可以删除核减发票',
+        })
+      }
 
       await db.run(
         `DELETE FROM reimbursement_deduction_invoices WHERE id = ?`,
@@ -2005,10 +2460,10 @@ router.post('/create', requireAuth, async (req, res) => {
     const { db } = await import('../db/index.js')
 
     // 服务端统一重算核减金额，不信任客户端传入的 deductedAmount
-    let processedInvoices = invoices.map((inv: any) => ({
-      ...inv,
-      deductedAmount: 0,
-    }))
+    let processedInvoices = await verifyDeductionInvoicePayloads(
+      invoices,
+      userId,
+    )
     if (type === 'basic') {
       // 获取当月已使用的交通额度类发票额度
       // 使用 calculateReimbursementMonth 确保与入库时的 reimbursement_month 口径一致（本地时区）
@@ -2036,7 +2491,7 @@ router.post('/create', requireAuth, async (req, res) => {
       // 计算本次提交的交通额度类发票总额
       let transportFuelTotal = 0
 
-      processedInvoices = invoices.map((inv: any) => {
+      processedInvoices = processedInvoices.map((inv: any) => {
         const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
         if (isTransportOrFuel) {
@@ -2147,11 +2602,15 @@ router.post('/create', requireAuth, async (req, res) => {
     const invoiceNumbers = processedInvoices
       .map((inv: any) => inv.invoiceNumber)
       .filter((n: any) => n)
-    const uniqueNumbers = new Set(invoiceNumbers)
-    if (uniqueNumbers.size < invoiceNumbers.length) {
+    const currentUploadDuplicate = findCurrentUploadDuplicate(processedInvoices)
+    if (currentUploadDuplicate) {
       return res.status(400).json({
         success: false,
-        message: '提交的发票中存在重复的发票号码',
+        message: currentUploadInvoiceDuplicateMessage(
+          currentUploadDuplicate.invoiceNumber,
+          currentUploadDuplicate.existingUsageKind,
+          currentUploadDuplicate.incomingUsageKind,
+        ),
       })
     }
 
@@ -2161,25 +2620,11 @@ router.post('/create', requireAuth, async (req, res) => {
         client,
         reimbursementInvoiceNumbersForCrossModule(processedInvoices),
       )
-      // 事务内校验发票号码唯一性，并发安全
-      for (const invoiceNumber of uniqueNumbers) {
-        const existing = await txGet(
-          client,
-          `
-          SELECT ri.invoice_number FROM reimbursement_invoices ri
-          JOIN reimbursements r ON ri.reimbursement_id = r.id
-          WHERE ri.invoice_number = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
-          LIMIT 1
-        `,
-          invoiceNumber,
-        )
-        if (existing) {
-          throw new RouteError(
-            400,
-            `发票号码 ${invoiceNumber} 已存在，请勿重复提交`,
-          )
-        }
-      }
+      await assertInvoicesNotUsedInReimbursement(client, invoiceNumbers)
+      await lockReimbursementInvoiceFileHashes(
+        client,
+        processedInvoices.map((invoice: any) => invoice.fileHash),
+      )
 
       // 事务内校验文件哈希唯一性（防止同一文件被上传到不同报销单）
       for (const invoice of processedInvoices) {
@@ -2187,20 +2632,37 @@ router.post('/create', requireAuth, async (req, res) => {
           const existingByHash = await txGet<{
             file_hash: string
             applicant_name: string
+            usage_kind: 'invoice' | 'deduction'
           }>(
             client,
             `
-            SELECT ri.file_hash, r.applicant_name FROM reimbursement_invoices ri
-            JOIN reimbursements r ON ri.reimbursement_id = r.id
-            WHERE ri.file_hash = ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
-            LIMIT 1
+            SELECT file_hash, applicant_name, usage_kind FROM (
+              SELECT ri.file_hash, r.applicant_name,
+                CASE WHEN COALESCE(ri.is_deduction, 0) = 1
+                  THEN 'deduction' ELSE 'invoice' END AS usage_kind
+              FROM reimbursement_invoices ri
+              JOIN reimbursements r ON ri.reimbursement_id = r.id
+              WHERE ri.file_hash = ? AND r.status <> 'rejected'
+                AND COALESCE(r.is_deleted, FALSE) = FALSE
+              UNION ALL
+              SELECT rdi.file_hash, r.applicant_name,
+                'deduction'::text AS usage_kind
+              FROM reimbursement_deduction_invoices rdi
+              JOIN reimbursements r ON rdi.reimbursement_id = r.id
+              WHERE rdi.file_hash = ? AND r.status <> 'rejected'
+                AND COALESCE(r.is_deleted, FALSE) = FALSE
+            ) duplicate_file LIMIT 1
           `,
+            invoice.fileHash,
             invoice.fileHash,
           )
           if (existingByHash) {
             throw new RouteError(
               400,
-              `${existingByHash.applicant_name} 已上传此发票文件，请勿重复提交`,
+              reimbursementInvoiceDuplicateMessage(
+                existingByHash.applicant_name,
+                existingByHash.usage_kind,
+              ),
             )
           }
         }
@@ -2300,6 +2762,11 @@ router.post('/create', requireAuth, async (req, res) => {
       }
     })
 
+    for (const invoice of processedInvoices) {
+      if (invoice.isDeduction && invoice.filePath) {
+        deductionOcrCache.delete(path.basename(invoice.filePath))
+      }
+    }
     // 报销单提交成功后，清理该用户的临时上传记录（发票已关联到正式报销单）
     await db.run(`DELETE FROM user_uploaded_files WHERE user_id = ?`, userId)
 
@@ -3017,6 +3484,8 @@ router.post('/:id/confirm-payment', requireAdmin, async (req, res) => {
  */
 router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
   console.log('🔵 收到付款回单提交请求')
+  const movedPaymentProofPaths: string[] = []
+  let paymentProofCommitted = false
 
   try {
     const { id } = req.params
@@ -3097,9 +3566,8 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       })
     }
 
-    // 收集哈希和交易流水号，先做去重校验，再落盘；校验失败则文件留在 temp 目录由定时清理处理
-    // 注意：必须同时获取 fileHash 和 proofNo，保持索引对应关系
-    const proofData = verifiedFiles
+    // 收集并规范化摘要和回单号；数据库权威去重在落盘后的事务锁内执行，失败时清理本批新文件。
+    const proofIdentities: PaymentProofIdentity[] = verifiedFiles
       .map((f: any) => {
         const cached = ocrCache.get(f.tempFileName)
         return {
@@ -3108,35 +3576,23 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         }
       })
       .filter((item) => item.fileHash) // 只过滤有 fileHash 的项
-    const proofFileHashes = proofData.map((item) => item.fileHash)
-    const proofNos = proofData.map((item) => item.proofNo)
-
-    // 先检查哈希是否已被使用（防重放），校验失败则不落盘
-    for (const fileHash of proofFileHashes) {
-      const existing = (await db
-        .prepare(`SELECT id FROM payment_proof_hashes WHERE file_hash = ?`)
-        .get(fileHash)) as { id: string } | undefined
-      if (existing) {
-        return res.status(400).json({
-          success: false,
-          message: '付款回单已被其他付款记录使用，请重新上传',
-        })
-      }
+    if (
+      proofIdentities.length !== verifiedFiles.length ||
+      hasDuplicatePaymentProofIdentities(proofIdentities)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: '本次提交包含重复或无效的付款回单标识',
+      })
     }
-
-    // 检查交易流水号是否已被使用（防止同一笔交易的不同文件重复使用）
-    for (const proofNo of proofNos) {
-      if (!proofNo) continue // 允许未识别到电子回单号码的情况（兼容旧数据）
-      const existing = (await db
-        .prepare(`SELECT id FROM payment_proof_hashes WHERE proof_no = ?`)
-        .get(proofNo)) as { id: string } | undefined
-      if (existing) {
-        return res.status(400).json({
-          success: false,
-          message: `电子回单号码 ${proofNo} 已被使用，请勿重复提交同一张付款回单`,
-        })
-      }
-    }
+    const normalizedProofIdentities =
+      normalizePaymentProofIdentities(proofIdentities)
+    const proofFileHashes = normalizedProofIdentities.map(
+      (identity) => identity.fileHash,
+    )
+    const proofNos = normalizedProofIdentities.map(
+      (identity) => identity.proofNo,
+    )
 
     const paymentProofPaths: string[] = []
     const invoicesDir = ensureDatedUploadDirectory('invoices')
@@ -3150,10 +3606,11 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       }
       const safeFileName = path
         .basename(file.originalFileName || 'proof')
-        .replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+        .replace(/[^\w\u4e00-\u9fff.-]/g, '_')
       const finalFileName = `payment-proof-${id}-${Date.now()}-${safeFileName}`
       const finalPath = path.join(invoicesDir, finalFileName)
       fs.renameSync(tempPath, finalPath)
+      movedPaymentProofPaths.push(finalPath)
       paymentProofPaths.push(toStoredUploadPath(finalPath))
     }
 
@@ -3173,6 +3630,55 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
 
     // 使用事务确保原子性
     await db.transaction(async (client) => {
+      await lockPaymentProofIdentities(client, normalizedProofIdentities)
+      if (
+        await findExistingPaymentProofIdentity(
+          client,
+          normalizedProofIdentities,
+        )
+      ) {
+        throw new RouteError(
+          409,
+          '付款回单文件或电子回单号码已被使用，请勿重复提交',
+          { code: 'PAYMENT_PROOF_ALREADY_USED' },
+        )
+      }
+
+      const lockedReimbursement = await txGet<{
+        id: string
+        status: string
+        total_amount: string
+        payment_batch_id: string | null
+      }>(
+        client,
+        `SELECT id, status, total_amount::text AS total_amount,
+                payment_batch_id
+           FROM reimbursements
+          WHERE id = ? AND COALESCE(is_deleted, FALSE) = FALSE
+          FOR UPDATE`,
+        id,
+      )
+      if (!lockedReimbursement) {
+        throw new RouteError(404, '报销单不存在')
+      }
+      if (
+        lockedReimbursement.status !== 'paid' ||
+        lockedReimbursement.payment_batch_id
+      ) {
+        throw new RouteError(409, '报销单状态或付款批次已变化，请刷新后重试', {
+          code: 'REIMBURSEMENT_PAYMENT_STATE_CHANGED',
+        })
+      }
+      if (
+        Math.abs(
+          Number.parseFloat(lockedReimbursement.total_amount) - totalOcrAmount,
+        ) > 0.01
+      ) {
+        throw new RouteError(409, '报销金额已变化，请重新验证付款回单', {
+          code: 'REIMBURSEMENT_PAYMENT_AMOUNT_CHANGED',
+        })
+      }
+
       // 自动创建单笔付款批次（统一批次机制）
       const batchId = nanoid()
       const batchNo = generateBatchNo()
@@ -3230,8 +3736,8 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         now,
       )
 
-      // 更新报销单状态
-      await txRun(
+      // 仅允许仍处于已付款且未挂批次的报销单接管本次付款事实。
+      const reimbursementUpdate = await txRun(
         client,
         `
         UPDATE reimbursements
@@ -3243,6 +3749,9 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
             payment_upload_time = ?,
             updated_at = ?
         WHERE id = ?
+          AND status = 'paid'
+          AND payment_batch_id IS NULL
+          AND COALESCE(is_deleted, FALSE) = FALSE
       `,
         paymentProofPath,
         batchId,
@@ -3252,6 +3761,11 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         now,
         id,
       )
+      if (reimbursementUpdate.changes !== 1) {
+        throw new RouteError(409, '报销单状态或付款批次已变化，请刷新后重试', {
+          code: 'REIMBURSEMENT_PAYMENT_STATE_CHANGED',
+        })
+      }
 
       // 创建审批记录
       if (approvalInstance) {
@@ -3273,6 +3787,7 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
         )
       }
     })
+    paymentProofCommitted = true
 
     // 一次性消费：事务完成后从缓存中删除已使用的回单验证记录
     for (const file of verifiedFiles) {
@@ -3289,6 +3804,39 @@ router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
       data: { paymentProofPath },
     })
   } catch (error) {
+    const commitOutcomeUncertain = Boolean(
+      error &&
+      typeof error === 'object' &&
+      'commitOutcomeUncertain' in error &&
+      (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+    )
+    if (!paymentProofCommitted && !commitOutcomeUncertain) {
+      for (const movedPath of movedPaymentProofPaths) {
+        fs.rmSync(movedPath, { force: true })
+      }
+    }
+    if (commitOutcomeUncertain) {
+      return res.status(500).json({
+        success: false,
+        code: 'PAYMENT_PROOF_COMMIT_OUTCOME_UNCERTAIN',
+        message: '付款结果暂时无法确认，请刷新状态后再操作，勿重复上传',
+      })
+    }
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      String((error as { code?: unknown }).code) === '23505'
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: 'PAYMENT_PROOF_ALREADY_USED',
+        message: '付款回单文件或电子回单号码已被使用，请勿重复提交',
+      })
+    }
+    if (isRouteError(error)) {
+      return res.status(error.statusCode).json(error.payload)
+    }
     console.error('❌ 提交付款回单失败:', error)
     res.status(500).json({ success: false, message: '提交失败' })
   }
@@ -3679,10 +4227,11 @@ router.put('/:id', requireAuth, async (req, res) => {
     }
 
     // 服务端统一重算核减金额，不信任客户端传入的 deductedAmount
-    let processedInvoices = invoices.map((inv: any) => ({
-      ...inv,
-      deductedAmount: 0,
-    }))
+    let processedInvoices = await verifyDeductionInvoicePayloads(
+      invoices,
+      userId,
+      id,
+    )
     // 计算报销月份（跨月编辑时需要同步更新）
     const reimbursementMonth = calculateReimbursementMonth(
       new Date(),
@@ -3716,7 +4265,7 @@ router.put('/:id', requireAuth, async (req, res) => {
       // 计算本次提交的交通额度类发票总额
       let transportFuelTotal = 0
 
-      processedInvoices = invoices.map((inv: any) => {
+      processedInvoices = processedInvoices.map((inv: any) => {
         const isTransportOrFuel = isTransportFuelCategory(inv.category)
 
         if (isTransportOrFuel) {
@@ -3815,11 +4364,15 @@ router.put('/:id', requireAuth, async (req, res) => {
     const invoiceNumbers = processedInvoices
       .map((inv: any) => inv.invoiceNumber)
       .filter((n: any) => n)
-    const uniqueNumbers = new Set(invoiceNumbers)
-    if (uniqueNumbers.size < invoiceNumbers.length) {
+    const currentUploadDuplicate = findCurrentUploadDuplicate(processedInvoices)
+    if (currentUploadDuplicate) {
       return res.status(400).json({
         success: false,
-        message: '提交的发票中存在重复的发票号码',
+        message: currentUploadInvoiceDuplicateMessage(
+          currentUploadDuplicate.invoiceNumber,
+          currentUploadDuplicate.existingUsageKind,
+          currentUploadDuplicate.incomingUsageKind,
+        ),
       })
     }
 
@@ -3829,26 +4382,11 @@ router.put('/:id', requireAuth, async (req, res) => {
         client,
         reimbursementInvoiceNumbersForCrossModule(processedInvoices),
       )
-      // 事务内校验发票号码唯一性（排除当前报销单自身）
-      for (const invoiceNumber of uniqueNumbers) {
-        const existing = await txGet(
-          client,
-          `
-          SELECT ri.invoice_number FROM reimbursement_invoices ri
-          JOIN reimbursements r ON ri.reimbursement_id = r.id
-          WHERE ri.invoice_number = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
-          LIMIT 1
-        `,
-          invoiceNumber,
-          id,
-        )
-        if (existing) {
-          throw new RouteError(
-            400,
-            `发票号码 ${invoiceNumber} 已存在，请勿重复提交`,
-          )
-        }
-      }
+      await assertInvoicesNotUsedInReimbursement(client, invoiceNumbers, id)
+      await lockReimbursementInvoiceFileHashes(
+        client,
+        processedInvoices.map((invoice: any) => invoice.fileHash),
+      )
 
       // 事务内校验文件哈希唯一性（排除当前报销单自身）
       for (const invoice of processedInvoices) {
@@ -3856,21 +4394,39 @@ router.put('/:id', requireAuth, async (req, res) => {
           const existingByHash = await txGet<{
             file_hash: string
             applicant_name: string
+            usage_kind: 'invoice' | 'deduction'
           }>(
             client,
             `
-            SELECT ri.file_hash, r.applicant_name FROM reimbursement_invoices ri
-            JOIN reimbursements r ON ri.reimbursement_id = r.id
-            WHERE ri.file_hash = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
-            LIMIT 1
+            SELECT file_hash, applicant_name, usage_kind FROM (
+              SELECT ri.file_hash, r.applicant_name,
+                CASE WHEN COALESCE(ri.is_deduction, 0) = 1
+                  THEN 'deduction' ELSE 'invoice' END AS usage_kind
+              FROM reimbursement_invoices ri
+              JOIN reimbursements r ON ri.reimbursement_id = r.id
+              WHERE ri.file_hash = ? AND r.id <> ? AND r.status <> 'rejected'
+                AND COALESCE(r.is_deleted, FALSE) = FALSE
+              UNION ALL
+              SELECT rdi.file_hash, r.applicant_name,
+                'deduction'::text AS usage_kind
+              FROM reimbursement_deduction_invoices rdi
+              JOIN reimbursements r ON rdi.reimbursement_id = r.id
+              WHERE rdi.file_hash = ? AND r.id <> ? AND r.status <> 'rejected'
+                AND COALESCE(r.is_deleted, FALSE) = FALSE
+            ) duplicate_file LIMIT 1
           `,
+            invoice.fileHash,
+            id,
             invoice.fileHash,
             id,
           )
           if (existingByHash) {
             throw new RouteError(
               400,
-              `${existingByHash.applicant_name} 已上传此发票文件，请勿重复提交`,
+              reimbursementInvoiceDuplicateMessage(
+                existingByHash.applicant_name,
+                existingByHash.usage_kind,
+              ),
             )
           }
         }
@@ -4022,6 +4578,11 @@ router.put('/:id', requireAuth, async (req, res) => {
       }
     })
 
+    for (const invoice of processedInvoices) {
+      if (invoice.isDeduction && invoice.filePath) {
+        deductionOcrCache.delete(path.basename(invoice.filePath))
+      }
+    }
     // 报销单更新成功后，清理该用户的临时上传记录
     await db.run(`DELETE FROM user_uploaded_files WHERE user_id = ?`, userId)
 
@@ -4271,38 +4832,11 @@ router.post('/:id/restore', requireAuth, async (req, res) => {
         client,
         invoices.map((invoice) => invoice.invoice_number),
       )
-      const conflictInvoices: string[] = []
-      for (const inv of invoices) {
-        if (!inv.invoice_number) continue
-        const conflict = await txGet<{
-          invoice_number: string
-          title: string
-          applicant_name: string
-        }>(
-          client,
-          `
-          SELECT ri.invoice_number, r.title, r.applicant_name
-          FROM reimbursement_invoices ri
-          JOIN reimbursements r ON ri.reimbursement_id = r.id
-          WHERE ri.invoice_number = ? AND r.id != ? AND r.status != 'rejected' AND COALESCE(r.is_deleted, FALSE) = FALSE
-          LIMIT 1
-        `,
-          inv.invoice_number,
-          id,
-        )
-        if (conflict) {
-          conflictInvoices.push(
-            `${inv.invoice_number}（已被「${conflict.applicant_name}」的报销单「${conflict.title}」使用）`,
-          )
-        }
-      }
-
-      if (conflictInvoices.length > 0) {
-        throw new RouteError(
-          409,
-          `无法恢复，以下发票号已被其他有效报销单占用：${conflictInvoices.join('、')}`,
-        )
-      }
+      await assertInvoicesNotUsedInReimbursement(
+        client,
+        invoices.map((invoice) => invoice.invoice_number),
+        id,
+      )
 
       const now = new Date().toISOString()
       await txRun(
@@ -4349,43 +4883,25 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
   try {
     const currentUserId = req.session.userId!
 
-    const { reimbursementIds } = req.body
+    const { reimbursementIds: submittedReimbursementIds } = req.body
     if (
-      !reimbursementIds ||
-      !Array.isArray(reimbursementIds) ||
-      reimbursementIds.length === 0
+      !submittedReimbursementIds ||
+      !Array.isArray(submittedReimbursementIds) ||
+      submittedReimbursementIds.length === 0
     ) {
       return res.status(400).json({ success: false, message: '请选择报销单' })
     }
-
-    // 自动清理：删除当前管理员之前创建的 pending 状态批次
-    const pendingBatches = (await db
-      .prepare(
-        `
-      SELECT id FROM payment_batches WHERE payer_id = ? AND status = 'pending'
-    `,
-      )
-      .all(currentUserId)) as any[]
-
-    if (pendingBatches.length > 0) {
-      console.log(`🧹 自动清理 ${pendingBatches.length} 个未完成的批次...`)
-      for (const batch of pendingBatches) {
-        // 清除报销单的批次关联
-        await db
-          .prepare(
-            'UPDATE reimbursements SET payment_batch_id = NULL WHERE payment_batch_id = ?',
-          )
-          .run(batch.id)
-        // 删除批次明细
-        await db
-          .prepare('DELETE FROM payment_batch_items WHERE batch_id = ?')
-          .run(batch.id)
-        // 删除批次
-        await db
-          .prepare('DELETE FROM payment_batches WHERE id = ?')
-          .run(batch.id)
-        console.log(`✅ 已清理批次: ${batch.id}`)
-      }
+    const reimbursementIds = submittedReimbursementIds
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .sort()
+    if (
+      reimbursementIds.length !== submittedReimbursementIds.length ||
+      new Set(reimbursementIds).size !== reimbursementIds.length
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: '报销单编号重复或无效' })
     }
 
     // 查询所有选中的报销单（包含 payment_batch_id 用于校验重复挂载）
@@ -4468,17 +4984,93 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
 
     // 使用事务确保原子性
     await db.transaction(async (client) => {
-      // 清除旧批次关联（confirmed 或不存在的批次）
-      const toClear = withBatchId.filter((r) => r.payment_batch_id)
-      if (toClear.length > 0) {
-        for (const r of toClear) {
-          await txRun(
+      const lockedReimbursements = await txAll<{
+        id: string
+        user_id: string
+        total_amount: string
+        status: string
+        applicant_name: string
+        type: string
+        title: string
+        payment_batch_id: string | null
+      }>(
+        client,
+        `SELECT id, user_id, total_amount::text AS total_amount, status,
+                applicant_name, type, title, payment_batch_id
+           FROM reimbursements
+          WHERE id = ANY(?::text[])
+            AND COALESCE(is_deleted, FALSE) = FALSE
+          ORDER BY id
+          FOR UPDATE`,
+        reimbursementIds,
+      )
+      if (
+        lockedReimbursements.length !== reimbursementIds.length ||
+        lockedReimbursements.some((item) => item.status !== 'approved') ||
+        new Set(lockedReimbursements.map((item) => item.user_id)).size !== 1 ||
+        new Set(lockedReimbursements.map((item) => item.type)).size !== 1
+      ) {
+        throw new RouteError(
+          409,
+          '报销单成员、状态或收款信息已变化，请刷新后重试',
+          { code: 'PAYMENT_BATCH_REIMBURSEMENT_CHANGED' },
+        )
+      }
+      const lockedTotalAmount = lockedReimbursements.reduce(
+        (sum, item) => sum + Number.parseFloat(item.total_amount),
+        0,
+      )
+      if (Math.abs(lockedTotalAmount - totalAmount) > 0.01) {
+        throw new RouteError(409, '报销金额已变化，请刷新后重试', {
+          code: 'PAYMENT_BATCH_AMOUNT_CHANGED',
+        })
+      }
+
+      const referencedBatchIds = [
+        ...new Set(
+          lockedReimbursements
+            .map((item) => item.payment_batch_id)
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ].sort()
+      const lockedReferencedBatches = referencedBatchIds.length
+        ? await txAll<{ id: string; status: string }>(
             client,
-            'UPDATE reimbursements SET payment_batch_id = NULL, updated_at = ? WHERE id = ?',
-            now,
-            r.id,
+            `SELECT id, status
+               FROM payment_batches
+              WHERE id = ANY(?::text[])
+              ORDER BY id
+              FOR UPDATE`,
+            referencedBatchIds,
           )
-        }
+        : []
+      if (referencedBatchIds.length) {
+        await txAll(
+          client,
+          `SELECT id, batch_id, reimbursement_id
+             FROM payment_batch_items
+            WHERE batch_id = ANY(?::text[])
+            ORDER BY batch_id, reimbursement_id
+            FOR UPDATE`,
+          referencedBatchIds,
+        )
+      }
+      const activeBatchIds = new Set(
+        lockedReferencedBatches
+          .filter((item) => ['pending', 'uploaded'].includes(item.status))
+          .map((item) => item.id),
+      )
+      if (
+        lockedReimbursements.some(
+          (item) =>
+            item.payment_batch_id && activeBatchIds.has(item.payment_batch_id),
+        )
+      ) {
+        throw new RouteError(
+          409,
+          '报销单已在有效付款批次中，不能重复创建批次',
+          { code: 'REIMBURSEMENT_ALREADY_IN_PAYMENT_BATCH' },
+        )
       }
 
       // 创建新批次
@@ -4497,7 +5089,7 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
       )
 
       // 写入批次明细快照和关联报销单
-      for (const r of reimbursements) {
+      for (const r of lockedReimbursements) {
         const itemId = nanoid()
         await txRun(
           client,
@@ -4512,15 +5104,26 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
           now,
         )
 
-        await txRun(
+        const reimbursementUpdate = await txRun(
           client,
           `
-          UPDATE reimbursements SET payment_batch_id = ?, updated_at = ? WHERE id = ?
+          UPDATE reimbursements
+             SET payment_batch_id = ?, updated_at = ?
+           WHERE id = ?
+             AND status = 'approved'
+             AND payment_batch_id IS NOT DISTINCT FROM ?
+             AND COALESCE(is_deleted, FALSE) = FALSE
         `,
           batchId,
           now,
           r.id,
+          r.payment_batch_id,
         )
+        if (reimbursementUpdate.changes !== 1) {
+          throw new RouteError(409, '报销单付款批次已变化，请刷新后重试', {
+            code: 'REIMBURSEMENT_PAYMENT_BATCH_CHANGED',
+          })
+        }
       }
     })
 
@@ -4881,6 +5484,8 @@ router.post(
   '/payment-batch/:batchId/complete',
   requireAdmin,
   async (req, res) => {
+    const movedPaymentProofPaths: string[] = []
+    let paymentProofCommitted = false
     try {
       const { batchId } = req.params
       const currentUserId = req.session.userId!
@@ -4981,9 +5586,8 @@ router.post(
         })
       }
 
-      // 收集哈希和交易流水号，先做去重校验，再落盘；校验失败则文件留在 temp 目录由定时清理处理
-      // 注意：必须同时获取 fileHash 和 proofNo，保持索引对应关系
-      const batchProofData = verifiedFiles
+      // 收集并规范化摘要和回单号；数据库权威去重在落盘后的事务锁内执行，失败时清理本批新文件。
+      const batchProofIdentities: PaymentProofIdentity[] = verifiedFiles
         .map((f: any) => {
           const cached = ocrCache.get(f.tempFileName)
           return {
@@ -4992,35 +5596,23 @@ router.post(
           }
         })
         .filter((item) => item.fileHash) // 只过滤有 fileHash 的项
-      const batchProofFileHashes = batchProofData.map((item) => item.fileHash)
-      const batchProofNos = batchProofData.map((item) => item.proofNo)
-
-      // 先检查哈希是否已被使用（防重放），校验失败则不落盘
-      for (const fileHash of batchProofFileHashes) {
-        const existing = (await db
-          .prepare(`SELECT id FROM payment_proof_hashes WHERE file_hash = ?`)
-          .get(fileHash)) as { id: string } | undefined
-        if (existing) {
-          return res.status(400).json({
-            success: false,
-            message: '付款回单已被其他付款记录使用，请重新上传',
-          })
-        }
+      if (
+        batchProofIdentities.length !== verifiedFiles.length ||
+        hasDuplicatePaymentProofIdentities(batchProofIdentities)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: '本次提交包含重复或无效的付款回单标识',
+        })
       }
-
-      // 检查交易流水号是否已被使用（防止同一笔交易的不同文件重复使用）
-      for (const proofNo of batchProofNos) {
-        if (!proofNo) continue // 允许未识别到电子回单号码的情况（兼容旧数据）
-        const existing = (await db
-          .prepare(`SELECT id FROM payment_proof_hashes WHERE proof_no = ?`)
-          .get(proofNo)) as { id: string } | undefined
-        if (existing) {
-          return res.status(400).json({
-            success: false,
-            message: `电子回单号码 ${proofNo} 已被使用，请勿重复提交同一张付款回单`,
-          })
-        }
-      }
+      const normalizedBatchProofIdentities =
+        normalizePaymentProofIdentities(batchProofIdentities)
+      const batchProofFileHashes = normalizedBatchProofIdentities.map(
+        (identity) => identity.fileHash,
+      )
+      const batchProofNos = normalizedBatchProofIdentities.map(
+        (identity) => identity.proofNo,
+      )
 
       const paymentProofPaths: string[] = []
       const invoicesDir = ensureDatedUploadDirectory('invoices')
@@ -5034,10 +5626,11 @@ router.post(
         }
         const safeFileName = path
           .basename(file.originalFileName || 'proof')
-          .replace(/[^\w\u4e00-\u9fff.\-]/g, '_')
+          .replace(/[^\w\u4e00-\u9fff.-]/g, '_')
         const finalFileName = `payment-proof-batch-${batch.batch_no}-${Date.now()}-${safeFileName}`
         const finalPath = path.join(invoicesDir, finalFileName)
         fs.renameSync(tempPath, finalPath)
+        movedPaymentProofPaths.push(finalPath)
         paymentProofPaths.push(toStoredUploadPath(finalPath))
       }
 
@@ -5046,15 +5639,102 @@ router.post(
 
       // 使用事务确保原子性
       await db.transaction(async (client) => {
-        // 更新批次状态
-        await txRun(
+        await lockPaymentProofIdentities(client, normalizedBatchProofIdentities)
+        if (
+          await findExistingPaymentProofIdentity(
+            client,
+            normalizedBatchProofIdentities,
+          )
+        ) {
+          throw new RouteError(
+            409,
+            '付款回单文件或电子回单号码已被使用，请勿重复提交',
+            { code: 'PAYMENT_PROOF_ALREADY_USED' },
+          )
+        }
+
+        const expectedReimbursementIds = reimbursements
+          .map((item) => String(item.id))
+          .sort()
+        const lockedReimbursements = await txAll<{
+          id: string
+          status: string
+          total_amount: string
+          payment_batch_id: string | null
+        }>(
+          client,
+          `SELECT id, status, total_amount::text AS total_amount,
+                  payment_batch_id
+             FROM reimbursements
+            WHERE id = ANY(?::text[])
+              AND COALESCE(is_deleted, FALSE) = FALSE
+            ORDER BY id
+            FOR UPDATE`,
+          expectedReimbursementIds,
+        )
+        const lockedBatch = await txGet<{
+          id: string
+          batch_no: string
+          status: string
+          total_amount: string
+        }>(
+          client,
+          `SELECT id, batch_no, status, total_amount::text AS total_amount
+             FROM payment_batches
+            WHERE id = ?
+            FOR UPDATE`,
+          batchId,
+        )
+        const lockedItems = await txAll<{
+          reimbursement_id: string
+          amount: string
+        }>(
+          client,
+          `SELECT reimbursement_id, amount::text AS amount
+             FROM payment_batch_items
+            WHERE batch_id = ?
+            ORDER BY reimbursement_id
+            FOR UPDATE`,
+          batchId,
+        )
+        const lockedIds = lockedReimbursements.map((item) => item.id)
+        const lockedItemIds = lockedItems.map((item) => item.reimbursement_id)
+        const lockedItemAmount = lockedItems.reduce(
+          (sum, item) => sum + Number.parseFloat(item.amount),
+          0,
+        )
+        if (
+          !lockedBatch ||
+          lockedBatch.status !== 'pending' ||
+          JSON.stringify(lockedIds) !==
+            JSON.stringify(expectedReimbursementIds) ||
+          JSON.stringify(lockedItemIds) !==
+            JSON.stringify(expectedReimbursementIds) ||
+          lockedReimbursements.some(
+            (item) =>
+              item.status !== 'approved' || item.payment_batch_id !== batchId,
+          ) ||
+          Math.abs(
+            Number.parseFloat(lockedBatch.total_amount) - totalOcrAmount,
+          ) > 0.01 ||
+          Math.abs(lockedItemAmount - totalOcrAmount) > 0.01
+        ) {
+          throw new RouteError(
+            409,
+            '付款批次成员、金额或状态已变化，请刷新后重试',
+            { code: 'PAYMENT_BATCH_STATE_CHANGED' },
+          )
+        }
+
+        // 仅允许待付款批次接管本次付款事实。
+        const batchUpdate = await txRun(
           client,
           `
         UPDATE payment_batches
         SET status = 'uploaded', payment_proof_path = ?, pay_time = ?,
             payment_business_date = ?,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'pending'
       `,
           paymentProofPath,
           now,
@@ -5062,6 +5742,11 @@ router.post(
           now,
           batchId,
         )
+        if (batchUpdate.changes !== 1) {
+          throw new RouteError(409, '付款批次状态已变化，请刷新后重试', {
+            code: 'PAYMENT_BATCH_STATE_CHANGED',
+          })
+        }
 
         // 写入每张回单哈希和电子回单号码，防止后续重放
         for (let i = 0; i < batchProofFileHashes.length; i++) {
@@ -5082,8 +5767,8 @@ router.post(
         }
 
         // 更新所有关联报销单状态
-        for (const r of reimbursements) {
-          await txRun(
+        for (const r of lockedReimbursements) {
+          const reimbursementUpdate = await txRun(
             client,
             `
           UPDATE reimbursements
@@ -5091,6 +5776,9 @@ router.post(
               payment_business_date = ?,
               payment_upload_time = ?, updated_at = ?
           WHERE id = ?
+            AND status = 'approved'
+            AND payment_batch_id = ?
+            AND COALESCE(is_deleted, FALSE) = FALSE
         `,
             paymentProofPath,
             now,
@@ -5098,7 +5786,13 @@ router.post(
             now,
             now,
             r.id,
+            batchId,
           )
+          if (reimbursementUpdate.changes !== 1) {
+            throw new RouteError(409, '报销单付款状态已变化，请刷新后重试', {
+              code: 'REIMBURSEMENT_PAYMENT_STATE_CHANGED',
+            })
+          }
 
           // 为每个报销单创建审批记录
           const approvalInstance = (await txGet(
@@ -5134,6 +5828,7 @@ router.post(
           }
         }
       })
+      paymentProofCommitted = true
 
       // 一次性消费：事务完成后从缓存中删除已使用的回单验证记录
       for (const file of verifiedFiles) {
@@ -5150,6 +5845,39 @@ router.post(
         data: { batchNo: batch.batch_no, paymentProofPath },
       })
     } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === 'object' &&
+        'commitOutcomeUncertain' in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      )
+      if (!paymentProofCommitted && !commitOutcomeUncertain) {
+        for (const movedPath of movedPaymentProofPaths) {
+          fs.rmSync(movedPath, { force: true })
+        }
+      }
+      if (commitOutcomeUncertain) {
+        return res.status(500).json({
+          success: false,
+          code: 'PAYMENT_PROOF_COMMIT_OUTCOME_UNCERTAIN',
+          message: '付款结果暂时无法确认，请刷新状态后再操作，勿重复上传',
+        })
+      }
+      if (
+        error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        String((error as { code?: unknown }).code) === '23505'
+      ) {
+        return res.status(409).json({
+          success: false,
+          code: 'PAYMENT_PROOF_ALREADY_USED',
+          message: '付款回单文件或电子回单号码已被使用，请勿重复提交',
+        })
+      }
+      if (isRouteError(error)) {
+        return res.status(error.statusCode).json(error.payload)
+      }
       console.error('❌ 批量付款提交失败:', error)
       res.status(500).json({ success: false, message: '提交失败' })
     }

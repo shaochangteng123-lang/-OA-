@@ -205,6 +205,21 @@ export type ContractAssetCategory =
   | "parking_space"
   | "office_asset"
   | "other";
+export type ContractDepositStatus =
+  | "pending_payment"
+  | "active"
+  | "partially_settled"
+  | "settled";
+export type ContractDepositSettlementType =
+  | "refund"
+  | "deduction"
+  | "rent_offset";
+export type ContractDepositFundingSource =
+  | "engineering_allocation"
+  | "technology_self_funded"
+  | "mixed"
+  | "pending_review";
+export type ContractPaymentPurpose = "contract_payment" | "lease_deposit";
 export type ContractRelationType = "main" | "supplement" | "termination";
 export type ContractSupplementChangeType =
   | "payment_terms_only"
@@ -263,6 +278,92 @@ export interface Contract {
   pending_action: "seal" | "termination" | null;
   previous_status: ContractLifecycleStatus | null;
   version: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractDeposit {
+  id: string;
+  contract_id: string;
+  amount: number;
+  clause_text: string | null;
+  basis: string | null;
+  payment_purpose: "lease_deposit";
+  funding_source: ContractDepositFundingSource;
+  engineering_allocation_amount: number;
+  technology_self_funded_amount: number;
+  payment_record_id: string | null;
+  external_payment_record_id: string | null;
+  paid_at: string | null;
+  note: string | null;
+  status: ContractDepositStatus;
+  settled_amount: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContractDepositSettlement {
+  id: string;
+  deposit_id: string;
+  contract_id: string;
+  settlement_type: ContractDepositSettlementType;
+  amount: number;
+  settlement_date: string;
+  note: string | null;
+  engineering_return_required_amount: number;
+  engineering_returned_amount: number;
+  engineering_returned_at: string | null;
+  engineering_return_note: string | null;
+  engineering_returned_by: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export type ContractDepositSettlementReceiptKind =
+  | "deposit_refund"
+  | "engineering_return";
+
+export interface ContractDepositSettlementReceipt {
+  id: string;
+  settlement_id: string;
+  contract_id: string;
+  receipt_kind: ContractDepositSettlementReceiptKind;
+  amount: number;
+  transaction_date: string;
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  mime_type: "image/jpeg" | "image/png" | "application/pdf";
+  file_hash: string;
+  file_id: string | null;
+  financial_ocr_job_id: string | null;
+  electronic_receipt_no: string | null;
+  payer: string | null;
+  payer_account: string | null;
+  payee: string | null;
+  payee_account: string | null;
+  recognition_method: string | null;
+  ocr_engine_version: string | null;
+  ocr_parser_version: string | null;
+  evidence_text_hash: string | null;
+  uploaded_by: string;
+  created_at: string;
+}
+
+export interface ContractPaymentPurposeDetail {
+  id: string;
+  contract_id: string;
+  payment_record_id: string | null;
+  external_payment_record_id: string | null;
+  purpose: ContractPaymentPurpose;
+  amount: number;
+  funding_source: ContractDepositFundingSource;
+  engineering_allocation_amount: number;
+  technology_self_funded_amount: number;
   created_by: string;
   updated_by: string;
   created_at: string;
@@ -422,6 +523,12 @@ export interface ContractFinancialOcrJob {
     field?: string;
   }>;
   warnings_json: string[];
+  business_purpose:
+    | "deposit_refund"
+    | "engineering_return"
+    | "engineering_internal_funding"
+    | null;
+  target_id: string | null;
   requested_by: string;
   record_id: string | null;
   started_at: string;
@@ -506,7 +613,13 @@ export interface ApprovalRecord {
   instance_id: string;
   step: number;
   approver_id: string;
-  action: "approve" | "reject" | "comment" | "payment_uploaded" | "resubmit";
+  action:
+    | "approve"
+    | "reject"
+    | "comment"
+    | "payment_uploaded"
+    | "payment_proof_replaced"
+    | "resubmit";
   comment: string | null;
   action_time: string;
 }

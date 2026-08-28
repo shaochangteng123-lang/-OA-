@@ -14,6 +14,10 @@ jest.mock("../server/db/index", () => ({
 }));
 
 jest.mock("../server/middleware/auth", () => ({
+  requireAuth: Object.assign(
+    (_req: unknown, _res: unknown, next: () => void) => next(),
+    { authRequired: true },
+  ),
   requireRole: jest.fn((roles: string[]) => {
     const middleware = (_req: unknown, _res: unknown, next: () => void) =>
       next();
@@ -22,11 +26,27 @@ jest.mock("../server/middleware/auth", () => ({
   }),
 }));
 
+jest.mock("../server/services/monthlyFinancialBankStatement", () => {
+  const actual = jest.requireActual(
+    "../server/services/monthlyFinancialBankStatement",
+  );
+  return {
+    ...actual,
+    analyzeMonthlyFinancialBankFile: jest.fn(),
+    calculateMonthlyBankFileHash: jest.fn(),
+  };
+});
+
 import fs from "fs";
+import os from "os";
 import path from "path";
 import * as XLSX from "xlsx";
 import { db, pool } from "../server/db/index";
 import monthlyFinancialReportRouter from "../server/routes/monthly-financial-reports";
+import {
+  analyzeMonthlyFinancialBankFile,
+  calculateMonthlyBankFileHash,
+} from "../server/services/monthlyFinancialBankStatement";
 import {
   MANUAL_CATEGORY_RULES,
   addFinancialAmounts,
@@ -80,7 +100,10 @@ interface RouterLayer {
     path: string;
     methods: Record<string, boolean>;
     stack: Array<{
-      handle: ((...args: unknown[]) => unknown) & { allowedRoles?: string[] };
+      handle: ((...args: unknown[]) => unknown) & {
+        allowedRoles?: string[];
+        authRequired?: boolean;
+      };
     }>;
   };
 }
@@ -120,6 +143,9 @@ describe("月度财务报表精确金额与分类规则", () => {
       "welfare_one_supplement",
       "welfare_two_supplement",
       "welfare_one_407",
+      "welfare_one_drinking_water",
+      "welfare_one_office",
+      "welfare_one_electricity",
       "welfare_one_407_ai",
       "welfare_one_8h_ai",
       "welfare_two_refreshment",
@@ -149,6 +175,40 @@ describe("月度财务报表精确金额与分类规则", () => {
     expect(routeSource).toContain("hasValidPersonMetadata");
     expect(typeSource).toContain("personId?: string | null");
     expect(typeSource).toContain("personName?: string | null");
+  });
+
+  it("一般和商务账户利息与手续费逐笔进入自动明细并保留来源账户", () => {
+    const routeSource = source("server/routes/monthly-financial-reports.ts");
+    const typeSource = source("server/types/monthly-financial-report.ts");
+
+    expect(routeSource).toContain(
+      'row.category !== "interest" && row.category !== "bank_fee"',
+    );
+    expect(routeSource).toContain(
+      "const metric = `${row.account_code}_${row.category}`",
+    );
+    expect(routeSource).toContain("bankAccountCode: row.account_code");
+    expect(routeSource).toContain(
+      '!["general", "business"].includes(row.account_code)',
+    );
+    expect(typeSource).not.toContain("basicInterest: string");
+    expect(typeSource).not.toContain("basicBankFee: string");
+  });
+
+  it("银行上传和自动同步均重跑报销与工资挂载，重复原件可直接补挂", () => {
+    const routeSource = source("server/routes/monthly-financial-reports.ts");
+    expect(routeSource).toContain(
+      'from "../services/monthlyFinancialReimbursementMatcher.js"',
+    );
+    expect(
+      routeSource.match(/await reconcileMonthlyReimbursementTransactions/gu),
+    ).toHaveLength(2);
+    expect(routeSource).toContain(
+      "const duplicateOnly = candidates.length === 0",
+    );
+    expect(routeSource).toContain("文件已存在，已重新匹配并挂载业务回单");
+    expect(routeSource).toContain("reimbursementReconciliation");
+    expect(routeSource).toContain("salaryReconciliation");
   });
 
   it("自动收入只统计主营业务合同回款", () => {
@@ -349,6 +409,21 @@ describe("月度财务报表账户公式", () => {
         occurredOn: "2026-08-06",
       },
       { category: "welfare_one_407", amount: "1", occurredOn: "2026-08-07" },
+      {
+        category: "welfare_one_drinking_water",
+        amount: "0.1",
+        occurredOn: "2026-08-07",
+      },
+      {
+        category: "welfare_one_office",
+        amount: "0.2",
+        occurredOn: "2026-08-07",
+      },
+      {
+        category: "welfare_one_electricity",
+        amount: "0.3",
+        occurredOn: "2026-08-07",
+      },
       { category: "welfare_one_407_ai", amount: "2", occurredOn: "2026-08-08" },
       { category: "welfare_one_8h_ai", amount: "3", occurredOn: "2026-08-09" },
       {
@@ -375,7 +450,10 @@ describe("月度财务报表账户公式", () => {
     "2026-08",
   );
 
-  function report(items: MonthlyFinancialManualItemInput[] = manualItems) {
+  function report(
+    items: MonthlyFinancialManualItemInput[] = manualItems,
+    bank?: MonthlyFinancialAutomaticSnapshot["bank"],
+  ) {
     return buildMonthlyFinancialReportView({
       id: "report-1",
       month: "2026-08",
@@ -403,6 +481,7 @@ describe("月度财务报表账户公式", () => {
           businessReimbursement: "4",
           assetAdministration: "3",
         },
+        bank,
       },
       manualItems: items,
       lastRefreshedAt: null,
@@ -433,8 +512,13 @@ describe("月度财务报表账户公式", () => {
     expect(accounts.welfare_one).toMatchObject({
       openingBalance: "50",
       income: "5",
-      expense: "6",
-      closingBalance: "49",
+      expense: "6.6",
+      closingBalance: "48.4",
+    });
+    expect(result.expenses).toMatchObject({
+      welfareOneDrinkingWater: "0.1",
+      welfareOneOffice: "0.2",
+      welfareOneElectricity: "0.3",
     });
     expect(accounts.welfare_two).toMatchObject({
       openingBalance: "60",
@@ -472,6 +556,66 @@ describe("月度财务报表账户公式", () => {
     ).toBe("0.25");
     expect(withFees.expenses.generalBankFee).toBe("0.5");
     expect(withFees.expenses.businessBankFee).toBe("0.25");
+  });
+
+  it("一般和商务银行来源活跃后覆盖各自手工利息手续费且只计一次", () => {
+    const bankControlled = report(manualItems, {
+      activeAccounts: ["basic", "general", "business"],
+      chargeAccounts: ["general", "business"],
+      generalInterest: "103.69",
+      businessInterest: "36.65",
+      generalBankFee: "18",
+      businessBankFee: "0",
+      internalTransferTotal: "0",
+      partialAccounts: [],
+      reviewRequiredCount: 0,
+      unclassifiedCount: 0,
+      conflictCount: 0,
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    });
+
+    expect(bankControlled.income).toMatchObject({
+      generalInterest: "103.69",
+      businessInterest: "36.65",
+    });
+    expect(bankControlled.expenses).toMatchObject({
+      generalBankFee: "18",
+      businessBankFee: "0",
+    });
+    expect(
+      bankControlled.accounts.find((item) => item.code === "general"),
+    ).toMatchObject({ income: "203.69", expense: "39" });
+    expect(
+      bankControlled.accounts.find((item) => item.code === "business"),
+    ).toMatchObject({ income: "86.65", expense: "4" });
+  });
+
+  it("部分文件只接管安全利息手续费且不影响另一账户手工来源", () => {
+    const partialCharges = report(manualItems, {
+      activeAccounts: [],
+      chargeAccounts: ["general"],
+      generalInterest: "103.69",
+      businessInterest: "0",
+      generalBankFee: "18",
+      businessBankFee: "0",
+      internalTransferTotal: "0",
+      partialAccounts: ["general"],
+      reviewRequiredCount: 1,
+      unclassifiedCount: 0,
+      conflictCount: 0,
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    });
+
+    expect(partialCharges.income.generalInterest).toBe("103.69");
+    expect(partialCharges.expenses.generalBankFee).toBe("18");
+    expect(partialCharges.income.businessInterest).toBe("0.75");
+    expect(partialCharges.expenses.businessBankFee).toBe("0.25");
+    expect(
+      partialCharges.accounts.find((item) => item.code === "general"),
+    ).toMatchObject({ income: "203.69", expense: "39" });
+    expect(
+      partialCharges.accounts.find((item) => item.code === "business"),
+    ).toMatchObject({ income: "50.75", expense: "4.25" });
   });
 });
 
@@ -549,6 +693,70 @@ describe("月度财务报表月结、重开与快照安全", () => {
       expect.arrayContaining([
         expect.objectContaining({ code: "general", inflow: "75479.4" }),
         expect.objectContaining({ code: "business", inflow: "12800.6" }),
+      ]),
+    );
+  });
+
+  it("开放报表实时叠加银行待复核状态并禁用月结入口", async () => {
+    const automatic: MonthlyFinancialAutomaticSnapshot = {
+      ...emptyAutomaticSnapshot(),
+      bank: {
+        activeAccounts: ["general"],
+        generalInterest: "0",
+        businessInterest: "0",
+        generalBankFee: "0",
+        businessBankFee: "0",
+        internalTransferTotal: "0",
+        partialAccounts: [],
+        reviewRequiredCount: 0,
+        unclassifiedCount: 0,
+        conflictCount: 0,
+        updatedAt: "2026-08-20T01:00:00.000Z",
+      },
+    };
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM monthly_financial_reports report")) {
+        return reportRow({ automatic_snapshot_json: automatic });
+      }
+      if (sql.includes("AS review_required_count")) {
+        return {
+          review_required_count: 1,
+          unclassified_count: 0,
+          conflict_count: 0,
+        };
+      }
+      return undefined;
+    });
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (
+        sql.includes("SELECT account_code, recognition_status") &&
+        sql.includes("FROM monthly_financial_bank_files")
+      ) {
+        return [{ account_code: "general", recognition_status: "partial" }];
+      }
+      return [];
+    });
+    const route = findRoute("/:month", "get");
+    const response = responseMock();
+
+    await route.stack.at(-1)!.handle(requestMock("2026-08"), response);
+
+    const payload = response.json.mock.calls[0]?.[0] as {
+      data: {
+        validations: {
+          canClose: boolean;
+          blockers: Array<{ code: string; message: string }>;
+        };
+        permissions: { canClose: boolean };
+      };
+    };
+    expect(payload.data.validations.canClose).toBe(false);
+    expect(payload.data.permissions.canClose).toBe(false);
+    expect(payload.data.validations.blockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "MONTHLY_BANK_REVIEW_REQUIRED" }),
       ]),
     );
   });
@@ -873,6 +1081,261 @@ describe("月度财务报表月结、重开与快照安全", () => {
     expect(storedSnapshot).toBeDefined();
   });
 
+  it.each([
+    [
+      "活动银行文件为部分识别",
+      [
+        {
+          account_code: "general",
+          recognition_status: "partial",
+          updated_at: "2026-08-24T01:00:00.000Z",
+        },
+      ],
+      { review_required_count: 0, unclassified_count: 0, conflict_count: 0 },
+    ],
+    [
+      "仍有待复核交易",
+      [
+        {
+          account_code: "general",
+          recognition_status: "recognized",
+          updated_at: "2026-08-24T01:00:00.000Z",
+        },
+      ],
+      { review_required_count: 1, unclassified_count: 0, conflict_count: 0 },
+    ],
+  ])("%s时服务端拒绝月结且不写快照", async (_label, bankFiles, bankIssues) => {
+    const current = reportRow();
+    const client = {
+      query: jest.fn(async (sqlValue: string) => {
+        const sql = String(sqlValue);
+        if (sql.includes("FROM monthly_financial_reports report")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("WHERE report_month <")) return { rows: [] };
+        if (
+          sql.includes("SELECT account_code, recognition_status, updated_at") &&
+          sql.includes("FROM monthly_financial_bank_files")
+        ) {
+          return { rows: bankFiles };
+        }
+        if (sql.includes("AS review_required_count")) {
+          return { rows: [bankIssues] };
+        }
+        return { rows: [] };
+      }),
+    };
+    (db.transaction as jest.Mock).mockImplementation(
+      async (callback: (client: typeof client) => Promise<unknown>) =>
+        callback(client),
+    );
+    const route = findRoute("/:month/close", "post");
+    const response = responseMock();
+
+    await route.stack
+      .at(-1)!
+      .handle(requestMock("2026-08", { expectedVersion: 3 }), response);
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        code: "MONTHLY_BANK_REVIEW_REQUIRED",
+      }),
+    );
+    expect(
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("INSERT INTO monthly_financial_snapshots"),
+      ),
+    ).toBe(false);
+  });
+
+  it("上传存在待复核交易时在持久化前拒绝，不替换旧活动文件", async () => {
+    const temporaryRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "monthly-bank-review-upload-"),
+    );
+    const filePath = path.join(temporaryRoot, "一般账户.pdf");
+    fs.writeFileSync(filePath, "%PDF-1.4\n%%EOF\n");
+    const fileHash = "a".repeat(64);
+    (calculateMonthlyBankFileHash as jest.Mock).mockResolvedValue(fileHash);
+    (analyzeMonthlyFinancialBankFile as jest.Mock).mockResolvedValue({
+      originalName: "一般账户.pdf",
+      fileHash,
+      accountCode: "general",
+      accountNumber: "0200303519000018418",
+      filenameAccountHint: "general",
+      pageCount: 1,
+      skippedBlankPages: [],
+      transactionMonths: [],
+      requiresMixedMonthConfirmation: false,
+      warnings: [],
+      transactions: [
+        {
+          pageNo: 1,
+          position: "full",
+          previewPath: "review.jpg",
+          electronicReceiptNo: "TEST-REVIEW-001",
+          normalizedElectronicReceiptNo: "TESTREVIEW001",
+          transactionDate: "",
+          transactionMonth: "",
+          amount: 100,
+          payer: "测试付款人",
+          payerAccount: "0200303519000018418",
+          payee: "测试收款人",
+          payeeAccount: "6222000000000000001",
+          remark: "主营回款",
+          direction: "outflow",
+          category: "main_income",
+          isInternalTransfer: false,
+          includeInReport: false,
+          recognitionStatus: "review_required",
+          warnings: ["未识别到银行实际交易日期"],
+          rawTextHash: "b".repeat(64),
+        },
+      ],
+    });
+    (db.get as jest.Mock).mockResolvedValue(undefined);
+    const route = findRoute("/:month/bank-receipts", "post");
+    const response = responseMock();
+    const request = {
+      params: { month: "2026-08" },
+      body: { expectedVersion: "3", mixedMonthConfirmed: "false" },
+      files: [
+        {
+          fieldname: "files",
+          originalname: "一般账户.pdf",
+          encoding: "7bit",
+          mimetype: "application/pdf",
+          size: fs.statSync(filePath).size,
+          destination: temporaryRoot,
+          filename: path.basename(filePath),
+          path: filePath,
+          buffer: Buffer.alloc(0),
+        },
+      ],
+      session: {
+        user: { id: "admin-1", role: "admin", name: "管理员甲" },
+      },
+    };
+
+    try {
+      await route.stack.at(-1)!.handle(request, response);
+    } finally {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        code: "MONTHLY_BANK_REVIEW_REQUIRED",
+        message: expect.stringContaining("未替换当前月报文件"),
+      }),
+    );
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("管理员可填写原因排除冲正后的待复核交易并重新计算月报", async () => {
+    const current = reportRow();
+    const client = {
+      query: jest.fn(async (sqlValue: string) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT role, status FROM users")) {
+          return { rows: [{ role: "admin", status: "active" }] };
+        }
+        if (sql.includes("FROM monthly_financial_reports report")) {
+          return { rows: [current] };
+        }
+        if (
+          sql.includes(
+            "FROM monthly_financial_bank_transactions bank_transaction",
+          )
+        ) {
+          return {
+            rows: [
+              {
+                id: "bank-review-1",
+                current_file_id: "bank-file-1",
+                recognition_status: "review_required",
+                include_in_report: false,
+              },
+            ],
+          };
+        }
+        if (sql.includes("AS review_required_count")) {
+          return {
+            rows: [
+              {
+                review_required_count: 0,
+                unclassified_count: 0,
+                conflict_count: 0,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      }),
+    };
+    (db.transaction as jest.Mock).mockImplementation(
+      async (callback: (client: typeof client) => Promise<unknown>) =>
+        callback(client),
+    );
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM monthly_financial_reports report")) {
+        return reportRow({ version: 4 });
+      }
+      if (sql.includes("AS review_required_count")) {
+        return {
+          review_required_count: 0,
+          unclassified_count: 0,
+          conflict_count: 0,
+        };
+      }
+      return undefined;
+    });
+    (db.all as jest.Mock).mockResolvedValue([]);
+    const route = findRoute(
+      "/:month/bank-transactions/:transactionId/review",
+      "post",
+    );
+    const response = responseMock();
+    const request = {
+      ...requestMock("2026-08", {
+        expectedVersion: 3,
+        action: "exclude",
+        reason: "原合同登记已冲正，确认不计入本月经营收支",
+      }),
+      params: { month: "2026-08", transactionId: "bank-review-1" },
+    };
+
+    await route.stack.at(-1)!.handle(request, response);
+
+    expect(response.status).not.toHaveBeenCalled();
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        message: "待复核银行交易已排除，月报已重新计算",
+      }),
+    );
+    const sqls = client.query.mock.calls.map(([sql]) => String(sql));
+    expect(sqls).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "SET category = 'ignored', recognition_status = 'ignored'",
+        ),
+        expect.stringContaining("管理员已复核排除冲正交易"),
+      ]),
+    );
+    expect(
+      client.query.mock.calls.some(([, params]) =>
+        JSON.stringify(params || []).includes(
+          "monthly_bank_transaction_review",
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it("重开历史月会级联失效后续已月结月份并保留旧快照", async () => {
     const may = reportRow({
       id: "report-may",
@@ -1011,6 +1474,451 @@ describe("月度财务报表月结、重开与快照安全", () => {
   });
 });
 
+describe("月报银行交易关联状态与受控裁片预览", () => {
+  function previewResponseMock() {
+    return {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+      type: jest.fn().mockReturnThis(),
+      sendFile: jest.fn().mockReturnThis(),
+    };
+  }
+
+  it("分别返回员工匹配与报销关联，并保留旧关联状态", async () => {
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT file.id, file.account_code")) {
+        return [
+          {
+            id: "bank-file-1",
+            account_code: "basic",
+            original_name: "基本账户.pdf",
+            file_hash: "bank-hash-1",
+            file_version: 1,
+            page_count: 1,
+            recognized_receipt_count: 1,
+            included_receipt_count: 1,
+            recognition_status: "recognized",
+            charge_eligible: false,
+            detected_months_json: ["2026-08"],
+            warnings_json: [],
+            anomalies_json: [],
+            uploaded_by: "admin-1",
+            uploader_name: "管理员甲",
+            recognized_at: "2026-08-25T01:00:00.000Z",
+            updated_at: "2026-08-25T01:00:00.000Z",
+          },
+        ];
+      }
+      if (sql.includes("SELECT transaction.id, transaction.account_code")) {
+        const matchedTransaction = {
+          id: "bank-transaction-1",
+          account_code: "basic",
+          electronic_receipt_no: "BANK-001",
+          transaction_date: "2026-08-20",
+          amount: "88.5",
+          direction: "outflow",
+          payer_name: "公司",
+          payer_account: "company-account",
+          payee_name: "申请人甲",
+          payee_account: "employee-account",
+          remark: "基础报销-申请人甲",
+          page_number: 1,
+          receipt_position: "full",
+          category: "basic_reimbursement",
+          recognition_status: "recognized",
+          file_recognition_status: "recognized",
+          include_in_report: true,
+          warnings_json: [],
+          link_warnings: [],
+          occurrence_account_codes: [],
+          employee_match_status: "matched",
+          employee_id: "employee-1",
+          employee_name: "申请人甲",
+          reimbursement_link_status: "matched",
+          reimbursement_link_warnings: [],
+          link_status: "matched",
+        };
+        return [
+          matchedTransaction,
+          {
+            ...matchedTransaction,
+            id: "bank-transaction-2",
+            electronic_receipt_no: "BANK-002",
+            remark: "基础报销-申请人乙",
+            payee_name: "申请人乙",
+            employee_id: "employee-2",
+            employee_name: "申请人乙",
+          },
+        ];
+      }
+      if (
+        sql.includes(
+          "SELECT DISTINCT ON (link.transaction_id, reimbursement.id)",
+        )
+      ) {
+        return [
+          {
+            transaction_id: "bank-transaction-1",
+            reimbursement_id: "reimbursement-1",
+            type: "basic",
+            title: "八月差旅报销",
+            user_id: "user-1",
+            applicant_name: "申请人甲",
+            status: "completed",
+            total_amount: "88.5",
+            allocated_amount: "88.5",
+            display_action: "replaced",
+            payment_batch_id: "payment-batch-1",
+            original_payment_proof_path:
+              "uploads/invoices/payment-proof-old.png",
+          },
+          {
+            transaction_id: "bank-transaction-2",
+            reimbursement_id: "reimbursement-2",
+            type: "basic",
+            title: "八月办公报销",
+            user_id: "user-2",
+            applicant_name: "申请人乙",
+            status: "completed",
+            total_amount: "88.5",
+            allocated_amount: "88.5",
+            display_action: "attached",
+            payment_batch_id: "payment-batch-1",
+            original_payment_proof_path: null,
+          },
+        ];
+      }
+      if (sql.includes("SELECT file_hash")) {
+        return [{ file_hash: "bank-hash-1" }];
+      }
+      return [];
+    });
+
+    const route = findRoute("/:month/bank-receipts", "get");
+    const response = previewResponseMock();
+    await route.stack.at(-1)!.handle(
+      {
+        params: { month: "2026-08" },
+        session: {
+          user: { id: "admin-1", role: "admin", name: "管理员甲" },
+        },
+      },
+      response,
+    );
+
+    const linkedQuery = (db.all as jest.Mock).mock.calls
+      .map(([sql]) => String(sql))
+      .find((sql) =>
+        sql.includes(
+          "SELECT DISTINCT ON (link.transaction_id, reimbursement.id)",
+        ),
+      );
+    expect(linkedQuery).toContain(
+      "link.match_key_json ->> 'previousPaymentProofPath'",
+    );
+    expect(linkedQuery).toContain("link.match_key_json ->> 'displayAction'");
+    expect(linkedQuery).not.toContain("reimbursement.payment_proof_path");
+    expect(linkedQuery).not.toContain("payment_batch.payment_proof_path");
+
+    const transaction = response.json.mock.calls[0][0].data.accounts.find(
+      (account: { accountCode: string }) => account.accountCode === "basic",
+    ).transactions[0];
+    expect(transaction).toMatchObject({
+      linkStatus: "matched",
+      employeeMatch: {
+        status: "matched",
+        employeeId: "employee-1",
+        employeeName: "申请人甲",
+      },
+      reimbursementLink: {
+        status: "matched",
+        displayAction: "replaced",
+        reasons: [],
+      },
+    });
+    expect(transaction.reimbursementLink.linkedReimbursements).toEqual([
+      expect.objectContaining({
+        id: "reimbursement-1",
+        applicantId: "user-1",
+        allocatedAmount: "88.5",
+        detailUrl: "/basic-reimbursement/reimbursement-1",
+        originalProofPreviewUrl:
+          "/api/monthly-financial-reports/bank-transactions/bank-transaction-1/reimbursements/reimbursement-1/previous-proof",
+        bankProofPreviewUrl:
+          "/api/monthly-financial-reports/bank-transactions/bank-transaction-1/preview?accountCode=basic",
+        effectiveProofPreviewUrl:
+          "/api/monthly-financial-reports/bank-transactions/bank-transaction-1/preview?accountCode=basic",
+      }),
+    ]);
+    const attachedTransaction = response.json.mock.calls[0][0].data.accounts
+      .find(
+        (account: { accountCode: string }) => account.accountCode === "basic",
+      )
+      .transactions.find(
+        (item: { id: string }) => item.id === "bank-transaction-2",
+      );
+    expect(attachedTransaction.reimbursementLink).toMatchObject({
+      status: "matched",
+      displayAction: "attached",
+      linkedReimbursements: [
+        expect.objectContaining({
+          id: "reimbursement-2",
+          originalProofPreviewUrl: null,
+          effectiveProofPreviewUrl:
+            "/api/monthly-financial-reports/bank-transactions/bank-transaction-2/preview?accountCode=basic",
+        }),
+      ],
+    });
+  });
+
+  it("仅允许报销申请人或原月报读角色预览裁片，并拒绝路径逃逸", async () => {
+    const previewRoot = path.join(
+      process.cwd(),
+      "uploads",
+      "monthly-financial-bank",
+      "recognized",
+    );
+    const temporaryDirectory = fs.mkdtempSync(
+      path.join(previewRoot, "access-test-"),
+    );
+    const previewPath = path.join(temporaryDirectory, "receipt.jpg");
+    fs.writeFileSync(previewPath, "preview");
+    const storedPreviewPath = path.relative(process.cwd(), previewPath);
+    const route = findRoute("/bank-transactions/:transactionId/preview", "get");
+
+    try {
+      (db.get as jest.Mock)
+        .mockResolvedValueOnce({
+          crop_path: storedPreviewPath,
+          occurrence_crop_path: null,
+          historical_crop_path: null,
+          owns_linked_reimbursement: true,
+        })
+        .mockResolvedValueOnce({
+          crop_path: storedPreviewPath,
+          occurrence_crop_path: null,
+          historical_crop_path: null,
+          owns_linked_reimbursement: false,
+        })
+        .mockResolvedValueOnce({
+          crop_path: "package.json",
+          occurrence_crop_path: null,
+          historical_crop_path: null,
+          owns_linked_reimbursement: false,
+        });
+
+      const ownerResponse = previewResponseMock();
+      await route.stack.at(-1)!.handle(
+        {
+          params: { transactionId: "bank-transaction-1" },
+          query: {},
+          session: {
+            user: { id: "user-1", role: "user", name: "申请人甲" },
+          },
+        },
+        ownerResponse,
+      );
+      expect(ownerResponse.status).not.toHaveBeenCalled();
+      expect(ownerResponse.sendFile).toHaveBeenCalledWith(previewPath);
+
+      const otherResponse = previewResponseMock();
+      await route.stack.at(-1)!.handle(
+        {
+          params: { transactionId: "bank-transaction-1" },
+          query: {},
+          session: {
+            user: { id: "user-2", role: "user", name: "申请人乙" },
+          },
+        },
+        otherResponse,
+      );
+      expect(otherResponse.status).toHaveBeenCalledWith(403);
+      expect(otherResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "MONTHLY_BANK_PREVIEW_FORBIDDEN" }),
+      );
+      expect(otherResponse.sendFile).not.toHaveBeenCalled();
+
+      const unsafeResponse = previewResponseMock();
+      await route.stack.at(-1)!.handle(
+        {
+          params: { transactionId: "bank-transaction-1" },
+          query: {},
+          session: {
+            user: { id: "admin-1", role: "admin", name: "管理员甲" },
+          },
+        },
+        unsafeResponse,
+      );
+      expect(unsafeResponse.status).toHaveBeenCalledWith(403);
+      expect(unsafeResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "MONTHLY_BANK_PREVIEW_PATH_FORBIDDEN",
+        }),
+      );
+      expect(unsafeResponse.sendFile).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("原回单仅通过有效替换链接向申请人、管理员和商务总经理开放，并限制三类证据根目录", async () => {
+    const fixtureRoots = [
+      path.join(process.cwd(), "uploads", "invoices"),
+      path.join(process.cwd(), "uploads", "bank-receipts"),
+      path.join(process.cwd(), "uploads", "monthly-financial-bank"),
+    ];
+    fixtureRoots.forEach((root) => fs.mkdirSync(root, { recursive: true }));
+    const fixtureDirectories = fixtureRoots.map((root, index) =>
+      fs.mkdtempSync(path.join(root, `previous-proof-${index}-`)),
+    );
+    const fixturePaths = fixtureDirectories.map((directory, index) => {
+      const filePath = path.join(directory, `proof-${index}.pdf`);
+      fs.writeFileSync(filePath, `proof-${index}`);
+      return filePath;
+    });
+    const storedPaths = fixturePaths.map((filePath) =>
+      path.relative(process.cwd(), filePath),
+    );
+    const route = findRoute(
+      "/bank-transactions/:transactionId/reimbursements/:reimbursementId/previous-proof",
+      "get",
+    );
+    const linkedRow = (
+      previousPaymentProofPath: string,
+      type: "basic" | "large" | "business" = "basic",
+    ) => ({
+      user_id: "applicant-1",
+      type,
+      previous_payment_proof_path: previousPaymentProofPath,
+    });
+    const request = (user: { id: string; role: string }, query = {}) => ({
+      params: {
+        transactionId: "bank-transaction-1",
+        reimbursementId: "reimbursement-1",
+      },
+      query,
+      session: { user: { ...user, name: user.id } },
+    });
+
+    try {
+      (db.get as jest.Mock)
+        .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
+        .mockResolvedValueOnce(linkedRow(storedPaths[1]!))
+        .mockResolvedValueOnce(linkedRow(`/${storedPaths[2]!}`, "business"))
+        .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
+        .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
+        .mockResolvedValueOnce(linkedRow("uploads/invoices/../../package.json"))
+        .mockResolvedValueOnce(null);
+
+      const applicantResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "applicant-1", role: "user" }),
+          applicantResponse,
+        );
+      expect(applicantResponse.sendFile).toHaveBeenCalledWith(fixturePaths[0]);
+
+      const adminResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(request({ id: "admin-1", role: "admin" }), adminResponse);
+      expect(adminResponse.sendFile).toHaveBeenCalledWith(fixturePaths[1]);
+
+      const businessManagerResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "manager-1", role: "general_manager" }),
+          businessManagerResponse,
+        );
+      expect(businessManagerResponse.sendFile).toHaveBeenCalledWith(
+        fixturePaths[2],
+      );
+
+      const basicManagerResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "manager-1", role: "general_manager" }),
+          basicManagerResponse,
+        );
+      expect(basicManagerResponse.status).toHaveBeenCalledWith(403);
+      expect(basicManagerResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "MONTHLY_PREVIOUS_PAYMENT_PROOF_FORBIDDEN",
+        }),
+      );
+
+      const unrelatedResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "applicant-2", role: "user" }),
+          unrelatedResponse,
+        );
+      expect(unrelatedResponse.status).toHaveBeenCalledWith(403);
+      expect(unrelatedResponse.sendFile).not.toHaveBeenCalled();
+
+      const unsafeResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(request({ id: "admin-1", role: "admin" }), unsafeResponse);
+      expect(unsafeResponse.status).toHaveBeenCalledWith(403);
+      expect(unsafeResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "MONTHLY_PREVIOUS_PAYMENT_PROOF_PATH_FORBIDDEN",
+        }),
+      );
+      expect(unsafeResponse.sendFile).not.toHaveBeenCalled();
+
+      const inactiveLinkResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "admin-1", role: "admin" }),
+          inactiveLinkResponse,
+        );
+      expect(inactiveLinkResponse.status).toHaveBeenCalledWith(404);
+      expect(inactiveLinkResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: "MONTHLY_PREVIOUS_PAYMENT_PROOF_NOT_FOUND",
+        }),
+      );
+      expect(inactiveLinkResponse.sendFile).not.toHaveBeenCalled();
+
+      const linkedQuery = (db.get as jest.Mock).mock.calls
+        .map(([sql]) => String(sql))
+        .find(
+          (sql) =>
+            sql.includes("previousPaymentProofPath") &&
+            sql.includes("displayAction") &&
+            sql.includes("bank_transaction.is_current = TRUE"),
+        );
+      expect(linkedQuery).toContain("link.link_kind = 'display_replacement'");
+      expect(linkedQuery).toContain("link.match_status = 'active'");
+      expect(linkedQuery).toContain("link.is_active = TRUE");
+      expect(linkedQuery).toContain("bank_file.is_active = TRUE");
+      expect(linkedQuery).toContain("reimbursement.is_deleted = FALSE");
+
+      const invalidIndexResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "admin-1", role: "admin" }, { index: "../1" }),
+          invalidIndexResponse,
+        );
+      expect(invalidIndexResponse.status).toHaveBeenCalledWith(400);
+      expect(invalidIndexResponse.sendFile).not.toHaveBeenCalled();
+    } finally {
+      fixtureDirectories.forEach((directory) =>
+        fs.rmSync(directory, { recursive: true, force: true }),
+      );
+    }
+  });
+});
+
 describe("月度财务报表菜单、路由与后端接口权限", () => {
   it("菜单和页面路由精确限制普通管理员及总经理", () => {
     const layoutSource = source("src/layouts/MainLayout.vue");
@@ -1053,8 +1961,34 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
     expect(routeBlock).not.toContain('"boss"');
   });
 
-  it("六个后端接口完整存在且分别绑定精确读写角色", () => {
+  it("十二个后端接口完整存在，裁片与原回单受登录保护且其余接口绑定精确角色", () => {
     const expected = [
+      {
+        path: "/bank-transactions/:transactionId/preview",
+        method: "get",
+        authRequired: true,
+      },
+      {
+        path: "/bank-transactions/:transactionId/reimbursements/:reimbursementId/previous-proof",
+        method: "get",
+        authRequired: true,
+      },
+      {
+        path: "/:month/bank-receipts",
+        method: "get",
+        roles: ["admin", "general_manager"],
+      },
+      {
+        path: "/:month/bank-receipts",
+        method: "post",
+        roles: ["admin"],
+      },
+      {
+        path: "/:month/bank-transactions/:transactionId/review",
+        method: "post",
+        roles: ["admin"],
+      },
+      { path: "/trend", method: "get", roles: ["admin", "general_manager"] },
       { path: "/:month", method: "get", roles: ["admin", "general_manager"] },
       { path: "/:month/manual-items", method: "put", roles: ["admin"] },
       { path: "/:month/refresh", method: "post", roles: ["admin"] },
@@ -1068,13 +2002,298 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
     ];
 
     expect(routeLayers()).toHaveLength(expected.length);
-    expected.forEach(({ path: pathname, method, roles }) => {
+    expected.forEach(({ path: pathname, method, ...permission }) => {
       const route = findRoute(pathname, method);
-      expect(route.stack[0].handle.allowedRoles).toEqual(roles);
-      expect(route.stack[0].handle.allowedRoles).not.toEqual(
-        expect.arrayContaining(["super_admin", "chairman", "boss", "user"]),
-      );
+      if ("authRequired" in permission) {
+        expect(route.stack[0].handle.authRequired).toBe(true);
+        expect(route.stack[0].handle.allowedRoles).toBeUndefined();
+      } else {
+        expect(route.stack[0].handle.allowedRoles).toEqual(permission.roles);
+        expect(route.stack[0].handle.allowedRoles).not.toEqual(
+          expect.arrayContaining(["super_admin", "chairman", "boss", "user"]),
+        );
+      }
     });
+    expect(
+      routeLayers().findIndex((layer) => layer.route?.path === "/trend"),
+    ).toBeLessThan(
+      routeLayers().findIndex((layer) => layer.route?.path === "/:month"),
+    );
+  });
+
+  it("趋势接口从当前月结版本快照取值并为缺失月份返回空断点", async () => {
+    const automatic: MonthlyFinancialAutomaticSnapshot = {
+      ...emptyAutomaticSnapshot(),
+      income: {
+        mainBusinessReceipts: "500",
+        tax: "10",
+        marketingReserve: "20",
+        businessCost: "30",
+        accountingBase: "80",
+      },
+    };
+    const internal = buildMonthlyFinancialReportView({
+      id: "report-trend-closed",
+      month: "2026-01",
+      status: "closed",
+      version: 2,
+      openingBalances: {
+        general: "0",
+        business: "0",
+        welfare_one: "0",
+        welfare_two: "0",
+      },
+      automatic,
+      manualItems: [],
+      lastRefreshedAt: "2026-01-31T01:00:00.000Z",
+      closedAt: "2026-02-01T01:00:00.000Z",
+      updatedAt: "2026-02-01T01:00:00.000Z",
+      canMaintain: true,
+    });
+    const accounts = internal.accounts.map((account) => ({
+      code: account.code,
+      name: account.name,
+      opening: account.openingBalance,
+      inflow: account.income,
+      outflow: account.expense,
+      closing: account.closingBalance,
+    }));
+    const storedSnapshot = {
+      month: "2026-01",
+      status: "closed",
+      version: 2,
+      snapshotVersion: 2,
+      isFirstMonth: true,
+      generatedAt: automatic.generatedAt,
+      savedAt: "2026-02-01T01:00:00.000Z",
+      closedAt: "2026-02-01T01:00:00.000Z",
+      closedByName: "管理员甲",
+      reopenedAt: null,
+      accounts,
+      income: {
+        mainReceipt: "500",
+        tax: "10",
+        marketingReserve: "20",
+        businessCost: "30",
+        accountingBase: "80",
+        generalInterest: "0",
+        businessInterest: "0",
+        welfareOneSupplement: "0",
+        welfareTwoSupplement: "0",
+      },
+      expenses: {},
+      automaticDetails: [],
+      totals: {
+        opening: "0",
+        income: "500",
+        expense: "0",
+        closing: "130",
+        netChange: "130",
+      },
+      manualItems: [],
+      sources: [],
+      validations: { canClose: false, blockers: [], warnings: [] },
+      permissions: {
+        canEdit: false,
+        canRefresh: false,
+        canSubmitReview: false,
+        canClose: false,
+        canReopen: true,
+        canDownload: true,
+      },
+      __internal: internal,
+      __automatic: automatic,
+    };
+    const row = {
+      id: "report-trend-closed",
+      report_month: "2026-01",
+      status: "closed",
+      version: 2,
+      opening_balances_json: internal.openingBalances,
+      automatic_snapshot_json: {
+        ...automatic,
+        income: { ...automatic.income, mainBusinessReceipts: "999" },
+      },
+      closing_balances_json: Object.fromEntries(
+        accounts.map((account) => [account.code, account.closing]),
+      ),
+      last_refreshed_at: "2026-01-31T01:00:00.000Z",
+      closed_at: "2026-02-01T01:00:00.000Z",
+      closed_by_name: "管理员甲",
+      reopened_at: null,
+      updated_at: "2026-02-01T01:00:00.000Z",
+    };
+
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT report_month")) {
+        return [{ report_month: "2026-01" }];
+      }
+      if (sql.includes("SELECT DISTINCT LEFT(report_month, 4)")) {
+        return [{ year: 2025 }, { year: 2026 }];
+      }
+      return [];
+    });
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM monthly_financial_reports report")) return row;
+      if (sql.includes("WHERE report_month <")) return undefined;
+      if (sql.includes("FROM monthly_financial_snapshots")) {
+        return { snapshot_json: storedSnapshot };
+      }
+      return undefined;
+    });
+    const response = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    };
+    const route = findRoute("/trend", "get");
+
+    await route.stack.at(-1)!.handle(
+      {
+        query: { from: "2026-01", to: "2026-02" },
+        session: {
+          user: { id: "admin-1", role: "admin", name: "管理员甲" },
+        },
+      },
+      response,
+    );
+
+    expect(response.status).not.toHaveBeenCalled();
+    const payload = response.json.mock.calls[0]?.[0];
+    expect(payload.data.availableYears).toEqual([2025, 2026]);
+    expect(payload.data.points[0]).toMatchObject({
+      month: "2026-01",
+      status: "closed",
+      valueState: "closed",
+      actualReceipt: "500",
+    });
+    expect(payload.data.points[0].actualReceipt).not.toBe("999");
+    expect(payload.data.points[1]).toMatchObject({
+      month: "2026-02",
+      status: null,
+      valueState: null,
+      actualReceipt: null,
+      closingTotal: null,
+    });
+  });
+
+  it("趋势接口对重新开启月份使用当前开放报表的精确工作值", async () => {
+    const automatic: MonthlyFinancialAutomaticSnapshot = {
+      ...emptyAutomaticSnapshot(),
+      income: {
+        mainBusinessReceipts: "300",
+        tax: "10",
+        marketingReserve: "20",
+        businessCost: "30",
+        accountingBase: "240",
+      },
+    };
+    const row = {
+      id: "report-trend-reopened",
+      report_month: "2026-03",
+      status: "reopened",
+      version: 5,
+      opening_balances_json: {
+        general: "0",
+        business: "0",
+        welfare_one: "0",
+        welfare_two: "0",
+      },
+      automatic_snapshot_json: automatic,
+      closing_balances_json: null,
+      last_refreshed_at: "2026-03-31T01:00:00.000Z",
+      closed_at: null,
+      closed_by_name: null,
+      reopened_at: "2026-04-01T01:00:00.000Z",
+      updated_at: "2026-04-01T01:00:00.000Z",
+    };
+
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT report_month")) {
+        return [{ report_month: "2026-03" }];
+      }
+      if (sql.includes("SELECT DISTINCT LEFT(report_month, 4)")) {
+        return [{ year: 2026 }];
+      }
+      return [];
+    });
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM monthly_financial_reports report")) return row;
+      if (sql.includes("FROM monthly_financial_snapshots")) {
+        throw new Error("重新开启月份不应读取旧月结快照");
+      }
+      if (sql.includes("AS review_required_count")) {
+        return {
+          review_required_count: 0,
+          unclassified_count: 0,
+          conflict_count: 0,
+        };
+      }
+      return undefined;
+    });
+    const response = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    };
+    const route = findRoute("/trend", "get");
+
+    await route.stack.at(-1)!.handle(
+      {
+        query: { from: "2026-03", to: "2026-03" },
+        session: {
+          user: { id: "admin-1", role: "admin", name: "管理员甲" },
+        },
+      },
+      response,
+    );
+
+    expect(response.status).not.toHaveBeenCalled();
+    const currentPoint = response.json.mock.calls[0]?.[0].data.points[0];
+    expect(currentPoint).toMatchObject({
+      month: "2026-03",
+      status: "reopened",
+      valueState: "current",
+      actualReceipt: "300",
+    });
+    expect(currentPoint).not.toHaveProperty("isEstimate");
+    expect(
+      (db.get as jest.Mock).mock.calls.some(([sql]) =>
+        String(sql).includes("FROM monthly_financial_snapshots"),
+      ),
+    ).toBe(false);
+  });
+
+  it("趋势接口拒绝倒序和超过二百四十个月的查询", async () => {
+    const route = findRoute("/trend", "get");
+    const request = (from: string, to: string) => ({
+      query: { from, to },
+      session: {
+        user: { id: "admin-1", role: "admin", name: "管理员甲" },
+      },
+    });
+    const response = () => ({
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    });
+    const reversed = response();
+    const oversized = response();
+
+    await route.stack.at(-1)!.handle(request("2026-02", "2026-01"), reversed);
+    await route.stack.at(-1)!.handle(request("2000-01", "2020-01"), oversized);
+
+    for (const result of [reversed, oversized]) {
+      expect(result.status).toHaveBeenCalledWith(400);
+      expect(result.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          code: "MONTHLY_FINANCE_TREND_RANGE_INVALID",
+        }),
+      );
+    }
+    expect(db.all).not.toHaveBeenCalled();
   });
 
   it("下载生成完整工作簿并防止手工项和自动来源触发公式注入", async () => {

@@ -7,6 +7,22 @@ import type {
   ContractCategory,
   ContractDeclaredSubtype,
   ContractDeclaredSubtypeOptions,
+  ContractDepositFundingSource,
+  ContractDepositEngineeringReturnPayload,
+  ContractDepositMutationPayload,
+  ContractDepositPaymentRecordKind,
+  ContractDepositReceipt,
+  ContractDepositReceiptStatus,
+  ContractDepositReturnReceiptKind,
+  ContractDepositReturnReceiptRecognition,
+  ContractDepositSettlement,
+  ContractDepositSettlementPayload,
+  ContractDepositSettlementReceipt,
+  ContractDepositSettlementType,
+  ContractDepositSnapshot,
+  ContractDepositStatus,
+  ContractCompletedInternalFundingRecognition,
+  ContractCompletedInternalFundingSummary,
   ContractDashboardQuery,
   ContractDashboardResponse,
   ContractDetailResponse,
@@ -16,6 +32,8 @@ import type {
   ContractFinancialRegistrationPayload,
   ContractFinancialRegistrationResult,
   ContractFinancialOcrResult,
+  ContractFinancialOcrTaskStatus,
+  ContractFinancialValidationStatus,
   ContractFinanceRecordStatus,
   ContractListItem,
   ContractListQuery,
@@ -25,6 +43,8 @@ import type {
   ContractOcrFieldKey,
   ContractOcrJob,
   ContractPendingApprovalResponse,
+  ContractPaymentPurposeDetail,
+  ContractPaymentPurposeDetails,
   ContractProcessedApprovalResponse,
   ContractRateCode,
   ContractRateMutationPayload,
@@ -118,6 +138,400 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+const CONTRACT_DEPOSIT_RECEIPT_STATUSES = new Set<ContractDepositReceiptStatus>(
+  [
+    "recognizing",
+    "recognized",
+    "manual_review",
+    "verified",
+    "failed",
+    "voided",
+  ],
+);
+
+function normalizeContractDepositReceipt(
+  value: unknown,
+): ContractDepositReceipt {
+  const source = recordOrNull(value) || {};
+  const rawStatus = String(source.status || "manual_review");
+  const statusAlias: Record<string, ContractDepositReceiptStatus> = {
+    pending: "manual_review",
+    processing: "recognizing",
+    pending_review: "manual_review",
+    review_required: "manual_review",
+    ocr_failed: "failed",
+    confirmed: "verified",
+  };
+  const rawOcrStatus = String(source.ocrStatus ?? source.ocr_status ?? "");
+  const pendingStatus: ContractDepositReceiptStatus =
+    rawOcrStatus === "recognized"
+      ? "recognized"
+      : rawOcrStatus === "failed"
+        ? "failed"
+        : "manual_review";
+  const status =
+    rawStatus === "pending"
+      ? pendingStatus
+      : CONTRACT_DEPOSIT_RECEIPT_STATUSES.has(
+            rawStatus as ContractDepositReceiptStatus,
+          )
+        ? (rawStatus as ContractDepositReceiptStatus)
+        : statusAlias[rawStatus] || "manual_review";
+  return {
+    id: String(source.id || ""),
+    contractId: String(source.contractId ?? source.contract_id ?? ""),
+    financialRecordId: String(
+      source.financialRecordId ??
+        source.financial_record_id ??
+        source.paymentRecordId ??
+        source.payment_record_id ??
+        "",
+    ),
+    fileId: String(source.fileId ?? source.file_id ?? ""),
+    fileName: String(
+      source.fileName ??
+        source.file_name ??
+        source.originalName ??
+        "押金条原件",
+    ),
+    mimeType: (source.mimeType ?? source.mime_type ?? null) as string | null,
+    previewUrl: (source.previewUrl ??
+      source.preview_url ??
+      source.fileUrl ??
+      source.file_url ??
+      null) as string | null,
+    ocrAmount: (source.ocrAmount ??
+      source.ocr_amount ??
+      source.recognizedAmount ??
+      source.recognized_amount ??
+      null) as string | number | null,
+    verifiedAmount: (source.verifiedAmount ??
+      source.verified_amount ??
+      source.confirmedAmount ??
+      source.confirmed_amount ??
+      null) as string | number | null,
+    status,
+    recognitionMessage: (source.recognitionMessage ??
+      source.recognition_message ??
+      source.ocrFailureMessage ??
+      source.ocr_failure_message ??
+      null) as string | null,
+    createdBy: (source.createdBy ??
+      source.created_by ??
+      source.uploadedBy ??
+      source.uploaded_by ??
+      null) as string | null,
+    createdByName: (source.createdByName ??
+      source.created_by_name ??
+      source.uploadedByName ??
+      source.uploaded_by_name ??
+      null) as string | null,
+    createdAt: (source.createdAt ?? source.created_at ?? null) as string | null,
+    verifiedBy: (source.verifiedBy ??
+      source.verified_by ??
+      source.confirmedBy ??
+      source.confirmed_by ??
+      null) as string | null,
+    verifiedByName: (source.verifiedByName ??
+      source.verified_by_name ??
+      source.confirmedByName ??
+      source.confirmed_by_name ??
+      null) as string | null,
+    verifiedAt: (source.verifiedAt ??
+      source.verified_at ??
+      source.confirmedAt ??
+      source.confirmed_at ??
+      null) as string | null,
+    voidedBy: (source.voidedBy ?? source.voided_by ?? null) as string | null,
+    voidedByName: (source.voidedByName ?? source.voided_by_name ?? null) as
+      | string
+      | null,
+    voidedAt: (source.voidedAt ?? source.voided_at ?? null) as string | null,
+    voidReason: (source.voidReason ?? source.void_reason ?? null) as
+      | string
+      | null,
+  };
+}
+
+const CONTRACT_DEPOSIT_STATUSES = new Set<ContractDepositStatus>([
+  "pending_payment",
+  "active",
+  "partially_settled",
+  "settled",
+]);
+const CONTRACT_DEPOSIT_FUNDING_SOURCES = new Set<ContractDepositFundingSource>([
+  "engineering_allocation",
+  "technology_self_funded",
+  "mixed",
+  "pending_review",
+]);
+const CONTRACT_DEPOSIT_SETTLEMENT_TYPES =
+  new Set<ContractDepositSettlementType>([
+    "refund",
+    "deduction",
+    "rent_offset",
+  ]);
+
+function normalizeContractDepositFundingSource(
+  value: unknown,
+): ContractDepositFundingSource {
+  const normalized = String(value || "pending_review");
+  const aliases: Record<string, ContractDepositFundingSource> = {
+    engineering_transfer: "engineering_allocation",
+    technology_self: "technology_self_funded",
+    pending: "pending_review",
+  };
+  return CONTRACT_DEPOSIT_FUNDING_SOURCES.has(
+    normalized as ContractDepositFundingSource,
+  )
+    ? (normalized as ContractDepositFundingSource)
+    : aliases[normalized] || "pending_review";
+}
+
+function normalizeContractDepositSettlement(
+  value: unknown,
+): ContractDepositSettlement {
+  const source = recordOrNull(value) || {};
+  const rawType = String(source.type ?? source.settlement_type ?? "refund");
+  const typeAlias: Record<string, ContractDepositSettlementType> = {
+    offset_rent: "rent_offset",
+    offset: "rent_offset",
+    withheld: "deduction",
+  };
+  const type = CONTRACT_DEPOSIT_SETTLEMENT_TYPES.has(
+    rawType as ContractDepositSettlementType,
+  )
+    ? (rawType as ContractDepositSettlementType)
+    : typeAlias[rawType] || "refund";
+  const rawEngineeringReturnReceipts =
+    source.engineeringReturnReceipts ?? source.engineering_return_receipts;
+  return {
+    id: String(source.id || ""),
+    type,
+    amount: (source.amount ?? 0) as string | number,
+    settlementDate: String(
+      source.settlementDate ?? source.settlement_date ?? "",
+    ),
+    note: (source.note ?? null) as string | null,
+    refundReceipt: normalizeContractDepositSettlementReceipt(
+      source.refundReceipt ?? source.refund_receipt,
+    ),
+    engineeringReturnReceipts: (Array.isArray(rawEngineeringReturnReceipts)
+      ? rawEngineeringReturnReceipts
+      : []
+    )
+      .map(normalizeContractDepositSettlementReceipt)
+      .filter(
+        (receipt): receipt is ContractDepositSettlementReceipt =>
+          receipt !== null,
+      ),
+    engineeringReturnRequiredAmount: (source.engineeringReturnRequiredAmount ??
+      source.engineering_return_required_amount ??
+      0) as string | number,
+    engineeringReturnedAmount: (source.engineeringReturnedAmount ??
+      source.engineering_returned_amount ??
+      0) as string | number,
+    engineeringReturnStatus: (source.engineeringReturnStatus ??
+      source.engineering_return_status ??
+      null) as ContractDepositSettlement["engineeringReturnStatus"],
+    createdBy: (source.createdBy ?? source.created_by ?? null) as string | null,
+    createdByName: (source.createdByName ?? source.created_by_name ?? null) as
+      | string
+      | null,
+    createdAt: (source.createdAt ?? source.created_at ?? null) as string | null,
+  };
+}
+
+function normalizeContractDepositSettlementReceipt(
+  value: unknown,
+): ContractDepositSettlementReceipt | null {
+  const source = recordOrNull(value);
+  if (!source) return null;
+  return {
+    id: String(source.id || ""),
+    fileName: String(source.fileName ?? source.file_name ?? "回单原件"),
+    fileSize: Number(source.fileSize ?? source.file_size ?? 0),
+    mimeType: (source.mimeType ?? source.mime_type ?? null) as string | null,
+    amount: (source.amount ?? 0) as string | number,
+    transactionDate: String(
+      source.transactionDate ?? source.transaction_date ?? "",
+    ),
+    fileUrl: String(
+      source.fileUrl ??
+        source.file_url ??
+        source.previewUrl ??
+        source.preview_url ??
+        "",
+    ),
+    uploadedBy: (source.uploadedBy ?? source.uploaded_by ?? null) as
+      | string
+      | null,
+    uploadedByName: (source.uploadedByName ??
+      source.uploaded_by_name ??
+      null) as string | null,
+    createdAt: (source.createdAt ?? source.created_at ?? null) as string | null,
+  };
+}
+
+function normalizeContractDepositSnapshot(
+  value: unknown,
+): ContractDepositSnapshot {
+  const source = recordOrNull(value) || {};
+  const eligibility = recordOrNull(source.eligibility) || {};
+  const rawDeposit =
+    source.deposit === null
+      ? null
+      : recordOrNull(source.deposit) ||
+        (source.id || source.amount !== undefined ? source : null);
+  const deposit = rawDeposit
+    ? (() => {
+        const rawStatus = String(rawDeposit.status || "pending_payment");
+        const statusAliases: Record<string, ContractDepositStatus> = {
+          pending: "pending_payment",
+          paid: "active",
+          partial: "partially_settled",
+          completed: "settled",
+        };
+        const status = CONTRACT_DEPOSIT_STATUSES.has(
+          rawStatus as ContractDepositStatus,
+        )
+          ? (rawStatus as ContractDepositStatus)
+          : statusAliases[rawStatus] || "pending_payment";
+        const rawPaymentRecordKind = String(
+          rawDeposit.paymentRecordKind ?? rawDeposit.payment_record_kind ?? "",
+        );
+        const paymentRecordKind = ["payment", "external_payment"].includes(
+          rawPaymentRecordKind,
+        )
+          ? (rawPaymentRecordKind as ContractDepositPaymentRecordKind)
+          : null;
+        const rawSettlements =
+          rawDeposit.settlements ?? rawDeposit.settlement_records;
+        return {
+          id: String(rawDeposit.id || ""),
+          contractId: String(
+            rawDeposit.contractId ?? rawDeposit.contract_id ?? "",
+          ),
+          amount: (rawDeposit.amount ?? 0) as string | number,
+          clauseText: (rawDeposit.clauseText ??
+            rawDeposit.clause_text ??
+            null) as string | null,
+          basis: (rawDeposit.basis ?? null) as string | null,
+          paymentPurpose: "lease_deposit" as const,
+          fundingSource: normalizeContractDepositFundingSource(
+            rawDeposit.fundingSource ?? rawDeposit.funding_source,
+          ),
+          paymentRecordId: (rawDeposit.paymentRecordId ??
+            rawDeposit.payment_record_id ??
+            null) as string | null,
+          paymentRecordKind,
+          paidAt: (rawDeposit.paidAt ?? rawDeposit.paid_at ?? null) as
+            | string
+            | null,
+          note: (rawDeposit.note ?? null) as string | null,
+          engineeringAllocationAmount:
+            (rawDeposit.engineeringAllocationAmount ??
+              rawDeposit.engineering_allocation_amount ??
+              0) as string | number,
+          technologySelfFundedAmount: (rawDeposit.technologySelfFundedAmount ??
+            rawDeposit.technology_self_funded_amount ??
+            0) as string | number,
+          pendingEngineeringReturn: (rawDeposit.pendingEngineeringReturn ??
+            rawDeposit.pending_engineering_return ??
+            0) as string | number,
+          status,
+          settledAmount: (rawDeposit.settledAmount ??
+            rawDeposit.settled_amount ??
+            0) as string | number,
+          remainingAmount: (rawDeposit.remainingAmount ??
+            rawDeposit.remaining_amount ??
+            rawDeposit.amount ??
+            0) as string | number,
+          settlements: (Array.isArray(rawSettlements)
+            ? rawSettlements
+            : []
+          ).map(normalizeContractDepositSettlement),
+          createdBy: (rawDeposit.createdBy ?? rawDeposit.created_by ?? null) as
+            | string
+            | null,
+          createdByName: (rawDeposit.createdByName ??
+            rawDeposit.created_by_name ??
+            null) as string | null,
+          createdAt: (rawDeposit.createdAt ?? rawDeposit.created_at ?? null) as
+            | string
+            | null,
+          updatedBy: (rawDeposit.updatedBy ?? rawDeposit.updated_by ?? null) as
+            | string
+            | null,
+          updatedByName: (rawDeposit.updatedByName ??
+            rawDeposit.updated_by_name ??
+            null) as string | null,
+          updatedAt: (rawDeposit.updatedAt ?? rawDeposit.updated_at ?? null) as
+            | string
+            | null,
+        };
+      })()
+    : null;
+  const rawReason = String(
+    eligibility.reason ??
+      source.eligibilityReason ??
+      source.eligibility_reason ??
+      "non_rental_subtype",
+  );
+  return {
+    eligibility: {
+      likely: Boolean(
+        eligibility.likely ?? source.likely ?? rawReason === "rental_subtype",
+      ),
+      reason:
+        rawReason === "rental_subtype"
+          ? "rental_subtype"
+          : "non_rental_subtype",
+      subtype: (eligibility.subtype ?? source.subtype ?? null) as
+        | ContractDepositSnapshot["eligibility"]["subtype"]
+        | null,
+    },
+    deposit,
+  };
+}
+
+function normalizeContractPaymentPurposeDetails(
+  value: unknown,
+  contractId: string,
+  recordId: string,
+): ContractPaymentPurposeDetails {
+  const source = recordOrNull(value) || {};
+  const rawDetails = Array.isArray(source.details)
+    ? source.details
+    : Array.isArray(value)
+      ? value
+      : [];
+  const details = rawDetails.map((item): ContractPaymentPurposeDetail => {
+    const detail = recordOrNull(item) || {};
+    return {
+      purpose:
+        detail.purpose === "lease_deposit"
+          ? "lease_deposit"
+          : "contract_payment",
+      amount: (detail.amount ?? 0) as string | number,
+      fundingSource: normalizeContractDepositFundingSource(
+        detail.fundingSource ?? detail.funding_source,
+      ),
+      engineeringAllocationAmount: (detail.engineeringAllocationAmount ??
+        detail.engineering_allocation_amount ??
+        null) as string | number | null,
+      technologySelfFundedAmount: (detail.technologySelfFundedAmount ??
+        detail.technology_self_funded_amount ??
+        null) as string | number | null,
+    };
+  });
+  return {
+    contractId: String(source.contractId ?? source.contract_id ?? contractId),
+    recordId: String(source.recordId ?? source.record_id ?? recordId),
+    details,
+  };
 }
 
 function firstDefined(
@@ -501,6 +915,10 @@ export async function getContracts(
       renewal_contract_id?: unknown;
       renewal_contract_name?: unknown;
       renewal_contract_status?: unknown;
+      related_agreement_count?: unknown;
+      supplement_agreement_count?: unknown;
+      termination_agreement_count?: unknown;
+      historical_imported?: unknown;
     };
     return {
       ...item,
@@ -520,6 +938,22 @@ export async function getContracts(
       renewalContractStatus: (source.renewalContractStatus ??
         source.renewal_contract_status ??
         null) as ContractStatus | null,
+      relatedAgreementCount:
+        numberOrNull(
+          source.relatedAgreementCount ?? source.related_agreement_count,
+        ) ?? 0,
+      supplementAgreementCount:
+        numberOrNull(
+          source.supplementAgreementCount ?? source.supplement_agreement_count,
+        ) ?? 0,
+      terminationAgreementCount:
+        numberOrNull(
+          source.terminationAgreementCount ??
+            source.termination_agreement_count,
+        ) ?? 0,
+      historicalImported: Boolean(
+        source.historicalImported ?? source.historical_imported,
+      ),
     };
   });
   const rawSummary = (data.summary || {}) as ContractListResponse["summary"] & {
@@ -1411,6 +1845,9 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
     projectName: String(source.projectName ?? source.project_name ?? ""),
     projectId: (source.projectId ?? source.project_id ?? null) as string | null,
     category: (source.category ?? null) as ContractCategory | null,
+    contractCompanySubjectName: (source.contractCompanySubjectName ??
+      source.contract_company_subject_name ??
+      null) as string | null,
     financialDirection: (source.financialDirection ??
       source.financial_direction ??
       null) as ContractDetailResponse["contract"]["financialDirection"],
@@ -1520,6 +1957,9 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       0) as string | number,
     externalPaidAmount: (source.externalPaidAmount ??
       source.external_paid_amount ??
+      0) as string | number,
+    costSettledAmount: (source.costSettledAmount ??
+      source.cost_settled_amount ??
       0) as string | number,
     completionRate: numberOrNull(
       source.completionRate ?? source.completion_rate,
@@ -1660,6 +2100,12 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       type: kind,
       status,
       amount: (record.amount ?? 0) as string | number,
+      confirmedDepositAmount: (record.confirmedDepositAmount ??
+        record.confirmed_deposit_amount ??
+        null) as string | number | null,
+      invoiceRequiredAmount: (record.invoiceRequiredAmount ??
+        record.invoice_required_amount ??
+        null) as string | number | null,
       recordDate: date as string | null,
       invoiceNo: (record.invoiceNo ?? record.invoice_no ?? null) as
         | string
@@ -1712,6 +2158,17 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       financialOcrStatus: (record.financialOcrStatus ??
         record.financial_ocr_status ??
         null) as ContractDetailResponse["invoices"][number]["financialOcrStatus"],
+      financialRecognitionMethod: (record.financialRecognitionMethod ??
+        record.financial_recognition_method ??
+        null) as string | null,
+      financialEngineVersion: (record.financialEngineVersion ??
+        record.financial_engine_version ??
+        null) as string | null,
+      historicalConfirmedImport: Boolean(
+        record.historicalConfirmedImport ??
+        record.historical_confirmed_import ??
+        false,
+      ),
       financialValidationStatus: (record.financialValidationStatus ??
         record.financial_validation_status ??
         null) as ContractDetailResponse["invoices"][number]["financialValidationStatus"],
@@ -1733,10 +2190,16 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       financialRegistrationId: (record.financialRegistrationId ??
         record.financial_registration_id ??
         null) as string | null,
+      financialRegistrationStatus: (record.financialRegistrationStatus ??
+        record.financial_registration_status ??
+        null) as ContractDetailResponse["invoices"][number]["financialRegistrationStatus"],
       paymentTime: (record.paymentTime ?? record.payment_time ?? null) as
         | string
         | null,
       fileId: (record.fileId ?? record.file_id ?? null) as string | null,
+      canonicalReceiptPreviewUrl: (record.canonicalReceiptPreviewUrl ??
+        record.canonical_receipt_preview_url ??
+        null) as string | null,
       reversed: status === "reversed",
       reversedAt: (record.reversedAt ?? record.reversed_at ?? null) as
         | string
@@ -1872,6 +2335,7 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
   );
   const rawFinancialRegistrationMatches =
     raw.financialRegistrationMatches ?? raw.financial_registration_matches;
+  const rawDepositReceipts = raw.depositReceipts ?? raw.deposit_receipts;
   return {
     contract,
     files,
@@ -1893,6 +2357,10 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
         ? raw.external_payments
         : []
     ).map((item) => normalizeRecord(item, "external_payment")),
+    depositReceipts: (Array.isArray(rawDepositReceipts)
+      ? rawDepositReceipts
+      : []
+    ).map(normalizeContractDepositReceipt),
     financialRegistrationMatches: (Array.isArray(
       rawFinancialRegistrationMatches,
     )
@@ -2588,6 +3056,400 @@ export async function createContractRecord(
   );
 }
 
+export function getContractDepositReceiptFileUrl(
+  contractId: string,
+  financialRecordId: string,
+  depositReceiptId: string,
+): string {
+  return `/api/contracts/${encodeURIComponent(contractId)}/financial-records/${encodeURIComponent(financialRecordId)}/deposit-receipts/${encodeURIComponent(depositReceiptId)}/file`;
+}
+
+export async function uploadContractDepositReceipt(
+  contractId: string,
+  financialRecordId: string,
+  file: File,
+): Promise<ContractDepositReceipt> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const result = unwrap(
+    await api.post<ApiEnvelope<ContractDepositReceipt>>(
+      `/api/contracts/${contractId}/financial-records/${financialRecordId}/deposit-receipts`,
+      formData,
+      { timeout: 180_000 },
+    ),
+  );
+  return normalizeContractDepositReceipt(result);
+}
+
+export async function verifyContractDepositReceipt(
+  contractId: string,
+  financialRecordId: string,
+  depositReceiptId: string,
+  amount: string | number,
+): Promise<ContractDepositReceipt> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<ContractDepositReceipt>>(
+      `/api/contracts/${contractId}/financial-records/${financialRecordId}/deposit-receipts/${depositReceiptId}/verify`,
+      { amount },
+    ),
+  );
+  return normalizeContractDepositReceipt(result);
+}
+
+export async function deleteContractDepositReceipt(
+  contractId: string,
+  financialRecordId: string,
+  depositReceiptId: string,
+): Promise<void> {
+  await api.delete(
+    `/api/contracts/${contractId}/financial-records/${financialRecordId}/deposit-receipts/${depositReceiptId}`,
+  );
+}
+
+export async function voidContractDepositReceipt(
+  contractId: string,
+  financialRecordId: string,
+  depositReceiptId: string,
+  reason: string,
+): Promise<ContractDepositReceipt> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<ContractDepositReceipt>>(
+      `/api/contracts/${contractId}/financial-records/${financialRecordId}/deposit-receipts/${depositReceiptId}/void`,
+      { reason },
+    ),
+  );
+  return normalizeContractDepositReceipt(result);
+}
+
+export async function getContractDeposit(
+  id: string,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.get<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit`,
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+export async function updateContractDeposit(
+  id: string,
+  payload: ContractDepositMutationPayload,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.put<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit`,
+      payload,
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+export async function settleContractDeposit(
+  id: string,
+  payload: ContractDepositSettlementPayload,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/settlements`,
+      payload,
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+export async function recognizeContractDepositReturnReceipt(
+  id: string,
+  receiptKind: ContractDepositReturnReceiptKind,
+  file: File,
+  settlementId?: string,
+): Promise<ContractDepositReturnReceiptRecognition> {
+  const formData = new FormData();
+  formData.append("receiptKind", receiptKind);
+  if (settlementId) formData.append("settlementId", settlementId);
+  formData.append("file", file);
+  return unwrap(
+    await api.post<ApiEnvelope<ContractDepositReturnReceiptRecognition>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/return-receipts/recognize`,
+      formData,
+      { timeout: 180_000 },
+    ),
+  );
+}
+
+export async function deleteContractDepositReturnReceiptRecognition(
+  id: string,
+  jobId: string,
+): Promise<void> {
+  await unwrap(
+    await api.delete<ApiEnvelope<{ deleted: boolean }>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/return-receipts/${encodeURIComponent(jobId)}`,
+    ),
+  );
+}
+
+export async function uploadContractDepositRefundReceipt(
+  id: string,
+  settlementId: string,
+  ocrJobId: string,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/settlements/${encodeURIComponent(settlementId)}/refund-receipt`,
+      { ocrJobId },
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+export async function deleteContractDepositSettlementReceipt(
+  id: string,
+  settlementId: string,
+  receiptId: string,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.delete<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/settlements/${encodeURIComponent(settlementId)}/receipts/${encodeURIComponent(receiptId)}`,
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+export async function registerContractDepositEngineeringReturn(
+  id: string,
+  settlementId: string,
+  payload: ContractDepositEngineeringReturnPayload,
+): Promise<ContractDepositSnapshot> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/deposit/settlements/${encodeURIComponent(settlementId)}/engineering-return`,
+      payload,
+    ),
+  );
+  return normalizeContractDepositSnapshot(result);
+}
+
+function normalizeCompletedInternalFundingSummary(
+  value: unknown,
+): ContractCompletedInternalFundingSummary {
+  const source = recordOrNull(value) || {};
+  const rawReceipts = source.receipts ?? source.confirmed_receipts;
+  const rawPendingRecognitions =
+    source.pendingRecognitions ?? source.pending_recognitions;
+  return {
+    canAppendAfterCompletion: Boolean(
+      source.canAppendAfterCompletion ?? source.can_append_after_completion,
+    ),
+    contractCompanySubjectName: String(
+      source.contractCompanySubjectName ??
+        source.contract_company_subject_name ??
+        "签约公司",
+    ),
+    requiredAmount: (source.requiredAmount ?? source.required_amount ?? 0) as
+      | string
+      | number,
+    confirmedAmount: (source.confirmedAmount ??
+      source.confirmed_amount ??
+      0) as string | number,
+    pendingAmount: (source.pendingAmount ?? source.pending_amount ?? 0) as
+      | string
+      | number,
+    remainingAmount: (source.remainingAmount ??
+      source.remaining_amount ??
+      0) as string | number,
+    availableRecognitionAmount: (source.availableRecognitionAmount ??
+      source.available_recognition_amount ??
+      undefined) as string | number | undefined,
+    receipts: (Array.isArray(rawReceipts) ? rawReceipts : []).map((item) => {
+      const receipt = recordOrNull(item) || {};
+      return {
+        id: String(receipt.id || ""),
+        fileId: (receipt.fileId ?? receipt.file_id ?? null) as string | null,
+        fileName: String(
+          receipt.fileName ?? receipt.file_name ?? "工程划拨回单",
+        ),
+        fileSize: numberOrNull(receipt.fileSize ?? receipt.file_size),
+        mimeType: (receipt.mimeType ?? receipt.mime_type ?? null) as
+          | string
+          | null,
+        amount: (receipt.amount ?? 0) as string | number,
+        paymentTime: String(
+          receipt.paymentTime ??
+            receipt.payment_time ??
+            receipt.paymentDate ??
+            receipt.payment_date ??
+            "",
+        ),
+        electronicReceiptNo: (receipt.electronicReceiptNo ??
+          receipt.electronic_receipt_no ??
+          null) as string | null,
+        payer: (receipt.payer ?? null) as string | null,
+        payerAccount: (receipt.payerAccount ??
+          receipt.payer_account ??
+          null) as string | null,
+        payee: (receipt.payee ?? null) as string | null,
+        payeeAccount: (receipt.payeeAccount ??
+          receipt.payee_account ??
+          null) as string | null,
+        previewUrl: (receipt.previewUrl ??
+          receipt.preview_url ??
+          receipt.fileUrl ??
+          receipt.file_url ??
+          null) as string | null,
+      };
+    }),
+    pendingRecognitions: (Array.isArray(rawPendingRecognitions)
+      ? rawPendingRecognitions
+      : []
+    ).map(normalizeCompletedInternalFundingRecognition),
+  };
+}
+
+function normalizeCompletedInternalFundingRecognition(
+  value: unknown,
+): ContractCompletedInternalFundingRecognition {
+  const source = recordOrNull(value) || {};
+  const snapshot = recordOrNull(source.snapshot) || {};
+  const fields = recordOrNull(source.fields ?? snapshot.fields) || {};
+  return {
+    jobId: String(source.jobId ?? source.job_id ?? source.id ?? ""),
+    fileId: String(source.fileId ?? source.file_id ?? ""),
+    fileName: (source.fileName ?? source.file_name ?? null) as string | null,
+    fileSize: numberOrNull(source.fileSize ?? source.file_size),
+    status: String(
+      source.status || "blocked",
+    ) as ContractFinancialOcrTaskStatus,
+    validationStatus: (source.validationStatus ??
+      source.validation_status ??
+      null) as ContractFinancialValidationStatus | null,
+    canConfirm: Boolean(
+      source.canConfirm ?? source.can_confirm ?? source.canCreateDraft,
+    ),
+    fields: {
+      paymentTime: String(fields.paymentTime ?? fields.payment_time ?? ""),
+      amount: Number(fields.amount || 0),
+      electronicReceiptNo: String(
+        fields.electronicReceiptNo ?? fields.electronic_receipt_no ?? "",
+      ),
+      payer: String(fields.payer || ""),
+      payerAccount: String(fields.payerAccount ?? fields.payer_account ?? ""),
+      payee: String(fields.payee || ""),
+      payeeAccount: String(fields.payeeAccount ?? fields.payee_account ?? ""),
+    },
+    blockingReasons: Array.isArray(
+      source.blockingReasons ?? source.blocking_reasons,
+    )
+      ? ((source.blockingReasons ??
+          source.blocking_reasons) as ContractFinancialBlockingReason[])
+      : [],
+    warnings: Array.isArray(source.warnings) ? source.warnings.map(String) : [],
+    fileUrl: (source.fileUrl ?? source.file_url ?? null) as string | null,
+  };
+}
+
+export async function getCompletedInternalFundingSummary(
+  id: string,
+): Promise<ContractCompletedInternalFundingSummary> {
+  const result = unwrap(
+    await api.get<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/completed-internal-funding-summary`,
+    ),
+  );
+  return normalizeCompletedInternalFundingSummary(result);
+}
+
+export async function recognizeCompletedInternalFundingFile(
+  id: string,
+  file: File,
+): Promise<ContractCompletedInternalFundingRecognition> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const result = unwrap(
+    await api.post<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/completed-internal-funding/recognize`,
+      formData,
+      { timeout: 180_000 },
+    ),
+  );
+  return normalizeCompletedInternalFundingRecognition(result);
+}
+
+export async function deleteCompletedInternalFundingRecognition(
+  id: string,
+  jobId: string,
+): Promise<void> {
+  await unwrap(
+    await api.delete<ApiEnvelope<{ deleted: boolean }>>(
+      `/api/contracts/${encodeURIComponent(id)}/completed-internal-funding/recognitions/${encodeURIComponent(jobId)}`,
+    ),
+  );
+}
+
+export async function confirmCompletedInternalFunding(
+  id: string,
+  ocrJobIds: string[],
+): Promise<ContractCompletedInternalFundingSummary> {
+  const result = unwrap(
+    await api.post<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/completed-internal-funding/confirm`,
+      { ocrJobIds },
+    ),
+  );
+  return normalizeCompletedInternalFundingSummary(result);
+}
+
+export async function getContractExternalPaymentPurposeDetails(
+  id: string,
+  recordId: string,
+): Promise<ContractPaymentPurposeDetails> {
+  const result = unwrap(
+    await api.get<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/external-payments/${encodeURIComponent(recordId)}/purpose-details`,
+    ),
+  );
+  return normalizeContractPaymentPurposeDetails(result, id, recordId);
+}
+
+export async function updateContractExternalPaymentPurposeDetails(
+  id: string,
+  recordId: string,
+  details: ContractPaymentPurposeDetail[],
+): Promise<ContractPaymentPurposeDetails> {
+  const result = unwrap(
+    await api.put<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/external-payments/${encodeURIComponent(recordId)}/purpose-details`,
+      { details },
+    ),
+  );
+  return normalizeContractPaymentPurposeDetails(result, id, recordId);
+}
+
+export async function getContractPaymentPurposeDetails(
+  id: string,
+  recordId: string,
+): Promise<ContractPaymentPurposeDetails> {
+  const result = unwrap(
+    await api.get<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/payments/${encodeURIComponent(recordId)}/purpose-details`,
+    ),
+  );
+  return normalizeContractPaymentPurposeDetails(result, id, recordId);
+}
+
+export async function updateContractPaymentPurposeDetails(
+  id: string,
+  recordId: string,
+  details: ContractPaymentPurposeDetail[],
+): Promise<ContractPaymentPurposeDetails> {
+  const result = unwrap(
+    await api.put<ApiEnvelope<unknown>>(
+      `/api/contracts/${encodeURIComponent(id)}/payments/${encodeURIComponent(recordId)}/purpose-details`,
+      { details },
+    ),
+  );
+  return normalizeContractPaymentPurposeDetails(result, id, recordId);
+}
+
 export async function recognizeContractFinancialFile(
   id: string,
   kind: "invoice" | "receipt" | "payment",
@@ -2611,6 +3473,19 @@ export async function getPendingContractFinancialOcrUploads(
   return unwrap(
     await api.get<ApiEnvelope<ContractFinancialOcrResult[]>>(
       `/api/contracts/${id}/financial-ocr/pending`,
+    ),
+  );
+}
+
+export async function retryContractFinancialOcrUpload(
+  id: string,
+  ocrJobId: string,
+): Promise<ContractFinancialOcrResult> {
+  return unwrap(
+    await api.post<ApiEnvelope<ContractFinancialOcrResult>>(
+      `/api/contracts/${id}/financial-ocr/${ocrJobId}/retry`,
+      {},
+      { timeout: 180_000 },
     ),
   );
 }

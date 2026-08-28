@@ -19,6 +19,7 @@ import {
 } from "../utils/upload-date.js";
 import { normalizeUploadFileName } from "../utils/upload-file-name.js";
 import { validateFilePath } from "../utils/file-validation.js";
+import { isValidBankBusinessDate } from "../utils/bank-business-date.js";
 import {
   calculateContractAmountChange,
   calculateMainBusinessIncome,
@@ -30,6 +31,11 @@ import {
   toCents,
   type ContractRateBasisPoints,
 } from "../services/contractAccounting.js";
+import {
+  contractCostSettlementAmountSql,
+  contractCostSettlementLastDateSql,
+  prorateContractSettlementCents,
+} from "../services/contractSettlementAccounting.js";
 import { assertContractFileStructure } from "../services/contractFileValidation.js";
 import {
   SupplementAmountCalculationError,
@@ -54,7 +60,27 @@ import {
   resolvePaddleOcrModel,
   type PaddleOcrModelVersion,
 } from "../services/ocrDaemon.js";
-import { recognizeContractFinancialDocument } from "../services/contractFinancialOcr.js";
+import {
+  recognizeContractFinancialDocument,
+  type ContractFinancialOcrResult,
+} from "../services/contractFinancialOcr.js";
+import {
+  calculatePaymentInvoiceRequiredAmount,
+  canConfirmContractDepositAmount,
+  recognizeContractDepositReceipt,
+} from "../services/contractDepositReceipt.js";
+import {
+  calculateEngineeringReturnRequired,
+  calculateCompletedInternalFundingResponsibility,
+  deriveContractDepositStatus,
+  isContractDepositEligible,
+  validateContractDepositSettlement,
+  validateExternalPaymentPurposeDetails,
+  type ContractDepositFundingSource,
+  type ContractDepositSettlementType,
+  type ContractDepositStatus,
+  type ContractExternalPaymentPurpose,
+} from "../services/contractDeposit.js";
 import {
   findReimbursementInvoiceUsage,
   lockCrossModuleInvoiceNumbers,
@@ -62,6 +88,7 @@ import {
 import {
   buildSafeContractFinancialSnapshot,
   allocateAdditionalContractFinancialAmounts,
+  allocateAvailableContractFinancialAmounts,
   allocateContractFinancialAmounts,
   allocatePartialContractFinancialAmounts,
   contractFinancialOcrEngineVersion,
@@ -88,6 +115,7 @@ import {
   CONTRACT_OCR_AUTOMATIC_ACCEPTED_MARKER,
   confirmContractFinancialRecord,
   confirmContractFinancialRegistration,
+  confirmContractFinancialRegistrationInTransaction,
   confirmCompletedRentalExit,
   cancelContractBeforeSeal,
   ContractDomainError,
@@ -103,6 +131,7 @@ import {
   normalizeAutomaticContractConfidence,
   postContractFinancialSettlements,
   recalculateContractExecutionStatus,
+  rebuildContractFinancialRegistrationMatches,
   requestContractTermination,
   requiresRestrictedContractArea,
   resolveContractParentContext,
@@ -157,19 +186,9 @@ const requireContractRead = requireRole([...READ_ROLES]);
 const requireContractLedgerRead = requireRole([...CONTRACT_LEDGER_READ_ROLES]);
 
 function contractListDisplayName(row: Record<string, unknown>): string {
-  const recognizedName = String(
-    row.relation_type === "supplement"
-      ? row.project_name || row.title || ""
-      : row.title || row.project_name || "",
-  ).trim();
-  if (recognizedName) return recognizedName;
-  if (row.status === "draft") {
-    const sourceFileName = String(row.source_file_name || "")
-      .trim()
-      .replace(/\.(?:pdf|docx?)$/iu, "");
-    return sourceFileName ? `草拟：${sourceFileName}` : "草拟合同（待识别）";
-  }
-  return "未命名合同";
+  const projectName = String(row.project_name || "").trim();
+  if (projectName) return projectName;
+  return row.status === "draft" ? "项目名称待识别" : "—";
 }
 
 const RELATION_TYPES = ["main", "supplement", "termination"] as const;
@@ -199,7 +218,7 @@ const DECLARED_SUBTYPE_OPTIONS = {
     { value: "equipment", label: "设备合同" },
     { value: "house_rental", label: "房屋租赁" },
     { value: "vehicle_rental", label: "汽车租赁" },
-    { value: "parking_space", label: "车位合同" },
+    { value: "parking_space", label: "车位租赁" },
     { value: "office_asset", label: "办公资产合同" },
   ],
 } as const;
@@ -623,6 +642,9 @@ async function findContractBankReceiptNumberDuplicate(
        SELECT id, electronic_receipt_no FROM contract_payments
        UNION ALL
        SELECT id, electronic_receipt_no FROM contract_external_payments
+       UNION ALL
+       SELECT id, electronic_receipt_no
+       FROM contract_deposit_settlement_receipts
      ) AS bank_record
      WHERE UPPER(REGEXP_REPLACE(
        NORMALIZE(BTRIM(bank_record.electronic_receipt_no), NFKC),
@@ -733,6 +755,66 @@ function isRentalContract(
   );
 }
 
+interface StoredProjectRefreshOcrLine {
+  line_index: number;
+  page_number: number;
+  text: string;
+  confidence: number;
+}
+
+function normalizeProjectRefreshText(value: unknown): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/gu, "")
+    .trim();
+}
+
+/**
+ * 旧成功任务只在已存逐行证据明确闭合时复跑。续行必须是同页下一条非空
+ * 高置信行，且当前最终值必须恰好停在标签行，不能按普通“工程”尾词猜测。
+ */
+function storedProjectContinuationNeedsRefresh(
+  lines: readonly StoredProjectRefreshOcrLine[],
+  currentProjectValue: string,
+): boolean {
+  const current = normalizeProjectRefreshText(currentProjectValue);
+  if (!current) return false;
+  const ordered = [...lines]
+    .filter((line) => normalizeProjectRefreshText(line.text))
+    .sort((left, right) => left.line_index - right.line_index);
+  for (let index = 0; index < ordered.length - 1; index += 1) {
+    const anchor = ordered[index];
+    const anchorMatch = normalizeProjectRefreshText(anchor.text).match(
+      /^(?:项目名称|项目全称)[:：](.{4,120})$/u,
+    );
+    if (
+      !anchorMatch ||
+      normalizeProjectRefreshText(anchorMatch[1]) !== current
+    ) {
+      continue;
+    }
+    const continuation = ordered[index + 1];
+    if (
+      continuation.page_number !== anchor.page_number ||
+      continuation.line_index - anchor.line_index > 3 ||
+      Number(continuation.confidence) < 0.9
+    ) {
+      continue;
+    }
+    const continuationText = normalizeProjectRefreshText(continuation.text);
+    if (
+      !/^前期手续(?:技术咨询服务|工程咨询服务|咨询服务|技术服务)$/u.test(
+        continuationText,
+      ) ||
+      current.includes(continuationText)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function requiresHouseRentalInvoiceLines(contract: ContractRow): boolean {
   return (
     contract.category === "asset" &&
@@ -746,6 +828,7 @@ function assertAssetPaymentParties(
   invoice: { buyer: string; seller: string },
   bank: { payer: string; payee: string },
   role: "expense" | "external_settlement" = "expense",
+  contractCompanySubjectName?: string,
 ): void {
   if (!fundingMode || fundingMode === "pending_review") {
     throw new ContractDomainError(
@@ -762,13 +845,13 @@ function assertAssetPaymentParties(
       : normalizeFinancialIdentity(invoice.buyer);
   const expectedPayee =
     fundingMode === "engineering_to_technology" && role === "expense"
-      ? normalizeFinancialIdentity("北京羽隶科技有限公司")
+      ? normalizeFinancialIdentity(contractCompanySubjectName || invoice.buyer)
       : normalizeFinancialIdentity(invoice.seller);
   if (actualPayer !== expectedPayer || actualPayee !== expectedPayee) {
     throw new ContractDomainError(
       422,
       fundingMode === "engineering_to_technology" && role === "expense"
-        ? "工程咨询划拨回单必须由北京羽隶工程咨询有限公司付款、北京羽隶科技有限公司收款"
+        ? `工程咨询划拨回单必须由北京羽隶工程咨询有限公司付款、${contractCompanySubjectName || invoice.buyer}收款`
         : "最终付款的付款人、收款人必须与发票购销双方一致",
       "FINANCIAL_REGISTRATION_PARTY_MISMATCH",
     );
@@ -1188,15 +1271,14 @@ function sendError(res: Response, error: unknown, fallback: string): Response {
 }
 
 function toContractApi(row: Record<string, any>) {
-  const category = row.category || row.declared_category || null;
   const businessContractNo = row.business_contract_no || null;
-  const ownsBusinessContractNo = category === "main_business";
+  const contractCompanySubject = resolveContractFinancialCompanySubject([
+    row.party_a,
+    row.party_b,
+  ]);
   return {
     id: row.id,
-    contractNo:
-      ownsBusinessContractNo && businessContractNo
-        ? businessContractNo
-        : row.contract_no,
+    contractNo: businessContractNo || row.contract_no,
     systemContractNo: row.contract_no,
     businessContractNo,
     title: row.title,
@@ -1221,6 +1303,7 @@ function toContractApi(row: Record<string, any>) {
     renewalContractName: row.renewal_contract_name || null,
     partyA: row.party_a,
     partyB: row.party_b,
+    contractCompanySubjectName: contractCompanySubject?.name || null,
     amountDelta: row.amount_delta,
     originalContractAmount: row.original_contract_amount,
     recognizedOriginalAmount: row.recognized_original_amount,
@@ -1288,6 +1371,7 @@ function toContractApi(row: Record<string, any>) {
     createdBy: row.created_by,
     ownerName: row.owner_name,
     createdByName: row.owner_name,
+    historicalImported: Boolean(row.historical_imported),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     invoiceAmount: row.invoice_amount,
@@ -1441,6 +1525,7 @@ function normalizeAssetCategory(
     汽车租赁: "vehicle_rental",
     parking_space: "parking_space",
     车位合同: "parking_space",
+    车位租赁: "parking_space",
     office_asset: "office_asset",
     办公资产合同: "office_asset",
     other: "other",
@@ -1618,12 +1703,15 @@ export async function runRecognitionJob(
     file_path: string;
     mime_type: string;
     declared_category: ContractCategory | null;
+    declared_subtype: ContractDeclaredSubtype | null;
+    asset_category: ContractAssetCategory | null;
     relation_type: ContractRelationType;
     lease_operation_type: "renewal" | null;
     renewed_from_contract_id: string | null;
   }>(
     `SELECT j.id, j.contract_id, j.file_id, f.file_path, f.mime_type,
-       c.declared_category, c.relation_type, c.lease_operation_type,
+       c.declared_category, c.declared_subtype, c.asset_category,
+       c.relation_type, c.lease_operation_type,
        c.renewed_from_contract_id
      FROM contract_ocr_jobs j
      JOIN contract_files f ON f.id = j.file_id
@@ -1672,6 +1760,8 @@ export async function runRecognitionJob(
     const absolutePath = path.resolve(process.cwd(), job.file_path);
     const result = await recognitionRunner(absolutePath, job.mime_type, {
       expectedCategory: job.declared_category || undefined,
+      expectedDeclaredSubtype: job.declared_subtype || undefined,
+      expectedAssetCategory: job.asset_category || undefined,
       relationType: job.relation_type,
       leaseOperationType: job.lease_operation_type || undefined,
       renewalMain: Boolean(job.renewed_from_contract_id),
@@ -1702,14 +1792,21 @@ export async function runRecognitionJob(
         renewed_from_lease_end_date: string | null;
         status: string;
         contract_no: string;
+        created_by: string;
+        created_by_role: string;
       }>(
-        `SELECT id, relation_type, parent_contract_id,
-           termination_target_contract_id, declared_category,
-           declared_subtype, asset_category, area, project_id, status,
-           contract_no, supplement_sequence, lease_operation_type,
-           lease_previous_end_date, renewed_from_contract_id,
-           renewed_from_lease_end_date FROM contracts
-         WHERE id = $1 AND is_deleted = FALSE
+        `SELECT contract.id, contract.relation_type,
+           contract.parent_contract_id,contract.termination_target_contract_id,
+           contract.declared_category,contract.declared_subtype,
+           contract.asset_category,contract.area,contract.project_id,
+           contract.status,contract.contract_no,contract.supplement_sequence,
+           contract.lease_operation_type,contract.lease_previous_end_date,
+           contract.renewed_from_contract_id,
+           contract.renewed_from_lease_end_date,contract.created_by,
+           creator.role AS created_by_role
+         FROM contracts contract
+         JOIN users creator ON creator.id=contract.created_by
+         WHERE contract.id = $1 AND contract.is_deleted = FALSE
          FOR UPDATE`,
         [job.contract_id],
       );
@@ -2434,6 +2531,62 @@ export async function runRecognitionJob(
               [job.contract_id, inferredFundingMode],
             );
           }
+          const depositRecognition = result.depositRecognition;
+          if (
+            category === "asset" &&
+            depositRecognition?.triggered &&
+            depositRecognition.status === "confirmed" &&
+            depositRecognition.amount &&
+            depositRecognition.amount > 0
+          ) {
+            const depositId = nanoid();
+            const insertedDeposit = await client.query<{ id: string }>(
+              `INSERT INTO contract_deposits(
+                 id,contract_id,amount,clause_text,basis,payment_purpose,
+                 funding_source,engineering_allocation_amount,
+                 technology_self_funded_amount,status,settled_amount,
+                 created_by,updated_by,created_at,updated_at
+               ) VALUES($1,$2,$3,$4,$5,'lease_deposit','pending_review',
+                 0,0,'pending_payment',0,$6,$6,$7,$7)
+               ON CONFLICT(contract_id) DO NOTHING
+               RETURNING id`,
+              [
+                depositId,
+                job.contract_id,
+                depositRecognition.amount,
+                depositRecognition.evidence,
+                depositRecognition.formula
+                  ? `${depositRecognition.formula.months}个月 × 每月${depositRecognition.formula.monthlyBasisAmount.toFixed(2)}元`
+                  : depositRecognition.evidence,
+                contractLock.rows[0].created_by,
+                finishedAt,
+              ],
+            );
+            if (insertedDeposit.rows[0]) {
+              await client.query(
+                `INSERT INTO contract_audit_logs(
+                   id,contract_id,action,actor_id,actor_role,from_status,
+                   to_status,changes_json,comment,created_at
+                 ) SELECT $1,contract.id,'contract_deposit_recognized',$2,
+                   $3,status,status,$4::jsonb,$5,$6
+                   FROM contracts contract WHERE contract.id=$7`,
+                [
+                  nanoid(),
+                  contractLock.rows[0].created_by,
+                  contractLock.rows[0].created_by_role,
+                  JSON.stringify({
+                    depositId: insertedDeposit.rows[0].id,
+                    amount: depositRecognition.amount,
+                    amountSource: depositRecognition.amountSource,
+                    reasonCode: depositRecognition.reasonCode,
+                  }),
+                  "依据租赁合同原文自动建立待支付押金记录",
+                  finishedAt,
+                  job.contract_id,
+                ],
+              );
+            }
+          }
         }
       } else {
         await clearDraftAutomaticRecognitionValues(
@@ -3101,7 +3254,7 @@ router.get("/meta", requireContractLedgerRead, async (_req, res) => {
           { value: "equipment", label: "设备合同" },
           { value: "house_rental", label: "房屋租赁" },
           { value: "vehicle_rental", label: "汽车租赁" },
-          { value: "parking_space", label: "车位合同" },
+          { value: "parking_space", label: "车位租赁" },
           { value: "office_asset", label: "办公资产合同" },
           { value: "other", label: "其他" },
         ],
@@ -3503,8 +3656,23 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
     );
     if (counterparty) {
       const value = `%${counterparty}%`;
-      params.push(value, value);
-      where.push("(c.party_a ILIKE ? OR c.party_b ILIKE ?)");
+      params.push(value, value, value, value);
+      where.push(
+        `EXISTS (
+          SELECT 1 FROM contracts counterparty_contract
+          WHERE COALESCE(
+              counterparty_contract.root_contract_id,
+              counterparty_contract.id
+            ) = COALESCE(c.root_contract_id, c.id)
+            AND counterparty_contract.is_deleted = FALSE
+            AND (
+              counterparty_contract.party_a ILIKE ?
+              OR counterparty_contract.party_b ILIKE ?
+              OR counterparty_contract.title ILIKE ?
+              OR counterparty_contract.project_name ILIKE ?
+            )
+        )`,
+      );
     }
     const contractDateFromValue = optionalQueryScalar(
       req.query.contractDateFrom,
@@ -3664,6 +3832,12 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
           WHERE lease_source.lease_end_date IS NOT NULL
             AND lease_source.relation_type = 'main'
             AND lease_source.status IN ('effective', 'executing', 'completed')
+            AND (
+              lease_source.status <> 'completed'
+              OR lease_source.lease_end_date >= TO_CHAR(
+                CURRENT_DATE, 'YYYY-MM-DD'
+              )
+            )
             AND NOT EXISTS (
               SELECT 1 FROM contracts renewal
               WHERE renewal.renewed_from_contract_id = lease_source.id
@@ -3685,14 +3859,15 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       statuses.length === 1 && statuses[0] === "approving"
         ? "list_page.sort_submitted ASC NULLS LAST, list_page.sort_updated ASC, list_page.root_id ASC"
         : (FINANCE_ROLES as readonly string[]).includes(currentActor.role)
-          ? "CASE WHEN list_page.has_expiring_lease THEN 0 ELSE 1 END, list_page.earliest_lease_end ASC NULLS LAST, list_page.sort_updated DESC, list_page.root_id DESC"
-          : "list_page.sort_updated DESC, list_page.root_id DESC";
+          ? "CASE WHEN list_page.has_expiring_lease THEN 0 ELSE 1 END, list_page.sort_contract_date DESC NULLS LAST, list_page.sort_updated DESC, list_page.root_id DESC"
+          : "list_page.sort_contract_date DESC NULLS LAST, list_page.sort_updated DESC, list_page.root_id DESC";
     const rows = await db.all<Record<string, any>>(
       `WITH root_metrics AS (
          SELECT root.id AS root_id,
            root.status AS root_status,
            root.financial_direction,
            root.asset_funding_mode,
+           root.declared_subtype,
            CASE WHEN root.status IN ('rejected', 'terminated') THEN 0
              ELSE COALESCE(
                root.current_effective_amount,
@@ -3717,7 +3892,19 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
            COUNT(*) FILTER (
              WHERE child.relation_type = 'supplement'
                AND child.status IN ('approving', 'pending_seal')
-           )::int AS pending_supplement_count
+           )::int AS pending_supplement_count,
+           COUNT(*) FILTER (
+             WHERE child.relation_type = 'supplement'
+               AND child.status <> 'rejected'
+           )::int AS supplement_agreement_count,
+           COUNT(*) FILTER (
+             WHERE child.relation_type = 'termination'
+               AND child.status <> 'rejected'
+           )::int AS termination_agreement_count,
+           COUNT(*) FILTER (
+             WHERE child.relation_type IN ('supplement', 'termination')
+               AND child.status <> 'rejected'
+           )::int AS related_agreement_count
          FROM contracts root
          LEFT JOIN contracts child
            ON COALESCE(child.root_contract_id, child.id) = root.id
@@ -3725,7 +3912,8 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          WHERE COALESCE(root.root_contract_id, root.id) = root.id
            AND root.is_deleted = FALSE
          GROUP BY root.id, root.status, root.financial_direction,
-           root.asset_funding_mode, root.current_effective_amount
+           root.asset_funding_mode, root.declared_subtype,
+           root.current_effective_amount
        ), financial_metrics AS (
          SELECT roots.root_id,
            CASE WHEN roots.root_status = 'rejected'
@@ -3752,6 +3940,12 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
              WHERE COALESCE(cp.root_contract_id, cp.id) = roots.root_id
                AND cp.status <> 'rejected'
                AND ${confirmedFinancialPredicate("pay")}), 0) END AS external_paid_amount,
+           CASE WHEN roots.root_status = 'rejected'
+             OR roots.financial_direction <> 'cost' THEN 0
+             ELSE ${contractCostSettlementAmountSql({
+               rootAlias: "roots",
+               rootIdExpression: "roots.root_id",
+             })} END AS cost_settled_amount,
            CASE
              WHEN roots.root_status NOT IN ('completed', 'terminated') THEN NULL
              WHEN roots.financial_direction = 'income' THEN (
@@ -3763,47 +3957,28 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
                  AND receipt_contract.status <> 'rejected'
                  AND ${confirmedFinancialPredicate("receipt")}
              )
-             WHEN roots.financial_direction = 'cost'
-               AND roots.asset_funding_mode = 'engineering_to_technology' THEN GREATEST(
-                 (
-                 SELECT MAX(payment.payment_date)
-                 FROM contract_payments payment
-                 JOIN contracts payment_contract ON payment_contract.id = payment.contract_id
-                 WHERE COALESCE(payment_contract.root_contract_id, payment_contract.id) = roots.root_id
-                   AND payment_contract.is_deleted = FALSE
-                   AND payment_contract.status <> 'rejected'
-                   AND ${confirmedFinancialPredicate("payment")}
-                 ),
-                 (
-                 SELECT MAX(payment.payment_date)
-                 FROM contract_external_payments payment
-                 JOIN contracts payment_contract ON payment_contract.id = payment.contract_id
-                 WHERE COALESCE(payment_contract.root_contract_id, payment_contract.id) = roots.root_id
-                   AND payment_contract.is_deleted = FALSE
-                   AND payment_contract.status <> 'rejected'
-                   AND ${confirmedFinancialPredicate("payment")}
-                 )
-               )
-             WHEN roots.financial_direction = 'cost' THEN (
-               SELECT MAX(payment.payment_date)
-               FROM contract_payments payment
-               JOIN contracts payment_contract ON payment_contract.id = payment.contract_id
-               WHERE COALESCE(payment_contract.root_contract_id, payment_contract.id) = roots.root_id
-                 AND payment_contract.is_deleted = FALSE
-                 AND payment_contract.status <> 'rejected'
-                 AND ${confirmedFinancialPredicate("payment")}
-             )
+             WHEN roots.financial_direction = 'cost' THEN
+               ${contractCostSettlementLastDateSql({
+                 rootAlias: "roots",
+                 rootIdExpression: "roots.root_id",
+               })}
              ELSE NULL
            END AS contract_cutoff_date
          FROM root_metrics roots
        ), matching_roots AS (
          SELECT COALESCE(c.root_contract_id, c.id) AS root_id,
            MAX(c.updated_at) AS sort_updated,
+           MAX(c.contract_date) FILTER (WHERE c.relation_type = 'main')
+             AS sort_contract_date,
            MIN(c.submitted_at) FILTER (WHERE c.status = 'approving')
              AS sort_submitted,
            BOOL_OR(c.relation_type = 'main'
              AND c.lease_end_date IS NOT NULL
              AND c.status IN ('effective', 'executing', 'completed')
+             AND (
+               c.status <> 'completed'
+               OR c.lease_end_date >= TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
+             )
              AND NOT EXISTS (
                SELECT 1 FROM contracts renewal
                WHERE renewal.renewed_from_contract_id = c.id
@@ -3819,13 +3994,20 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
              WHERE c.relation_type = 'main'
                AND c.lease_end_date IS NOT NULL
                AND c.status IN ('effective', 'executing', 'completed')
+               AND (
+                 c.status <> 'completed'
+                 OR c.lease_end_date >= TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
+               )
                AND NOT EXISTS (
                  SELECT 1 FROM contracts renewal
                  WHERE renewal.renewed_from_contract_id = c.id
                    AND renewal.is_deleted = FALSE
                    AND renewal.status IN (
-                     'effective', 'executing', 'completed', 'terminated'
-                   )
+                   'effective', 'executing', 'completed', 'terminated'
+                 )
+               )
+               AND c.lease_end_date <= TO_CHAR(
+                 (CURRENT_DATE + INTERVAL '1 month'), 'YYYY-MM-DD'
                )
            ) AS earliest_lease_end
          FROM contracts c
@@ -3837,7 +4019,13 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          ORDER BY ${rootOrder}
          LIMIT ? OFFSET ?
        )
-       SELECT c.*, p.name AS linked_project_name, creator.name AS owner_name,
+       SELECT c.*, p.name AS linked_project_name,
+         creator.name AS owner_name,
+         EXISTS(
+           SELECT 1 FROM contract_audit_logs historical_audit
+           WHERE historical_audit.contract_id=COALESCE(c.root_contract_id,c.id)
+             AND historical_audit.action='historical_contract_imported'
+         ) AS historical_imported,
          draft_file.file_name AS source_file_name,
          approval_round.id AS approval_round_id,
          approval_round.approval_kind AS approval_kind,
@@ -3857,6 +4045,12 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          END AS projected_amount,
          COALESCE(rm.pending_supplement_count, 0)
            AS pending_supplement_count,
+         COALESCE(rm.supplement_agreement_count, 0)
+           AS supplement_agreement_count,
+         COALESCE(rm.termination_agreement_count, 0)
+           AS termination_agreement_count,
+         COALESCE(rm.related_agreement_count, 0)
+           AS related_agreement_count,
          CASE WHEN c.status = 'rejected' THEN 0
            ELSE COALESCE(fm.invoice_amount, 0) END AS invoice_amount,
          CASE WHEN c.status = 'rejected' THEN 0
@@ -3865,12 +4059,18 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
            ELSE COALESCE(fm.paid_amount, 0) END AS paid_amount,
          CASE WHEN c.status = 'rejected' THEN 0
            ELSE COALESCE(fm.external_paid_amount, 0) END AS external_paid_amount
+         ,CASE WHEN c.status = 'rejected' THEN 0
+           ELSE COALESCE(fm.cost_settled_amount, 0) END AS cost_settled_amount
          ,fm.contract_cutoff_date AS contract_cutoff_date
          ,${currentSealedContractFileExists("c")}
            AS has_sealed_contract_file
          ,CASE WHEN c.relation_type = 'main'
              AND c.lease_end_date IS NOT NULL
              AND c.status IN ('effective', 'executing', 'completed')
+             AND (
+               c.status <> 'completed'
+               OR c.lease_end_date >= TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
+             )
              AND NOT EXISTS (
                SELECT 1 FROM contracts renewal
                WHERE renewal.renewed_from_contract_id = c.id
@@ -3961,15 +4161,17 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
         row.external_paid_amount,
         "合同履约付款金额",
       );
+      const costSettledAmount = safeContractOutputAmount(
+        row.cost_settled_amount,
+        "合同履约结算金额",
+      );
       const financialDirection = row.group_financial_direction as
         | "income"
         | "cost"
         | null;
       const settledAmount =
         financialDirection === "cost"
-          ? row.asset_funding_mode === "engineering_to_technology"
-            ? externalPaidAmount
-            : paidAmount
+          ? costSettledAmount
           : financialDirection === "income"
             ? receivedAmount
             : 0;
@@ -3983,10 +4185,14 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
         currentAmount,
         projectedAmount,
         pendingSupplementCount: Number(row.pending_supplement_count || 0),
+        supplementAgreementCount: Number(row.supplement_agreement_count || 0),
+        terminationAgreementCount: Number(row.termination_agreement_count || 0),
+        relatedAgreementCount: Number(row.related_agreement_count || 0),
         hasSealedContractFile: Boolean(row.has_sealed_contract_file),
         receivedAmount,
         paidAmount,
         externalPaidAmount,
+        costSettledAmount,
         completionRate:
           financialDirection && currentAmount > 0
             ? Math.round((settledAmount / currentAmount) * 10000) / 100
@@ -4239,7 +4445,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            SELECT ?::text AS category, ?::text AS project_id,
              ?::text AS start_month, ?::text AS end_month
          ), root_groups AS (
-           SELECT root.id, root.category,
+           SELECT root.id, root.category, root.asset_funding_mode,
+             root.declared_subtype,
              ${currentFixedContractAmountExpression("root")} AS current_amount
            FROM contracts root
            CROSS JOIN filter_parameters filters
@@ -4305,7 +4512,17 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                  AND ${confirmedFinancialPredicate("payment")}
                  AND LEFT(payment.payment_date, 7)
                    BETWEEN filters.start_month AND filters.end_month), 0)
-               AS period_paid_amount
+               AS period_paid_amount,
+             ${contractCostSettlementAmountSql({
+               rootAlias: "roots",
+               rootIdExpression: "roots.id",
+             })} AS cost_settled_amount,
+             ${contractCostSettlementAmountSql({
+               rootAlias: "roots",
+               rootIdExpression: "roots.id",
+               paymentDatePredicate:
+                 "LEFT(settlement_payment.payment_date, 7) BETWEEN (SELECT start_month FROM filter_parameters) AND (SELECT end_month FROM filter_parameters)",
+             })} AS period_cost_settled_amount
            FROM root_groups roots
          )
          SELECT roots.category,
@@ -4316,18 +4533,18 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AS unfixed_amount_contract_count,
            COALESCE(SUM(roots.current_amount), 0) AS total_amount,
            COALESCE(SUM(CASE WHEN roots.category = 'asset'
-             THEN financial.period_paid_amount
+             THEN financial.period_cost_settled_amount
              ELSE financial.period_received_amount END), 0)
              AS period_settled_amount,
            COALESCE(SUM(CASE WHEN roots.category = 'asset'
-             THEN financial.paid_amount ELSE financial.received_amount END), 0)
+             THEN financial.cost_settled_amount ELSE financial.received_amount END), 0)
              AS cumulative_settled_amount,
            COALESCE(SUM(CASE WHEN roots.current_amount IS NULL THEN 0
-             WHEN roots.category = 'asset' THEN financial.paid_amount
+             WHEN roots.category = 'asset' THEN financial.cost_settled_amount
              ELSE financial.received_amount END), 0) AS fixed_settled_amount,
            COALESCE(SUM(CASE WHEN roots.current_amount IS NULL THEN 0
              WHEN roots.category = 'asset'
-               THEN GREATEST(roots.current_amount - financial.paid_amount, 0)
+               THEN GREATEST(roots.current_amount - financial.cost_settled_amount, 0)
              ELSE GREATEST(
                roots.current_amount - financial.received_amount,
                0
@@ -4551,6 +4768,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         received_amount: number;
         paid_amount: number;
         external_paid_amount: number;
+        cost_settled_amount: number;
         settled_amount: number;
         unreceived_amount: number;
         unpaid_amount: number;
@@ -4560,6 +4778,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              ?::text AS start_month, ?::text AS end_month
          ), root_metrics AS (
            SELECT root.id AS root_id, root.project_id, root.category,
+             root.asset_funding_mode, root.declared_subtype,
              filters.start_month, filters.end_month,
              ${contractCategoryDirectionExpression("root")} AS financial_direction,
              ${currentFixedContractAmountExpression("root")} AS current_amount
@@ -4593,7 +4812,13 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                  AND c.status <> 'rejected'
                  AND LEFT(payment.payment_date, 7)
                    BETWEEN roots.start_month AND roots.end_month
-                 AND ${confirmedFinancialPredicate("payment")}), 0) AS paid_amount
+                 AND ${confirmedFinancialPredicate("payment")}), 0) AS paid_amount,
+             ${contractCostSettlementAmountSql({
+               rootAlias: "roots",
+               rootIdExpression: "roots.root_id",
+               paymentDatePredicate:
+                 "LEFT(settlement_payment.payment_date, 7) BETWEEN roots.start_month AND roots.end_month",
+             })} AS cost_settled_amount
            FROM root_metrics roots
          )
          SELECT roots.project_id,
@@ -4606,7 +4831,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            COALESCE(SUM(financial.received_amount), 0) AS received_amount,
            COALESCE(SUM(financial.paid_amount), 0) AS paid_amount,
            COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
-             THEN financial.paid_amount ELSE financial.received_amount END), 0)
+             THEN financial.cost_settled_amount ELSE financial.received_amount END), 0)
              AS settled_amount,
            COALESCE(SUM(CASE WHEN roots.financial_direction = 'income'
              AND roots.current_amount IS NOT NULL
@@ -4614,7 +4839,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              ELSE 0 END), 0) AS unreceived_amount,
            COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
              AND roots.current_amount IS NOT NULL
-             THEN GREATEST(roots.current_amount - financial.paid_amount, 0)
+             THEN GREATEST(roots.current_amount - financial.cost_settled_amount, 0)
              ELSE 0 END), 0) AS unpaid_amount
          FROM root_metrics roots
          LEFT JOIN financial_metrics financial ON financial.root_id = roots.root_id
@@ -4644,6 +4869,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AS project_name,
              root.category,
              root.asset_funding_mode,
+             root.declared_subtype,
              ${currentFixedContractAmountExpression("root")} AS current_amount
            FROM contracts root
            CROSS JOIN filter_parameters filters
@@ -4657,33 +4883,12 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          )
          SELECT roots.*,
-           CASE WHEN roots.category = 'asset'
-             AND roots.asset_funding_mode = 'engineering_to_technology'
-           THEN COALESCE((
-             SELECT SUM(payment.amount)
-             FROM contract_external_payments payment
-             JOIN contracts payment_contract
-               ON payment_contract.id = payment.contract_id
-             WHERE COALESCE(
-                 payment_contract.root_contract_id,
-                 payment_contract.id
-               ) = roots.root_id
-               AND payment_contract.is_deleted = FALSE
-               AND payment_contract.status <> 'rejected'
-               AND ${confirmedFinancialPredicate("payment")}
-           ), 0) WHEN roots.category = 'asset' THEN COALESCE((
-             SELECT SUM(payment.amount)
-             FROM contract_payments payment
-             JOIN contracts payment_contract
-               ON payment_contract.id = payment.contract_id
-             WHERE COALESCE(
-                 payment_contract.root_contract_id,
-                 payment_contract.id
-               ) = roots.root_id
-               AND payment_contract.is_deleted = FALSE
-               AND payment_contract.status <> 'rejected'
-               AND ${confirmedFinancialPredicate("payment")}
-           ), 0) ELSE COALESCE((
+           CASE WHEN roots.category = 'asset' THEN
+             ${contractCostSettlementAmountSql({
+               rootAlias: "roots",
+               rootIdExpression: "roots.root_id",
+             })}
+           ELSE COALESCE((
              SELECT SUM(receipt.amount)
              FROM contract_receipts receipt
              JOIN contracts receipt_contract
@@ -4861,6 +5066,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            SELECT root.id, root.title, root.project_name, root.project_id,
              root.category, root.status, root.updated_at,
              root.financial_direction,
+             root.asset_funding_mode, root.declared_subtype,
              ${currentFixedContractAmountExpression("root")} AS current_amount
            FROM contracts root
            CROSS JOIN filter_parameters filters
@@ -4875,7 +5081,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
            GROUP BY root.id, root.title, root.project_name, root.project_id,
              root.category, root.status, root.updated_at,
-             root.financial_direction, root.current_effective_amount
+             root.financial_direction, root.asset_funding_mode,
+             root.declared_subtype, root.current_effective_amount
          ), settlement_risks AS (
            SELECT root.*, COALESCE((
                SELECT SUM(receipt.amount)
@@ -4894,7 +5101,11 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                  AND c.is_deleted = FALSE
                  AND c.status <> 'rejected'
                  AND ${confirmedFinancialPredicate("payment")}
-             ), 0) AS paid_amount
+             ), 0) AS paid_amount,
+             ${contractCostSettlementAmountSql({
+               rootAlias: "root",
+               rootIdExpression: "root.id",
+             })} AS cost_settled_amount
            FROM root_groups root
          ), risks AS (
            SELECT c.id, c.title, c.project_name, c.project_id, c.category,
@@ -4915,7 +5126,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            WHERE (root.financial_direction = 'income'
                  AND root.received_amount > root.current_amount)
               OR (root.financial_direction = 'cost'
-                 AND root.paid_amount > root.current_amount)
+                 AND root.cost_settled_amount > root.current_amount)
            UNION
            SELECT root.id, root.title, root.project_name, root.project_id,
              root.category, root.status, root.updated_at,
@@ -7103,6 +7314,8 @@ router.post("/:id/ocr-model-comparison", requireFinance, async (req, res) => {
     const context = await db.get<{
       contract_id: string;
       declared_category: ContractCategory | null;
+      declared_subtype: ContractDeclaredSubtype | null;
+      asset_category: ContractAssetCategory | null;
       relation_type: ContractRelationType;
       renewed_from_contract_id: string | null;
       file_id: string;
@@ -7111,6 +7324,7 @@ router.post("/:id/ocr-model-comparison", requireFinance, async (req, res) => {
       mime_type: string;
     }>(
       `SELECT contract.id AS contract_id, contract.declared_category,
+           contract.declared_subtype, contract.asset_category,
            contract.relation_type, contract.renewed_from_contract_id,
            file.id AS file_id, file.file_name,
            file.file_path, file.mime_type
@@ -7143,6 +7357,8 @@ router.post("/:id/ocr-model-comparison", requireFinance, async (req, res) => {
       context.mime_type,
       {
         expectedCategory: context.declared_category || undefined,
+        expectedDeclaredSubtype: context.declared_subtype || undefined,
+        expectedAssetCategory: context.asset_category || undefined,
         relationType: context.relation_type,
         renewalMain: Boolean(context.renewed_from_contract_id),
       },
@@ -7341,6 +7557,7 @@ router.get("/:id", requireAuth, async (req, res) => {
       invoiceLineRows,
       payments,
       externalPayments,
+      depositReceipts,
       financialRegistrationMatches,
       relations,
       accountingRow,
@@ -7371,12 +7588,15 @@ router.get("/:id", requireAuth, async (req, res) => {
       db.all<Record<string, any>>(
         `SELECT i.*, f.file_name,
              financial_ocr.status AS financial_ocr_status,
+             financial_ocr.recognition_method AS financial_recognition_method,
+             financial_ocr.engine_version AS financial_engine_version,
              financial_ocr.validation_status AS financial_validation_status,
              financial_ocr.direction AS financial_direction,
              financial_ocr.document_status AS financial_document_status,
              financial_ocr.can_auto_post AS financial_can_auto_post,
              financial_ocr.blocking_reasons_json AS financial_blocking_reasons,
-             financial_registration.id AS financial_registration_id
+             financial_registration.id AS financial_registration_id,
+             financial_registration.status AS financial_registration_status
            FROM contract_invoices i
            JOIN contracts c ON c.id = i.contract_id
            LEFT JOIN contract_files f ON f.id = i.file_id
@@ -7394,13 +7614,32 @@ router.get("/:id", requireAuth, async (req, res) => {
       ),
       db.all<Record<string, any>>(
         `SELECT r.*, f.file_name,
+             (SELECT link.transaction_id
+                FROM monthly_financial_bank_transaction_links link
+                JOIN monthly_financial_bank_transactions bank_transaction
+                  ON bank_transaction.id = link.transaction_id
+                JOIN monthly_financial_bank_files bank_file
+                  ON bank_file.id = bank_transaction.current_file_id
+                 AND bank_file.is_active = TRUE
+               WHERE link.business_object_type = 'contract_receipt'
+                 AND link.business_object_id = r.id
+                 AND link.link_kind = 'display_replacement'
+                 AND link.match_status = 'active'
+                 AND link.is_active = TRUE
+                 AND bank_transaction.is_current = TRUE
+                 AND r.status = 'confirmed'
+               ORDER BY link.updated_at DESC, link.id DESC LIMIT 1)
+               AS canonical_bank_transaction_id,
              financial_ocr.status AS financial_ocr_status,
+             financial_ocr.recognition_method AS financial_recognition_method,
+             financial_ocr.engine_version AS financial_engine_version,
              financial_ocr.validation_status AS financial_validation_status,
              financial_ocr.direction AS financial_direction,
              financial_ocr.document_status AS financial_document_status,
              financial_ocr.can_auto_post AS financial_can_auto_post,
              financial_ocr.blocking_reasons_json AS financial_blocking_reasons,
-             financial_registration.id AS financial_registration_id
+             financial_registration.id AS financial_registration_id,
+             financial_registration.status AS financial_registration_status
            FROM contract_receipts r
            JOIN contracts c ON c.id = r.contract_id
            LEFT JOIN contract_files f ON f.id = r.file_id
@@ -7447,13 +7686,46 @@ router.get("/:id", requireAuth, async (req, res) => {
       ),
       db.all<Record<string, any>>(
         `SELECT p.*, f.file_name,
+             COALESCE((
+               SELECT SUM(detail.amount)
+               FROM contract_payment_purpose_details detail
+               WHERE detail.payment_record_id = p.id
+                 AND detail.purpose = 'lease_deposit'
+             ), CASE WHEN EXISTS(
+               SELECT 1 FROM contract_payment_purpose_details purpose
+               WHERE purpose.payment_record_id = p.id
+             ) THEN 0 ELSE (
+               SELECT SUM(deposit.confirmed_amount)
+               FROM contract_payment_deposit_receipts deposit
+               WHERE deposit.payment_record_id = p.id
+                 AND deposit.status = 'confirmed'
+             ) END, 0) AS confirmed_deposit_amount,
+             (SELECT link.transaction_id
+                FROM monthly_financial_bank_transaction_links link
+                JOIN monthly_financial_bank_transactions bank_transaction
+                  ON bank_transaction.id = link.transaction_id
+                JOIN monthly_financial_bank_files bank_file
+                  ON bank_file.id = bank_transaction.current_file_id
+                 AND bank_file.is_active = TRUE
+               WHERE link.business_object_type = 'contract_payment'
+                 AND link.business_object_id = p.id
+                 AND link.link_kind = 'display_replacement'
+                 AND link.match_status = 'active'
+                 AND link.is_active = TRUE
+                 AND bank_transaction.is_current = TRUE
+                 AND p.status = 'confirmed'
+               ORDER BY link.updated_at DESC, link.id DESC LIMIT 1)
+               AS canonical_bank_transaction_id,
              financial_ocr.status AS financial_ocr_status,
+             financial_ocr.recognition_method AS financial_recognition_method,
+             financial_ocr.engine_version AS financial_engine_version,
              financial_ocr.validation_status AS financial_validation_status,
              financial_ocr.direction AS financial_direction,
              financial_ocr.document_status AS financial_document_status,
              financial_ocr.can_auto_post AS financial_can_auto_post,
              financial_ocr.blocking_reasons_json AS financial_blocking_reasons,
-             financial_registration.id AS financial_registration_id
+             financial_registration.id AS financial_registration_id,
+             financial_registration.status AS financial_registration_status
            FROM contract_payments p
            JOIN contracts c ON c.id = p.contract_id
            LEFT JOIN contract_files f ON f.id = p.file_id
@@ -7471,13 +7743,46 @@ router.get("/:id", requireAuth, async (req, res) => {
       ),
       db.all<Record<string, any>>(
         `SELECT p.*, f.file_name,
+             COALESCE((
+               SELECT SUM(detail.amount)
+               FROM contract_payment_purpose_details detail
+               WHERE detail.external_payment_record_id = p.id
+                 AND detail.purpose = 'lease_deposit'
+             ), CASE WHEN EXISTS(
+               SELECT 1 FROM contract_payment_purpose_details purpose
+               WHERE purpose.external_payment_record_id = p.id
+             ) THEN 0 ELSE (
+               SELECT SUM(deposit.confirmed_amount)
+               FROM contract_payment_deposit_receipts deposit
+               WHERE deposit.external_payment_record_id = p.id
+                 AND deposit.status = 'confirmed'
+             ) END, 0) AS confirmed_deposit_amount,
+             (SELECT link.transaction_id
+                FROM monthly_financial_bank_transaction_links link
+                JOIN monthly_financial_bank_transactions bank_transaction
+                  ON bank_transaction.id = link.transaction_id
+                JOIN monthly_financial_bank_files bank_file
+                  ON bank_file.id = bank_transaction.current_file_id
+                 AND bank_file.is_active = TRUE
+               WHERE link.business_object_type = 'contract_external_payment'
+                 AND link.business_object_id = p.id
+                 AND link.link_kind = 'display_replacement'
+                 AND link.match_status = 'active'
+                 AND link.is_active = TRUE
+                 AND bank_transaction.is_current = TRUE
+                 AND p.status = 'confirmed'
+               ORDER BY link.updated_at DESC, link.id DESC LIMIT 1)
+               AS canonical_bank_transaction_id,
              financial_ocr.status AS financial_ocr_status,
+             financial_ocr.recognition_method AS financial_recognition_method,
+             financial_ocr.engine_version AS financial_engine_version,
              financial_ocr.validation_status AS financial_validation_status,
              financial_ocr.direction AS financial_direction,
              financial_ocr.document_status AS financial_document_status,
              financial_ocr.can_auto_post AS financial_can_auto_post,
              financial_ocr.blocking_reasons_json AS financial_blocking_reasons,
-             financial_registration.id AS financial_registration_id
+             financial_registration.id AS financial_registration_id,
+             financial_registration.status AS financial_registration_status
            FROM contract_external_payments p
            JOIN contracts c ON c.id = p.contract_id
            LEFT JOIN contract_files f ON f.id = p.file_id
@@ -7491,6 +7796,18 @@ router.get("/:id", requireAuth, async (req, res) => {
            WHERE COALESCE(c.root_contract_id, c.id) = ?
              AND c.is_deleted = FALSE
            ORDER BY p.payment_date DESC, p.created_at DESC`,
+        financialRootId,
+      ),
+      db.all<DepositReceiptRow>(
+        `SELECT deposit.*, uploader.name AS uploaded_by_name,
+             confirmer.name AS confirmed_by_name,
+             voider.name AS voided_by_name
+         FROM contract_payment_deposit_receipts deposit
+         LEFT JOIN users uploader ON uploader.id = deposit.uploaded_by
+         LEFT JOIN users confirmer ON confirmer.id = deposit.confirmed_by
+         LEFT JOIN users voider ON voider.id = deposit.voided_by
+         WHERE deposit.contract_id = ?
+         ORDER BY deposit.created_at ASC, deposit.id ASC`,
         financialRootId,
       ),
       db.all<Record<string, any>>(
@@ -7540,6 +7857,7 @@ router.get("/:id", requireAuth, async (req, res) => {
         received_amount: number;
         paid_amount: number;
         external_paid_amount: number;
+        cost_settled_amount: number;
         root_terminated: boolean;
         root_rejected: boolean;
       }>(
@@ -7612,7 +7930,16 @@ router.get("/:id", requireAuth, async (req, res) => {
                JOIN contracts c ON c.id = p.contract_id
                WHERE COALESCE(c.root_contract_id, c.id) = ?
                  AND c.status <> 'rejected'
-                 AND ${confirmedFinancialPredicate("p")}), 0) END AS external_paid_amount`,
+                 AND ${confirmedFinancialPredicate("p")}), 0) END AS external_paid_amount,
+             COALESCE((
+               SELECT ${contractCostSettlementAmountSql({
+                 rootAlias: "accounting_root",
+                 rootIdExpression: "accounting_root.id",
+               })}
+               FROM contracts accounting_root
+               WHERE accounting_root.id = ?
+                 AND accounting_root.is_deleted = FALSE
+             ), 0) AS cost_settled_amount`,
         rootId,
         rootId,
         rootId,
@@ -7627,6 +7954,7 @@ router.get("/:id", requireAuth, async (req, res) => {
         rootId,
         financialRootId,
         rootId,
+        financialRootId,
         financialRootId,
       ),
     ]);
@@ -7650,9 +7978,31 @@ router.get("/:id", requireAuth, async (req, res) => {
     )
       .replace(/\s+/g, "")
       .trim();
+    const storedProjectRefreshLines =
+      contract.status === "draft" &&
+      contract.relation_type === "main" &&
+      latestJob?.status === "succeeded" &&
+      latestJob.parser_version !== CONTRACT_OCR_PARSER_VERSION &&
+      latestProjectValue
+        ? await db.all<StoredProjectRefreshOcrLine>(
+            `SELECT line_index, page_number, text, confidence
+             FROM contract_ocr_lines
+             WHERE job_id = ? AND BTRIM(text) <> ''
+             ORDER BY line_index`,
+            latestJob.id,
+          )
+        : [];
     const staleSucceededProjectNeedsRefresh =
       latestJob?.status === "succeeded" &&
       /(?:技术|咨询服|规划许可|施工许可|许可证|输变电|变电)$/u.test(
+        latestProjectValue,
+      );
+    const staleSucceededProjectContinuationNeedsRefresh =
+      contract.status === "draft" &&
+      contract.relation_type === "main" &&
+      latestJob?.status === "succeeded" &&
+      storedProjectContinuationNeedsRefresh(
+        storedProjectRefreshLines,
         latestProjectValue,
       );
     const staleSucceededPageFailureNeedsRefresh =
@@ -7733,11 +8083,12 @@ router.get("/:id", requireAuth, async (req, res) => {
     const externalPaidAmount = excludedFromPerformance
       ? 0
       : Number(accountingRow?.external_paid_amount || 0);
+    const costSettledAmount = excludedFromPerformance
+      ? 0
+      : Number(accountingRow?.cost_settled_amount || 0);
     const settledAmount =
       contract.financial_direction === "cost"
-        ? contract.asset_funding_mode === "engineering_to_technology"
-          ? externalPaidAmount
-          : paidAmount
+        ? costSettledAmount
         : contract.financial_direction === "income"
           ? receivedAmount
           : 0;
@@ -7776,6 +8127,26 @@ router.get("/:id", requireAuth, async (req, res) => {
         invoiceTotalCents,
         toCents(String(rows[0]?.allocated_payment_amount || 0)),
       );
+      const accountingGrossCents = rows.reduce(
+        (sum, row) =>
+          row.include_in_contract_accounting &&
+          row.recognition_status === "verified"
+            ? sum + toCents(String(row.gross_amount))
+            : sum,
+        0,
+      );
+      const accountingAllocatedCents =
+        invoiceTotalCents > 0
+          ? prorateContractSettlementCents(
+              allocatedCents,
+              accountingGrossCents,
+              invoiceTotalCents,
+            )
+          : 0;
+      rentalInvoiceSummaryCents.contractAccountingExpense +=
+        accountingAllocatedCents;
+      rentalInvoiceSummaryCents.outsideContractCost +=
+        allocatedCents - accountingAllocatedCents;
       let allocatedSoFar = 0;
       rows.forEach((row, index) => {
         const grossCents = toCents(String(row.gross_amount));
@@ -7789,18 +8160,12 @@ router.get("/:id", requireAuth, async (req, res) => {
         row.actual_paid_amount = centsToAmount(actualPaidCents);
         if (row.expense_category === "rent") {
           rentalInvoiceSummaryCents.rent += actualPaidCents;
-          rentalInvoiceSummaryCents.contractAccountingExpense +=
-            actualPaidCents;
         } else if (row.expense_category === "property_management") {
           rentalInvoiceSummaryCents.propertyManagement += actualPaidCents;
-          rentalInvoiceSummaryCents.contractAccountingExpense +=
-            actualPaidCents;
         } else if (row.expense_category === "electricity") {
           rentalInvoiceSummaryCents.electricity += actualPaidCents;
-          rentalInvoiceSummaryCents.outsideContractCost += actualPaidCents;
         } else if (row.expense_category === "system_maintenance") {
           rentalInvoiceSummaryCents.systemMaintenance += actualPaidCents;
-          rentalInvoiceSummaryCents.outsideContractCost += actualPaidCents;
         }
       });
     }
@@ -7825,6 +8190,12 @@ router.get("/:id", requireAuth, async (req, res) => {
             : row.payment_date,
       fileId: row.file_id,
       fileName: row.file_name,
+      canonicalReceiptPreviewUrl:
+        ["admin", "general_manager"].includes(
+          String(req.session.user?.role || ""),
+        ) && row.canonical_bank_transaction_id
+          ? `/api/monthly-financial-reports/bank-transactions/${row.canonical_bank_transaction_id}/preview`
+          : null,
       status: row.status,
       reversed: row.status === "reversed",
       reversedBy: row.reversed_by,
@@ -7870,9 +8241,22 @@ router.get("/:id", requireAuth, async (req, res) => {
       transactionSerialNo: row.transaction_serial_no,
       proofNo: row.proof_no,
       expenseCategory: row.expense_category,
+      confirmedDepositAmount: Number(row.confirmed_deposit_amount || 0),
+      invoiceRequiredAmount:
+        kind === "payment" || kind === "external_payment"
+          ? calculatePaymentInvoiceRequiredAmount(
+              Number(row.amount || 0),
+              Number(row.confirmed_deposit_amount || 0),
+            )
+          : undefined,
       financialOcrJobId: row.financial_ocr_job_id,
       financialRegistrationId: row.financial_registration_id,
+      financialRegistrationStatus: row.financial_registration_status,
       financialOcrStatus: row.financial_ocr_status,
+      financialRecognitionMethod: row.financial_recognition_method,
+      financialEngineVersion: row.financial_engine_version,
+      historicalConfirmedImport:
+        row.financial_recognition_method === "historical_confirmed_import",
       financialValidationStatus: row.financial_validation_status,
       financialDirection: row.financial_direction,
       financialDocumentStatus: row.financial_document_status,
@@ -7896,6 +8280,7 @@ router.get("/:id", requireAuth, async (req, res) => {
           receivedAmount,
           paidAmount,
           externalPaidAmount,
+          costSettledAmount,
           completionRate,
         },
         files: files.map((file) => ({
@@ -7920,6 +8305,7 @@ router.get("/:id", requireAuth, async (req, res) => {
                 latestJob.parser_version !== CONTRACT_OCR_PARSER_VERSION &&
                 (latestJob.status === "partial" ||
                   staleSucceededProjectNeedsRefresh ||
+                  staleSucceededProjectContinuationNeedsRefresh ||
                   staleSucceededPageFailureNeedsRefresh),
             }
           : null,
@@ -7948,6 +8334,7 @@ router.get("/:id", requireAuth, async (req, res) => {
         externalPayments: externalPayments.map((row) =>
           mapFinancialRecord(row, "external_payment"),
         ),
+        depositReceipts: depositReceipts.map(toDepositReceiptApi),
         financialRegistrationMatches: financialRegistrationMatches.map(
           (match) => ({
             registrationId: match.registration_id,
@@ -8028,6 +8415,7 @@ router.get("/:id", requireAuth, async (req, res) => {
                 : Number(accountingRow?.invoice_amount || 0),
               receivedAmount,
               paidAmount,
+              costSettledAmount,
               settledAmount,
               completionRate,
               overAmount:
@@ -8779,6 +9167,9 @@ interface FinancialOcrJobView {
   snapshot: SafeContractFinancialSnapshot;
   blockingReasons: Array<{ code: string; message: string; field?: string }>;
   warnings: string[];
+  engineVersion?: string | null;
+  parserVersion?: string | null;
+  requiresRefresh?: boolean;
 }
 
 interface ExistingFinancialHashJob {
@@ -8801,8 +9192,525 @@ interface ExistingFinancialHashJob {
   blocking_reasons_json: FinancialOcrJobView["blockingReasons"] | null;
   warnings_json: string[] | null;
   record_id: string | null;
+  business_purpose: ContractFinancialOcrBusinessPurpose | null;
+  target_id: string | null;
   file_id: string;
   file_path: string;
+}
+
+type ContractDepositReturnReceiptPurpose =
+  | "deposit_refund"
+  | "engineering_return";
+
+type ContractFinancialOcrBusinessPurpose =
+  | ContractDepositReturnReceiptPurpose
+  | "engineering_internal_funding";
+
+interface DepositReturnFinancialOcrContext {
+  businessPurpose: ContractDepositReturnReceiptPurpose;
+  targetId: string;
+  expectedPayer: string;
+  expectedPayee: string;
+  expectedPayerAccount?: string | null;
+  expectedPayeeAccount?: string | null;
+  minimumTransactionDate: string;
+  maximumAmount: number;
+  expectedDirection: "receipt" | "payment";
+  requiredAmount?: number;
+  requiredTransactionDate?: string;
+}
+
+interface CompletedInternalFundingOcrContext extends Omit<
+  DepositReturnFinancialOcrContext,
+  "businessPurpose"
+> {
+  businessPurpose: "engineering_internal_funding";
+}
+
+type SpecializedFinancialOcrContext =
+  | DepositReturnFinancialOcrContext
+  | CompletedInternalFundingOcrContext;
+
+async function lockDepositReturnOcrContract(
+  client: PoolClient,
+  contractId: string,
+): Promise<ContractRow & { category: ContractCategory }> {
+  const result = await client.query<ContractRow>(
+    `SELECT * FROM contracts
+     WHERE id=$1 AND is_deleted=FALSE FOR UPDATE`,
+    [contractId],
+  );
+  const contract = result.rows[0];
+  if (!contract) throw new ContractDomainError(404, "合同不存在");
+  if (
+    !isContractDepositEligible({
+      category: contract.category,
+      declaredSubtype: contract.declared_subtype,
+      relationType: contract.relation_type,
+    })
+  ) {
+    throw new ContractDomainError(
+      409,
+      "只有租赁类资产主合同可以识别押金结算回单",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_CONTRACT_INELIGIBLE",
+    );
+  }
+  return contract as ContractRow & { category: ContractCategory };
+}
+
+interface CompletedInternalFundingReceiptView {
+  id: string;
+  amount: number;
+  paymentDate: string;
+  payer: string;
+  payerAccount: string;
+  payee: string;
+  payeeAccount: string;
+  electronicReceiptNo: string;
+  fileId: string | null;
+  fileName: string | null;
+  fileUrl: string | null;
+  createdAt: string;
+  confirmedAt: string | null;
+}
+
+interface CompletedInternalFundingRecognitionView {
+  jobId: string;
+  fileId: string;
+  fileName: string;
+  fileUrl: string;
+  status: FinancialOcrJobView["status"];
+  validationStatus: FinancialOcrJobView["validationStatus"];
+  canConfirm: boolean;
+  fields: SafeContractFinancialSnapshot["fields"];
+  blockingReasons: FinancialOcrJobView["blockingReasons"];
+  warnings: string[];
+  recognitionMethod: string | null;
+  evidenceTextHash: string | null;
+  engineVersion: string | null;
+  parserVersion: string | null;
+}
+
+interface CompletedInternalFundingSummary {
+  canAppendAfterCompletion: boolean;
+  contractCompanySubjectName: string;
+  requiredAmount: number;
+  confirmedAmount: number;
+  pendingAmount: number;
+  remainingAmount: number;
+  availableRecognitionAmount: number;
+  status: "pending_review" | "pending" | "partial" | "completed";
+  receipts: CompletedInternalFundingReceiptView[];
+  pendingRecognitions: CompletedInternalFundingRecognitionView[];
+}
+
+async function loadCompletedInternalFundingSummary(
+  client: PoolClient,
+  contractId: string,
+  forUpdate: boolean,
+): Promise<{
+  contract: ContractRow & { category: ContractCategory };
+  summary: CompletedInternalFundingSummary;
+  context: CompletedInternalFundingOcrContext;
+}> {
+  const contractResult = await client.query<ContractRow>(
+    `SELECT * FROM contracts
+     WHERE id=$1 AND is_deleted=FALSE
+       ${forUpdate ? "FOR UPDATE" : ""}`,
+    [contractId],
+  );
+  const contract = contractResult.rows[0];
+  if (!contract) throw new ContractDomainError(404, "合同不存在");
+  if (
+    contract.relation_type !== "main" ||
+    contract.category !== "asset" ||
+    contract.status !== "completed" ||
+    contract.asset_funding_mode !== "engineering_to_technology" ||
+    contract.financial_direction !== "cost" ||
+    (contract.root_contract_id && contract.root_contract_id !== contract.id)
+  ) {
+    throw new ContractDomainError(
+      409,
+      "只有已完成的工程划拨科技资产主合同可以补录历史内部划拨",
+      "COMPLETED_INTERNAL_FUNDING_CONTRACT_INELIGIBLE",
+    );
+  }
+  const pendingTermination = await client.query<{ id: string }>(
+    `SELECT id FROM contracts
+     WHERE root_contract_id=$1 AND relation_type='termination'
+       AND is_deleted=FALSE AND status IN ('approving','pending_seal')
+     ORDER BY created_at,id LIMIT 1`,
+    [contract.id],
+  );
+  if (pendingTermination.rows[0]) {
+    throw new ContractDomainError(
+      409,
+      "解除协议办理期间不能补录历史内部划拨",
+      "FINANCIAL_RECORD_TERMINATION_PENDING",
+    );
+  }
+  const contractCompanySubject = resolveContractCompanySubject(contract);
+  const responsibilityRows = await client.query<{
+    amount: string | number;
+    purpose_funding_source: ContractDepositFundingSource | null;
+    purpose_technology_amount: string | number | null;
+    deposit_funding_source: ContractDepositFundingSource | null;
+    deposit_technology_amount: string | number | null;
+    confirmed_deposit_amount: string | number;
+  }>(
+    `SELECT payment.amount,
+       (SELECT detail.funding_source
+        FROM contract_payment_purpose_details detail
+        WHERE detail.external_payment_record_id=payment.id
+          AND detail.purpose='lease_deposit' LIMIT 1)
+          AS purpose_funding_source,
+       (SELECT detail.technology_self_funded_amount
+        FROM contract_payment_purpose_details detail
+        WHERE detail.external_payment_record_id=payment.id
+          AND detail.purpose='lease_deposit' LIMIT 1)
+          AS purpose_technology_amount,
+       (SELECT deposit.funding_source FROM contract_deposits deposit
+        WHERE deposit.external_payment_record_id=payment.id LIMIT 1)
+          AS deposit_funding_source,
+       (SELECT deposit.technology_self_funded_amount
+        FROM contract_deposits deposit
+        WHERE deposit.external_payment_record_id=payment.id LIMIT 1)
+          AS deposit_technology_amount,
+       COALESCE((SELECT SUM(receipt.confirmed_amount)
+        FROM contract_payment_deposit_receipts receipt
+        WHERE receipt.external_payment_record_id=payment.id
+          AND receipt.status='confirmed'),0) AS confirmed_deposit_amount
+     FROM contract_external_payments payment
+     WHERE payment.contract_id=$1 AND payment.status='confirmed'
+     ORDER BY payment.payment_date,payment.created_at,payment.id`,
+    [contract.id],
+  );
+  const responsibility = calculateCompletedInternalFundingResponsibility(
+    responsibilityRows.rows.map((payment) => {
+      const depositFundingSource =
+        payment.purpose_funding_source || payment.deposit_funding_source;
+      const technologyAmount = payment.purpose_funding_source
+        ? payment.purpose_technology_amount
+        : payment.deposit_technology_amount;
+      return {
+        paymentAmountCents: toCents(String(payment.amount)),
+        depositFundingSource,
+        technologySelfFundedAmountCents: toCents(String(technologyAmount || 0)),
+        confirmedDepositAmountCents: toCents(
+          String(payment.confirmed_deposit_amount || 0),
+        ),
+      };
+    }),
+  );
+  const paymentRows = await client.query<{
+    id: string;
+    amount: string | number;
+    payment_date: string;
+    payer: string | null;
+    payer_account: string | null;
+    payee: string | null;
+    payee_account: string | null;
+    electronic_receipt_no: string | null;
+    file_id: string | null;
+    file_name: string | null;
+    created_at: string;
+    confirmed_at: string | null;
+  }>(
+    `SELECT payment.id,payment.amount,payment.payment_date,payment.payer,
+       payment.payer_account,payment.payee,payment.payee_account,
+       payment.electronic_receipt_no,payment.file_id,file.file_name,
+       payment.created_at,payment.confirmed_at
+     FROM contract_payments payment
+     LEFT JOIN contract_files file ON file.id=payment.file_id
+     WHERE payment.contract_id=$1 AND payment.status='confirmed'
+     ORDER BY payment.payment_date,payment.created_at,payment.id
+     ${forUpdate ? "FOR UPDATE OF payment" : ""}`,
+    [contract.id],
+  );
+  const internalRows = paymentRows.rows.filter(
+    (payment) =>
+      normalizeFinancialIdentity(payment.payer || "") ===
+        normalizeFinancialIdentity("北京羽隶工程咨询有限公司") &&
+      normalizeFinancialIdentity(payment.payee || "") ===
+        normalizeFinancialIdentity(contractCompanySubject.name),
+  );
+  const pendingRows = await client.query<{
+    id: string;
+    file_id: string;
+    file_name: string;
+    status: FinancialOcrJobView["status"];
+    validation_status: FinancialOcrJobView["validationStatus"];
+    can_auto_post: boolean;
+    document_status: string | null;
+    snapshot_json: SafeContractFinancialSnapshot;
+    blocking_reasons_json: FinancialOcrJobView["blockingReasons"] | null;
+    warnings_json: string[] | null;
+    recognition_method: string | null;
+    evidence_text_hash: string | null;
+    engine_version: string | null;
+    parser_version: string | null;
+  }>(
+    `SELECT job.id,job.file_id,file.file_name,job.status,
+       job.validation_status,job.can_auto_post,job.document_status,
+       job.snapshot_json,job.blocking_reasons_json,
+       job.warnings_json,job.recognition_method,job.evidence_text_hash,
+       job.engine_version,job.parser_version
+     FROM contract_financial_ocr_jobs job
+     JOIN contract_files file ON file.id=job.file_id
+     WHERE job.contract_id=$1
+       AND job.business_purpose='engineering_internal_funding'
+       AND job.target_id=$1 AND job.record_id IS NULL
+       AND job.status IN ('processing','verified','blocked','failed')
+     ORDER BY job.created_at,job.id`,
+    [contract.id],
+  );
+  const requiredAmount = centsToAmount(responsibility.requiredAmountCents);
+  const confirmedAmount = internalRows.reduce(
+    (sum, payment) => sum + Number(payment.amount || 0),
+    0,
+  );
+  const remainingAmount = Math.max(0, requiredAmount - confirmedAmount);
+  const pendingRecognitions = pendingRows.rows.map((job) => {
+    const fields = job.snapshot_json?.fields as unknown as Record<
+      string,
+      unknown
+    >;
+    const amount = Number(fields?.amount || 0);
+    const canConfirm =
+      !responsibility.fundingSourcePendingReview &&
+      job.status === "verified" &&
+      job.validation_status === "verified" &&
+      job.can_auto_post === true &&
+      job.document_status === "normal" &&
+      Number.isFinite(amount) &&
+      amount > 0 &&
+      amount <= remainingAmount;
+    return {
+      jobId: job.id,
+      fileId: job.file_id,
+      fileName: job.file_name,
+      fileUrl: `/api/contracts/files/${job.file_id}`,
+      status: job.status,
+      validationStatus: job.validation_status,
+      canConfirm,
+      fields: job.snapshot_json?.fields,
+      blockingReasons: job.blocking_reasons_json || [],
+      warnings: job.warnings_json || [],
+      recognitionMethod: job.recognition_method,
+      evidenceTextHash: job.evidence_text_hash,
+      engineVersion: job.engine_version,
+      parserVersion: job.parser_version,
+      amount: canConfirm ? amount : 0,
+    };
+  });
+  const pendingAmount = pendingRecognitions.reduce(
+    (sum, job) => sum + job.amount,
+    0,
+  );
+  const hasProcessingRecognition = pendingRows.rows.some(
+    (job) => job.status === "processing",
+  );
+  const availableRecognitionAmount = hasProcessingRecognition
+    ? 0
+    : Math.max(0, remainingAmount - pendingAmount);
+  const status: CompletedInternalFundingSummary["status"] =
+    responsibility.fundingSourcePendingReview
+      ? "pending_review"
+      : remainingAmount <= 0
+        ? "completed"
+        : confirmedAmount > 0
+          ? "partial"
+          : "pending";
+  const summary: CompletedInternalFundingSummary = {
+    canAppendAfterCompletion:
+      !responsibility.fundingSourcePendingReview && remainingAmount > 0,
+    contractCompanySubjectName: contractCompanySubject.name,
+    requiredAmount,
+    confirmedAmount,
+    pendingAmount,
+    remainingAmount,
+    availableRecognitionAmount: responsibility.fundingSourcePendingReview
+      ? 0
+      : availableRecognitionAmount,
+    status,
+    receipts: internalRows.map((payment) => ({
+      id: payment.id,
+      amount: Number(payment.amount),
+      paymentDate: payment.payment_date,
+      payer: payment.payer || "",
+      payerAccount: payment.payer_account || "",
+      payee: payment.payee || "",
+      payeeAccount: payment.payee_account || "",
+      electronicReceiptNo: payment.electronic_receipt_no || "",
+      fileId: payment.file_id,
+      fileName: payment.file_name,
+      fileUrl: payment.file_id
+        ? `/api/contracts/files/${payment.file_id}`
+        : null,
+      createdAt: payment.created_at,
+      confirmedAt: payment.confirmed_at,
+    })),
+    pendingRecognitions: pendingRecognitions.map(
+      ({ amount: _amount, ...job }) => job,
+    ),
+  };
+  return {
+    contract: contract as ContractRow & { category: ContractCategory },
+    summary,
+    context: {
+      businessPurpose: "engineering_internal_funding",
+      targetId: contract.id,
+      expectedPayer: "北京羽隶工程咨询有限公司",
+      expectedPayee: contractCompanySubject.name,
+      minimumTransactionDate: "2000-01-01",
+      maximumAmount: remainingAmount,
+      expectedDirection: "payment",
+    },
+  };
+}
+
+async function lockCompletedInternalFundingContract(
+  client: PoolClient,
+  contractId: string,
+): Promise<ContractRow & { category: ContractCategory }> {
+  const result = await loadCompletedInternalFundingSummary(
+    client,
+    contractId,
+    true,
+  );
+  if (result.summary.status === "pending_review") {
+    throw new ContractDomainError(
+      409,
+      "押金资金来源尚未确认，不能计算工程应承担的历史内部划拨",
+      "COMPLETED_INTERNAL_FUNDING_SOURCE_PENDING_REVIEW",
+    );
+  }
+  if (!result.summary.canAppendAfterCompletion) {
+    throw new ContractDomainError(
+      409,
+      "该已完成合同没有待补内部划拨金额",
+      "COMPLETED_INTERNAL_FUNDING_ALREADY_CLOSED",
+    );
+  }
+  if (result.summary.availableRecognitionAmount <= 0) {
+    throw new ContractDomainError(
+      409,
+      "现有识别任务已占用内部划拨缺口，请先等待、确认或删除现有任务",
+      "COMPLETED_INTERNAL_FUNDING_PENDING_COVERS_REMAINING",
+    );
+  }
+  return result.contract;
+}
+
+function addDepositReturnOcrBusinessGuards(
+  result: ContractFinancialOcrResult,
+  context: SpecializedFinancialOcrContext,
+): ContractFinancialOcrResult {
+  if (result.kind !== "bank_receipt") return result;
+  const reasons = [...result.blockingReasons];
+  const addReason = (code: string, message: string, field?: string) => {
+    if (!reasons.some((reason) => reason.code === code)) {
+      reasons.push({ code, message, ...(field ? { field } : {}) });
+    }
+  };
+  if (result.direction !== context.expectedDirection) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_DIRECTION_MISMATCH",
+      context.businessPurpose === "deposit_refund"
+        ? "押金退款回单必须识别为资金收回方向"
+        : context.businessPurpose === "engineering_return"
+          ? `退工程回单必须识别为${context.expectedPayer}向${context.expectedPayee}付款方向`
+          : `历史内部划拨回单必须识别为${context.expectedPayer}向${context.expectedPayee}付款方向`,
+      "direction",
+    );
+  }
+  if (Number(result.fields.amount || 0) > Number(context.maximumAmount || 0)) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_AMOUNT_EXCEEDS_REMAINING",
+      context.businessPurpose === "deposit_refund"
+        ? "回单退款金额不能超过押金待结算金额"
+        : context.businessPurpose === "engineering_return"
+          ? "回单退工程金额不能超过该笔待退工程金额"
+          : "内部划拨回单金额不能超过已完成合同的待划拨缺口",
+      "amount",
+    );
+  }
+  if (
+    context.requiredAmount !== undefined &&
+    toCents(String(result.fields.amount || 0)) !==
+      toCents(String(context.requiredAmount))
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_REFUND_RECEIPT_HISTORY_AMOUNT_MISMATCH",
+      "回单识别金额必须与历史押金退款金额完全一致",
+      "amount",
+    );
+  }
+  if (
+    context.requiredTransactionDate &&
+    result.fields.paymentTime !== context.requiredTransactionDate
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_REFUND_RECEIPT_HISTORY_DATE_MISMATCH",
+      "回单识别日期必须与历史押金退款日期完全一致",
+      "paymentTime",
+    );
+  }
+  if (
+    normalizeFinancialIdentity(result.fields.payer) !==
+      normalizeFinancialIdentity(context.expectedPayer) ||
+    normalizeFinancialIdentity(result.fields.payee) !==
+      normalizeFinancialIdentity(context.expectedPayee)
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PARTY_MISMATCH",
+      context.businessPurpose === "deposit_refund"
+        ? "押金退款回单必须由原付款收款方退回至原付款付款方"
+        : context.businessPurpose === "engineering_return"
+          ? `退工程回单必须由${context.expectedPayer}付款、${context.expectedPayee}收款`
+          : `内部划拨回单必须由${context.expectedPayer}付款、${context.expectedPayee}收款`,
+      "direction",
+    );
+  }
+  if (
+    context.expectedPayerAccount &&
+    normalizeFinancialBankIdentifier(result.fields.payerAccount) !==
+      normalizeFinancialBankIdentifier(context.expectedPayerAccount)
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PAYER_ACCOUNT_MISMATCH",
+      "回单付款账号与要求的资金退回账号不一致",
+      "payerAccount",
+    );
+  }
+  if (
+    context.expectedPayeeAccount &&
+    normalizeFinancialBankIdentifier(result.fields.payeeAccount) !==
+      normalizeFinancialBankIdentifier(context.expectedPayeeAccount)
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PAYEE_ACCOUNT_MISMATCH",
+      "回单收款账号与要求的资金接收账号不一致",
+      "payeeAccount",
+    );
+  }
+  if (
+    result.fields.paymentTime &&
+    result.fields.paymentTime < context.minimumTransactionDate
+  ) {
+    addReason(
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_DATE_BEFORE_SOURCE",
+      "资金退回日期不能早于原付款或押金退款日期",
+      "paymentTime",
+    );
+  }
+  if (reasons.length === result.blockingReasons.length) return result;
+  return {
+    ...result,
+    validationStatus: "blocked",
+    canAutoPost: false,
+    blockingReasons: reasons,
+  };
 }
 
 function assertFinancialKindAllowed(
@@ -8837,6 +9745,7 @@ async function lockFinancialContract(
   client: PoolClient,
   contractId: string,
   kind: FinancialRecordKind,
+  allowCompletedOpenIncomeRegistration = false,
 ): Promise<ContractRow & { category: ContractCategory }> {
   const locked = await client.query<ContractRow>(
     `SELECT * FROM contracts
@@ -8873,9 +9782,17 @@ async function lockFinancialContract(
     rootPartyB = root.rows[0].party_b;
     rootFundingMode = root.rows[0].asset_funding_mode;
   }
+  const allowsCompletedIncomeContinuation =
+    allowCompletedOpenIncomeRegistration &&
+    kind !== "payment" &&
+    target.category === "main_business" &&
+    rootFinancialDirection === "income" &&
+    target.status === "completed" &&
+    rootStatus === "completed";
   if (
-    !["effective", "executing"].includes(target.status) ||
-    !["effective", "executing"].includes(rootStatus)
+    (!["effective", "executing"].includes(target.status) ||
+      !["effective", "executing"].includes(rootStatus)) &&
+    !allowsCompletedIncomeContinuation
   ) {
     throw new ContractDomainError(
       409,
@@ -9048,6 +9965,9 @@ async function recognizeAndStoreFinancialFile(
   uploadedFile: Express.Multer.File | undefined,
   currentActor: { id: string; role: string },
   onStored?: () => void,
+  allowCompletedOpenIncomeRegistration = false,
+  preserveStoredFileOnReuse = false,
+  depositReturnContext?: SpecializedFinancialOcrContext,
 ): Promise<FinancialOcrJobView> {
   const file = await validateUploadedFile(uploadedFile, ["pdf", "jpeg", "png"]);
   const fileId = nanoid();
@@ -9056,7 +9976,16 @@ async function recognizeAndStoreFinancialFile(
   const startedAt = new Date().toISOString();
   const leaseExpiresAt = financialOcrLeaseExpiresAt();
   const registration = await db.transaction(async (client) => {
-    const target = await lockFinancialContract(client, contractId, kind);
+    const target = depositReturnContext
+      ? depositReturnContext.businessPurpose === "engineering_internal_funding"
+        ? await lockCompletedInternalFundingContract(client, contractId)
+        : await lockDepositReturnOcrContract(client, contractId)
+      : await lockFinancialContract(
+          client,
+          contractId,
+          kind,
+          allowCompletedOpenIncomeRegistration,
+        );
     await client.query(
       `SELECT pg_advisory_xact_lock(
          hashtextextended('contract-financial-file:' || $1, 0)
@@ -9083,6 +10012,8 @@ async function recognizeAndStoreFinancialFile(
          financial_ocr.blocking_reasons_json,
          financial_ocr.warnings_json,
          financial_ocr.record_id,
+         financial_ocr.business_purpose,
+         financial_ocr.target_id,
          stored_file.file_path
        FROM contract_financial_file_hashes AS registry
        JOIN contract_files AS stored_file ON stored_file.id = registry.file_id
@@ -9097,6 +10028,10 @@ async function recognizeAndStoreFinancialFile(
       existing?.contract_id === contractId &&
       existing.job_id &&
       existing.record_kind === kind &&
+      (depositReturnContext
+        ? existing.business_purpose === depositReturnContext.businessPurpose &&
+          existing.target_id === depositReturnContext.targetId
+        : existing.business_purpose === null && existing.target_id === null) &&
       existing.record_id === null &&
       existing.job_status
     ) {
@@ -9207,6 +10142,58 @@ async function recognizeAndStoreFinancialFile(
       }
     }
     if (existing) {
+      if (depositReturnContext && existing.contract_id === contractId) {
+        const postedFinancialRecord = await client.query<{
+          id: string;
+          record_kind: "invoice" | "receipt" | "payment" | "external_payment";
+        }>(
+          `SELECT invoice.id,'invoice'::text AS record_kind
+           FROM contract_invoices invoice
+           JOIN contracts source ON source.id=invoice.contract_id
+           WHERE invoice.file_id=$1 AND invoice.status='confirmed'
+             AND COALESCE(source.root_contract_id,source.id)=$2
+           UNION ALL
+           SELECT receipt.id,'receipt'::text AS record_kind
+           FROM contract_receipts receipt
+           JOIN contracts source ON source.id=receipt.contract_id
+           WHERE receipt.file_id=$1 AND receipt.status='confirmed'
+             AND COALESCE(source.root_contract_id,source.id)=$2
+           UNION ALL
+           SELECT payment.id,'payment'::text AS record_kind
+           FROM contract_payments payment
+           JOIN contracts source ON source.id=payment.contract_id
+           WHERE payment.file_id=$1 AND payment.status='confirmed'
+             AND COALESCE(source.root_contract_id,source.id)=$2
+           UNION ALL
+           SELECT payment.id,'external_payment'::text AS record_kind
+           FROM contract_external_payments payment
+           JOIN contracts source ON source.id=payment.contract_id
+           WHERE payment.file_id=$1 AND payment.status='confirmed'
+             AND COALESCE(source.root_contract_id,source.id)=$2
+           LIMIT 1`,
+          [existing.file_id, contractId],
+        );
+        const posted = postedFinancialRecord.rows[0];
+        if (posted) {
+          const recordLabel = {
+            invoice: "发票",
+            receipt: "回款回单",
+            payment: "付款回单",
+            external_payment: "对外付款回单",
+          }[posted.record_kind];
+          const purposeLabel =
+            depositReturnContext.businessPurpose === "deposit_refund"
+              ? "押金退款"
+              : depositReturnContext.businessPurpose === "engineering_return"
+                ? "退工程"
+                : "历史内部划拨";
+          throw new ContractDomainError(
+            409,
+            `该文件已作为本合同${recordLabel}入账，不能重复用于${purposeLabel}；请上传“${depositReturnContext.expectedPayer}→${depositReturnContext.expectedPayee}”方向的真实银行回单`,
+            "CONTRACT_DEPOSIT_RETURN_FILE_ALREADY_POSTED",
+          );
+        }
+      }
       throw new ContractDomainError(
         409,
         "该财务凭证原件已在其他合同或记录中上传，禁止重复使用",
@@ -9232,10 +10219,11 @@ async function recognizeAndStoreFinancialFile(
          id, contract_id, file_id, file_hash, record_kind, document_kind,
          status, failure_kind, retry_count, worker_token, lease_expires_at,
          can_auto_post, snapshot_json, blocking_reasons_json,
-         warnings_json, requested_by, started_at, created_at, updated_at
+         warnings_json, business_purpose, target_id, requested_by,
+         started_at, created_at, updated_at
        ) VALUES (
          $1,$2,$3,$4,$5,$6,'processing',NULL,0,$7,$8,
-         FALSE,'{}'::jsonb,'[]'::jsonb,'[]'::jsonb,$9,$10,$10,$10
+         FALSE,'{}'::jsonb,'[]'::jsonb,'[]'::jsonb,$9,$10,$11,$12,$12,$12
        )`,
       [
         jobId,
@@ -9246,6 +10234,8 @@ async function recognizeAndStoreFinancialFile(
         kind === "invoice" ? "invoice" : "bank_receipt",
         workerToken,
         leaseExpiresAt,
+        depositReturnContext?.businessPurpose || null,
+        depositReturnContext?.targetId || null,
         currentActor.id,
         startedAt,
       ],
@@ -9261,7 +10251,14 @@ async function recognizeAndStoreFinancialFile(
         currentActor.id,
         currentActor.role,
         target.status,
-        JSON.stringify({ jobId, fileId, fileHash: file.fileHash, kind }),
+        JSON.stringify({
+          jobId,
+          fileId,
+          fileHash: file.fileHash,
+          kind,
+          businessPurpose: depositReturnContext?.businessPurpose || null,
+          targetId: depositReturnContext?.targetId || null,
+        }),
         startedAt,
       ],
     );
@@ -9279,10 +10276,13 @@ async function recognizeAndStoreFinancialFile(
     };
   });
   if (registration.existing) {
-    cleanupUploadedFile(uploadedFile);
+    if (!preserveStoredFileOnReuse) cleanupUploadedFile(uploadedFile);
     const existing = registration.existing;
-    const expectedDirection =
-      kind === "invoice"
+    const expectedDirection = depositReturnContext
+      ? depositReturnContext.businessPurpose === "deposit_refund"
+        ? "receipt"
+        : "payment"
+      : kind === "invoice"
         ? existing.direction === "input" || existing.direction === "output"
           ? existing.direction
           : "unknown"
@@ -9313,6 +10313,8 @@ async function recognizeAndStoreFinancialFile(
       snapshot: existing.snapshot_json as SafeContractFinancialSnapshot,
       blockingReasons: existing.blocking_reasons_json || [],
       warnings: existing.warnings_json || [],
+      engineVersion: existing.engine_version,
+      parserVersion: existing.parser_version,
     });
   }
   const execution = registration.execution;
@@ -9323,10 +10325,13 @@ async function recognizeAndStoreFinancialFile(
       "FINANCIAL_OCR_JOB_STATE_CHANGED",
     );
   }
-  if (execution.reusedStoredFile) cleanupUploadedFile(uploadedFile);
-  else onStored?.();
+  if (execution.reusedStoredFile && !preserveStoredFileOnReuse) {
+    cleanupUploadedFile(uploadedFile);
+  } else onStored?.();
   const contract = registration.contract;
-  const contractCompanySubject = resolveContractCompanySubject(contract);
+  const contractCompanySubject = depositReturnContext
+    ? undefined
+    : resolveContractCompanySubject(contract);
   let result: Awaited<ReturnType<typeof recognizeContractFinancialDocument>>;
   let decision: ReturnType<typeof decideContractFinancialOcr>;
   let snapshot: SafeContractFinancialSnapshot;
@@ -9338,21 +10343,39 @@ async function recognizeAndStoreFinancialFile(
         companyNames: CONTRACT_COMPANY_LEGAL_NAMES,
         companyTaxIds: CONTRACT_COMPANY_TAX_IDS,
         companySubjects: CONTRACT_COMPANY_SUBJECTS,
-        contractCompanySubject,
+        ...(contractCompanySubject ? { contractCompanySubject } : {}),
         requireInvoiceLineItems:
           kind === "invoice" && requiresHouseRentalInvoiceLines(contract),
         allowTaxExemptInvoice:
           kind === "invoice" && isVehicleRentalContract(contract),
-        ...(contract.asset_funding_mode === "engineering_to_technology"
+        ...(depositReturnContext?.businessPurpose === "engineering_return"
           ? {
               internalFundingPair: {
-                payerName: "北京羽隶工程咨询有限公司",
-                payeeName: "北京羽隶科技有限公司",
+                payerName: depositReturnContext.expectedPayer,
+                payeeName: depositReturnContext.expectedPayee,
               },
             }
-          : {}),
+          : depositReturnContext?.businessPurpose ===
+              "engineering_internal_funding"
+            ? {
+                internalFundingPair: {
+                  payerName: depositReturnContext.expectedPayer,
+                  payeeName: depositReturnContext.expectedPayee,
+                },
+              }
+            : contract.asset_funding_mode === "engineering_to_technology"
+              ? {
+                  internalFundingPair: {
+                    payerName: "北京羽隶工程咨询有限公司",
+                    payeeName: contractCompanySubject!.name,
+                  },
+                }
+              : {}),
       },
     });
+    if (depositReturnContext) {
+      result = addDepositReturnOcrBusinessGuards(result, depositReturnContext);
+    }
     decision = decideContractFinancialOcr(result, kind);
     snapshot = buildSafeContractFinancialSnapshot(result);
   } catch (error) {
@@ -9581,6 +10604,8 @@ async function recognizeAndStoreFinancialFile(
     snapshot,
     blockingReasons: decision.blockingReasons,
     warnings: result.warnings,
+    engineVersion: contractFinancialOcrEngineVersion(kind),
+    parserVersion: contractFinancialOcrParserVersion(kind),
   });
 }
 
@@ -9612,6 +10637,7 @@ async function createFinancialDraftFromJob(
     const jobs = await client.query<StoredFinancialOcrJob>(
       `SELECT * FROM contract_financial_ocr_jobs
        WHERE id = $1 AND contract_id = $2 AND record_kind = $3
+         AND business_purpose IS NULL
        FOR UPDATE`,
       [jobId, contractId, kind],
     );
@@ -9939,7 +10965,22 @@ interface CreatedFinancialRegistration {
     settlementRecordId: string;
     allocatedAmount: number;
   }>;
-  status: "draft";
+  status: "draft" | "confirmed";
+}
+
+function financialRegistrationAmountsAreClosed(input: {
+  invoiceRecordIds: readonly string[];
+  settlementRecordIds: readonly string[];
+  invoiceTotalCents: number;
+  settlementTotalCents: number;
+  allocatedTotalCents: number;
+}): boolean {
+  return (
+    input.invoiceRecordIds.length > 0 &&
+    input.settlementRecordIds.length > 0 &&
+    input.invoiceTotalCents === input.settlementTotalCents &&
+    input.allocatedTotalCents === input.invoiceTotalCents
+  );
 }
 
 async function createExternalPaymentRegistrationShell(
@@ -9954,7 +10995,7 @@ async function createExternalPaymentRegistrationShell(
     ) {
       throw new ContractDomainError(
         409,
-        "只有“工程咨询划拨科技支付”模式允许先保存科技对外付款",
+        "只有工程咨询向实际签约公司内部划拨的模式允许先保存签约公司对外付款",
         "EXTERNAL_PAYMENT_NOT_REQUIRED",
       );
     }
@@ -10050,11 +11091,11 @@ async function createFinancialRegistrationFromJobs(
       "DUPLICATE_CONTRACT_INVOICE",
     );
   }
-  if (!uniqueInvoiceJobIds.length) {
+  if (!uniqueInvoiceJobIds.length && !uniqueBankJobIds.length) {
     throw new ContractDomainError(
       400,
-      "必须至少提交一张发票",
-      "FINANCIAL_REGISTRATION_INVOICE_REQUIRED",
+      "必须至少提交一张发票或银行回单",
+      "FINANCIAL_REGISTRATION_DOCUMENT_REQUIRED",
     );
   }
   if (uniqueInvoiceJobIds.some((id) => uniqueBankJobIds.includes(id))) {
@@ -10071,29 +11112,44 @@ async function createFinancialRegistrationFromJobs(
     const jobs = await client.query<StoredFinancialOcrJob>(
       `SELECT * FROM contract_financial_ocr_jobs
        WHERE id = ANY($1::text[]) AND contract_id = $2
+         AND business_purpose IS NULL
        ORDER BY id ASC
        FOR UPDATE`,
       [allJobIds, contractId],
     );
     const jobsById = new Map(jobs.rows.map((job) => [job.id, job]));
-    const invoiceDirections = new Set(
-      uniqueInvoiceJobIds.map((id) => jobsById.get(id)?.direction),
-    );
-    if (
-      invoiceDirections.size !== 1 ||
-      !["input", "output"].includes(String([...invoiceDirections][0] || ""))
-    ) {
-      throw new ContractDomainError(
-        422,
-        "本次发票的购销方向不一致或无法确定，不能生成同一笔财务登记",
-        "FINANCIAL_INVOICE_DIRECTIONS_MIXED",
+    let expectedInvoiceDirection: "input" | "output";
+    let financialDirection: "income" | "cost";
+    if (uniqueInvoiceJobIds.length) {
+      const invoiceDirections = new Set(
+        uniqueInvoiceJobIds.map((id) => jobsById.get(id)?.direction),
       );
+      if (
+        invoiceDirections.size !== 1 ||
+        !["input", "output"].includes(String([...invoiceDirections][0] || ""))
+      ) {
+        throw new ContractDomainError(
+          422,
+          "本次发票的购销方向不一致或无法确定，不能生成同一笔财务登记",
+          "FINANCIAL_INVOICE_DIRECTIONS_MIXED",
+        );
+      }
+      expectedInvoiceDirection = [...invoiceDirections][0] as
+        | "input"
+        | "output";
+      financialDirection =
+        expectedInvoiceDirection === "output" ? "income" : "cost";
+    } else {
+      if (target.category !== "main_business") {
+        throw new ContractDomainError(
+          400,
+          "只有主营合同允许先保存回款、后补发票",
+          "FINANCIAL_REGISTRATION_INVOICE_REQUIRED",
+        );
+      }
+      expectedInvoiceDirection = "output";
+      financialDirection = "income";
     }
-    const expectedInvoiceDirection = [...invoiceDirections][0] as
-      | "input"
-      | "output";
-    const financialDirection =
-      expectedInvoiceDirection === "output" ? "income" : "cost";
     const settlementKind: "receipt" | "payment" =
       financialDirection === "income" ? "receipt" : "payment";
     const expectedBankDirection = settlementKind;
@@ -10213,7 +11269,11 @@ async function createFinancialRegistrationFromJobs(
       };
     });
 
-    for (const invoice of invoiceDocuments) {
+    const partyValidationInvoices =
+      financialDirection === "income" && !invoiceDocuments.length
+        ? [{ buyer: "", seller: resolveContractCompanySubject(target).name }]
+        : invoiceDocuments;
+    for (const invoice of partyValidationInvoices) {
       for (const bank of bankDocuments) {
         if (financialDirection === "cost") {
           assertAssetPaymentParties(target.asset_funding_mode, invoice, bank);
@@ -10234,7 +11294,9 @@ async function createFinancialRegistrationFromJobs(
       (sum, item) => sum + toCents(String(item.amount)),
       0,
     );
-    if (bankTotalCents > invoiceTotalCents) {
+    const allowsPendingInvoiceReceipt =
+      target.category === "main_business" && financialDirection === "income";
+    if (!allowsPendingInvoiceReceipt && bankTotalCents > invoiceTotalCents) {
       throw new ContractDomainError(
         422,
         `${settlementKind === "receipt" ? "回单" : "付款凭证"}合计${centsToAmount(bankTotalCents).toFixed(2)}元不能超过发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元`,
@@ -10451,12 +11513,12 @@ async function createFinancialRegistrationFromJobs(
         contractId,
         settlementKind,
         financialDirection,
-        invoiceRecordIds[0]!,
-        invoiceDocuments[0]!.job.id,
+        invoiceRecordIds[0] || null,
+        invoiceDocuments[0]?.job.id || null,
         bankDocuments[0]?.job.id || null,
-        invoiceRecordIds[0]!,
-        settlementKind === "receipt" ? settlementRecordIds[0]! : null,
-        settlementKind === "payment" ? settlementRecordIds[0]! : null,
+        invoiceRecordIds[0] || null,
+        settlementKind === "receipt" ? settlementRecordIds[0] || null : null,
+        settlementKind === "payment" ? settlementRecordIds[0] || null : null,
         bankBusinessHashes[0] || null,
         currentActor.id,
         now,
@@ -10509,53 +11571,109 @@ async function createFinancialRegistrationFromJobs(
     const settlementItems = registrationItems.filter(
       (item) => item.kind === settlementKind,
     );
-    const amountAllocations = bankDocuments.length
-      ? bankTotalCents === invoiceTotalCents
-        ? allocateContractFinancialAmounts(
-            invoiceDocuments.map((item) => item.amount),
-            bankDocuments.map((item) => item.amount),
-          )
-        : allocatePartialContractFinancialAmounts(
-            invoiceDocuments.map((item) => item.amount),
-            bankDocuments.map((item) => item.amount),
-          )
-      : [];
-    const matches = amountAllocations.map((allocation) => ({
-      registrationId,
-      invoiceRecordId: invoiceRecordIds[allocation.invoiceIndex]!,
-      settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
-      allocatedAmount: allocation.allocatedAmount,
-    }));
-    for (const [index, allocation] of amountAllocations.entries()) {
-      await client.query(
-        `INSERT INTO contract_financial_registration_matches (
-           id, registration_id, contract_id, invoice_item_id,
-           settlement_item_id, allocated_amount, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          nanoid(),
+    let matches: CreatedFinancialRegistration["matches"] = [];
+    let registrationStatus: CreatedFinancialRegistration["status"] = "draft";
+    let contractAfterSettlementPosting: ContractRow = target;
+    if (allowsPendingInvoiceReceipt) {
+      const rebuilt = await rebuildContractFinancialRegistrationMatches(
+        client,
+        {
           registrationId,
           contractId,
-          invoiceItems[allocation.invoiceIndex]!.id,
-          settlementItems[allocation.settlementIndex]!.id,
-          allocation.allocatedAmount,
-          now,
-        ],
-      );
-    }
-    const contractAfterSettlementPosting = bankDocuments.length
-      ? await postContractFinancialSettlements(client, {
-          contractId,
-          registrationId,
           settlementKind,
-          settlementRecordIds,
-          financialDirection,
-          directionInvoiceRecordId: invoiceRecordIds[0]!,
-          actorId: currentActor.id,
-          actorRole: currentActor.role,
           now,
-        })
-      : target;
+        },
+      );
+      await client.query(
+        `UPDATE contract_financial_registrations
+         SET direction_invoice_record_id = $2, updated_at = $3
+         WHERE id = $1 AND contract_id = $4 AND status = 'draft'`,
+        [registrationId, rebuilt.directionInvoiceRecordId, now, contractId],
+      );
+      matches = rebuilt.matches.map((match) => ({
+        registrationId,
+        ...match,
+      }));
+      if (bankDocuments.length) {
+        contractAfterSettlementPosting = await postContractFinancialSettlements(
+          client,
+          {
+            contractId,
+            registrationId,
+            settlementKind,
+            settlementRecordIds,
+            financialDirection,
+            directionInvoiceRecordId: rebuilt.directionInvoiceRecordId,
+            allowUnallocatedSettlement: true,
+            actorId: currentActor.id,
+            actorRole: currentActor.role,
+            now,
+          },
+        );
+      }
+      if (financialRegistrationAmountsAreClosed(rebuilt)) {
+        contractAfterSettlementPosting =
+          await confirmContractFinancialRegistrationInTransaction(
+            client,
+            registrationId,
+            currentActor.id,
+            currentActor.role,
+            contractId,
+          );
+        registrationStatus = "confirmed";
+      }
+    } else {
+      const amountAllocations = bankDocuments.length
+        ? bankTotalCents === invoiceTotalCents
+          ? allocateContractFinancialAmounts(
+              invoiceDocuments.map((item) => item.amount),
+              bankDocuments.map((item) => item.amount),
+            )
+          : allocatePartialContractFinancialAmounts(
+              invoiceDocuments.map((item) => item.amount),
+              bankDocuments.map((item) => item.amount),
+            )
+        : [];
+      matches = amountAllocations.map((allocation) => ({
+        registrationId,
+        invoiceRecordId: invoiceRecordIds[allocation.invoiceIndex]!,
+        settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
+        allocatedAmount: allocation.allocatedAmount,
+      }));
+      for (const allocation of amountAllocations) {
+        await client.query(
+          `INSERT INTO contract_financial_registration_matches (
+             id, registration_id, contract_id, invoice_item_id,
+             settlement_item_id, allocated_amount, created_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            nanoid(),
+            registrationId,
+            contractId,
+            invoiceItems[allocation.invoiceIndex]!.id,
+            settlementItems[allocation.settlementIndex]!.id,
+            allocation.allocatedAmount,
+            now,
+          ],
+        );
+      }
+      if (bankDocuments.length) {
+        contractAfterSettlementPosting = await postContractFinancialSettlements(
+          client,
+          {
+            contractId,
+            registrationId,
+            settlementKind,
+            settlementRecordIds,
+            financialDirection,
+            directionInvoiceRecordId: invoiceRecordIds[0]!,
+            actorId: currentActor.id,
+            actorRole: currentActor.role,
+            now,
+          },
+        );
+      }
+    }
     await client.query(
       `INSERT INTO contract_audit_logs (
          id, contract_id, action, actor_id, actor_role, from_status,
@@ -10583,9 +11701,13 @@ async function createFinancialRegistrationFromJobs(
           cumulativeInvoiceAmount: centsToAmount(invoiceTotalCents),
           cumulativeSettlementAmount: centsToAmount(bankTotalCents),
           remainingSettlementAmount: centsToAmount(
-            invoiceTotalCents - bankTotalCents,
+            Math.max(0, invoiceTotalCents - bankTotalCents),
+          ),
+          remainingInvoiceAmount: centsToAmount(
+            Math.max(0, bankTotalCents - invoiceTotalCents),
           ),
           immediateSettlementPosted: bankDocuments.length > 0,
+          registrationConfirmed: registrationStatus === "confirmed",
           contractStatusAfterSettlementPosting:
             contractAfterSettlementPosting.status,
           matches,
@@ -10598,10 +11720,10 @@ async function createFinancialRegistrationFromJobs(
       registrationId,
       invoiceRecordIds,
       settlementRecordIds,
-      invoiceRecordId: invoiceRecordIds[0]!,
+      invoiceRecordId: invoiceRecordIds[0] || null,
       settlementRecordId: settlementRecordIds[0] || null,
       matches,
-      status: "draft" as const,
+      status: registrationStatus,
     };
   });
 }
@@ -10666,15 +11788,34 @@ async function appendFinancialRegistrationSettlementJobs(
       );
     }
     // 根合同事务锁已先取得；随后统一按登记行、合同／凭证行顺序加锁。
-    const target = await lockFinancialContract(client, contractId, "invoice");
-    const allowsInvoiceBackfill =
+    const target = await lockFinancialContract(
+      client,
+      contractId,
+      "invoice",
+      registration.financial_direction === "income" &&
+        registration.settlement_kind === "receipt",
+    );
+    const allowsAssetInvoiceBackfill =
       target.category === "asset" &&
       target.asset_funding_mode === "engineering_to_technology" &&
       registration.financial_direction === "cost" &&
       uniqueInvoiceJobIds.length > 0;
+    const allowsPendingInvoiceReceipt =
+      target.category === "main_business" &&
+      registration.financial_direction === "income" &&
+      registration.settlement_kind === "receipt";
+    const allowsEngineeringInternalFundingAppend =
+      target.category === "asset" &&
+      target.asset_funding_mode === "engineering_to_technology" &&
+      registration.financial_direction === "cost" &&
+      registration.settlement_kind === "payment" &&
+      uniqueBankJobIds.length > 0;
     if (
       !registration.financial_direction ||
-      (!registration.direction_invoice_record_id && !allowsInvoiceBackfill)
+      (!registration.direction_invoice_record_id &&
+        !allowsAssetInvoiceBackfill &&
+        !allowsPendingInvoiceReceipt &&
+        !allowsEngineeringInternalFundingAppend)
     ) {
       throw new ContractDomainError(
         409,
@@ -10711,7 +11852,12 @@ async function appendFinancialRegistrationSettlementJobs(
        ORDER BY item.created_at, item.id FOR UPDATE OF invoice`,
       [registrationId],
     );
-    if (!invoiceRows.rows.length && !allowsInvoiceBackfill) {
+    if (
+      !invoiceRows.rows.length &&
+      !allowsAssetInvoiceBackfill &&
+      !allowsPendingInvoiceReceipt &&
+      !allowsEngineeringInternalFundingAppend
+    ) {
       throw new ContractDomainError(500, "待回款登记缺少发票明细");
     }
     const existingAllocationResult = await client.query<{
@@ -10763,6 +11909,7 @@ async function appendFinancialRegistrationSettlementJobs(
     const jobs = await client.query<StoredFinancialOcrJob>(
       `SELECT * FROM contract_financial_ocr_jobs
        WHERE id = ANY($1::text[]) AND contract_id = $2
+         AND business_purpose IS NULL
        ORDER BY id ASC FOR UPDATE`,
       [allJobIds, contractId],
     );
@@ -10879,10 +12026,54 @@ async function appendFinancialRegistrationSettlementJobs(
         seller: invoice.seller,
       })),
     ];
-    for (const invoice of allInvoiceRows) {
-      for (const bank of bankDocuments) {
+    const existingSettlementTable =
+      settlementKind === "receipt" ? "contract_receipts" : "contract_payments";
+    const existingBankRows = await client.query<{
+      payer: string | null;
+      payer_account: string | null;
+      payee: string | null;
+      payee_account: string | null;
+      amount: string | number;
+    }>(
+      `SELECT record.payer, record.payer_account, record.payee,
+          record.payee_account, record.amount
+       FROM contract_financial_registration_items item
+       JOIN ${existingSettlementTable} record ON record.id = item.record_id
+       WHERE item.registration_id = $1 AND item.item_kind = $2
+         AND record.status <> 'reversed'
+       ORDER BY item.created_at, item.id
+       FOR UPDATE OF item, record`,
+      [registrationId, settlementKind],
+    );
+    const allBankPartyRows = [
+      ...existingBankRows.rows.map((bank) => ({
+        payer: bank.payer || "",
+        payerAccount: bank.payer_account || "",
+        payee: bank.payee || "",
+        payeeAccount: bank.payee_account || "",
+        amount: Number(bank.amount),
+      })),
+      ...bankDocuments,
+    ];
+    const contractCompanySubjectName =
+      resolveContractCompanySubject(target).name;
+    const allInvoicePartyRows = !allInvoiceRows.length
+      ? allowsEngineeringInternalFundingAppend
+        ? [{ buyer: contractCompanySubjectName, seller: "" }]
+        : registration.financial_direction === "income"
+          ? [{ buyer: "", seller: contractCompanySubjectName }]
+          : []
+      : allInvoiceRows;
+    for (const invoice of allInvoicePartyRows) {
+      for (const bank of allBankPartyRows) {
         if (registration.financial_direction === "cost") {
-          assertAssetPaymentParties(target.asset_funding_mode, invoice, bank);
+          assertAssetPaymentParties(
+            target.asset_funding_mode,
+            invoice,
+            bank,
+            "expense",
+            contractCompanySubjectName,
+          );
         } else if (!incomeReceiptPartiesMatch(invoice, bank)) {
           throw new ContractDomainError(
             422,
@@ -10892,6 +12083,8 @@ async function appendFinancialRegistrationSettlementJobs(
         }
       }
     }
+    const isEngineeringInternalFundingAppend =
+      allowsEngineeringInternalFundingAppend && bankDocuments.length > 0;
     const invoiceTotalCents = allInvoiceRows.reduce(
       (sum, item) => sum + toCents(String(item.amount)),
       0,
@@ -10900,7 +12093,16 @@ async function appendFinancialRegistrationSettlementJobs(
       (sum, item) => sum + toCents(String(item.amount)),
       0,
     );
-    if (existingAllocatedTotalCents + bankTotalCents > invoiceTotalCents) {
+    let existingInternalFundingTotalCents = 0;
+    if (isEngineeringInternalFundingAppend) {
+      existingInternalFundingTotalCents = existingBankRows.rows.reduce(
+        (sum, item) => sum + toCents(String(item.amount)),
+        0,
+      );
+    } else if (
+      !allowsPendingInvoiceReceipt &&
+      existingAllocatedTotalCents + bankTotalCents > invoiceTotalCents
+    ) {
       throw new ContractDomainError(
         422,
         `累计${settlementKind === "receipt" ? "回单" : "付款凭证"}合计${centsToAmount(existingAllocatedTotalCents + bankTotalCents).toFixed(2)}元不能超过累计发票合计${centsToAmount(invoiceTotalCents).toFixed(2)}元`,
@@ -11175,136 +12377,317 @@ async function appendFinancialRegistrationSettlementJobs(
         seller: invoice.seller,
       })),
     ];
-    if (invoiceDocuments.length) {
-      const externalItems = await client.query<{
-        item_id: string;
-        amount: string | number;
-      }>(
-        `SELECT item.id AS item_id, payment.amount
-         FROM contract_financial_registration_items item
-         JOIN contract_external_payments payment ON payment.id = item.record_id
-         WHERE item.registration_id = $1
-           AND item.item_kind = 'external_payment'
-           AND payment.status <> 'reversed'
-         ORDER BY item.created_at, item.id
-         FOR UPDATE OF item, payment`,
-        [registrationId],
-      );
-      if (externalItems.rows.length) {
+    let matches: CreatedFinancialRegistration["matches"] = [];
+    let registrationStatus: CreatedFinancialRegistration["status"] = "draft";
+    let contractAfterSettlementPosting: ContractRow = target;
+    let cumulativeInvoiceCents = invoiceTotalCents;
+    let cumulativeSettlementCents =
+      existingAllocatedTotalCents + bankTotalCents;
+    if (allowsPendingInvoiceReceipt) {
+      if (bankDocuments.length) {
         await client.query(
-          `UPDATE contract_invoices
-           SET status = 'confirmed', confirmed_by = COALESCE(confirmed_by, $2),
-             confirmed_at = COALESCE(confirmed_at, $3), updated_at = $3
-           WHERE id = ANY($1::text[]) AND status = 'draft'`,
-          [newInvoiceRecordIds, currentActor.id, now],
+          `UPDATE contract_financial_registrations
+           SET bank_ocr_job_id = COALESCE(bank_ocr_job_id, $2),
+             receipt_record_id = COALESCE(receipt_record_id, $3),
+             bank_business_key_hash = COALESCE(bank_business_key_hash, $4),
+             updated_at = $5 WHERE id = $1`,
+          [
+            registrationId,
+            bankDocuments[0]!.job.id,
+            settlementRecordIds[0] || null,
+            bankBusinessHashes[0],
+            now,
+          ],
         );
-        await client.query(
-          `DELETE FROM contract_financial_registration_matches match
-           USING contract_financial_registration_items settlement
-           WHERE match.registration_id = $1
-             AND settlement.id = match.settlement_item_id
-             AND settlement.item_kind = 'external_payment'`,
-          [registrationId],
-        );
-        const externalAllocations = allocateAdditionalContractFinancialAmounts(
-          allocationInvoiceRows.map((item) => Number(item.amount)),
-          allocationInvoiceRows.map(() => 0),
-          externalItems.rows.map((item) => Number(item.amount)),
-        );
-        for (const allocation of externalAllocations) {
-          await client.query(
-            `INSERT INTO contract_financial_registration_matches (
-               id, registration_id, contract_id, invoice_item_id,
-               settlement_item_id, allocated_amount, created_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [
-              nanoid(),
-              registrationId,
-              contractId,
-              allocationInvoiceRows[allocation.invoiceIndex]!.item_id,
-              externalItems.rows[allocation.settlementIndex]!.item_id,
-              allocation.allocatedAmount,
-              now,
-            ],
-          );
-        }
       }
-    }
-    const allocations = allocateAdditionalContractFinancialAmounts(
-      allocationInvoiceRows.map((item) => Number(item.amount)),
-      allocationInvoiceRows.map((item) =>
-        item.item_id
-          ? centsToAmount(
-              existingAllocatedByInvoiceItemId.get(item.item_id) || 0,
-            )
-          : 0,
-      ),
-      bankDocuments.map((item) => item.amount),
-    );
-    const matches = allocations.map((allocation) => ({
-      registrationId,
-      invoiceRecordId:
-        allocationInvoiceRows[allocation.invoiceIndex]!.record_id,
-      settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
-      allocatedAmount: allocation.allocatedAmount,
-    }));
-    for (const allocation of allocations) {
-      await client.query(
-        `INSERT INTO contract_financial_registration_matches (
-           id, registration_id, contract_id, invoice_item_id,
-           settlement_item_id, allocated_amount, created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          nanoid(),
+      const rebuilt = await rebuildContractFinancialRegistrationMatches(
+        client,
+        {
           registrationId,
           contractId,
-          allocationInvoiceRows[allocation.invoiceIndex]!.item_id,
-          settlementItemIds[allocation.settlementIndex],
-          allocation.allocatedAmount,
+          settlementKind,
           now,
-        ],
+        },
       );
-    }
-    let contractAfterSettlementPosting: ContractRow = target;
-    if (bankDocuments.length) {
       await client.query(
         `UPDATE contract_financial_registrations
-         SET bank_ocr_job_id = COALESCE(bank_ocr_job_id, $2),
-           receipt_record_id = COALESCE(receipt_record_id, $3),
-           payment_record_id = COALESCE(payment_record_id, $4),
-           bank_business_key_hash = COALESCE(bank_business_key_hash, $5),
-           updated_at = $6 WHERE id = $1`,
+         SET direction_invoice_record_id = $2, updated_at = $3
+         WHERE id = $1 AND contract_id = $4 AND status = 'draft'`,
+        [registrationId, rebuilt.directionInvoiceRecordId, now, contractId],
+      );
+      cumulativeInvoiceCents = rebuilt.invoiceTotalCents;
+      cumulativeSettlementCents = rebuilt.settlementTotalCents;
+      matches = rebuilt.matches.map((match) => ({
+        registrationId,
+        ...match,
+      }));
+      if (bankDocuments.length) {
+        contractAfterSettlementPosting = await postContractFinancialSettlements(
+          client,
+          {
+            contractId,
+            registrationId,
+            settlementKind,
+            settlementRecordIds,
+            financialDirection: registration.financial_direction,
+            directionInvoiceRecordId: rebuilt.directionInvoiceRecordId,
+            allowUnallocatedSettlement: true,
+            actorId: currentActor.id,
+            actorRole: currentActor.role,
+            now,
+          },
+        );
+      } else if (invoiceDocuments.length) {
+        contractAfterSettlementPosting =
+          await recalculateContractExecutionStatus(
+            client,
+            contractId,
+            currentActor.id,
+            currentActor.role,
+          );
+      }
+      if (financialRegistrationAmountsAreClosed(rebuilt)) {
+        contractAfterSettlementPosting =
+          await confirmContractFinancialRegistrationInTransaction(
+            client,
+            registrationId,
+            currentActor.id,
+            currentActor.role,
+            contractId,
+          );
+        registrationStatus = "confirmed";
+      }
+    } else if (isEngineeringInternalFundingAppend) {
+      cumulativeSettlementCents =
+        existingInternalFundingTotalCents + bankTotalCents;
+      const internalDirectionInvoiceRecordId =
+        registration.direction_invoice_record_id ||
+        newInvoiceRecordIds[0] ||
+        null;
+      if (
+        internalDirectionInvoiceRecordId !==
+        registration.direction_invoice_record_id
+      ) {
+        await client.query(
+          `UPDATE contract_financial_registrations
+           SET direction_invoice_record_id=$2,updated_at=$3
+           WHERE id=$1 AND contract_id=$4 AND status='draft'`,
+          [registrationId, internalDirectionInvoiceRecordId, now, contractId],
+        );
+      }
+      await client.query(
+        `UPDATE contract_financial_registrations
+         SET bank_ocr_job_id=COALESCE(bank_ocr_job_id,$2),
+           payment_record_id=COALESCE(payment_record_id,$3),
+           bank_business_key_hash=COALESCE(bank_business_key_hash,$4),
+           updated_at=$5
+         WHERE id=$1 AND contract_id=$6 AND status='draft'`,
         [
           registrationId,
           bankDocuments[0]!.job.id,
-          settlementKind === "receipt" ? settlementRecordIds[0] : null,
-          settlementKind === "payment" ? settlementRecordIds[0] : null,
+          settlementRecordIds[0]!,
           bankBusinessHashes[0],
           now,
+          contractId,
         ],
       );
+      if (invoiceDocuments.length) {
+        const externalItem = await client.query<{ record_id: string }>(
+          `SELECT record_id FROM contract_financial_registration_items
+           WHERE registration_id=$1 AND contract_id=$2
+             AND item_kind='external_payment'
+           ORDER BY created_at,id LIMIT 1`,
+          [registrationId, contractId],
+        );
+        if (externalItem.rows[0]) {
+          const externalTarget = await lockDepositPaymentTarget(
+            client,
+            contractId,
+            externalItem.rows[0].record_id,
+          );
+          await rebuildDepositAffectedFinancialMatches(
+            client,
+            contractId,
+            externalTarget,
+            now,
+          );
+          const externalMatches = await client.query<{
+            invoice_record_id: string;
+            settlement_record_id: string;
+            allocated_amount: string | number;
+          }>(
+            `SELECT invoice_item.record_id AS invoice_record_id,
+               settlement_item.record_id AS settlement_record_id,
+               match.allocated_amount
+             FROM contract_financial_registration_matches match
+             JOIN contract_financial_registration_items invoice_item
+               ON invoice_item.id=match.invoice_item_id
+              AND invoice_item.item_kind='invoice'
+             JOIN contract_financial_registration_items settlement_item
+               ON settlement_item.id=match.settlement_item_id
+              AND settlement_item.item_kind='external_payment'
+             WHERE match.registration_id=$1
+               AND invoice_item.record_id=ANY($2::text[])
+             ORDER BY match.created_at,match.id`,
+            [registrationId, newInvoiceRecordIds],
+          );
+          matches = externalMatches.rows.map((match) => ({
+            registrationId,
+            invoiceRecordId: match.invoice_record_id,
+            settlementRecordId: match.settlement_record_id,
+            allocatedAmount: Number(match.allocated_amount),
+          }));
+        }
+      }
       contractAfterSettlementPosting = await postContractFinancialSettlements(
         client,
         {
           contractId,
           registrationId,
-          settlementKind,
+          settlementKind: "payment",
           settlementRecordIds,
-          financialDirection: registration.financial_direction,
-          directionInvoiceRecordId:
-            registration.direction_invoice_record_id || newInvoiceRecordIds[0]!,
+          financialDirection: "cost",
+          directionInvoiceRecordId: internalDirectionInvoiceRecordId,
+          allowUnallocatedSettlement: true,
           actorId: currentActor.id,
           actorRole: currentActor.role,
           now,
         },
       );
-    } else if (invoiceDocuments.length) {
-      contractAfterSettlementPosting = await recalculateContractExecutionStatus(
-        client,
-        contractId,
-        currentActor.id,
-        currentActor.role,
+    } else {
+      if (invoiceDocuments.length) {
+        const externalItems = await client.query<{
+          item_id: string;
+          amount: string | number;
+        }>(
+          `SELECT item.id AS item_id, payment.amount
+           FROM contract_financial_registration_items item
+           JOIN contract_external_payments payment ON payment.id = item.record_id
+           WHERE item.registration_id = $1
+             AND item.item_kind = 'external_payment'
+             AND payment.status <> 'reversed'
+           ORDER BY item.created_at, item.id
+           FOR UPDATE OF item, payment`,
+          [registrationId],
+        );
+        if (externalItems.rows.length) {
+          await client.query(
+            `UPDATE contract_invoices
+             SET status = 'confirmed', confirmed_by = COALESCE(confirmed_by, $2),
+               confirmed_at = COALESCE(confirmed_at, $3), updated_at = $3
+             WHERE id = ANY($1::text[]) AND status = 'draft'`,
+            [newInvoiceRecordIds, currentActor.id, now],
+          );
+          await client.query(
+            `DELETE FROM contract_financial_registration_matches match
+             USING contract_financial_registration_items settlement
+             WHERE match.registration_id = $1
+               AND settlement.id = match.settlement_item_id
+               AND settlement.item_kind = 'external_payment'`,
+            [registrationId],
+          );
+          const externalAllocations =
+            allocateAdditionalContractFinancialAmounts(
+              allocationInvoiceRows.map((item) => Number(item.amount)),
+              allocationInvoiceRows.map(() => 0),
+              externalItems.rows.map((item) => Number(item.amount)),
+            );
+          for (const allocation of externalAllocations) {
+            await client.query(
+              `INSERT INTO contract_financial_registration_matches (
+                 id, registration_id, contract_id, invoice_item_id,
+                 settlement_item_id, allocated_amount, created_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+              [
+                nanoid(),
+                registrationId,
+                contractId,
+                allocationInvoiceRows[allocation.invoiceIndex]!.item_id,
+                externalItems.rows[allocation.settlementIndex]!.item_id,
+                allocation.allocatedAmount,
+                now,
+              ],
+            );
+          }
+        }
+      }
+      const allocations = allocateAdditionalContractFinancialAmounts(
+        allocationInvoiceRows.map((item) => Number(item.amount)),
+        allocationInvoiceRows.map((item) =>
+          item.item_id
+            ? centsToAmount(
+                existingAllocatedByInvoiceItemId.get(item.item_id) || 0,
+              )
+            : 0,
+        ),
+        bankDocuments.map((item) => item.amount),
       );
+      matches = allocations.map((allocation) => ({
+        registrationId,
+        invoiceRecordId:
+          allocationInvoiceRows[allocation.invoiceIndex]!.record_id,
+        settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
+        allocatedAmount: allocation.allocatedAmount,
+      }));
+      for (const allocation of allocations) {
+        await client.query(
+          `INSERT INTO contract_financial_registration_matches (
+             id, registration_id, contract_id, invoice_item_id,
+             settlement_item_id, allocated_amount, created_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            nanoid(),
+            registrationId,
+            contractId,
+            allocationInvoiceRows[allocation.invoiceIndex]!.item_id,
+            settlementItemIds[allocation.settlementIndex],
+            allocation.allocatedAmount,
+            now,
+          ],
+        );
+      }
+      if (bankDocuments.length) {
+        await client.query(
+          `UPDATE contract_financial_registrations
+           SET bank_ocr_job_id = COALESCE(bank_ocr_job_id, $2),
+             receipt_record_id = COALESCE(receipt_record_id, $3),
+             payment_record_id = COALESCE(payment_record_id, $4),
+             bank_business_key_hash = COALESCE(bank_business_key_hash, $5),
+             updated_at = $6 WHERE id = $1`,
+          [
+            registrationId,
+            bankDocuments[0]!.job.id,
+            settlementKind === "receipt" ? settlementRecordIds[0] : null,
+            settlementKind === "payment" ? settlementRecordIds[0] : null,
+            bankBusinessHashes[0],
+            now,
+          ],
+        );
+        contractAfterSettlementPosting = await postContractFinancialSettlements(
+          client,
+          {
+            contractId,
+            registrationId,
+            settlementKind,
+            settlementRecordIds,
+            financialDirection: registration.financial_direction,
+            directionInvoiceRecordId:
+              registration.direction_invoice_record_id ||
+              newInvoiceRecordIds[0]!,
+            actorId: currentActor.id,
+            actorRole: currentActor.role,
+            now,
+          },
+        );
+      } else if (invoiceDocuments.length) {
+        contractAfterSettlementPosting =
+          await recalculateContractExecutionStatus(
+            client,
+            contractId,
+            currentActor.id,
+            currentActor.role,
+          );
+      }
     }
     await client.query(
       `INSERT INTO contract_audit_logs (
@@ -11330,14 +12713,23 @@ async function appendFinancialRegistrationSettlementJobs(
             ),
           ),
           currentSettlementAmount: centsToAmount(bankTotalCents),
-          cumulativeInvoiceAmount: centsToAmount(invoiceTotalCents),
-          cumulativeSettlementAmount: centsToAmount(
-            existingAllocatedTotalCents + bankTotalCents,
-          ),
+          cumulativeInvoiceAmount: centsToAmount(cumulativeInvoiceCents),
+          cumulativeSettlementAmount: centsToAmount(cumulativeSettlementCents),
+          internalFundingChainSeparated: isEngineeringInternalFundingAppend,
+          existingInternalFundingAmount: isEngineeringInternalFundingAppend
+            ? centsToAmount(existingInternalFundingTotalCents)
+            : null,
+          internalFundingMatchesCreated: isEngineeringInternalFundingAppend
+            ? false
+            : null,
           remainingSettlementAmount: centsToAmount(
-            invoiceTotalCents - existingAllocatedTotalCents - bankTotalCents,
+            Math.max(0, cumulativeInvoiceCents - cumulativeSettlementCents),
+          ),
+          remainingInvoiceAmount: centsToAmount(
+            Math.max(0, cumulativeSettlementCents - cumulativeInvoiceCents),
           ),
           immediateSettlementPosted: bankDocuments.length > 0,
+          registrationConfirmed: registrationStatus === "confirmed",
           contractStatusAfterSettlementPosting:
             contractAfterSettlementPosting.status,
           matches,
@@ -11349,10 +12741,10 @@ async function appendFinancialRegistrationSettlementJobs(
       registrationId,
       invoiceRecordIds: allocationInvoiceRows.map((item) => item.record_id),
       settlementRecordIds,
-      invoiceRecordId: allocationInvoiceRows[0]!.record_id,
+      invoiceRecordId: allocationInvoiceRows[0]?.record_id || null,
       settlementRecordId: settlementRecordIds[0] || null,
       matches,
-      status: "draft",
+      status: registrationStatus,
     };
   });
 }
@@ -11366,7 +12758,7 @@ async function appendExternalPaymentJobs(
 ): Promise<CreatedFinancialRegistration> {
   const uniqueBankJobIds = [...new Set(bankJobIds.filter(Boolean))];
   if (!uniqueBankJobIds.length) {
-    throw new ContractDomainError(400, "必须至少提交一张科技公司对外付款回单");
+    throw new ContractDomainError(400, "必须至少提交一张签约公司对外付款回单");
   }
   return db.transaction(async (client) => {
     const registrationResult = await client.query<{
@@ -11393,7 +12785,7 @@ async function appendExternalPaymentJobs(
     ) {
       throw new ContractDomainError(
         409,
-        "只有“工程咨询划拨科技支付”模式需要单独补充最终对外付款",
+        "只有工程咨询向实际签约公司内部划拨的模式需要单独补充最终对外付款",
         "EXTERNAL_PAYMENT_NOT_REQUIRED",
       );
     }
@@ -11416,6 +12808,7 @@ async function appendExternalPaymentJobs(
     const jobs = await client.query<StoredFinancialOcrJob>(
       `SELECT * FROM contract_financial_ocr_jobs
        WHERE id = ANY($1::text[]) AND contract_id = $2
+         AND business_purpose IS NULL
        ORDER BY id FOR UPDATE`,
       [uniqueBankJobIds, contractId],
     );
@@ -11472,7 +12865,7 @@ async function appendExternalPaymentJobs(
     if (!contractCounterparty) {
       throw new ContractDomainError(
         409,
-        "合同对方主体不明确，不能保存科技对外付款",
+        "合同对方主体不明确，不能保存签约公司对外付款",
         "FINANCIAL_CONTRACT_SUBJECT_NOT_UNIQUE",
       );
     }
@@ -11800,6 +13193,9 @@ router.post(
       await assertMainContractFinancialTarget(req.params.id);
       const currentActor = actor(req);
       const kind = parseFinancialRecordKind(req.body.kind);
+      const openRegistrationId = await findOpenFinancialRegistrationId(
+        req.params.id,
+      );
       const result = await recognizeAndStoreFinancialFile(
         req.params.id,
         kind,
@@ -11808,6 +13204,7 @@ router.post(
         () => {
           stored = true;
         },
+        Boolean(openRegistrationId),
       );
       res.status(result.canCreateDraft ? 200 : 202).json({
         success: true,
@@ -11923,7 +13320,7 @@ router.post(
           registrationId,
         );
       }
-      sendError(res, error, "科技对外付款保存失败");
+      sendError(res, error, "签约公司对外付款保存失败");
     }
   },
 );
@@ -11947,7 +13344,3819 @@ router.post(
       );
       res.json({ success: true, data: result });
     } catch (error) {
-      sendError(res, error, "补充科技公司最终对外付款失败");
+      sendError(res, error, "补充签约公司最终对外付款失败");
+    }
+  },
+);
+
+type DepositPaymentKind = "payment" | "external_payment";
+
+interface DepositPaymentTarget {
+  id: string;
+  contractId: string;
+  kind: DepositPaymentKind;
+  amount: number;
+  paymentDate: string;
+  payer: string | null;
+  payerAccount: string | null;
+  payee: string | null;
+  payeeAccount: string | null;
+}
+
+interface DepositReceiptRow {
+  id: string;
+  contract_id: string;
+  payment_record_id: string | null;
+  external_payment_record_id: string | null;
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  mime_type: string;
+  file_hash: string;
+  ocr_status: "recognized" | "unrecognized" | "failed";
+  recognized_amount: number | null;
+  ocr_engine_version: string | null;
+  ocr_text_sha256: string | null;
+  ocr_evidence_json: string[] | null;
+  ocr_failure_message: string | null;
+  status: "pending" | "confirmed" | "voided";
+  confirmed_amount: number | null;
+  confirmation_source: "ocr" | "manual" | null;
+  uploaded_by: string;
+  confirmed_by: string | null;
+  confirmed_at: string | null;
+  voided_by: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  uploaded_by_name?: string | null;
+  confirmed_by_name?: string | null;
+  voided_by_name?: string | null;
+}
+
+function toDepositReceiptApi(row: DepositReceiptRow) {
+  const paymentKind: DepositPaymentKind = row.payment_record_id
+    ? "payment"
+    : "external_payment";
+  return {
+    id: row.id,
+    contractId: row.contract_id,
+    paymentRecordId:
+      row.payment_record_id || row.external_payment_record_id || "",
+    paymentKind,
+    fileName: row.file_name,
+    fileSize: Number(row.file_size),
+    mimeType: row.mime_type,
+    fileUrl: `/api/contracts/${row.contract_id}/financial-records/${
+      row.payment_record_id || row.external_payment_record_id
+    }/deposit-receipts/${row.id}/file`,
+    ocrStatus: row.ocr_status,
+    recognizedAmount:
+      row.recognized_amount == null ? null : Number(row.recognized_amount),
+    ocrEngineVersion: row.ocr_engine_version,
+    ocrEvidence: row.ocr_evidence_json || [],
+    ocrFailureMessage: row.ocr_failure_message,
+    status: row.status,
+    confirmedAmount:
+      row.confirmed_amount == null ? null : Number(row.confirmed_amount),
+    confirmationSource: row.confirmation_source,
+    uploadedBy: row.uploaded_by,
+    uploadedByName: row.uploaded_by_name || null,
+    confirmedBy: row.confirmed_by,
+    confirmedByName: row.confirmed_by_name || null,
+    confirmedAt: row.confirmed_at,
+    voidedBy: row.voided_by,
+    voidedByName: row.voided_by_name || null,
+    voidedAt: row.voided_at,
+    voidReason: row.void_reason,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function lockDepositPaymentTarget(
+  client: PoolClient,
+  contractId: string,
+  recordId: string,
+): Promise<DepositPaymentTarget> {
+  const contractResult = await client.query<{
+    id: string;
+    relation_type: ContractRelationType;
+    category: ContractCategory | null;
+  }>(
+    `SELECT id, relation_type, category FROM contracts
+     WHERE id = $1 AND is_deleted = FALSE FOR UPDATE`,
+    [contractId],
+  );
+  const contract = contractResult.rows[0];
+  if (!contract || contract.relation_type !== "main") {
+    throw new ContractDomainError(404, "资产类主合同不存在");
+  }
+  if (contract.category !== "asset") {
+    throw new ContractDomainError(
+      409,
+      "押金条只允许关联资产类合同付款",
+      "DEPOSIT_RECEIPT_ASSET_CONTRACT_ONLY",
+    );
+  }
+
+  const payments = await client.query<{
+    id: string;
+    contract_id: string;
+    amount: number;
+    payment_date: string;
+    payer: string | null;
+    payer_account: string | null;
+    payee: string | null;
+    payee_account: string | null;
+  }>(
+    `SELECT payment.id, payment.contract_id, payment.amount,
+         payment.payment_date,payment.payer,payment.payer_account,
+         payment.payee,payment.payee_account
+       FROM contract_payments payment
+       JOIN contracts source ON source.id = payment.contract_id
+       WHERE payment.id = $1
+         AND COALESCE(source.root_contract_id, source.id) = $2
+         AND source.is_deleted = FALSE
+         AND payment.status = 'confirmed'
+       FOR UPDATE OF payment`,
+    [recordId, contractId],
+  );
+  const externalPayments = await client.query<{
+    id: string;
+    contract_id: string;
+    amount: number;
+    payment_date: string;
+    payer: string | null;
+    payer_account: string | null;
+    payee: string | null;
+    payee_account: string | null;
+  }>(
+    `SELECT payment.id, payment.contract_id, payment.amount,
+         payment.payment_date,payment.payer,payment.payer_account,
+         payment.payee,payment.payee_account
+       FROM contract_external_payments payment
+       JOIN contracts source ON source.id = payment.contract_id
+       WHERE payment.id = $1
+         AND COALESCE(source.root_contract_id, source.id) = $2
+         AND source.is_deleted = FALSE
+         AND payment.status = 'confirmed'
+       FOR UPDATE OF payment`,
+    [recordId, contractId],
+  );
+  if (payments.rows[0] && externalPayments.rows[0]) {
+    throw new ContractDomainError(
+      409,
+      "付款记录编号存在冲突，无法安全关联押金条",
+      "DEPOSIT_RECEIPT_PAYMENT_ID_CONFLICT",
+    );
+  }
+  const payment = payments.rows[0];
+  if (payment) {
+    return {
+      id: payment.id,
+      contractId: payment.contract_id,
+      kind: "payment",
+      amount: Number(payment.amount),
+      paymentDate: payment.payment_date,
+      payer: payment.payer,
+      payerAccount: payment.payer_account,
+      payee: payment.payee,
+      payeeAccount: payment.payee_account,
+    };
+  }
+  const externalPayment = externalPayments.rows[0];
+  if (externalPayment) {
+    return {
+      id: externalPayment.id,
+      contractId: externalPayment.contract_id,
+      kind: "external_payment",
+      amount: Number(externalPayment.amount),
+      paymentDate: externalPayment.payment_date,
+      payer: externalPayment.payer,
+      payerAccount: externalPayment.payer_account,
+      payee: externalPayment.payee,
+      payeeAccount: externalPayment.payee_account,
+    };
+  }
+  throw new ContractDomainError(
+    404,
+    "已确认的合同付款记录不存在",
+    "DEPOSIT_RECEIPT_PAYMENT_NOT_FOUND",
+  );
+}
+
+interface ContractDepositRow {
+  id: string;
+  contract_id: string;
+  amount: number;
+  clause_text: string | null;
+  basis: string | null;
+  payment_purpose: "lease_deposit";
+  funding_source: ContractDepositFundingSource;
+  engineering_allocation_amount: number;
+  technology_self_funded_amount: number;
+  payment_record_id: string | null;
+  external_payment_record_id: string | null;
+  paid_at: string | null;
+  note: string | null;
+  status: ContractDepositStatus;
+  settled_amount: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  created_by_name?: string | null;
+  updated_by_name?: string | null;
+}
+
+interface ContractDepositSettlementRow {
+  id: string;
+  deposit_id: string;
+  contract_id: string;
+  settlement_type: ContractDepositSettlementType;
+  amount: number;
+  settlement_date: string;
+  note: string | null;
+  engineering_return_required_amount: number;
+  engineering_returned_amount: number;
+  engineering_returned_at: string | null;
+  engineering_return_note: string | null;
+  created_by: string;
+  created_at: string;
+  created_by_name?: string | null;
+}
+
+type ContractDepositSettlementReceiptKind =
+  | "deposit_refund"
+  | "engineering_return";
+
+interface ContractDepositSettlementReceiptRow {
+  id: string;
+  settlement_id: string;
+  contract_id: string;
+  receipt_kind: ContractDepositSettlementReceiptKind;
+  amount: number;
+  transaction_date: string;
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  mime_type: string;
+  file_hash: string;
+  file_id: string | null;
+  financial_ocr_job_id: string | null;
+  electronic_receipt_no: string | null;
+  payer: string | null;
+  payer_account: string | null;
+  payee: string | null;
+  payee_account: string | null;
+  recognition_method: string | null;
+  ocr_engine_version: string | null;
+  ocr_parser_version: string | null;
+  evidence_text_hash: string | null;
+  uploaded_by: string;
+  created_at: string;
+  uploaded_by_name?: string | null;
+}
+
+const DEPOSIT_FUNDING_SOURCES = new Set<ContractDepositFundingSource>([
+  "engineering_allocation",
+  "technology_self_funded",
+  "mixed",
+  "pending_review",
+]);
+const DEPOSIT_SETTLEMENT_TYPES = new Set<ContractDepositSettlementType>([
+  "refund",
+  "deduction",
+  "rent_offset",
+]);
+
+function normalizeDepositFundingSource(
+  value: unknown,
+): ContractDepositFundingSource {
+  const source = String(
+    value || "pending_review",
+  ) as ContractDepositFundingSource;
+  if (!DEPOSIT_FUNDING_SOURCES.has(source)) {
+    throw new ContractDomainError(400, "押金资金来源不正确");
+  }
+  return source;
+}
+
+function normalizeDepositDate(value: unknown, label: string): string {
+  const date = String(value || "").trim();
+  if (!isValidBankBusinessDate(date)) {
+    throw new ContractDomainError(400, `${label}格式不正确`);
+  }
+  return date;
+}
+
+async function insertContractDepositSettlementReceipt(
+  client: PoolClient,
+  input: {
+    settlementId: string;
+    contractId: string;
+    kind: ContractDepositSettlementReceiptKind;
+    amount: number;
+    transactionDate: string;
+    file: ValidatedUpload;
+    uploadedBy: string;
+    createdAt: string;
+    fileId?: string;
+    financialOcrJobId?: string;
+    electronicReceiptNo?: string;
+    payer?: string;
+    payerAccount?: string;
+    payee?: string;
+    payeeAccount?: string;
+    recognitionMethod?: string;
+    ocrEngineVersion?: string;
+    ocrParserVersion?: string;
+    evidenceTextHash?: string;
+  },
+): Promise<ContractDepositSettlementReceiptRow> {
+  const inserted = await client.query<ContractDepositSettlementReceiptRow>(
+    `INSERT INTO contract_deposit_settlement_receipts(
+       id,settlement_id,contract_id,receipt_kind,amount,transaction_date,
+       file_name,file_path,file_size,mime_type,file_hash,file_id,
+       financial_ocr_job_id,electronic_receipt_no,payer,payer_account,
+       payee,payee_account,recognition_method,ocr_engine_version,
+       ocr_parser_version,evidence_text_hash,uploaded_by,created_at
+     ) VALUES(
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+       $17,$18,$19,$20,$21,$22,$23,$24
+     )
+     ON CONFLICT(file_hash) DO NOTHING
+     RETURNING *`,
+    [
+      nanoid(),
+      input.settlementId,
+      input.contractId,
+      input.kind,
+      input.amount,
+      input.transactionDate,
+      input.file.fileName,
+      input.file.filePath,
+      input.file.fileSize,
+      input.file.mimeType,
+      input.file.fileHash,
+      input.fileId || null,
+      input.financialOcrJobId || null,
+      input.electronicReceiptNo || null,
+      input.payer || null,
+      input.payerAccount || null,
+      input.payee || null,
+      input.payeeAccount || null,
+      input.recognitionMethod || null,
+      input.ocrEngineVersion || null,
+      input.ocrParserVersion || null,
+      input.evidenceTextHash || null,
+      input.uploadedBy,
+      input.createdAt,
+    ],
+  );
+  const receipt = inserted.rows[0];
+  if (!receipt) {
+    throw new ContractDomainError(
+      409,
+      "该回单已经用于本合同的押金资金登记，请勿重复上传",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_DUPLICATE",
+    );
+  }
+  return receipt;
+}
+
+async function lockDepositContract(client: PoolClient, contractId: string) {
+  const result = await client.query<ContractRow>(
+    `SELECT * FROM contracts
+     WHERE id=$1 AND is_deleted=FALSE FOR UPDATE`,
+    [contractId],
+  );
+  const contract = result.rows[0];
+  if (!contract) throw new ContractDomainError(404, "合同不存在");
+  if (
+    !isContractDepositEligible({
+      category: contract.category,
+      declaredSubtype: contract.declared_subtype,
+      relationType: contract.relation_type,
+    })
+  ) {
+    throw new ContractDomainError(409, "只有租赁类资产主合同可以登记押金");
+  }
+  return contract;
+}
+
+async function resolveDepositReturnRecognitionContext(
+  client: PoolClient,
+  input: {
+    contractId: string;
+    businessPurpose: ContractDepositReturnReceiptPurpose;
+    settlementId?: string | null;
+    targetId?: string | null;
+  },
+): Promise<DepositReturnFinancialOcrContext> {
+  const contract = await lockDepositContract(client, input.contractId);
+  const depositResult = await client.query<ContractDepositRow>(
+    `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+    [input.contractId],
+  );
+  const deposit = depositResult.rows[0];
+  if (!deposit) throw new ContractDomainError(404, "押金记录不存在");
+  const selectedSettlementId =
+    input.settlementId ||
+    (input.targetId && input.targetId !== deposit.id ? input.targetId : null);
+
+  if (input.businessPurpose === "deposit_refund") {
+    const linkedPaymentRecordId =
+      deposit.payment_record_id || deposit.external_payment_record_id;
+    if (!linkedPaymentRecordId) {
+      throw new ContractDomainError(
+        409,
+        "押金尚未关联实际付款回单，不能识别退款回单",
+        "CONTRACT_DEPOSIT_REFUND_SOURCE_PAYMENT_REQUIRED",
+      );
+    }
+    const sourcePayment = await lockDepositPaymentTarget(
+      client,
+      input.contractId,
+      linkedPaymentRecordId,
+    );
+    if (!sourcePayment.payer || !sourcePayment.payee) {
+      throw new ContractDomainError(
+        409,
+        "原押金付款回单缺少完整收付款主体，不能自动核验退款方向",
+        "CONTRACT_DEPOSIT_REFUND_SOURCE_PARTIES_MISSING",
+      );
+    }
+    let targetId = deposit.id;
+    let maximumAmount =
+      Number(deposit.amount) - Number(deposit.settled_amount || 0);
+    let requiredAmount: number | undefined;
+    let requiredTransactionDate: string | undefined;
+    if (selectedSettlementId) {
+      const settlementResult = await client.query<ContractDepositSettlementRow>(
+        `SELECT * FROM contract_deposit_settlements
+           WHERE id=$1 AND contract_id=$2 AND deposit_id=$3 FOR UPDATE`,
+        [selectedSettlementId, input.contractId, deposit.id],
+      );
+      const settlement = settlementResult.rows[0];
+      if (!settlement) {
+        throw new ContractDomainError(404, "押金退款记录不存在");
+      }
+      if (settlement.settlement_type !== "refund") {
+        throw new ContractDomainError(
+          409,
+          "只有押金退款记录可以补充退款回单",
+          "CONTRACT_DEPOSIT_REFUND_TARGET_TYPE_INVALID",
+        );
+      }
+      const existing = await client.query<{ id: string }>(
+        `SELECT id FROM contract_deposit_settlement_receipts
+         WHERE settlement_id=$1 AND receipt_kind='deposit_refund'
+         FOR UPDATE`,
+        [settlement.id],
+      );
+      if (existing.rows[0]) {
+        throw new ContractDomainError(
+          409,
+          "该笔押金退款已经存在退回回单",
+          "CONTRACT_DEPOSIT_REFUND_RECEIPT_ALREADY_EXISTS",
+        );
+      }
+      targetId = settlement.id;
+      maximumAmount = Number(settlement.amount);
+      requiredAmount = Number(settlement.amount);
+      requiredTransactionDate = settlement.settlement_date;
+    } else {
+      if (deposit.status === "pending_payment") {
+        throw new ContractDomainError(409, "押金尚未支付，不能办理退款");
+      }
+      if (deposit.status === "settled" || maximumAmount <= 0) {
+        throw new ContractDomainError(409, "押金已结清，不能重复退款");
+      }
+    }
+    if (input.targetId && input.targetId !== targetId) {
+      throw new ContractDomainError(
+        409,
+        "押金退款识别任务目标已经变化，请重新识别",
+        "CONTRACT_DEPOSIT_RETURN_OCR_TARGET_CHANGED",
+      );
+    }
+    return {
+      businessPurpose: "deposit_refund",
+      targetId,
+      expectedPayer: sourcePayment.payee,
+      expectedPayee: sourcePayment.payer,
+      expectedPayerAccount: sourcePayment.payeeAccount,
+      expectedPayeeAccount: sourcePayment.payerAccount,
+      minimumTransactionDate: sourcePayment.paymentDate,
+      maximumAmount,
+      expectedDirection: "receipt",
+      requiredAmount,
+      requiredTransactionDate,
+    };
+  }
+
+  const engineeringSettlementId = selectedSettlementId || input.targetId;
+  if (!engineeringSettlementId) {
+    throw new ContractDomainError(
+      400,
+      "识别退工程回单必须指定押金退款记录",
+      "CONTRACT_DEPOSIT_ENGINEERING_RETURN_TARGET_REQUIRED",
+    );
+  }
+  const settlementResult = await client.query<ContractDepositSettlementRow>(
+    `SELECT * FROM contract_deposit_settlements
+     WHERE id=$1 AND contract_id=$2 AND deposit_id=$3 FOR UPDATE`,
+    [engineeringSettlementId, input.contractId, deposit.id],
+  );
+  const settlement = settlementResult.rows[0];
+  if (!settlement) throw new ContractDomainError(404, "押金退款记录不存在");
+  if (settlement.settlement_type !== "refund") {
+    throw new ContractDomainError(409, "只有押金退款可以退回工程资金");
+  }
+  const maximumAmount =
+    Number(settlement.engineering_return_required_amount || 0) -
+    Number(settlement.engineering_returned_amount || 0);
+  if (maximumAmount <= 0) {
+    throw new ContractDomainError(409, "该笔工程划拨资金已经全部退回");
+  }
+  if (input.targetId && input.targetId !== settlement.id) {
+    throw new ContractDomainError(
+      409,
+      "退工程识别任务目标已经变化，请重新识别",
+      "CONTRACT_DEPOSIT_RETURN_OCR_TARGET_CHANGED",
+    );
+  }
+  return {
+    businessPurpose: "engineering_return",
+    targetId: settlement.id,
+    expectedPayer: resolveContractCompanySubject(contract).name,
+    expectedPayee: "北京羽隶工程咨询有限公司",
+    minimumTransactionDate: settlement.settlement_date,
+    maximumAmount,
+    expectedDirection: "payment",
+  };
+}
+
+interface DepositReturnOcrFields {
+  paymentTime: string;
+  amount: number;
+  electronicReceiptNo: string;
+  payer: string;
+  payerAccount: string;
+  payee: string;
+  payeeAccount: string;
+}
+
+interface LockedDepositReturnOcrJob {
+  id: string;
+  contract_id: string;
+  file_id: string;
+  file_hash: string;
+  record_kind: "receipt" | "payment";
+  status: FinancialOcrJobView["status"];
+  validation_status: FinancialOcrJobView["validationStatus"];
+  recognition_method: string | null;
+  engine_version: string | null;
+  parser_version: string | null;
+  evidence_text_hash: string | null;
+  direction: string | null;
+  document_status: string | null;
+  can_auto_post: boolean;
+  snapshot_json: SafeContractFinancialSnapshot;
+  business_purpose: ContractFinancialOcrBusinessPurpose;
+  target_id: string;
+  requested_by: string;
+  file_name: string;
+  file_path: string;
+  file_size: number;
+  mime_type: string;
+}
+
+function assertDepositReturnOcrFieldsMatch(
+  job: LockedDepositReturnOcrJob,
+  context: SpecializedFinancialOcrContext,
+): DepositReturnOcrFields {
+  const fields = job.snapshot_json?.fields as Partial<DepositReturnOcrFields>;
+  if (
+    !fields ||
+    !fields.paymentTime ||
+    !isValidBankBusinessDate(String(fields.paymentTime)) ||
+    !fields.electronicReceiptNo ||
+    !fields.payer ||
+    !fields.payerAccount ||
+    !fields.payee ||
+    !fields.payeeAccount
+  ) {
+    throw new ContractDomainError(
+      409,
+      "押金结算回单识别字段不完整，请重新识别",
+      "CONTRACT_DEPOSIT_RETURN_OCR_FIELDS_INCOMPLETE",
+    );
+  }
+  const amount = parsePositiveAmount(fields.amount, "回单金额");
+  if (job.direction !== context.expectedDirection) {
+    throw new ContractDomainError(
+      422,
+      "押金结算回单资金方向不符合当前操作",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_DIRECTION_MISMATCH",
+    );
+  }
+  if (
+    normalizeFinancialIdentity(fields.payer) !==
+      normalizeFinancialIdentity(context.expectedPayer) ||
+    normalizeFinancialIdentity(fields.payee) !==
+      normalizeFinancialIdentity(context.expectedPayee)
+  ) {
+    throw new ContractDomainError(
+      422,
+      context.businessPurpose === "deposit_refund"
+        ? "押金退款回单必须由原付款收款方退回至原付款付款方"
+        : context.businessPurpose === "engineering_return"
+          ? `退工程回单必须由${context.expectedPayer}付款、${context.expectedPayee}收款`
+          : `内部划拨回单必须由${context.expectedPayer}付款、${context.expectedPayee}收款`,
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PARTY_MISMATCH",
+    );
+  }
+  if (
+    context.expectedPayerAccount &&
+    normalizeFinancialBankIdentifier(fields.payerAccount) !==
+      normalizeFinancialBankIdentifier(context.expectedPayerAccount)
+  ) {
+    throw new ContractDomainError(
+      422,
+      "回单付款账号与要求的资金退回账号不一致",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PAYER_ACCOUNT_MISMATCH",
+    );
+  }
+  if (
+    context.expectedPayeeAccount &&
+    normalizeFinancialBankIdentifier(fields.payeeAccount) !==
+      normalizeFinancialBankIdentifier(context.expectedPayeeAccount)
+  ) {
+    throw new ContractDomainError(
+      422,
+      "回单收款账号与要求的资金接收账号不一致",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_PAYEE_ACCOUNT_MISMATCH",
+    );
+  }
+  if (String(fields.paymentTime) < context.minimumTransactionDate) {
+    throw new ContractDomainError(
+      422,
+      "资金退回日期不能早于原付款或押金退款日期",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_DATE_BEFORE_SOURCE",
+    );
+  }
+  if (toCents(String(amount)) > toCents(String(context.maximumAmount))) {
+    throw new ContractDomainError(
+      409,
+      context.businessPurpose === "deposit_refund"
+        ? "回单退款金额不能超过押金待结算金额"
+        : context.businessPurpose === "engineering_return"
+          ? "回单退工程金额不能超过该笔待退工程金额"
+          : "内部划拨回单金额不能超过已完成合同的待划拨缺口",
+      "CONTRACT_DEPOSIT_RETURN_RECEIPT_AMOUNT_EXCEEDS_REMAINING",
+    );
+  }
+  return {
+    paymentTime: String(fields.paymentTime),
+    amount,
+    electronicReceiptNo: String(fields.electronicReceiptNo),
+    payer: String(fields.payer),
+    payerAccount: String(fields.payerAccount),
+    payee: String(fields.payee),
+    payeeAccount: String(fields.payeeAccount),
+  };
+}
+
+async function lockVerifiedDepositReturnOcrJob(
+  client: PoolClient,
+  input: {
+    contractId: string;
+    jobId: string;
+    context: SpecializedFinancialOcrContext;
+  },
+): Promise<{ job: LockedDepositReturnOcrJob; fields: DepositReturnOcrFields }> {
+  const result = await client.query<LockedDepositReturnOcrJob>(
+    `SELECT job.*,file.file_name,file.file_path,file.file_size,file.mime_type
+     FROM contract_financial_ocr_jobs job
+     JOIN contract_files file ON file.id=job.file_id
+     WHERE job.id=$1 AND job.contract_id=$2
+       AND job.business_purpose=$3 AND job.target_id=$4
+     FOR UPDATE OF job,file`,
+    [
+      input.jobId,
+      input.contractId,
+      input.context.businessPurpose,
+      input.context.targetId,
+    ],
+  );
+  const job = result.rows[0];
+  if (!job) {
+    throw new ContractDomainError(
+      404,
+      "押金结算回单识别任务不存在或目标不一致",
+      "CONTRACT_DEPOSIT_RETURN_OCR_JOB_NOT_FOUND",
+    );
+  }
+  const expectedRecordKind =
+    input.context.businessPurpose === "deposit_refund" ? "receipt" : "payment";
+  if (
+    job.record_kind !== expectedRecordKind ||
+    job.status !== "verified" ||
+    job.validation_status !== "verified" ||
+    job.document_status !== "normal" ||
+    job.can_auto_post !== true ||
+    job.engine_version !==
+      contractFinancialOcrEngineVersion(expectedRecordKind) ||
+    job.parser_version !== contractFinancialOcrParserVersion(expectedRecordKind)
+  ) {
+    throw new ContractDomainError(
+      409,
+      "押金结算回单未通过当前安全识别，不能确认",
+      "CONTRACT_DEPOSIT_RETURN_OCR_JOB_NOT_CONFIRMABLE",
+    );
+  }
+  const fields = assertDepositReturnOcrFieldsMatch(job, input.context);
+  if (
+    await findContractBankReceiptNumberDuplicate(
+      client,
+      fields.electronicReceiptNo,
+      job.id,
+    )
+  ) {
+    throw new ContractDomainError(
+      409,
+      `电子回单号码 ${fields.electronicReceiptNo} 已上传或登记，禁止重复使用`,
+      "DUPLICATE_CONTRACT_BANK_DOCUMENT",
+    );
+  }
+  return { job, fields };
+}
+
+function storedUploadFromDepositReturnJob(
+  job: LockedDepositReturnOcrJob,
+): ValidatedUpload {
+  return {
+    fileName: job.file_name,
+    filePath: job.file_path,
+    fileSize: Number(job.file_size),
+    mimeType: job.mime_type,
+    fileHash: job.file_hash,
+  };
+}
+
+async function loadContractDepositSnapshot(
+  client: PoolClient,
+  contractId: string,
+) {
+  const contractResult = await client.query<{
+    id: string;
+    category: string | null;
+    declared_subtype: string | null;
+    relation_type: string;
+  }>(
+    `SELECT id,category,declared_subtype,relation_type FROM contracts
+     WHERE id=$1 AND is_deleted=FALSE`,
+    [contractId],
+  );
+  const contract = contractResult.rows[0];
+  if (!contract) throw new ContractDomainError(404, "合同不存在");
+  const eligible = isContractDepositEligible({
+    category: contract.category,
+    declaredSubtype: contract.declared_subtype,
+    relationType: contract.relation_type,
+  });
+  const depositResult = await client.query<ContractDepositRow>(
+    `SELECT deposit.*,creator.name AS created_by_name,
+       updater.name AS updated_by_name
+     FROM contract_deposits deposit
+     LEFT JOIN users creator ON creator.id=deposit.created_by
+     LEFT JOIN users updater ON updater.id=deposit.updated_by
+     WHERE deposit.contract_id=$1`,
+    [contractId],
+  );
+  const deposit = depositResult.rows[0] || null;
+  const settlements = deposit
+    ? (
+        await client.query<ContractDepositSettlementRow>(
+          `SELECT settlement.*,creator.name AS created_by_name
+           FROM contract_deposit_settlements settlement
+           LEFT JOIN users creator ON creator.id=settlement.created_by
+           WHERE settlement.deposit_id=$1
+           ORDER BY settlement.settlement_date,settlement.created_at,settlement.id`,
+          [deposit.id],
+        )
+      ).rows
+    : [];
+  const settlementReceipts = deposit
+    ? (
+        await client.query<ContractDepositSettlementReceiptRow>(
+          `SELECT receipt.*,uploader.name AS uploaded_by_name
+           FROM contract_deposit_settlement_receipts receipt
+           JOIN contract_deposit_settlements settlement
+             ON settlement.id=receipt.settlement_id
+             AND settlement.contract_id=receipt.contract_id
+           LEFT JOIN users uploader ON uploader.id=receipt.uploaded_by
+           WHERE receipt.contract_id=$1 AND settlement.deposit_id=$2
+           ORDER BY receipt.created_at,receipt.id`,
+          [contractId, deposit.id],
+        )
+      ).rows
+    : [];
+  const receiptApiBySettlement = new Map<
+    string,
+    Array<{
+      kind: ContractDepositSettlementReceiptKind;
+      value: {
+        id: string;
+        fileName: string;
+        fileSize: number;
+        mimeType: string;
+        amount: number;
+        transactionDate: string;
+        fileUrl: string;
+        uploadedBy: string;
+        uploadedByName: string | null;
+        createdAt: string;
+        electronicReceiptNo: string | null;
+        payer: string | null;
+        payerAccount: string | null;
+        payee: string | null;
+        payeeAccount: string | null;
+        recognitionMethod: string | null;
+        ocrEngineVersion: string | null;
+        ocrParserVersion: string | null;
+      };
+    }>
+  >();
+  for (const receipt of settlementReceipts) {
+    const values = receiptApiBySettlement.get(receipt.settlement_id) || [];
+    values.push({
+      kind: receipt.receipt_kind,
+      value: {
+        id: receipt.id,
+        fileName: receipt.file_name,
+        fileSize: Number(receipt.file_size),
+        mimeType: receipt.mime_type,
+        amount: Number(receipt.amount),
+        transactionDate: receipt.transaction_date,
+        fileUrl: `/api/contracts/${contractId}/deposit/settlements/${receipt.settlement_id}/receipts/${receipt.id}/file`,
+        uploadedBy: receipt.uploaded_by,
+        uploadedByName: receipt.uploaded_by_name || null,
+        createdAt: receipt.created_at,
+        electronicReceiptNo: receipt.electronic_receipt_no,
+        payer: receipt.payer,
+        payerAccount: receipt.payer_account,
+        payee: receipt.payee,
+        payeeAccount: receipt.payee_account,
+        recognitionMethod: receipt.recognition_method,
+        ocrEngineVersion: receipt.ocr_engine_version,
+        ocrParserVersion: receipt.ocr_parser_version,
+      },
+    });
+    receiptApiBySettlement.set(receipt.settlement_id, values);
+  }
+  const mappedSettlements = settlements.map((row) => ({
+    id: row.id,
+    type: row.settlement_type,
+    amount: Number(row.amount),
+    settlementDate: row.settlement_date,
+    note: row.note,
+    engineeringReturnRequiredAmount: Number(
+      row.engineering_return_required_amount || 0,
+    ),
+    engineeringReturnedAmount: Number(row.engineering_returned_amount || 0),
+    engineeringReturnStatus:
+      Number(row.engineering_return_required_amount || 0) === 0
+        ? "not_required"
+        : Number(row.engineering_returned_amount || 0) >=
+            Number(row.engineering_return_required_amount || 0)
+          ? "returned"
+          : Number(row.engineering_returned_amount || 0) > 0
+            ? "partial"
+            : "pending",
+    refundReceipt:
+      receiptApiBySettlement
+        .get(row.id)
+        ?.find((receipt) => receipt.kind === "deposit_refund")?.value || null,
+    engineeringReturnReceipts: (receiptApiBySettlement.get(row.id) || [])
+      .filter((receipt) => receipt.kind === "engineering_return")
+      .map((receipt) => receipt.value),
+    createdBy: row.created_by,
+    createdByName: row.created_by_name || null,
+    createdAt: row.created_at,
+  }));
+  const pendingEngineeringReturn = mappedSettlements.reduce(
+    (sum, row) =>
+      sum +
+      Math.max(
+        0,
+        Number(row.engineeringReturnRequiredAmount || 0) -
+          Number(row.engineeringReturnedAmount || 0),
+      ),
+    0,
+  );
+  return {
+    eligibility: {
+      likely: eligible,
+      reason: eligible ? "rental_subtype" : "non_rental_subtype",
+      subtype: contract.declared_subtype,
+    },
+    deposit: deposit
+      ? {
+          id: deposit.id,
+          contractId: deposit.contract_id,
+          amount: Number(deposit.amount),
+          clauseText: deposit.clause_text,
+          basis: deposit.basis,
+          paymentPurpose: deposit.payment_purpose,
+          fundingSource: deposit.funding_source,
+          engineeringAllocationAmount: Number(
+            deposit.engineering_allocation_amount || 0,
+          ),
+          technologySelfFundedAmount: Number(
+            deposit.technology_self_funded_amount || 0,
+          ),
+          paymentRecordId:
+            deposit.payment_record_id || deposit.external_payment_record_id,
+          paymentRecordKind: deposit.external_payment_record_id
+            ? "external_payment"
+            : deposit.payment_record_id
+              ? "payment"
+              : null,
+          paidAt: deposit.paid_at,
+          note: deposit.note,
+          status: deposit.status,
+          settledAmount: Number(deposit.settled_amount || 0),
+          remainingAmount:
+            Number(deposit.amount) - Number(deposit.settled_amount || 0),
+          pendingEngineeringReturn,
+          settlements: mappedSettlements,
+          createdBy: deposit.created_by,
+          createdByName: deposit.created_by_name || null,
+          createdAt: deposit.created_at,
+          updatedBy: deposit.updated_by,
+          updatedByName: deposit.updated_by_name || null,
+          updatedAt: deposit.updated_at,
+        }
+      : null,
+  };
+}
+
+router.get(
+  "/:id/completed-internal-funding-summary",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const result = await db.transaction((client) =>
+        loadCompletedInternalFundingSummary(client, req.params.id, false),
+      );
+      res.json({ success: true, data: result.summary });
+    } catch (error) {
+      sendError(res, error, "获取已完成合同内部划拨摘要失败");
+    }
+  },
+);
+
+router.post(
+  "/:id/completed-internal-funding/recognize",
+  requireFinance,
+  uploadSingle,
+  async (req, res) => {
+    let stored = false;
+    try {
+      if (Object.keys(req.body || {}).length > 0) {
+        throw new ContractDomainError(
+          400,
+          "识别历史内部划拨回单时只需上传文件",
+          "COMPLETED_INTERNAL_FUNDING_OCR_FIELDS_FORBIDDEN",
+        );
+      }
+      const currentActor = actor(req);
+      const contextResult = await db.transaction((client) =>
+        loadCompletedInternalFundingSummary(client, req.params.id, true),
+      );
+      if (contextResult.summary.status === "pending_review") {
+        throw new ContractDomainError(
+          409,
+          "押金资金来源尚未确认，不能补录历史内部划拨",
+          "COMPLETED_INTERNAL_FUNDING_SOURCE_PENDING_REVIEW",
+        );
+      }
+      if (!contextResult.summary.canAppendAfterCompletion) {
+        throw new ContractDomainError(
+          409,
+          "该已完成合同没有待补内部划拨金额",
+          "COMPLETED_INTERNAL_FUNDING_ALREADY_CLOSED",
+        );
+      }
+      const availableRecognitionAmount =
+        contextResult.summary.availableRecognitionAmount;
+      if (availableRecognitionAmount <= 0) {
+        throw new ContractDomainError(
+          409,
+          "待确认识别任务已经覆盖全部内部划拨缺口，请先确认或删除现有任务",
+          "COMPLETED_INTERNAL_FUNDING_PENDING_COVERS_REMAINING",
+        );
+      }
+      const result = await recognizeAndStoreFinancialFile(
+        req.params.id,
+        "payment",
+        req.file,
+        currentActor,
+        () => {
+          stored = true;
+        },
+        false,
+        false,
+        {
+          ...contextResult.context,
+          maximumAmount: availableRecognitionAmount,
+        },
+      );
+      const refreshed = await db.transaction((client) =>
+        loadCompletedInternalFundingSummary(client, req.params.id, false),
+      );
+      const recognition = refreshed.summary.pendingRecognitions.find(
+        (job) => job.jobId === result.id,
+      );
+      if (!recognition) {
+        throw new ContractDomainError(
+          409,
+          "识别任务状态已经变化，请刷新内部划拨摘要",
+          "COMPLETED_INTERNAL_FUNDING_OCR_STATE_CHANGED",
+        );
+      }
+      res.status(recognition.canConfirm ? 200 : 202).json({
+        success: true,
+        data: recognition,
+      });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (!stored && !commitOutcomeUncertain) cleanupUploadedFile(req.file);
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "COMPLETED_INTERNAL_FUNDING_OCR_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "内部划拨识别任务提交结果暂时无法确认；已保留原件，请刷新后再操作",
+        });
+        return;
+      }
+      sendError(res, error, "识别已完成合同内部划拨回单失败");
+    }
+  },
+);
+
+router.delete(
+  "/:id/completed-internal-funding/recognitions/:jobId",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      const removed = await db.transaction(async (client) => {
+        await loadCompletedInternalFundingSummary(client, req.params.id, true);
+        const result = await client.query<{
+          id: string;
+          file_id: string;
+          file_hash: string;
+          file_path: string;
+          file_name: string;
+          status: string;
+          record_id: string | null;
+        }>(
+          `SELECT job.id,job.file_id,job.file_hash,job.status,job.record_id,
+             file.file_path,file.file_name
+           FROM contract_financial_ocr_jobs job
+           JOIN contract_files file ON file.id=job.file_id
+           WHERE job.id=$1 AND job.contract_id=$2
+             AND job.business_purpose='engineering_internal_funding'
+             AND job.target_id=$2
+           FOR UPDATE OF job,file`,
+          [req.params.jobId, req.params.id],
+        );
+        const job = result.rows[0];
+        if (!job) {
+          throw new ContractDomainError(
+            404,
+            "历史内部划拨识别任务不存在",
+            "COMPLETED_INTERNAL_FUNDING_OCR_JOB_NOT_FOUND",
+          );
+        }
+        if (job.status === "processing") {
+          throw new ContractDomainError(409, "回单正在识别，请稍后再移除");
+        }
+        if (job.record_id || job.status === "consumed") {
+          throw new ContractDomainError(
+            409,
+            "该内部划拨回单已经确认，不能按临时任务删除",
+            "COMPLETED_INTERNAL_FUNDING_OCR_ALREADY_CONSUMED",
+          );
+        }
+        const now = new Date().toISOString();
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) SELECT $1,contract.id,'completed_internal_funding_ocr_deleted',
+             $2,$3,status,status,$4::jsonb,$5,$6
+             FROM contracts contract WHERE contract.id=$7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              ocrJobId: job.id,
+              fileId: job.file_id,
+              fileHash: job.file_hash,
+              fileName: job.file_name,
+              previousStatus: job.status,
+              hardDeleted: true,
+            }),
+            "移除未确认的已完成合同内部划拨识别任务",
+            now,
+            req.params.id,
+          ],
+        );
+        await client.query(
+          `DELETE FROM contract_financial_file_hashes WHERE file_id=$1`,
+          [job.file_id],
+        );
+        await client.query(
+          `DELETE FROM contract_financial_ocr_jobs WHERE id=$1`,
+          [job.id],
+        );
+        await client.query(`DELETE FROM contract_files WHERE id=$1`, [
+          job.file_id,
+        ]);
+        return job;
+      });
+      await cleanupStoredFinancialFiles([removed.file_path], {
+        contractId: req.params.id,
+        ocrJobId: removed.id,
+        businessPurpose: "engineering_internal_funding",
+      });
+      res.json({ success: true, data: { jobId: removed.id, deleted: true } });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "COMPLETED_INTERNAL_FUNDING_DELETE_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "识别任务移除结果暂时无法确认；已保留物理文件，请刷新后再操作",
+        });
+        return;
+      }
+      sendError(res, error, "移除已完成合同内部划拨识别任务失败");
+    }
+  },
+);
+
+router.post(
+  "/:id/completed-internal-funding/confirm",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (
+        Object.keys(req.body || {}).some((key) => key !== "ocrJobIds") ||
+        !Array.isArray(req.body?.ocrJobIds)
+      ) {
+        throw new ContractDomainError(
+          400,
+          "确认历史内部划拨时只能提交识别任务编号数组",
+          "COMPLETED_INTERNAL_FUNDING_CONFIRM_FIELDS_INVALID",
+        );
+      }
+      const jobIds = [
+        ...new Set(
+          (req.body.ocrJobIds as unknown[])
+            .map(normalizeNullableText)
+            .filter((id): id is string => Boolean(id)),
+        ),
+      ].sort();
+      if (!jobIds.length || jobIds.length > 20) {
+        throw new ContractDomainError(
+          400,
+          "每次必须确认一至二十张内部划拨回单",
+        );
+      }
+      const currentActor = actor(req);
+      const summary = await db.transaction(async (client) => {
+        const contextResult = await loadCompletedInternalFundingSummary(
+          client,
+          req.params.id,
+          true,
+        );
+        if (contextResult.summary.status === "pending_review") {
+          throw new ContractDomainError(
+            409,
+            "押金资金来源尚未确认，不能确认历史内部划拨",
+            "COMPLETED_INTERNAL_FUNDING_SOURCE_PENDING_REVIEW",
+          );
+        }
+        if (!contextResult.summary.canAppendAfterCompletion) {
+          throw new ContractDomainError(
+            409,
+            "该已完成合同没有待补内部划拨金额",
+            "COMPLETED_INTERNAL_FUNDING_ALREADY_CLOSED",
+          );
+        }
+        const recognized = [];
+        for (const jobId of jobIds) {
+          recognized.push(
+            await lockVerifiedDepositReturnOcrJob(client, {
+              contractId: req.params.id,
+              jobId,
+              context: contextResult.context,
+            }),
+          );
+        }
+        const batchAmountCents = recognized.reduce(
+          (sum, item) => sum + toCents(String(item.fields.amount)),
+          0,
+        );
+        if (
+          batchAmountCents >
+          toCents(String(contextResult.summary.remainingAmount))
+        ) {
+          throw new ContractDomainError(
+            422,
+            `本批内部划拨合计${centsToAmount(batchAmountCents).toFixed(2)}元不能超过待划拨缺口${contextResult.summary.remainingAmount.toFixed(2)}元`,
+            "COMPLETED_INTERNAL_FUNDING_BATCH_EXCEEDS_REMAINING",
+          );
+        }
+        const now = new Date().toISOString();
+        const paymentIds: string[] = [];
+        for (const item of recognized) {
+          const paymentId = nanoid();
+          paymentIds.push(paymentId);
+          await client.query(
+            `INSERT INTO contract_payments(
+               id,contract_id,file_id,payment_date,payment_time,amount,
+               expense_category,payer,payer_account,payee,payee_account,
+               electronic_receipt_no,note,financial_ocr_job_id,status,
+               created_by,confirmed_by,confirmed_at,created_at,updated_at
+             ) VALUES(
+               $1,$2,$3,$4,$4,$5,'other',$6,$7,$8,$9,$10,NULL,$11,
+               'confirmed',$12,$13,$14,$14,$14
+             )`,
+            [
+              paymentId,
+              req.params.id,
+              item.job.file_id,
+              item.fields.paymentTime,
+              item.fields.amount,
+              item.fields.payer,
+              item.fields.payerAccount,
+              item.fields.payee,
+              item.fields.payeeAccount,
+              item.fields.electronicReceiptNo,
+              item.job.id,
+              item.job.requested_by,
+              currentActor.id,
+              now,
+            ],
+          );
+          await client.query(
+            `UPDATE contract_financial_ocr_jobs SET
+               status='consumed',record_id=$2,consumed_at=$3,updated_at=$3
+             WHERE id=$1 AND status='verified' AND record_id IS NULL`,
+            [item.job.id, paymentId, now],
+          );
+        }
+        const contractStatus = await client.query<{ status: string }>(
+          `SELECT status FROM contracts WHERE id=$1 FOR UPDATE`,
+          [req.params.id],
+        );
+        if (contractStatus.rows[0]?.status !== "completed") {
+          throw new ContractDomainError(
+            409,
+            "合同状态已变化，历史内部划拨确认已回滚",
+            "COMPLETED_INTERNAL_FUNDING_STATUS_CHANGED",
+          );
+        }
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) VALUES($1,$2,'completed_internal_funding_confirmed',$3,$4,
+             'completed','completed',$5::jsonb,$6,$7)`,
+          [
+            nanoid(),
+            req.params.id,
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              ocrJobIds: recognized.map((item) => item.job.id),
+              paymentIds,
+              batchAmount: centsToAmount(batchAmountCents),
+              contractStatusPreserved: true,
+              registrationCreated: false,
+              matchesCreated: false,
+            }),
+            "补录已完成合同工程咨询内部划拨",
+            now,
+          ],
+        );
+        return (
+          await loadCompletedInternalFundingSummary(
+            client,
+            req.params.id,
+            false,
+          )
+        ).summary;
+      });
+      res.json({ success: true, data: summary });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "COMPLETED_INTERNAL_FUNDING_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "内部划拨确认结果暂时无法确认；请刷新摘要后再操作，勿重复确认",
+        });
+        return;
+      }
+      sendError(res, error, "确认已完成合同内部划拨失败");
+    }
+  },
+);
+
+router.get("/:id/deposit", requireContractRead, async (req, res) => {
+  try {
+    await assertContractReadScope(req, req.params.id);
+    const snapshot = await db.transaction((client) =>
+      loadContractDepositSnapshot(client, req.params.id),
+    );
+    res.json({ success: true, data: snapshot });
+  } catch (error) {
+    sendError(res, error, "获取押金记录失败");
+  }
+});
+
+router.post(
+  "/:id/deposit/return-receipts/recognize",
+  requireFinance,
+  uploadSingle,
+  async (req, res) => {
+    let stored = false;
+    try {
+      const allowedFields = new Set(["receiptKind", "settlementId"]);
+      if (
+        Object.keys(req.body || {}).some((field) => !allowedFields.has(field))
+      ) {
+        throw new ContractDomainError(
+          400,
+          "识别押金结算回单时只能提交回单类型和目标退款记录",
+          "CONTRACT_DEPOSIT_RETURN_OCR_FIELDS_FORBIDDEN",
+        );
+      }
+      const receiptKind = String(
+        req.body.receiptKind || "",
+      ) as ContractDepositReturnReceiptPurpose;
+      if (!new Set(["deposit_refund", "engineering_return"]).has(receiptKind)) {
+        throw new ContractDomainError(400, "押金结算回单类型不正确");
+      }
+      const settlementId = normalizeNullableText(req.body.settlementId);
+      if (receiptKind === "engineering_return" && !settlementId) {
+        throw new ContractDomainError(
+          400,
+          "识别退工程回单必须指定押金退款记录",
+          "CONTRACT_DEPOSIT_ENGINEERING_RETURN_TARGET_REQUIRED",
+        );
+      }
+      const currentActor = actor(req);
+      const recognitionContext = await db.transaction((client) =>
+        resolveDepositReturnRecognitionContext(client, {
+          contractId: req.params.id,
+          businessPurpose: receiptKind,
+          settlementId,
+        }),
+      );
+      const result = await recognizeAndStoreFinancialFile(
+        req.params.id,
+        receiptKind === "deposit_refund" ? "receipt" : "payment",
+        req.file,
+        currentActor,
+        () => {
+          stored = true;
+        },
+        false,
+        false,
+        recognitionContext,
+      );
+      const data = {
+        jobId: result.id,
+        fileId: result.fileId,
+        receiptKind,
+        targetId: recognitionContext.targetId,
+        status: result.status,
+        validationStatus: result.validationStatus,
+        canConfirm: result.canCreateDraft,
+        fields: result.snapshot.fields,
+        blockingReasons: result.blockingReasons,
+        warnings: result.warnings,
+        recognitionMethod: result.recognitionMethod,
+        evidenceTextHash: result.evidenceTextHash,
+        engineVersion: result.engineVersion,
+        parserVersion: result.parserVersion,
+        fileUrl: `/api/contracts/files/${result.fileId}`,
+      };
+      res.status(result.canCreateDraft ? 200 : 202).json({
+        success: true,
+        data,
+      });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (!stored && !commitOutcomeUncertain) cleanupUploadedFile(req.file);
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_RETURN_OCR_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "回单识别任务提交结果暂时无法确认；已保留原件，请刷新后再操作，勿重复上传",
+        });
+        return;
+      }
+      sendError(res, error, "识别押金结算回单失败");
+    }
+  },
+);
+
+router.delete(
+  "/:id/deposit/return-receipts/:jobId",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      const removed = await db.transaction(async (client) => {
+        await lockDepositContract(client, req.params.id);
+        const result = await client.query<{
+          id: string;
+          file_id: string;
+          file_hash: string;
+          file_path: string;
+          file_name: string;
+          status: string;
+          record_id: string | null;
+          business_purpose: ContractDepositReturnReceiptPurpose;
+          target_id: string;
+        }>(
+          `SELECT job.id,job.file_id,job.file_hash,job.status,job.record_id,
+             job.business_purpose,job.target_id,file.file_path,file.file_name
+           FROM contract_financial_ocr_jobs job
+           JOIN contract_files file ON file.id=job.file_id
+           WHERE job.id=$1 AND job.contract_id=$2
+             AND job.business_purpose IN (
+               'deposit_refund','engineering_return'
+             )
+           FOR UPDATE OF job,file`,
+          [req.params.jobId, req.params.id],
+        );
+        const job = result.rows[0];
+        if (!job) {
+          throw new ContractDomainError(
+            404,
+            "押金结算回单识别任务不存在",
+            "CONTRACT_DEPOSIT_RETURN_OCR_JOB_NOT_FOUND",
+          );
+        }
+        if (job.status === "processing") {
+          throw new ContractDomainError(
+            409,
+            "回单正在识别，请稍后再移除",
+            "CONTRACT_DEPOSIT_RETURN_OCR_PROCESSING",
+          );
+        }
+        if (job.record_id || job.status === "consumed") {
+          throw new ContractDomainError(
+            409,
+            "回单已经确认，请通过结算回单删除入口处理",
+            "CONTRACT_DEPOSIT_RETURN_OCR_ALREADY_CONSUMED",
+          );
+        }
+        const now = new Date().toISOString();
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) SELECT $1,contract.id,'contract_deposit_return_ocr_deleted',
+             $2,$3,status,status,$4::jsonb,$5,$6
+             FROM contracts contract WHERE contract.id=$7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              ocrJobId: job.id,
+              fileId: job.file_id,
+              fileHash: job.file_hash,
+              fileName: job.file_name,
+              businessPurpose: job.business_purpose,
+              targetId: job.target_id,
+              previousStatus: job.status,
+              hardDeleted: true,
+            }),
+            "移除未确认的押金结算回单识别任务",
+            now,
+            req.params.id,
+          ],
+        );
+        await client.query(
+          `DELETE FROM contract_financial_file_hashes WHERE file_id=$1`,
+          [job.file_id],
+        );
+        await client.query(
+          `DELETE FROM contract_financial_ocr_jobs WHERE id=$1`,
+          [job.id],
+        );
+        await client.query(`DELETE FROM contract_files WHERE id=$1`, [
+          job.file_id,
+        ]);
+        return job;
+      });
+      await cleanupStoredFinancialFiles([removed.file_path], {
+        contractId: req.params.id,
+        ocrJobId: removed.id,
+        businessPurpose: removed.business_purpose,
+      });
+      res.json({
+        success: true,
+        data: { jobId: removed.id, deleted: true },
+      });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_RETURN_OCR_DELETE_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "识别任务移除结果暂时无法确认；已保留物理文件，请刷新后再操作",
+        });
+        return;
+      }
+      sendError(res, error, "移除押金结算回单识别任务失败");
+    }
+  },
+);
+
+router.put("/:id/deposit", requireFinance, async (req, res) => {
+  try {
+    const currentActor = actor(req);
+    const amount = parsePositiveAmount(req.body.amount, "押金金额");
+    const amountCents = toCents(String(amount));
+    const fundingSource = normalizeDepositFundingSource(req.body.fundingSource);
+    const engineeringAllocationAmount =
+      fundingSource === "engineering_allocation"
+        ? amount
+        : Number(req.body.engineeringAllocationAmount || 0);
+    const technologySelfFundedAmount =
+      fundingSource === "technology_self_funded"
+        ? amount
+        : Number(req.body.technologySelfFundedAmount || 0);
+    validateExternalPaymentPurposeDetails(amountCents, [
+      {
+        purpose: "lease_deposit",
+        amountCents,
+        fundingSource,
+        engineeringAllocationAmountCents: toCents(
+          String(engineeringAllocationAmount),
+        ),
+        technologySelfFundedAmountCents: toCents(
+          String(technologySelfFundedAmount),
+        ),
+      },
+    ]);
+    const clauseText = normalizeNullableText(req.body.clauseText);
+    const basis = normalizeNullableText(req.body.basis);
+    if (!clauseText && !basis) {
+      throw new ContractDomainError(400, "必须填写合同押金条款或计算依据");
+    }
+    const note = normalizeNullableText(req.body.note);
+    if ((clauseText?.length || 0) > 4000 || (basis?.length || 0) > 1000) {
+      throw new ContractDomainError(400, "押金条款或计算依据内容过长");
+    }
+    if ((note?.length || 0) > 1000) {
+      throw new ContractDomainError(400, "押金备注不能超过1000字");
+    }
+    const requestedPaymentRecordId = normalizeNullableText(
+      req.body.paymentRecordId,
+    );
+    const now = new Date().toISOString();
+    const snapshot = await db.transaction(async (client) => {
+      await lockDepositContract(client, req.params.id);
+      const existing = await client.query<ContractDepositRow>(
+        `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+        [req.params.id],
+      );
+      const existingDeposit = existing.rows[0];
+      const settledCents = toCents(
+        String(existingDeposit?.settled_amount || 0),
+      );
+      if (amountCents < settledCents) {
+        throw new ContractDomainError(409, "押金金额不能低于已结算金额");
+      }
+      if (
+        existingDeposit &&
+        settledCents > 0 &&
+        (amountCents !== toCents(String(existingDeposit.amount)) ||
+          fundingSource !== existingDeposit.funding_source ||
+          toCents(String(engineeringAllocationAmount)) !==
+            toCents(String(existingDeposit.engineering_allocation_amount)) ||
+          toCents(String(technologySelfFundedAmount)) !==
+            toCents(String(existingDeposit.technology_self_funded_amount)))
+      ) {
+        throw new ContractDomainError(
+          409,
+          "押金已发生结算，不能再修改金额或资金来源",
+        );
+      }
+      let paymentTarget: DepositPaymentTarget | null = null;
+      let linkedPaymentRecordId =
+        requestedPaymentRecordId ||
+        existingDeposit?.payment_record_id ||
+        existingDeposit?.external_payment_record_id ||
+        null;
+      if (!linkedPaymentRecordId) {
+        const confirmedReceiptCandidates = await client.query<{
+          record_id: string;
+        }>(
+          `SELECT COALESCE(
+             receipt.payment_record_id,receipt.external_payment_record_id
+           ) AS record_id
+           FROM contract_payment_deposit_receipts receipt
+           WHERE receipt.contract_id=$1 AND receipt.status='confirmed'
+             AND receipt.confirmed_amount=$2
+             AND (
+               (receipt.payment_record_id IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM contract_payments payment
+                 WHERE payment.id=receipt.payment_record_id
+                   AND payment.status='confirmed'
+               ))
+               OR
+               (receipt.external_payment_record_id IS NOT NULL AND EXISTS(
+                 SELECT 1 FROM contract_external_payments payment
+                 WHERE payment.id=receipt.external_payment_record_id
+                   AND payment.status='confirmed'
+               ))
+             )
+           ORDER BY receipt.confirmed_at DESC,receipt.id
+           FOR UPDATE`,
+          [req.params.id, amount],
+        );
+        if (confirmedReceiptCandidates.rows.length > 1) {
+          throw new ContractDomainError(
+            409,
+            "存在多张同金额已验证押金条，无法唯一关联付款回单",
+            "CONTRACT_DEPOSIT_PAYMENT_LINK_AMBIGUOUS",
+          );
+        }
+        linkedPaymentRecordId =
+          confirmedReceiptCandidates.rows[0]?.record_id || null;
+      }
+      if (linkedPaymentRecordId) {
+        paymentTarget = await lockDepositPaymentTarget(
+          client,
+          req.params.id,
+          linkedPaymentRecordId,
+        );
+        if (amountCents > toCents(String(paymentTarget.amount))) {
+          throw new ContractDomainError(409, "押金金额不能超过关联付款金额");
+        }
+      }
+      const paidAt = paymentTarget?.paymentDate || null;
+      const status = deriveContractDepositStatus({
+        amountCents,
+        settledAmountCents: settledCents,
+        isPaid: Boolean(paidAt),
+      });
+      const id = existingDeposit?.id || nanoid();
+      await client.query(
+        `INSERT INTO contract_deposits(
+           id,contract_id,amount,clause_text,basis,payment_purpose,
+           funding_source,engineering_allocation_amount,
+           technology_self_funded_amount,payment_record_id,
+           external_payment_record_id,paid_at,note,status,settled_amount,
+           created_by,updated_by,created_at,updated_at
+         ) VALUES($1,$2,$3,$4,$5,'lease_deposit',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15,$16,$16)
+         ON CONFLICT(contract_id) DO UPDATE SET
+           amount=EXCLUDED.amount,clause_text=EXCLUDED.clause_text,
+           basis=EXCLUDED.basis,funding_source=EXCLUDED.funding_source,
+           engineering_allocation_amount=EXCLUDED.engineering_allocation_amount,
+           technology_self_funded_amount=EXCLUDED.technology_self_funded_amount,
+           payment_record_id=EXCLUDED.payment_record_id,
+           external_payment_record_id=EXCLUDED.external_payment_record_id,
+           paid_at=EXCLUDED.paid_at,note=EXCLUDED.note,status=EXCLUDED.status,
+           updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`,
+        [
+          id,
+          req.params.id,
+          amount,
+          clauseText,
+          basis,
+          fundingSource,
+          engineeringAllocationAmount,
+          technologySelfFundedAmount,
+          paymentTarget?.kind === "payment" ? paymentTarget.id : null,
+          paymentTarget?.kind === "external_payment" ? paymentTarget.id : null,
+          paidAt,
+          note,
+          status,
+          centsToAmount(settledCents),
+          currentActor.id,
+          now,
+        ],
+      );
+      if (paymentTarget) {
+        await client.query(
+          `DELETE FROM contract_payment_purpose_details
+           WHERE contract_id=$1 AND ${purposeDetailsRecordColumn(paymentTarget.kind)}=$2`,
+          [req.params.id, paymentTarget.id],
+        );
+        const contractPaymentAmount = Number(paymentTarget.amount) - amount;
+        if (contractPaymentAmount > 0) {
+          await client.query(
+            `INSERT INTO contract_payment_purpose_details(
+               id,contract_id,payment_record_id,external_payment_record_id,
+               purpose,amount,funding_source,engineering_allocation_amount,
+               technology_self_funded_amount,created_by,updated_by,
+               created_at,updated_at
+             ) VALUES($1,$2,$3,$4,'contract_payment',$5,'pending_review',
+               0,0,$6,$6,$7,$7)`,
+            [
+              nanoid(),
+              req.params.id,
+              paymentTarget.kind === "payment" ? paymentTarget.id : null,
+              paymentTarget.kind === "external_payment"
+                ? paymentTarget.id
+                : null,
+              contractPaymentAmount,
+              currentActor.id,
+              now,
+            ],
+          );
+        }
+        await client.query(
+          `INSERT INTO contract_payment_purpose_details(
+             id,contract_id,payment_record_id,external_payment_record_id,
+             purpose,amount,funding_source,engineering_allocation_amount,
+             technology_self_funded_amount,created_by,updated_by,
+             created_at,updated_at
+           ) VALUES($1,$2,$3,$4,'lease_deposit',$5,$6,$7,$8,$9,$9,$10,$10)`,
+          [
+            nanoid(),
+            req.params.id,
+            paymentTarget.kind === "payment" ? paymentTarget.id : null,
+            paymentTarget.kind === "external_payment" ? paymentTarget.id : null,
+            amount,
+            fundingSource,
+            engineeringAllocationAmount,
+            technologySelfFundedAmount,
+            currentActor.id,
+            now,
+          ],
+        );
+        await rebuildDepositAffectedFinancialMatches(
+          client,
+          req.params.id,
+          paymentTarget,
+          now,
+        );
+      }
+      await client.query(
+        `INSERT INTO contract_audit_logs(
+           id,contract_id,action,actor_id,actor_role,from_status,to_status,
+           changes_json,comment,created_at
+         ) SELECT $1,contract.id,'contract_deposit_saved',$2,$3,status,status,
+           $4::jsonb,$5,$6 FROM contracts contract WHERE contract.id=$7`,
+        [
+          nanoid(),
+          currentActor.id,
+          currentActor.role,
+          JSON.stringify({
+            depositId: id,
+            amount,
+            fundingSource,
+            paymentRecordId: paymentTarget?.id || null,
+          }),
+          "保存租赁合同押金记录",
+          now,
+          req.params.id,
+        ],
+      );
+      return loadContractDepositSnapshot(client, req.params.id);
+    });
+    res.json({ success: true, data: snapshot });
+  } catch (error) {
+    sendError(res, error, "保存押金记录失败");
+  }
+});
+
+router.post("/:id/deposit/settlements", requireFinance, async (req, res) => {
+  try {
+    const currentActor = actor(req);
+    const type = String(req.body.type || "") as ContractDepositSettlementType;
+    if (!DEPOSIT_SETTLEMENT_TYPES.has(type)) {
+      throw new ContractDomainError(400, "押金结算方式不正确");
+    }
+    const allowedFields = new Set(
+      type === "refund"
+        ? ["type", "ocrJobId", "note"]
+        : ["type", "amount", "settlementDate", "note"],
+    );
+    if (Object.keys(req.body || {}).some((key) => !allowedFields.has(key))) {
+      throw new ContractDomainError(
+        400,
+        type === "refund"
+          ? "押金退款确认只能提交类型、识别任务和说明"
+          : "押金扣款或抵租金只能提交类型、金额、日期和说明",
+        "CONTRACT_DEPOSIT_SETTLEMENT_FIELDS_FORBIDDEN",
+      );
+    }
+    const ocrJobId = normalizeNullableText(req.body.ocrJobId);
+    if (type === "refund" && !ocrJobId) {
+      throw new ContractDomainError(
+        400,
+        "押金退款必须先上传回单并通过自动识别",
+        "CONTRACT_DEPOSIT_REFUND_OCR_JOB_REQUIRED",
+      );
+    }
+    const manualAmount =
+      type === "refund"
+        ? null
+        : parsePositiveAmount(req.body.amount, "押金结算金额");
+    const manualSettlementDate =
+      type === "refund"
+        ? null
+        : normalizeDepositDate(req.body.settlementDate, "押金结算日期");
+    const note = normalizeNullableText(req.body.note);
+    if (type !== "refund" && !note) {
+      throw new ContractDomainError(
+        400,
+        "登记押金扣款或抵租金时必须填写说明",
+        "CONTRACT_DEPOSIT_NON_REFUND_NOTE_REQUIRED",
+      );
+    }
+    if ((note?.length || 0) > 1000) {
+      throw new ContractDomainError(400, "押金结算说明不能超过1000字");
+    }
+    const now = new Date().toISOString();
+    const snapshot = await db.transaction(async (client) => {
+      await lockDepositContract(client, req.params.id);
+      const locked = await client.query<ContractDepositRow>(
+        `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+        [req.params.id],
+      );
+      const deposit = locked.rows[0];
+      if (!deposit) throw new ContractDomainError(404, "押金记录不存在");
+      if (deposit.funding_source === "pending_review") {
+        throw new ContractDomainError(409, "请先确认押金资金来源");
+      }
+      let depositReturnOcr: {
+        job: LockedDepositReturnOcrJob;
+        fields: DepositReturnOcrFields;
+      } | null = null;
+      if (type === "refund") {
+        const context = await resolveDepositReturnRecognitionContext(client, {
+          contractId: req.params.id,
+          businessPurpose: "deposit_refund",
+          targetId: deposit.id,
+        });
+        depositReturnOcr = await lockVerifiedDepositReturnOcrJob(client, {
+          contractId: req.params.id,
+          jobId: ocrJobId!,
+          context,
+        });
+      }
+      const amount = depositReturnOcr?.fields.amount ?? manualAmount!;
+      const amountCents = toCents(String(amount));
+      const settlementDate =
+        depositReturnOcr?.fields.paymentTime ?? manualSettlementDate!;
+      const depositAmountCents = toCents(String(deposit.amount));
+      const settledAmountCents = toCents(String(deposit.settled_amount));
+      const result = validateContractDepositSettlement({
+        status: deposit.status,
+        type,
+        amountCents,
+        depositAmountCents,
+        settledAmountCents,
+      });
+      const previous = await client.query<{
+        refund_amount: number;
+        required_amount: number;
+      }>(
+        `SELECT COALESCE(SUM(amount) FILTER(WHERE settlement_type='refund'),0)
+           AS refund_amount,
+           COALESCE(SUM(engineering_return_required_amount),0) AS required_amount
+         FROM contract_deposit_settlements WHERE deposit_id=$1`,
+        [deposit.id],
+      );
+      const engineeringReturnRequiredCents = calculateEngineeringReturnRequired(
+        {
+          settlementType: type,
+          refundAmountCents: amountCents,
+          depositAmountCents,
+          engineeringAllocationAmountCents:
+            type === "refund" && deposit.external_payment_record_id
+              ? toCents(String(deposit.engineering_allocation_amount || 0))
+              : 0,
+          previousRefundAmountCents: toCents(
+            String(previous.rows[0]?.refund_amount || 0),
+          ),
+          previousEngineeringReturnRequiredCents: toCents(
+            String(previous.rows[0]?.required_amount || 0),
+          ),
+        },
+      );
+      const settlementId = nanoid();
+      await client.query(
+        `INSERT INTO contract_deposit_settlements(
+           id,deposit_id,contract_id,settlement_type,amount,settlement_date,
+           note,engineering_return_required_amount,created_by,created_at
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          settlementId,
+          deposit.id,
+          req.params.id,
+          type,
+          amount,
+          settlementDate,
+          note,
+          centsToAmount(engineeringReturnRequiredCents),
+          currentActor.id,
+          now,
+        ],
+      );
+      const refundReceipt = depositReturnOcr
+        ? await insertContractDepositSettlementReceipt(client, {
+            settlementId,
+            contractId: req.params.id,
+            kind: "deposit_refund",
+            amount,
+            transactionDate: settlementDate,
+            file: storedUploadFromDepositReturnJob(depositReturnOcr.job),
+            fileId: depositReturnOcr.job.file_id,
+            financialOcrJobId: depositReturnOcr.job.id,
+            electronicReceiptNo: depositReturnOcr.fields.electronicReceiptNo,
+            payer: depositReturnOcr.fields.payer,
+            payerAccount: depositReturnOcr.fields.payerAccount,
+            payee: depositReturnOcr.fields.payee,
+            payeeAccount: depositReturnOcr.fields.payeeAccount,
+            recognitionMethod:
+              depositReturnOcr.job.recognition_method || undefined,
+            ocrEngineVersion: depositReturnOcr.job.engine_version || undefined,
+            ocrParserVersion: depositReturnOcr.job.parser_version || undefined,
+            evidenceTextHash:
+              depositReturnOcr.job.evidence_text_hash || undefined,
+            uploadedBy: depositReturnOcr.job.requested_by,
+            createdAt: now,
+          })
+        : null;
+      if (depositReturnOcr && refundReceipt) {
+        await client.query(
+          `UPDATE contract_financial_ocr_jobs SET
+               status='consumed',record_id=$2,consumed_at=$3,updated_at=$3
+             WHERE id=$1 AND status='verified'`,
+          [depositReturnOcr.job.id, refundReceipt.id, now],
+        );
+      }
+      const rentOffsetPurpose =
+        type === "rent_offset"
+          ? await applyDepositRentOffsetPurpose(client, {
+              contractId: req.params.id,
+              deposit,
+              offsetAmountCents: amountCents,
+              actorId: currentActor.id,
+              now,
+            })
+          : null;
+      await client.query(
+        `UPDATE contract_deposits SET settled_amount=$2,status=$3,
+           updated_by=$4,updated_at=$5 WHERE id=$1`,
+        [
+          deposit.id,
+          centsToAmount(result.nextSettledAmountCents),
+          result.nextStatus,
+          currentActor.id,
+          now,
+        ],
+      );
+      await client.query(
+        `INSERT INTO contract_audit_logs(
+           id,contract_id,action,actor_id,actor_role,from_status,to_status,
+           changes_json,comment,created_at
+         ) SELECT $1,contract.id,'contract_deposit_settled',$2,$3,status,status,
+           $4::jsonb,$5,$6 FROM contracts contract WHERE contract.id=$7`,
+        [
+          nanoid(),
+          currentActor.id,
+          currentActor.role,
+          JSON.stringify({
+            depositId: deposit.id,
+            settlementId,
+            type,
+            amount,
+            engineeringReturnRequired: centsToAmount(
+              engineeringReturnRequiredCents,
+            ),
+            refundReceiptId: refundReceipt?.id || null,
+            refundReceiptFileName: refundReceipt?.file_name || null,
+            refundReceiptFileHash: refundReceipt?.file_hash || null,
+            electronicReceiptNo: refundReceipt?.electronic_receipt_no || null,
+            ocrJobId: depositReturnOcr?.job.id || null,
+            recognitionMethod: depositReturnOcr?.job.recognition_method || null,
+            engineVersion: depositReturnOcr?.job.engine_version || null,
+            parserVersion: depositReturnOcr?.job.parser_version || null,
+            rentOffsetPurpose,
+          }),
+          "登记押金退回、扣款或抵租金",
+          now,
+          req.params.id,
+        ],
+      );
+      return loadContractDepositSnapshot(client, req.params.id);
+    });
+    res.json({ success: true, data: snapshot });
+  } catch (error) {
+    const commitOutcomeUncertain = Boolean(
+      error &&
+      typeof error === "object" &&
+      "commitOutcomeUncertain" in error &&
+      (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+    );
+    if (commitOutcomeUncertain) {
+      res.status(500).json({
+        success: false,
+        code: "CONTRACT_DEPOSIT_SETTLEMENT_COMMIT_OUTCOME_UNCERTAIN",
+        message: "押金结算结果暂时无法确认；请刷新押金状态后再操作，勿重复确认",
+      });
+      return;
+    }
+    sendError(res, error, "登记押金结算失败");
+  }
+});
+
+router.post(
+  "/:id/deposit/settlements/:settlementId/engineering-return",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (
+        Object.keys(req.body || {}).some(
+          (key) => !new Set(["ocrJobId", "note"]).has(key),
+        )
+      ) {
+        throw new ContractDomainError(
+          400,
+          "退工程确认只能提交识别任务和说明",
+          "CONTRACT_DEPOSIT_ENGINEERING_RETURN_FIELDS_FORBIDDEN",
+        );
+      }
+      const ocrJobId = normalizeNullableText(req.body.ocrJobId);
+      if (!ocrJobId) {
+        throw new ContractDomainError(
+          400,
+          "退工程登记必须先上传回单并通过自动识别",
+          "CONTRACT_DEPOSIT_ENGINEERING_RETURN_OCR_JOB_REQUIRED",
+        );
+      }
+      const currentActor = actor(req);
+      const note = normalizeNullableText(req.body.note);
+      if ((note?.length || 0) > 1000) {
+        throw new ContractDomainError(400, "退回工程说明不能超过1000字");
+      }
+      const now = new Date().toISOString();
+      const snapshot = await db.transaction(async (client) => {
+        const context = await resolveDepositReturnRecognitionContext(client, {
+          contractId: req.params.id,
+          businessPurpose: "engineering_return",
+          targetId: req.params.settlementId,
+        });
+        const recognized = await lockVerifiedDepositReturnOcrJob(client, {
+          contractId: req.params.id,
+          jobId: ocrJobId,
+          context,
+        });
+        const settlementResult =
+          await client.query<ContractDepositSettlementRow>(
+            `SELECT * FROM contract_deposit_settlements
+             WHERE id=$1 AND contract_id=$2 FOR UPDATE`,
+            [req.params.settlementId, req.params.id],
+          );
+        const settlement = settlementResult.rows[0]!;
+        const amount = recognized.fields.amount;
+        const returnDate = recognized.fields.paymentTime;
+        const nextReturned =
+          Number(settlement.engineering_returned_amount || 0) + amount;
+        if (
+          nextReturned > Number(settlement.engineering_return_required_amount)
+        ) {
+          throw new ContractDomainError(409, "退回工程金额不能超过应退金额");
+        }
+        await client.query(
+          `UPDATE contract_deposit_settlements SET
+             engineering_returned_amount=$2,engineering_returned_at=$3,
+             engineering_return_note=$4,engineering_returned_by=$5
+           WHERE id=$1`,
+          [settlement.id, nextReturned, returnDate, note, currentActor.id],
+        );
+        const engineeringReturnReceipt =
+          await insertContractDepositSettlementReceipt(client, {
+            settlementId: settlement.id,
+            contractId: req.params.id,
+            kind: "engineering_return",
+            amount,
+            transactionDate: returnDate,
+            file: storedUploadFromDepositReturnJob(recognized.job),
+            fileId: recognized.job.file_id,
+            financialOcrJobId: recognized.job.id,
+            electronicReceiptNo: recognized.fields.electronicReceiptNo,
+            payer: recognized.fields.payer,
+            payerAccount: recognized.fields.payerAccount,
+            payee: recognized.fields.payee,
+            payeeAccount: recognized.fields.payeeAccount,
+            recognitionMethod: recognized.job.recognition_method || undefined,
+            ocrEngineVersion: recognized.job.engine_version || undefined,
+            ocrParserVersion: recognized.job.parser_version || undefined,
+            evidenceTextHash: recognized.job.evidence_text_hash || undefined,
+            uploadedBy: recognized.job.requested_by,
+            createdAt: now,
+          });
+        await client.query(
+          `UPDATE contract_financial_ocr_jobs SET
+             status='consumed',record_id=$2,consumed_at=$3,updated_at=$3
+           WHERE id=$1 AND status='verified'`,
+          [recognized.job.id, engineeringReturnReceipt.id, now],
+        );
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) SELECT $1,contract.id,'contract_deposit_engineering_returned',
+             $2,$3,status,status,$4::jsonb,$5,$6
+             FROM contracts contract WHERE contract.id=$7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              settlementId: settlement.id,
+              amount,
+              returnDate,
+              engineeringReturnedAmount: nextReturned,
+              engineeringReturnReceiptId: engineeringReturnReceipt.id,
+              engineeringReturnReceiptFileName:
+                engineeringReturnReceipt.file_name,
+              engineeringReturnReceiptFileHash:
+                engineeringReturnReceipt.file_hash,
+              electronicReceiptNo: recognized.fields.electronicReceiptNo,
+              ocrJobId: recognized.job.id,
+              recognitionMethod: recognized.job.recognition_method,
+              engineVersion: recognized.job.engine_version,
+              parserVersion: recognized.job.parser_version,
+            }),
+            "登记科技退回工程咨询公司的押金划拨资金",
+            now,
+            req.params.id,
+          ],
+        );
+        return loadContractDepositSnapshot(client, req.params.id);
+      });
+      res.json({ success: true, data: snapshot });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_ENGINEERING_RETURN_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "退工程登记结果暂时无法确认；请刷新押金状态后再操作，勿重复确认",
+        });
+        return;
+      }
+      sendError(res, error, "登记退回工程资金失败");
+    }
+  },
+);
+
+router.post(
+  "/:id/deposit/settlements/:settlementId/refund-receipt",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (Object.keys(req.body || {}).some((key) => key !== "ocrJobId")) {
+        throw new ContractDomainError(
+          400,
+          "补传押金退回回单时只能提交识别任务",
+          "CONTRACT_DEPOSIT_REFUND_RECEIPT_FIELDS_FORBIDDEN",
+        );
+      }
+      const ocrJobId = normalizeNullableText(req.body.ocrJobId);
+      if (!ocrJobId) {
+        throw new ContractDomainError(
+          400,
+          "补传押金退回回单必须先完成自动识别",
+          "CONTRACT_DEPOSIT_REFUND_OCR_JOB_REQUIRED",
+        );
+      }
+      const currentActor = actor(req);
+      const now = new Date().toISOString();
+      const snapshot = await db.transaction(async (client) => {
+        const context = await resolveDepositReturnRecognitionContext(client, {
+          contractId: req.params.id,
+          businessPurpose: "deposit_refund",
+          targetId: req.params.settlementId,
+        });
+        const recognized = await lockVerifiedDepositReturnOcrJob(client, {
+          contractId: req.params.id,
+          jobId: ocrJobId,
+          context,
+        });
+        const settlementResult =
+          await client.query<ContractDepositSettlementRow>(
+            `SELECT * FROM contract_deposit_settlements
+             WHERE id=$1 AND contract_id=$2 FOR UPDATE`,
+            [req.params.settlementId, req.params.id],
+          );
+        const settlement = settlementResult.rows[0]!;
+        if (
+          toCents(String(recognized.fields.amount)) !==
+            toCents(String(settlement.amount)) ||
+          recognized.fields.paymentTime !== settlement.settlement_date
+        ) {
+          throw new ContractDomainError(
+            422,
+            "回单识别金额和日期必须与历史押金退款记录完全一致",
+            "CONTRACT_DEPOSIT_REFUND_RECEIPT_HISTORY_MISMATCH",
+          );
+        }
+        const refundReceipt = await insertContractDepositSettlementReceipt(
+          client,
+          {
+            settlementId: settlement.id,
+            contractId: req.params.id,
+            kind: "deposit_refund",
+            amount: Number(settlement.amount),
+            transactionDate: settlement.settlement_date,
+            file: storedUploadFromDepositReturnJob(recognized.job),
+            fileId: recognized.job.file_id,
+            financialOcrJobId: recognized.job.id,
+            electronicReceiptNo: recognized.fields.electronicReceiptNo,
+            payer: recognized.fields.payer,
+            payerAccount: recognized.fields.payerAccount,
+            payee: recognized.fields.payee,
+            payeeAccount: recognized.fields.payeeAccount,
+            recognitionMethod: recognized.job.recognition_method || undefined,
+            ocrEngineVersion: recognized.job.engine_version || undefined,
+            ocrParserVersion: recognized.job.parser_version || undefined,
+            evidenceTextHash: recognized.job.evidence_text_hash || undefined,
+            uploadedBy: recognized.job.requested_by,
+            createdAt: now,
+          },
+        );
+        await client.query(
+          `UPDATE contract_financial_ocr_jobs SET
+             status='consumed',record_id=$2,consumed_at=$3,updated_at=$3
+           WHERE id=$1 AND status='verified'`,
+          [recognized.job.id, refundReceipt.id, now],
+        );
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) SELECT $1,contract.id,
+             'contract_deposit_refund_receipt_attached',$2,$3,status,status,
+             $4::jsonb,$5,$6 FROM contracts contract WHERE contract.id=$7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              settlementId: settlement.id,
+              settlementAmount: Number(settlement.amount),
+              settlementDate: settlement.settlement_date,
+              refundReceiptId: refundReceipt.id,
+              refundReceiptFileName: refundReceipt.file_name,
+              refundReceiptFileHash: refundReceipt.file_hash,
+              electronicReceiptNo: recognized.fields.electronicReceiptNo,
+              ocrJobId: recognized.job.id,
+              recognitionMethod: recognized.job.recognition_method,
+              engineVersion: recognized.job.engine_version,
+              parserVersion: recognized.job.parser_version,
+              existingSettlementUnchanged: true,
+            }),
+            "为历史押金退款记录补传押金退回回单",
+            now,
+            req.params.id,
+          ],
+        );
+        return loadContractDepositSnapshot(client, req.params.id);
+      });
+      res.json({ success: true, data: snapshot });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_REFUND_RECEIPT_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "押金退回回单补传结果暂时无法确认；请刷新押金状态后再操作，勿重复确认",
+        });
+        return;
+      }
+      sendError(res, error, "补传押金退回回单失败");
+    }
+  },
+);
+
+router.delete(
+  "/:id/deposit/settlements/:settlementId/receipts/:receiptId",
+  requireFinance,
+  async (req, res) => {
+    let committed = false;
+    try {
+      const currentActor = actor(req);
+      const now = new Date().toISOString();
+      const result = await db.transaction(async (client) => {
+        await lockDepositContract(client, req.params.id);
+        const settlementResult =
+          await client.query<ContractDepositSettlementRow>(
+            `SELECT * FROM contract_deposit_settlements
+             WHERE id=$1 AND contract_id=$2 FOR UPDATE`,
+            [req.params.settlementId, req.params.id],
+          );
+        const settlement = settlementResult.rows[0];
+        if (!settlement) {
+          throw new ContractDomainError(404, "押金结算记录不存在");
+        }
+        const receiptResult =
+          await client.query<ContractDepositSettlementReceiptRow>(
+            `SELECT * FROM contract_deposit_settlement_receipts
+             WHERE id=$1 AND settlement_id=$2 AND contract_id=$3
+             FOR UPDATE`,
+            [req.params.receiptId, settlement.id, req.params.id],
+          );
+        const receipt = receiptResult.rows[0];
+        if (!receipt) {
+          throw new ContractDomainError(404, "押金结算回单不存在");
+        }
+        let linkedArtifact: {
+          job_id: string;
+          file_id: string;
+          file_path: string;
+        } | null = null;
+        if (receipt.financial_ocr_job_id || receipt.file_id) {
+          if (!receipt.financial_ocr_job_id || !receipt.file_id) {
+            throw new ContractDomainError(
+              409,
+              "回单识别证据链不完整，禁止删除",
+              "CONTRACT_DEPOSIT_RECEIPT_OCR_LINK_INCOMPLETE",
+            );
+          }
+          const artifactResult = await client.query<{
+            job_id: string;
+            file_id: string;
+            file_path: string;
+          }>(
+            `SELECT job.id AS job_id,file.id AS file_id,file.file_path
+             FROM contract_financial_ocr_jobs job
+             JOIN contract_files file ON file.id=job.file_id
+             WHERE job.id=$1 AND file.id=$2 AND job.contract_id=$3
+               AND job.record_id=$4 AND job.status='consumed'
+               AND job.business_purpose=$5
+               AND (
+                 ($5='engineering_return' AND job.target_id=$6)
+                 OR ($5='deposit_refund'
+                   AND job.target_id IN ($6,$7))
+               )
+             FOR UPDATE OF job,file`,
+            [
+              receipt.financial_ocr_job_id,
+              receipt.file_id,
+              req.params.id,
+              receipt.id,
+              receipt.receipt_kind,
+              settlement.id,
+              settlement.deposit_id,
+            ],
+          );
+          linkedArtifact = artifactResult.rows[0] || null;
+          if (!linkedArtifact) {
+            throw new ContractDomainError(
+              409,
+              "回单识别任务与合同、结算或文件不一致，禁止删除",
+              "CONTRACT_DEPOSIT_RECEIPT_OCR_LINK_MISMATCH",
+            );
+          }
+        }
+        if (receipt.receipt_kind === "deposit_refund") {
+          const downstream = await client.query<{ id: string }>(
+            `SELECT id FROM contract_deposit_settlement_receipts
+             WHERE settlement_id=$1 AND contract_id=$2
+               AND receipt_kind='engineering_return'
+             ORDER BY created_at,id LIMIT 1 FOR UPDATE`,
+            [settlement.id, req.params.id],
+          );
+          if (downstream.rows[0]) {
+            throw new ContractDomainError(
+              409,
+              "该押金退款已有退工程回单，请先删除全部退工程回单",
+              "CONTRACT_DEPOSIT_REFUND_RECEIPT_HAS_ENGINEERING_RETURN",
+            );
+          }
+        }
+        const engineeringReturnedAmountBefore = Number(
+          settlement.engineering_returned_amount || 0,
+        );
+        await client.query(
+          `DELETE FROM contract_deposit_settlement_receipts
+           WHERE id=$1 AND settlement_id=$2 AND contract_id=$3`,
+          [receipt.id, settlement.id, req.params.id],
+        );
+        let engineeringReturnedAmountAfter = engineeringReturnedAmountBefore;
+        if (receipt.receipt_kind === "engineering_return") {
+          const remaining = await client.query<{
+            returned_amount: number;
+            returned_at: string | null;
+            returned_by: string | null;
+          }>(
+            `SELECT COALESCE(SUM(amount),0) AS returned_amount,
+               (ARRAY_AGG(transaction_date ORDER BY
+                 transaction_date DESC,created_at DESC,id DESC))[1]
+                 AS returned_at,
+               (ARRAY_AGG(uploaded_by ORDER BY
+                 transaction_date DESC,created_at DESC,id DESC))[1]
+                 AS returned_by
+             FROM contract_deposit_settlement_receipts
+             WHERE settlement_id=$1 AND contract_id=$2
+               AND receipt_kind='engineering_return'`,
+            [settlement.id, req.params.id],
+          );
+          engineeringReturnedAmountAfter = Number(
+            remaining.rows[0]?.returned_amount || 0,
+          );
+          await client.query(
+            `UPDATE contract_deposit_settlements SET
+               engineering_returned_amount=$2,
+               engineering_returned_at=$3,
+               engineering_returned_by=$4,
+               engineering_return_note=NULL
+             WHERE id=$1 AND contract_id=$5`,
+            [
+              settlement.id,
+              engineeringReturnedAmountAfter,
+              remaining.rows[0]?.returned_at || null,
+              remaining.rows[0]?.returned_by || null,
+              req.params.id,
+            ],
+          );
+        }
+        await client.query(
+          `INSERT INTO contract_audit_logs(
+             id,contract_id,action,actor_id,actor_role,from_status,to_status,
+             changes_json,comment,created_at
+           ) SELECT $1,contract.id,
+             'contract_deposit_settlement_receipt_deleted',$2,$3,
+             status,status,$4::jsonb,$5,$6
+             FROM contracts contract WHERE contract.id=$7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              settlementId: settlement.id,
+              receiptId: receipt.id,
+              receiptKind: receipt.receipt_kind,
+              fileName: receipt.file_name,
+              fileHash: receipt.file_hash,
+              amount: Number(receipt.amount),
+              transactionDate: receipt.transaction_date,
+              electronicReceiptNo: receipt.electronic_receipt_no,
+              ocrJobId: receipt.financial_ocr_job_id,
+              fileId: receipt.file_id,
+              engineeringReturnedAmountBefore,
+              engineeringReturnedAmountAfter,
+              hardDeleted: true,
+            }),
+            receipt.receipt_kind === "deposit_refund"
+              ? "删除押金退回回单"
+              : "删除退工程回单并重算累计退回金额",
+            now,
+            req.params.id,
+          ],
+        );
+        if (linkedArtifact) {
+          await client.query(
+            `DELETE FROM contract_financial_file_hashes WHERE file_id=$1`,
+            [linkedArtifact.file_id],
+          );
+          await client.query(
+            `DELETE FROM contract_financial_ocr_jobs WHERE id=$1`,
+            [linkedArtifact.job_id],
+          );
+          await client.query(`DELETE FROM contract_files WHERE id=$1`, [
+            linkedArtifact.file_id,
+          ]);
+        }
+        return {
+          removed: receipt,
+          snapshot: await loadContractDepositSnapshot(client, req.params.id),
+        };
+      });
+      committed = true;
+      await cleanupStoredFinancialFiles([result.removed.file_path], {
+        contractId: req.params.id,
+        settlementId: req.params.settlementId,
+        settlementReceiptId: req.params.receiptId,
+      });
+      res.json({ success: true, data: result.snapshot });
+    } catch (error) {
+      const commitOutcomeUncertain = Boolean(
+        error &&
+        typeof error === "object" &&
+        "commitOutcomeUncertain" in error &&
+        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+      );
+      if (commitOutcomeUncertain) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_RECEIPT_DELETE_COMMIT_OUTCOME_UNCERTAIN",
+          message:
+            "回单删除结果暂时无法确认；已保留物理文件，请刷新押金状态后再操作",
+        });
+        return;
+      }
+      if (committed) {
+        res.status(500).json({
+          success: false,
+          code: "CONTRACT_DEPOSIT_RECEIPT_DELETED_REFRESH_REQUIRED",
+          message: "回单已删除，请刷新押金状态",
+        });
+        return;
+      }
+      sendError(res, error, "删除押金结算回单失败");
+    }
+  },
+);
+
+router.get(
+  "/:id/deposit/settlements/:settlementId/receipts/:receiptId/file",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      const receipt = await db.get<ContractDepositSettlementReceiptRow>(
+        `SELECT receipt.*
+         FROM contract_deposit_settlement_receipts receipt
+         JOIN contract_deposit_settlements settlement
+           ON settlement.id=receipt.settlement_id
+           AND settlement.contract_id=receipt.contract_id
+         JOIN contracts contract ON contract.id=receipt.contract_id
+         WHERE receipt.id=? AND receipt.settlement_id=?
+           AND receipt.contract_id=? AND contract.is_deleted=FALSE`,
+        req.params.receiptId,
+        req.params.settlementId,
+        req.params.id,
+      );
+      if (!receipt) {
+        throw new ContractDomainError(404, "押金退回回单不存在");
+      }
+      if (!validateFilePath(receipt.file_path)) {
+        throw new ContractDomainError(403, "押金退回回单文件路径不安全");
+      }
+      const storedPath = receipt.file_path.startsWith("/")
+        ? receipt.file_path.slice(1)
+        : receipt.file_path;
+      const absolutePath = path.resolve(process.cwd(), storedPath);
+      let fileStats: fs.Stats;
+      try {
+        fileStats = await fs.promises.stat(absolutePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new ContractDomainError(404, "押金退回回单文件已丢失");
+        }
+        throw error;
+      }
+      if (!fileStats.isFile()) {
+        throw new ContractDomainError(404, "押金退回回单文件已丢失");
+      }
+      await db.run(
+        `INSERT INTO contract_audit_logs(
+           id,contract_id,action,actor_id,actor_role,from_status,to_status,
+           changes_json,created_at
+         ) SELECT ?,contract.id,
+           'contract_deposit_settlement_receipt_previewed',?,?,status,status,
+           ?::jsonb,? FROM contracts contract WHERE contract.id=?`,
+        nanoid(),
+        currentActor.id,
+        currentActor.role,
+        JSON.stringify({
+          settlementId: receipt.settlement_id,
+          receiptId: receipt.id,
+          receiptKind: receipt.receipt_kind,
+          amount: Number(receipt.amount),
+          transactionDate: receipt.transaction_date,
+          fileName: receipt.file_name,
+        }),
+        new Date().toISOString(),
+        receipt.contract_id,
+      );
+      res.setHeader("Content-Type", receipt.mime_type);
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename*=UTF-8''${encodeURIComponent(receipt.file_name)}`,
+      );
+      res.sendFile(absolutePath);
+    } catch (error) {
+      if (!res.headersSent) sendError(res, error, "读取押金退回回单失败");
+    }
+  },
+);
+
+function purposeDetailsRecordColumn(kind: DepositPaymentKind): string {
+  return kind === "payment"
+    ? "payment_record_id"
+    : "external_payment_record_id";
+}
+
+async function applyDepositRentOffsetPurpose(
+  client: PoolClient,
+  input: {
+    contractId: string;
+    deposit: ContractDepositRow;
+    offsetAmountCents: number;
+    actorId: string;
+    now: string;
+  },
+): Promise<{
+  paymentRecordId: string;
+  paymentKind: DepositPaymentKind;
+  contractPaymentAmount: number;
+  remainingDepositPurposeAmount: number;
+}> {
+  const linkedPaymentRecordId =
+    input.deposit.payment_record_id || input.deposit.external_payment_record_id;
+  if (!linkedPaymentRecordId) {
+    throw new ContractDomainError(
+      409,
+      "押金尚未关联实际付款回单，不能办理抵租金",
+      "CONTRACT_DEPOSIT_RENT_OFFSET_PAYMENT_REQUIRED",
+    );
+  }
+  const target = await lockDepositPaymentTarget(
+    client,
+    input.contractId,
+    linkedPaymentRecordId,
+  );
+  const recordColumn = purposeDetailsRecordColumn(target.kind);
+  const existingPurposeRows = await client.query<{
+    purpose: ContractExternalPaymentPurpose;
+    amount: number;
+  }>(
+    `SELECT purpose,amount FROM contract_payment_purpose_details
+     WHERE contract_id=$1 AND ${recordColumn}=$2
+     ORDER BY CASE purpose WHEN 'contract_payment' THEN 0 ELSE 1 END
+     FOR UPDATE`,
+    [input.contractId, target.id],
+  );
+  const storedDepositPurpose = existingPurposeRows.rows.find(
+    (row) => row.purpose === "lease_deposit",
+  );
+  const currentDepositPurposeCents = storedDepositPurpose
+    ? toCents(String(storedDepositPurpose.amount))
+    : existingPurposeRows.rows.length
+      ? 0
+      : toCents(String(input.deposit.amount));
+  if (input.offsetAmountCents > currentDepositPurposeCents) {
+    throw new ContractDomainError(
+      409,
+      "抵租金金额不能超过付款中尚未转换的押金金额",
+      "CONTRACT_DEPOSIT_RENT_OFFSET_EXCEEDS_PURPOSE",
+    );
+  }
+  const remainingDepositPurposeCents =
+    currentDepositPurposeCents - input.offsetAmountCents;
+  const paymentAmountCents = toCents(String(target.amount));
+  const contractPaymentCents =
+    paymentAmountCents - remainingDepositPurposeCents;
+  await client.query(
+    `DELETE FROM contract_payment_purpose_details
+     WHERE contract_id=$1 AND ${recordColumn}=$2`,
+    [input.contractId, target.id],
+  );
+  await client.query(
+    `INSERT INTO contract_payment_purpose_details(
+       id,contract_id,payment_record_id,external_payment_record_id,
+       purpose,amount,funding_source,engineering_allocation_amount,
+       technology_self_funded_amount,created_by,updated_by,
+       created_at,updated_at
+     ) VALUES($1,$2,$3,$4,'contract_payment',$5,'pending_review',
+       0,0,$6,$6,$7,$7)`,
+    [
+      nanoid(),
+      input.contractId,
+      target.kind === "payment" ? target.id : null,
+      target.kind === "external_payment" ? target.id : null,
+      centsToAmount(contractPaymentCents),
+      input.actorId,
+      input.now,
+    ],
+  );
+  if (remainingDepositPurposeCents > 0) {
+    const depositAmountCents = toCents(String(input.deposit.amount));
+    const originalEngineeringCents = toCents(
+      String(input.deposit.engineering_allocation_amount || 0),
+    );
+    const remainingEngineeringCents = Math.round(
+      (remainingDepositPurposeCents * originalEngineeringCents) /
+        depositAmountCents,
+    );
+    const remainingTechnologyCents =
+      remainingDepositPurposeCents - remainingEngineeringCents;
+    const remainingFundingSource: ContractDepositFundingSource =
+      remainingEngineeringCents <= 0
+        ? "technology_self_funded"
+        : remainingTechnologyCents <= 0
+          ? "engineering_allocation"
+          : "mixed";
+    await client.query(
+      `INSERT INTO contract_payment_purpose_details(
+         id,contract_id,payment_record_id,external_payment_record_id,
+         purpose,amount,funding_source,engineering_allocation_amount,
+         technology_self_funded_amount,created_by,updated_by,
+         created_at,updated_at
+       ) VALUES($1,$2,$3,$4,'lease_deposit',$5,$6,$7,$8,$9,$9,$10,$10)`,
+      [
+        nanoid(),
+        input.contractId,
+        target.kind === "payment" ? target.id : null,
+        target.kind === "external_payment" ? target.id : null,
+        centsToAmount(remainingDepositPurposeCents),
+        remainingFundingSource,
+        centsToAmount(remainingEngineeringCents),
+        centsToAmount(remainingTechnologyCents),
+        input.actorId,
+        input.now,
+      ],
+    );
+  }
+  await rebuildDepositAffectedFinancialMatches(
+    client,
+    input.contractId,
+    target,
+    input.now,
+  );
+  return {
+    paymentRecordId: target.id,
+    paymentKind: target.kind,
+    contractPaymentAmount: centsToAmount(contractPaymentCents),
+    remainingDepositPurposeAmount: centsToAmount(remainingDepositPurposeCents),
+  };
+}
+
+async function rebuildDepositAffectedFinancialMatches(
+  client: PoolClient,
+  contractId: string,
+  target: DepositPaymentTarget,
+  now: string,
+): Promise<void> {
+  const itemKind =
+    target.kind === "external_payment" ? "external_payment" : "payment";
+  const paymentTable =
+    target.kind === "external_payment"
+      ? "contract_external_payments"
+      : "contract_payments";
+  const purposeRecordColumn =
+    target.kind === "external_payment"
+      ? "external_payment_record_id"
+      : "payment_record_id";
+  const registrations = await client.query<{ registration_id: string }>(
+    `SELECT item.registration_id
+     FROM contract_financial_registration_items item
+     WHERE item.contract_id=$1 AND item.item_kind=$2 AND item.record_id=$3`,
+    [contractId, itemKind, target.id],
+  );
+  for (const registration of registrations.rows) {
+    await client.query(
+      `DELETE FROM contract_financial_registration_matches match
+       USING contract_financial_registration_items settlement
+       WHERE match.registration_id=$1
+         AND settlement.id=match.settlement_item_id
+         AND settlement.item_kind=$2`,
+      [registration.registration_id, itemKind],
+    );
+    const invoiceItems = await client.query<{
+      item_id: string;
+      amount: string | number;
+      allocated_amount: string | number;
+    }>(
+      `SELECT item.id AS item_id,invoice.amount,
+         COALESCE((
+           SELECT SUM(match.allocated_amount)
+           FROM contract_financial_registration_matches match
+           WHERE match.invoice_item_id=item.id
+         ),0) AS allocated_amount
+       FROM contract_financial_registration_items item
+       JOIN contract_invoices invoice ON invoice.id=item.record_id
+       WHERE item.registration_id=$1 AND item.contract_id=$2
+         AND item.item_kind='invoice' AND invoice.status <> 'reversed'
+       ORDER BY item.created_at,item.id
+       FOR UPDATE OF item,invoice`,
+      [registration.registration_id, contractId],
+    );
+    const settlementItems = await client.query<{
+      item_id: string;
+      amount: string | number;
+      deposit_amount: string | number;
+    }>(
+      `SELECT item.id AS item_id,payment.amount,
+         COALESCE((
+           SELECT SUM(detail.amount)
+           FROM contract_payment_purpose_details detail
+           WHERE detail.${purposeRecordColumn}=payment.id
+             AND detail.purpose='lease_deposit'
+         ),CASE WHEN EXISTS(
+           SELECT 1 FROM contract_payment_purpose_details purpose
+           WHERE purpose.${purposeRecordColumn}=payment.id
+         ) THEN 0 ELSE (
+           SELECT SUM(receipt.confirmed_amount)
+           FROM contract_payment_deposit_receipts receipt
+           WHERE receipt.${purposeRecordColumn}=payment.id
+             AND receipt.status='confirmed'
+         ) END,0) AS deposit_amount
+       FROM contract_financial_registration_items item
+       JOIN ${paymentTable} payment ON payment.id=item.record_id
+       WHERE item.registration_id=$1 AND item.contract_id=$2
+         AND item.item_kind=$3 AND payment.status <> 'reversed'
+       ORDER BY item.created_at,item.id
+       FOR UPDATE OF item,payment`,
+      [registration.registration_id, contractId, itemKind],
+    );
+    const availableInvoices = invoiceItems.rows
+      .map((item) => ({
+        itemId: item.item_id,
+        amount: centsToAmount(
+          Math.max(
+            0,
+            toCents(String(item.amount)) -
+              toCents(String(item.allocated_amount || 0)),
+          ),
+        ),
+      }))
+      .filter((item) => item.amount > 0);
+    const availableSettlements = settlementItems.rows
+      .map((item) => ({
+        itemId: item.item_id,
+        amount: centsToAmount(
+          Math.max(
+            0,
+            toCents(String(item.amount)) -
+              toCents(String(item.deposit_amount || 0)),
+          ),
+        ),
+      }))
+      .filter((item) => item.amount > 0);
+    const allocations = allocateAvailableContractFinancialAmounts(
+      availableInvoices.map((item) => item.amount),
+      availableSettlements.map((item) => item.amount),
+    );
+    for (const allocation of allocations) {
+      await client.query(
+        `INSERT INTO contract_financial_registration_matches(
+           id,registration_id,contract_id,invoice_item_id,
+           settlement_item_id,allocated_amount,created_at
+         ) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          nanoid(),
+          registration.registration_id,
+          contractId,
+          availableInvoices[allocation.invoiceIndex]!.itemId,
+          availableSettlements[allocation.settlementIndex]!.itemId,
+          allocation.allocatedAmount,
+          now,
+        ],
+      );
+    }
+  }
+}
+
+async function loadPaymentPurposeDetails(
+  contractId: string,
+  recordId: string,
+  kind: DepositPaymentKind,
+) {
+  const rows = await db.all<Record<string, unknown>>(
+    `SELECT detail.* FROM contract_payment_purpose_details detail
+     WHERE detail.contract_id=? AND detail.${purposeDetailsRecordColumn(kind)}=?
+     ORDER BY CASE detail.purpose WHEN 'contract_payment' THEN 0 ELSE 1 END`,
+    contractId,
+    recordId,
+  );
+  return {
+    contractId,
+    recordId,
+    details: rows.map((row) => ({
+      purpose: row.purpose,
+      amount: Number(row.amount),
+      fundingSource: row.funding_source,
+      engineeringAllocationAmount: Number(
+        row.engineering_allocation_amount || 0,
+      ),
+      technologySelfFundedAmount: Number(
+        row.technology_self_funded_amount || 0,
+      ),
+    })),
+  };
+}
+
+function registerPurposeDetailRoutes(
+  kind: DepositPaymentKind,
+  resource: "payments" | "external-payments",
+) {
+  router.get(
+    `/:id/${resource}/:recordId/purpose-details`,
+    requireContractRead,
+    async (req, res) => {
+      try {
+        await assertContractReadScope(req, req.params.id);
+        await db.transaction((client) =>
+          lockDepositPaymentTarget(client, req.params.id, req.params.recordId),
+        );
+        res.json({
+          success: true,
+          data: await loadPaymentPurposeDetails(
+            req.params.id,
+            req.params.recordId,
+            kind,
+          ),
+        });
+      } catch (error) {
+        sendError(res, error, "获取付款用途明细失败");
+      }
+    },
+  );
+  router.put(
+    `/:id/${resource}/:recordId/purpose-details`,
+    requireFinance,
+    async (req, res) => {
+      try {
+        const currentActor = actor(req);
+        if (!Array.isArray(req.body.details)) {
+          throw new ContractDomainError(400, "付款用途明细格式不正确");
+        }
+        const details: Array<{
+          purpose: ContractExternalPaymentPurpose;
+          amount: number;
+          amountCents: number;
+          fundingSource: ContractDepositFundingSource;
+          engineeringAllocationAmount: number;
+          technologySelfFundedAmount: number;
+        }> = (req.body.details as Record<string, unknown>[]).map((raw) => {
+          const purpose = String(
+            raw.purpose || "",
+          ) as ContractExternalPaymentPurpose;
+          if (!new Set(["contract_payment", "lease_deposit"]).has(purpose)) {
+            throw new ContractDomainError(400, "付款用途不正确");
+          }
+          const amount = parsePositiveAmount(raw.amount, "付款用途金额");
+          const fundingSource = normalizeDepositFundingSource(
+            raw.fundingSource,
+          );
+          return {
+            purpose,
+            amount,
+            amountCents: toCents(String(amount)),
+            fundingSource,
+            engineeringAllocationAmount: Number(
+              raw.engineeringAllocationAmount || 0,
+            ),
+            technologySelfFundedAmount: Number(
+              raw.technologySelfFundedAmount || 0,
+            ),
+          };
+        });
+        const now = new Date().toISOString();
+        await db.transaction(async (client) => {
+          await lockDepositContract(client, req.params.id);
+          const target = await lockDepositPaymentTarget(
+            client,
+            req.params.id,
+            req.params.recordId,
+          );
+          if (target.kind !== kind) {
+            throw new ContractDomainError(409, "付款记录类型与接口不一致");
+          }
+          validateExternalPaymentPurposeDetails(
+            toCents(String(target.amount)),
+            details.map((detail) => ({
+              purpose: detail.purpose,
+              amountCents: detail.amountCents,
+              fundingSource: detail.fundingSource,
+              engineeringAllocationAmountCents: toCents(
+                String(detail.engineeringAllocationAmount),
+              ),
+              technologySelfFundedAmountCents: toCents(
+                String(detail.technologySelfFundedAmount),
+              ),
+            })),
+          );
+          await client.query(
+            `DELETE FROM contract_payment_purpose_details
+             WHERE contract_id=$1 AND ${purposeDetailsRecordColumn(kind)}=$2`,
+            [req.params.id, req.params.recordId],
+          );
+          for (const detail of details) {
+            await client.query(
+              `INSERT INTO contract_payment_purpose_details(
+                 id,contract_id,payment_record_id,external_payment_record_id,
+                 purpose,amount,funding_source,engineering_allocation_amount,
+                 technology_self_funded_amount,created_by,updated_by,
+                 created_at,updated_at
+               ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$11)`,
+              [
+                nanoid(),
+                req.params.id,
+                kind === "payment" ? target.id : null,
+                kind === "external_payment" ? target.id : null,
+                detail.purpose,
+                detail.amount,
+                detail.fundingSource,
+                detail.engineeringAllocationAmount,
+                detail.technologySelfFundedAmount,
+                currentActor.id,
+                now,
+              ],
+            );
+          }
+          const depositDetail = details.find(
+            (detail) => detail.purpose === "lease_deposit",
+          );
+          const depositResult = await client.query<ContractDepositRow>(
+            `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+            [req.params.id],
+          );
+          const deposit = depositResult.rows[0];
+          if (depositDetail) {
+            if (!deposit) {
+              throw new ContractDomainError(
+                409,
+                "请先依据合同原文建立押金记录，再设置付款用途",
+              );
+            }
+            if (toCents(String(deposit.amount)) !== depositDetail.amountCents) {
+              throw new ContractDomainError(
+                409,
+                "付款中的押金金额必须与合同押金记录一致",
+              );
+            }
+            const nextStatus = deriveContractDepositStatus({
+              amountCents: depositDetail.amountCents,
+              settledAmountCents: toCents(String(deposit.settled_amount || 0)),
+              isPaid: true,
+            });
+            await client.query(
+              `UPDATE contract_deposits SET funding_source=$2,
+                 engineering_allocation_amount=$3,
+                 technology_self_funded_amount=$4,payment_record_id=$5,
+                 external_payment_record_id=$6,paid_at=$7,status=$8,
+                 updated_by=$9,updated_at=$10 WHERE id=$1`,
+              [
+                deposit.id,
+                depositDetail.fundingSource,
+                depositDetail.engineeringAllocationAmount,
+                depositDetail.technologySelfFundedAmount,
+                kind === "payment" ? target.id : null,
+                kind === "external_payment" ? target.id : null,
+                target.paymentDate,
+                nextStatus,
+                currentActor.id,
+                now,
+              ],
+            );
+          } else if (
+            deposit &&
+            (deposit.payment_record_id === target.id ||
+              deposit.external_payment_record_id === target.id)
+          ) {
+            if (toCents(String(deposit.settled_amount || 0)) > 0) {
+              throw new ContractDomainError(
+                409,
+                "押金已发生结算，不能移除付款中的押金用途",
+              );
+            }
+            await client.query(
+              `UPDATE contract_deposits SET payment_record_id=NULL,
+                 external_payment_record_id=NULL,paid_at=NULL,
+                 status='pending_payment',updated_by=$2,updated_at=$3
+               WHERE id=$1`,
+              [deposit.id, currentActor.id, now],
+            );
+          }
+          await rebuildDepositAffectedFinancialMatches(
+            client,
+            req.params.id,
+            target,
+            now,
+          );
+          await client.query(
+            `INSERT INTO contract_audit_logs(
+               id,contract_id,action,actor_id,actor_role,from_status,to_status,
+               changes_json,comment,created_at
+             ) SELECT $1,contract.id,'contract_payment_purpose_updated',
+               $2,$3,status,status,$4::jsonb,$5,$6
+               FROM contracts contract WHERE contract.id=$7`,
+            [
+              nanoid(),
+              currentActor.id,
+              currentActor.role,
+              JSON.stringify({ recordId: target.id, kind, details }),
+              "设置合同付款中的合同款、押金及资金来源",
+              now,
+              req.params.id,
+            ],
+          );
+        });
+        res.json({
+          success: true,
+          data: await loadPaymentPurposeDetails(
+            req.params.id,
+            req.params.recordId,
+            kind,
+          ),
+        });
+      } catch (error) {
+        sendError(res, error, "保存付款用途明细失败");
+      }
+    },
+  );
+}
+
+registerPurposeDetailRoutes("payment", "payments");
+registerPurposeDetailRoutes("external_payment", "external-payments");
+
+router.post(
+  "/:id/financial-records/:recordId/deposit-receipts",
+  requireFinance,
+  uploadSingle,
+  async (req, res) => {
+    let stored = false;
+    try {
+      const currentActor = actor(req);
+      const file = await validateUploadedFile(req.file, ["pdf", "jpeg", "png"]);
+      await db.transaction((client) =>
+        lockDepositPaymentTarget(client, req.params.id, req.params.recordId),
+      );
+      const recognition = await recognizeContractDepositReceipt(
+        path.resolve(process.cwd(), file.filePath),
+        file.mimeType,
+      );
+      const receipt = await db.transaction(async (client) => {
+        const target = await lockDepositPaymentTarget(
+          client,
+          req.params.id,
+          req.params.recordId,
+        );
+        const duplicate = await client.query<{ id: string }>(
+          `SELECT id FROM contract_payment_deposit_receipts
+           WHERE contract_id = $1 AND file_hash = $2 LIMIT 1`,
+          [req.params.id, file.fileHash],
+        );
+        if (duplicate.rows[0]) {
+          throw new ContractDomainError(
+            409,
+            "该押金条已经上传，请勿重复提交",
+            "DEPOSIT_RECEIPT_DUPLICATE",
+          );
+        }
+        const id = nanoid();
+        const now = new Date().toISOString();
+        const inserted = await client.query<DepositReceiptRow>(
+          `INSERT INTO contract_payment_deposit_receipts (
+             id, contract_id, payment_record_id, external_payment_record_id,
+             file_name, file_path, file_size, mime_type, file_hash,
+             ocr_status, recognized_amount, ocr_engine_version,
+             ocr_text_sha256, ocr_evidence_json, ocr_failure_message,
+             status, uploaded_by, created_at, updated_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,
+             'pending',$16,$17,$17
+           ) RETURNING *`,
+          [
+            id,
+            req.params.id,
+            target.kind === "payment" ? target.id : null,
+            target.kind === "external_payment" ? target.id : null,
+            file.fileName,
+            file.filePath,
+            file.fileSize,
+            file.mimeType,
+            file.fileHash,
+            recognition.status,
+            recognition.amount,
+            recognition.engineVersion,
+            recognition.textSha256,
+            JSON.stringify(recognition.evidence),
+            recognition.failureMessage,
+            currentActor.id,
+            now,
+          ],
+        );
+        await client.query(
+          `INSERT INTO contract_audit_logs (
+             id, contract_id, action, actor_id, actor_role, from_status,
+             to_status, changes_json, created_at
+           ) SELECT $1, contract.id, 'deposit_receipt_uploaded', $2, $3,
+               contract.status, contract.status, $4::jsonb, $5
+             FROM contracts contract WHERE contract.id = $6`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              depositReceiptId: id,
+              paymentRecordId: target.id,
+              paymentKind: target.kind,
+              originalPaymentAmount: target.amount,
+              fileName: file.fileName,
+              ocrStatus: recognition.status,
+              recognizedAmount: recognition.amount,
+            }),
+            now,
+            req.params.id,
+          ],
+        );
+        return inserted.rows[0]!;
+      });
+      stored = true;
+      receipt.uploaded_by_name = currentActor.name;
+      res.status(recognition.status === "recognized" ? 200 : 202).json({
+        success: true,
+        data: toDepositReceiptApi(receipt),
+      });
+    } catch (error) {
+      if (!stored) cleanupUploadedFile(req.file);
+      sendError(res, error, "上传押金条失败");
+    }
+  },
+);
+
+router.post(
+  "/:id/financial-records/:recordId/deposit-receipts/:depositReceiptId/verify",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (
+        Object.keys(req.body || {}).some((key) => key !== "amount") ||
+        req.body?.amount === undefined
+      ) {
+        throw new ContractDomainError(400, "确认押金条时只能提交押金金额");
+      }
+      const confirmedAmount = parsePositiveAmount(req.body.amount, "押金金额");
+      const currentActor = actor(req);
+      const receipt = await db.transaction(async (client) => {
+        const locked = await client.query<DepositReceiptRow>(
+          `SELECT * FROM contract_payment_deposit_receipts
+           WHERE id = $1 AND contract_id = $2
+             AND COALESCE(payment_record_id, external_payment_record_id) = $3
+           FOR UPDATE`,
+          [req.params.depositReceiptId, req.params.id, req.params.recordId],
+        );
+        const depositReceipt = locked.rows[0];
+        if (!depositReceipt) {
+          throw new ContractDomainError(404, "押金条不存在");
+        }
+        if (depositReceipt.status !== "pending") {
+          throw new ContractDomainError(
+            409,
+            depositReceipt.status === "voided"
+              ? "押金条已经撤销，不能重新确认"
+              : "押金条已经确认，不能重复修改",
+            depositReceipt.status === "voided"
+              ? "DEPOSIT_RECEIPT_ALREADY_VOIDED"
+              : "DEPOSIT_RECEIPT_ALREADY_CONFIRMED",
+          );
+        }
+        const target = await lockDepositPaymentTarget(
+          client,
+          req.params.id,
+          req.params.recordId,
+        );
+        const totals = await client.query<{ confirmed_amount: number }>(
+          `SELECT COALESCE(SUM(confirmed_amount), 0) AS confirmed_amount
+           FROM contract_payment_deposit_receipts
+           WHERE status = 'confirmed' AND id <> $1
+             AND COALESCE(payment_record_id, external_payment_record_id) = $2`,
+          [depositReceipt.id, target.id],
+        );
+        const otherConfirmed = Number(totals.rows[0]?.confirmed_amount || 0);
+        if (
+          !canConfirmContractDepositAmount(
+            target.amount,
+            otherConfirmed,
+            confirmedAmount,
+          )
+        ) {
+          throw new ContractDomainError(
+            422,
+            "该付款已确认的押金合计不能超过银行原始付款金额",
+            "DEPOSIT_RECEIPT_AMOUNT_EXCEEDS_PAYMENT",
+          );
+        }
+        const confirmationSource =
+          depositReceipt.recognized_amount !== null &&
+          toCents(String(depositReceipt.recognized_amount)) ===
+            toCents(String(confirmedAmount))
+            ? "ocr"
+            : "manual";
+        const now = new Date().toISOString();
+        const updated = await client.query<DepositReceiptRow>(
+          `UPDATE contract_payment_deposit_receipts
+           SET status = 'confirmed', confirmed_amount = $1,
+             confirmation_source = $2, confirmed_by = $3,
+             confirmed_at = $4, updated_at = $4
+           WHERE id = $5 RETURNING *`,
+          [
+            confirmedAmount,
+            confirmationSource,
+            currentActor.id,
+            now,
+            depositReceipt.id,
+          ],
+        );
+        const depositResult = await client.query<ContractDepositRow>(
+          `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+          [req.params.id],
+        );
+        const contractDeposit = depositResult.rows[0];
+        if (contractDeposit) {
+          if (
+            toCents(String(contractDeposit.amount)) !==
+            toCents(String(confirmedAmount))
+          ) {
+            throw new ContractDomainError(
+              409,
+              "押金条确认金额必须与合同押金记录一致",
+            );
+          }
+          await client.query(
+            `DELETE FROM contract_payment_purpose_details
+             WHERE contract_id=$1 AND ${purposeDetailsRecordColumn(target.kind)}=$2`,
+            [req.params.id, target.id],
+          );
+          const contractPaymentAmount =
+            Number(target.amount) - Number(confirmedAmount);
+          if (contractPaymentAmount > 0) {
+            await client.query(
+              `INSERT INTO contract_payment_purpose_details(
+                 id,contract_id,payment_record_id,external_payment_record_id,
+                 purpose,amount,funding_source,engineering_allocation_amount,
+                 technology_self_funded_amount,created_by,updated_by,
+                 created_at,updated_at
+               ) VALUES($1,$2,$3,$4,'contract_payment',$5,'pending_review',
+                 0,0,$6,$6,$7,$7)`,
+              [
+                nanoid(),
+                req.params.id,
+                target.kind === "payment" ? target.id : null,
+                target.kind === "external_payment" ? target.id : null,
+                contractPaymentAmount,
+                currentActor.id,
+                now,
+              ],
+            );
+          }
+          await client.query(
+            `INSERT INTO contract_payment_purpose_details(
+               id,contract_id,payment_record_id,external_payment_record_id,
+               purpose,amount,funding_source,engineering_allocation_amount,
+               technology_self_funded_amount,created_by,updated_by,
+               created_at,updated_at
+             ) VALUES($1,$2,$3,$4,'lease_deposit',$5,$6,$7,$8,$9,$9,$10,$10)`,
+            [
+              nanoid(),
+              req.params.id,
+              target.kind === "payment" ? target.id : null,
+              target.kind === "external_payment" ? target.id : null,
+              confirmedAmount,
+              contractDeposit.funding_source,
+              contractDeposit.engineering_allocation_amount,
+              contractDeposit.technology_self_funded_amount,
+              currentActor.id,
+              now,
+            ],
+          );
+          await client.query(
+            `UPDATE contract_deposits SET payment_record_id=$2,
+               external_payment_record_id=$3,paid_at=$4,status=$5,
+               updated_by=$6,updated_at=$7 WHERE id=$1`,
+            [
+              contractDeposit.id,
+              target.kind === "payment" ? target.id : null,
+              target.kind === "external_payment" ? target.id : null,
+              target.paymentDate,
+              deriveContractDepositStatus({
+                amountCents: toCents(String(contractDeposit.amount)),
+                settledAmountCents: toCents(
+                  String(contractDeposit.settled_amount || 0),
+                ),
+                isPaid: true,
+              }),
+              currentActor.id,
+              now,
+            ],
+          );
+        }
+        await rebuildDepositAffectedFinancialMatches(
+          client,
+          req.params.id,
+          target,
+          now,
+        );
+        await client.query(
+          `INSERT INTO contract_audit_logs (
+             id, contract_id, action, actor_id, actor_role, from_status,
+             to_status, changes_json, created_at
+           ) SELECT $1, contract.id, 'deposit_receipt_confirmed', $2, $3,
+               contract.status, contract.status, $4::jsonb, $5
+             FROM contracts contract WHERE contract.id = $6`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              depositReceiptId: depositReceipt.id,
+              paymentRecordId: target.id,
+              paymentKind: target.kind,
+              originalPaymentAmount: target.amount,
+              recognizedAmount: depositReceipt.recognized_amount,
+              confirmedAmount,
+              confirmationSource,
+              invoiceRequiredAmount: calculatePaymentInvoiceRequiredAmount(
+                target.amount,
+                otherConfirmed + confirmedAmount,
+              ),
+            }),
+            now,
+            req.params.id,
+          ],
+        );
+        const result = updated.rows[0]!;
+        result.confirmed_by_name = currentActor.name;
+        const uploader = await client.query<{ name: string }>(
+          `SELECT name FROM users WHERE id = $1`,
+          [result.uploaded_by],
+        );
+        result.uploaded_by_name = uploader.rows[0]?.name || null;
+        return result;
+      });
+      res.json({ success: true, data: toDepositReceiptApi(receipt) });
+    } catch (error) {
+      sendError(res, error, "确认押金条失败");
+    }
+  },
+);
+
+router.delete(
+  "/:id/financial-records/:recordId/deposit-receipts/:depositReceiptId",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      const removed = await db.transaction(async (client) => {
+        const locked = await client.query<DepositReceiptRow>(
+          `SELECT * FROM contract_payment_deposit_receipts
+           WHERE id = $1 AND contract_id = $2
+             AND COALESCE(payment_record_id, external_payment_record_id) = $3
+           FOR UPDATE`,
+          [req.params.depositReceiptId, req.params.id, req.params.recordId],
+        );
+        const depositReceipt = locked.rows[0];
+        if (!depositReceipt) {
+          throw new ContractDomainError(404, "押金条不存在");
+        }
+        if (depositReceipt.status !== "pending") {
+          throw new ContractDomainError(
+            409,
+            depositReceipt.status === "confirmed"
+              ? "已确认押金条不能删除，请先提交撤销原因"
+              : "已撤销押金条必须保留审计证据，不能删除",
+            depositReceipt.status === "confirmed"
+              ? "DEPOSIT_RECEIPT_CONFIRMED_DELETE_FORBIDDEN"
+              : "DEPOSIT_RECEIPT_VOIDED_DELETE_FORBIDDEN",
+          );
+        }
+        const target = await lockDepositPaymentTarget(
+          client,
+          req.params.id,
+          req.params.recordId,
+        );
+        const now = new Date().toISOString();
+        await client.query(
+          `INSERT INTO contract_audit_logs (
+             id, contract_id, action, actor_id, actor_role, from_status,
+             to_status, changes_json, created_at
+           ) SELECT $1, contract.id, 'deposit_receipt_deleted', $2, $3,
+               contract.status, contract.status, $4::jsonb, $5
+             FROM contracts contract WHERE contract.id = $6`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              depositReceiptId: depositReceipt.id,
+              paymentRecordId: target.id,
+              paymentKind: target.kind,
+              fileName: depositReceipt.file_name,
+              fileHash: depositReceipt.file_hash,
+              previousStatus: depositReceipt.status,
+              hardDeleted: true,
+            }),
+            now,
+            req.params.id,
+          ],
+        );
+        await client.query(
+          `DELETE FROM contract_payment_deposit_receipts
+           WHERE id = $1 AND status = 'pending'`,
+          [depositReceipt.id],
+        );
+        return depositReceipt;
+      });
+      await cleanupStoredFinancialFiles([removed.file_path], {
+        contractId: req.params.id,
+        paymentRecordId: req.params.recordId,
+        depositReceiptId: removed.id,
+      });
+      res.json({
+        success: true,
+        data: { depositReceiptId: removed.id, deleted: true },
+      });
+    } catch (error) {
+      sendError(res, error, "删除待确认押金条失败");
+    }
+  },
+);
+
+router.post(
+  "/:id/financial-records/:recordId/deposit-receipts/:depositReceiptId/void",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (Object.keys(req.body || {}).some((key) => key !== "reason")) {
+        throw new ContractDomainError(400, "撤销押金条时只能提交撤销原因");
+      }
+      const reason = normalizeNullableText(req.body?.reason);
+      if (!reason) {
+        throw new ContractDomainError(
+          400,
+          "撤销押金条必须填写原因",
+          "DEPOSIT_RECEIPT_VOID_REASON_REQUIRED",
+        );
+      }
+      if (reason.length > 300) {
+        throw new ContractDomainError(400, "押金条撤销原因不能超过300字");
+      }
+      const currentActor = actor(req);
+      const receipt = await db.transaction(async (client) => {
+        const locked = await client.query<DepositReceiptRow>(
+          `SELECT * FROM contract_payment_deposit_receipts
+           WHERE id = $1 AND contract_id = $2
+             AND COALESCE(payment_record_id, external_payment_record_id) = $3
+           FOR UPDATE`,
+          [req.params.depositReceiptId, req.params.id, req.params.recordId],
+        );
+        const depositReceipt = locked.rows[0];
+        if (!depositReceipt) {
+          throw new ContractDomainError(404, "押金条不存在");
+        }
+        if (depositReceipt.status !== "confirmed") {
+          throw new ContractDomainError(
+            409,
+            depositReceipt.status === "pending"
+              ? "待确认押金条请直接删除，无需撤销"
+              : "押金条已经撤销，不能重复撤销",
+            depositReceipt.status === "pending"
+              ? "DEPOSIT_RECEIPT_PENDING_NOT_VOIDABLE"
+              : "DEPOSIT_RECEIPT_ALREADY_VOIDED",
+          );
+        }
+        const target = await lockDepositPaymentTarget(
+          client,
+          req.params.id,
+          req.params.recordId,
+        );
+        const totals = await client.query<{ confirmed_amount: number }>(
+          `SELECT COALESCE(SUM(confirmed_amount), 0) AS confirmed_amount
+           FROM contract_payment_deposit_receipts
+           WHERE status = 'confirmed' AND id <> $1
+             AND COALESCE(payment_record_id, external_payment_record_id) = $2`,
+          [depositReceipt.id, target.id],
+        );
+        const remainingConfirmed = Number(
+          totals.rows[0]?.confirmed_amount || 0,
+        );
+        const previousConfirmed =
+          remainingConfirmed + Number(depositReceipt.confirmed_amount || 0);
+        const structuredDeposit = await client.query<ContractDepositRow>(
+          `SELECT * FROM contract_deposits WHERE contract_id=$1 FOR UPDATE`,
+          [req.params.id],
+        );
+        const linkedDeposit = structuredDeposit.rows[0];
+        if (
+          remainingConfirmed === 0 &&
+          linkedDeposit &&
+          (linkedDeposit.payment_record_id === target.id ||
+            linkedDeposit.external_payment_record_id === target.id) &&
+          toCents(String(linkedDeposit.settled_amount || 0)) > 0
+        ) {
+          throw new ContractDomainError(
+            409,
+            "押金已发生退回、扣款或抵租金，不能撤销付款凭证",
+          );
+        }
+        const now = new Date().toISOString();
+        const updated = await client.query<DepositReceiptRow>(
+          `UPDATE contract_payment_deposit_receipts
+           SET status = 'voided', voided_by = $1, voided_at = $2,
+             void_reason = $3, updated_at = $2
+           WHERE id = $4 AND status = 'confirmed'
+           RETURNING *`,
+          [currentActor.id, now, reason, depositReceipt.id],
+        );
+        if (
+          remainingConfirmed === 0 &&
+          linkedDeposit &&
+          (linkedDeposit.payment_record_id === target.id ||
+            linkedDeposit.external_payment_record_id === target.id)
+        ) {
+          await client.query(
+            `DELETE FROM contract_payment_purpose_details
+             WHERE contract_id=$1 AND ${purposeDetailsRecordColumn(target.kind)}=$2`,
+            [req.params.id, target.id],
+          );
+          await client.query(
+            `UPDATE contract_deposits SET payment_record_id=NULL,
+               external_payment_record_id=NULL,paid_at=NULL,
+               status='pending_payment',updated_by=$2,updated_at=$3
+             WHERE id=$1`,
+            [linkedDeposit.id, currentActor.id, now],
+          );
+        }
+        await rebuildDepositAffectedFinancialMatches(
+          client,
+          req.params.id,
+          target,
+          now,
+        );
+        await client.query(
+          `INSERT INTO contract_audit_logs (
+             id, contract_id, action, actor_id, actor_role, from_status,
+             to_status, changes_json, comment, created_at
+           ) SELECT $1, contract.id, 'deposit_receipt_voided', $2, $3,
+               contract.status, contract.status, $4::jsonb, $5, $6
+             FROM contracts contract WHERE contract.id = $7`,
+          [
+            nanoid(),
+            currentActor.id,
+            currentActor.role,
+            JSON.stringify({
+              depositReceiptId: depositReceipt.id,
+              paymentRecordId: target.id,
+              paymentKind: target.kind,
+              originalPaymentAmount: target.amount,
+              confirmedAmount: depositReceipt.confirmed_amount,
+              previousInvoiceRequiredAmount:
+                calculatePaymentInvoiceRequiredAmount(
+                  target.amount,
+                  previousConfirmed,
+                ),
+              invoiceRequiredAmount: calculatePaymentInvoiceRequiredAmount(
+                target.amount,
+                remainingConfirmed,
+              ),
+              evidencePreserved: true,
+            }),
+            reason,
+            now,
+            req.params.id,
+          ],
+        );
+        const result = updated.rows[0]!;
+        const names = await client.query<{ id: string; name: string }>(
+          `SELECT id, name FROM users WHERE id = ANY($1::text[])`,
+          [
+            [result.uploaded_by, result.confirmed_by, result.voided_by].filter(
+              Boolean,
+            ),
+          ],
+        );
+        const nameById = new Map(
+          names.rows.map((user) => [user.id, user.name]),
+        );
+        result.uploaded_by_name = nameById.get(result.uploaded_by) || null;
+        result.confirmed_by_name = result.confirmed_by
+          ? nameById.get(result.confirmed_by) || null
+          : null;
+        result.voided_by_name = currentActor.name;
+        return result;
+      });
+      res.json({ success: true, data: toDepositReceiptApi(receipt) });
+    } catch (error) {
+      sendError(res, error, "撤销已确认押金条失败");
+    }
+  },
+);
+
+router.get(
+  "/:id/financial-records/:recordId/deposit-receipts/:depositReceiptId/file",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      const receipt = await db.get<DepositReceiptRow>(
+        `SELECT * FROM contract_payment_deposit_receipts
+         WHERE id = ? AND contract_id = ?
+           AND COALESCE(payment_record_id, external_payment_record_id) = ?`,
+        req.params.depositReceiptId,
+        req.params.id,
+        req.params.recordId,
+      );
+      if (!receipt) throw new ContractDomainError(404, "押金条不存在");
+      if (!validateFilePath(receipt.file_path)) {
+        throw new ContractDomainError(403, "押金条文件路径不安全");
+      }
+      const absolutePath = path.resolve(process.cwd(), receipt.file_path);
+      if (!fs.existsSync(absolutePath)) {
+        throw new ContractDomainError(404, "押金条文件已丢失");
+      }
+      await db.run(
+        `INSERT INTO contract_audit_logs (
+           id, contract_id, action, actor_id, actor_role, from_status,
+           to_status, changes_json, created_at
+         ) SELECT ?, contract.id, 'deposit_receipt_previewed', ?, ?,
+             contract.status, contract.status, ?::jsonb, ?
+           FROM contracts contract WHERE contract.id = ?`,
+        nanoid(),
+        currentActor.id,
+        currentActor.role,
+        JSON.stringify({
+          depositReceiptId: receipt.id,
+          paymentRecordId: req.params.recordId,
+          fileName: receipt.file_name,
+        }),
+        new Date().toISOString(),
+        req.params.id,
+      );
+      res.setHeader("Content-Type", receipt.mime_type);
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename*=UTF-8''${encodeURIComponent(receipt.file_name)}`,
+      );
+      res.sendFile(absolutePath);
+    } catch (error) {
+      if (!res.headersSent) sendError(res, error, "读取押金条失败");
     }
   },
 );
@@ -12046,6 +17255,117 @@ router.post(
   rejectUnpairedFinancialRecord("付款凭证"),
 );
 
+export async function retryStoredContractFinancialOcr(
+  contractId: string,
+  jobId: string,
+  currentActor: { id: string; role: string },
+): Promise<FinancialOcrJobView> {
+  if (
+    !FINANCE_ROLES.includes(currentActor.role as (typeof FINANCE_ROLES)[number])
+  ) {
+    throw new ContractDomainError(
+      403,
+      "只有合同管理员可以重新识别旧版银行回单",
+      "CONTRACT_FINANCIAL_OCR_ADMIN_ONLY",
+    );
+  }
+  const stored = await db.get<{
+    id: string;
+    contract_id: string;
+    record_kind: "receipt" | "payment";
+    status: string;
+    validation_status: string | null;
+    parser_version: string | null;
+    record_id: string | null;
+    file_id: string;
+    file_name: string;
+    file_path: string;
+    file_size: number;
+    mime_type: string;
+    is_current: boolean;
+  }>(
+    `SELECT job.id, job.contract_id, job.record_kind, job.status,
+       job.validation_status, job.parser_version, job.record_id,
+       file.id AS file_id, file.file_name, file.file_path,
+       file.file_size, file.mime_type, file.is_current
+     FROM contract_financial_ocr_jobs job
+     JOIN contract_files file ON file.id = job.file_id
+     WHERE job.id = ? AND job.contract_id = ?
+       AND job.record_kind IN ('receipt', 'payment')
+       AND job.business_purpose IS NULL`,
+    jobId,
+    contractId,
+  );
+  if (!stored) {
+    throw new ContractDomainError(
+      404,
+      "待重识别的银行回单任务不存在",
+      "FINANCIAL_OCR_JOB_NOT_FOUND",
+    );
+  }
+  if (
+    stored.status !== "blocked" ||
+    stored.validation_status !== "blocked" ||
+    stored.record_id !== null ||
+    !stored.is_current
+  ) {
+    throw new ContractDomainError(
+      409,
+      "只有未消费且仍为当前文件的旧版阻断任务可以重新识别",
+      "FINANCIAL_OCR_RETRY_NOT_ALLOWED",
+    );
+  }
+  if (
+    stored.parser_version ===
+    contractFinancialOcrParserVersion(stored.record_kind)
+  ) {
+    throw new ContractDomainError(
+      409,
+      "该银行回单已经使用最新解析版本",
+      "FINANCIAL_OCR_RETRY_NOT_REQUIRED",
+    );
+  }
+  const registered = await db.get<{ id: string }>(
+    `SELECT id FROM contract_financial_registration_items
+     WHERE ocr_job_id = ? LIMIT 1`,
+    stored.id,
+  );
+  if (registered) {
+    throw new ContractDomainError(
+      409,
+      "该银行回单已进入财务登记，不能重新识别",
+      "FINANCIAL_OCR_ALREADY_REGISTERED",
+    );
+  }
+  if (!validateFilePath(stored.file_path)) {
+    throw new ContractDomainError(403, "财务凭证文件路径不安全");
+  }
+  const absolutePath = path.resolve(process.cwd(), stored.file_path);
+  if (!fs.existsSync(absolutePath)) {
+    throw new ContractDomainError(404, "财务凭证原文件已丢失");
+  }
+  const storedFile = {
+    fieldname: "file",
+    originalname: stored.file_name,
+    encoding: "7bit",
+    mimetype: stored.mime_type,
+    size: Number(stored.file_size),
+    destination: path.dirname(absolutePath),
+    filename: path.basename(absolutePath),
+    path: absolutePath,
+    buffer: undefined as unknown as Buffer,
+  } as unknown as Express.Multer.File;
+  return recognizeAndStoreFinancialFile(
+    stored.contract_id,
+    stored.record_kind,
+    storedFile,
+    currentActor,
+    undefined,
+    false,
+    true,
+  );
+}
+
 router.get("/:id/financial-ocr/pending", requireFinance, async (req, res) => {
   try {
     await assertMainContractFinancialTarget(req.params.id);
@@ -12058,6 +17378,8 @@ router.get("/:id/financial-ocr/pending", requireFinance, async (req, res) => {
       validation_status: FinancialOcrJobView["validationStatus"];
       failure_kind: FinancialOcrJobView["failureKind"];
       retry_count: number;
+      engine_version: string | null;
+      parser_version: string | null;
       recognition_method: string | null;
       evidence_text_hash: string | null;
       direction: string | null;
@@ -12069,12 +17391,14 @@ router.get("/:id/financial-ocr/pending", requireFinance, async (req, res) => {
     }>(
       `SELECT job.id, job.contract_id, job.file_id, job.record_kind,
          job.status, job.validation_status, job.failure_kind,
-         job.retry_count, job.recognition_method, job.evidence_text_hash,
+         job.retry_count, job.engine_version, job.parser_version,
+         job.recognition_method, job.evidence_text_hash,
          job.direction, job.document_status, job.can_auto_post,
          job.snapshot_json, job.blocking_reasons_json, job.warnings_json
        FROM contract_financial_ocr_jobs AS job
        JOIN contract_files AS file ON file.id = job.file_id
        WHERE job.contract_id = $1
+         AND job.business_purpose IS NULL
          AND job.record_id IS NULL
          AND job.status IN ('verified', 'blocked')
          AND job.validation_status IN ('verified', 'blocked')
@@ -12119,6 +17443,13 @@ router.get("/:id/financial-ocr/pending", requireFinance, async (req, res) => {
         snapshot: job.snapshot_json,
         blockingReasons: job.blocking_reasons_json || [],
         warnings: job.warnings_json || [],
+        engineVersion: job.engine_version,
+        parserVersion: job.parser_version,
+        requiresRefresh:
+          job.status === "blocked" &&
+          job.validation_status === "blocked" &&
+          job.parser_version !==
+            contractFinancialOcrParserVersion(job.record_kind),
       });
     });
     res.json({ success: true, data: responseJobs });
@@ -12126,6 +17457,31 @@ router.get("/:id/financial-ocr/pending", requireFinance, async (req, res) => {
     sendError(res, error, "恢复待登记财务凭证失败");
   }
 });
+
+router.post(
+  "/:id/financial-ocr/:jobId/retry",
+  requireFinance,
+  async (req, res) => {
+    try {
+      if (Object.keys(req.body || {}).length > 0) {
+        throw new ContractDomainError(
+          400,
+          "重新识别旧版财务凭证无需提交字段",
+          "FINANCIAL_OCR_RETRY_FIELDS_FORBIDDEN",
+        );
+      }
+      const currentActor = actor(req);
+      const result = await retryStoredContractFinancialOcr(
+        req.params.id,
+        req.params.jobId,
+        currentActor,
+      );
+      res.json({ success: true, data: result });
+    } catch (error) {
+      sendError(res, error, "重新识别旧版银行回单失败");
+    }
+  },
+);
 
 router.delete("/:id/financial-ocr/:jobId", requireFinance, async (req, res) => {
   try {

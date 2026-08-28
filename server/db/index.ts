@@ -105,7 +105,23 @@ export const db = {
     try {
       await client.query("BEGIN");
       const result = await fn(client);
-      await client.query("COMMIT");
+      try {
+        await client.query("COMMIT");
+      } catch (error) {
+        const commitError =
+          error instanceof Error
+            ? error
+            : new Error("数据库提交结果暂时无法确认");
+        const code = String(
+          (commitError as Error & { code?: unknown }).code || "",
+        );
+        if (!["40001", "40P01"].includes(code)) {
+          (
+            commitError as Error & { commitOutcomeUncertain?: boolean }
+          ).commitOutcomeUncertain = true;
+        }
+        throw commitError;
+      }
       client.release();
       return result;
     } catch (error) {
@@ -1596,7 +1612,56 @@ export async function initDatabase() {
         }
       }
 
-      // 为 proof_no 创建唯一索引（允许 NULL，但非 NULL 值必须唯一）
+      // 旧库无规范化冲突时，将电子回单号统一为 NFKC、去非字母数字并大写，
+      // 再建立同口径表达式唯一索引；历史冲突必须失败关闭，禁止无唯一保护启动。
+      const proofNoConflicts = await ddlClient.query<{
+        normalized_proof_no: string;
+        conflicting_ids: string[];
+      }>(`
+        WITH normalized AS (
+          SELECT id, UPPER(REGEXP_REPLACE(
+            NORMALIZE(BTRIM(proof_no), NFKC),
+            '[^A-Za-z0-9]+', '', 'g'
+          )) AS normalized_proof_no
+          FROM payment_proof_hashes
+          WHERE proof_no IS NOT NULL
+        )
+        SELECT normalized_proof_no,
+               ARRAY_AGG(id ORDER BY id) AS conflicting_ids
+        FROM normalized
+        WHERE NULLIF(normalized_proof_no, '') IS NOT NULL
+        GROUP BY normalized_proof_no
+        HAVING COUNT(*) > 1
+        ORDER BY normalized_proof_no
+        LIMIT 1
+      `);
+      if (proofNoConflicts.rows[0]) {
+        const conflict = proofNoConflicts.rows[0];
+        throw new Error(
+          `PAYMENT_PROOF_NORMALIZED_CONFLICT:电子回单号${conflict.normalized_proof_no}规范化后重复，记录${conflict.conflicting_ids.join("、")}`,
+        );
+      }
+
+      await ddlClient.query(`
+        UPDATE payment_proof_hashes
+        SET proof_no = NULLIF(UPPER(REGEXP_REPLACE(
+          NORMALIZE(BTRIM(proof_no), NFKC),
+          '[^A-Za-z0-9]+', '', 'g'
+        )), '')
+        WHERE proof_no IS NOT NULL
+      `);
+
+      await ddlClient.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_proof_no_normalized
+        ON payment_proof_hashes (
+          UPPER(REGEXP_REPLACE(
+            NORMALIZE(BTRIM(proof_no), NFKC),
+            '[^A-Za-z0-9]+', '', 'g'
+          ))
+        )
+        WHERE proof_no IS NOT NULL AND BTRIM(proof_no) <> ''
+      `);
+
       await ddlClient.query(`
         CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_proof_no
         ON payment_proof_hashes (proof_no)
@@ -1605,6 +1670,13 @@ export async function initDatabase() {
 
       console.log("✅ 数据库迁移：payment_proof_hashes 表检查完成");
     } catch (error: any) {
+      if (
+        String(error?.message || "").includes(
+          "PAYMENT_PROOF_NORMALIZED_CONFLICT",
+        )
+      ) {
+        throw error;
+      }
       console.log("ℹ️  payment_proof_hashes 迁移失败:", error.message);
     }
 
@@ -3513,7 +3585,11 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
           AND item_account_code = 'business' AND item_direction = 'expense')
         OR (item_category = 'welfare_one_supplement'
           AND item_account_code = 'welfare_one' AND item_direction = 'income')
-        OR (item_category IN ('welfare_one_407', 'welfare_one_407_ai', 'welfare_one_8h_ai')
+        OR (item_category IN (
+          'welfare_one_407', 'welfare_one_drinking_water',
+          'welfare_one_office', 'welfare_one_electricity',
+          'welfare_one_407_ai', 'welfare_one_8h_ai'
+        )
           AND item_account_code = 'welfare_one' AND item_direction = 'expense')
         OR (item_category = 'welfare_two_supplement'
           AND item_account_code = 'welfare_two' AND item_direction = 'income')
@@ -3566,7 +3642,9 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
         'general_interest', 'business_interest',
         'general_bank_fee', 'business_bank_fee', 'general_other',
         'welfare_one_supplement', 'welfare_two_supplement',
-        'welfare_one_407', 'welfare_one_407_ai', 'welfare_one_8h_ai',
+        'welfare_one_407', 'welfare_one_drinking_water',
+        'welfare_one_office', 'welfare_one_electricity',
+        'welfare_one_407_ai', 'welfare_one_8h_ai',
         'welfare_two_refreshment', 'welfare_two_team_building',
         'welfare_two_physical_exam'
       )),
@@ -3607,6 +3685,288 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       created_at TEXT NOT NULL
     );
 
+    -- 月报银行原件按“月度 + 账户”保存版本链。替换时旧文件只转为非当前，
+    -- 原文件路径、摘要和识别审计信息继续保留，不覆盖历史证据。
+    CREATE TABLE IF NOT EXISTS monthly_financial_bank_files (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL
+        REFERENCES monthly_financial_reports(id) ON DELETE RESTRICT,
+      report_month TEXT NOT NULL
+        CHECK(report_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      account_code TEXT NOT NULL
+        CHECK(account_code IN ('basic', 'general', 'business')),
+      original_name TEXT NOT NULL CHECK(BTRIM(original_name) <> ''),
+      storage_path TEXT NOT NULL CHECK(BTRIM(storage_path) <> ''),
+      mime_type TEXT NOT NULL DEFAULT 'application/pdf',
+      file_size BIGINT CHECK(file_size IS NULL OR file_size >= 0),
+      file_hash TEXT NOT NULL
+        CHECK(file_hash ~ '^[0-9a-f]{64}$'),
+      file_version INTEGER NOT NULL DEFAULT 1 CHECK(file_version >= 1),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      replaces_file_id TEXT UNIQUE
+        REFERENCES monthly_financial_bank_files(id) ON DELETE RESTRICT,
+      page_count INTEGER CHECK(page_count IS NULL OR page_count >= 1),
+      recognized_receipt_count INTEGER NOT NULL DEFAULT 0
+        CHECK(recognized_receipt_count >= 0),
+      included_receipt_count INTEGER NOT NULL DEFAULT 0
+        CHECK(included_receipt_count >= 0),
+      recognition_status TEXT NOT NULL DEFAULT 'uploaded' CHECK(recognition_status IN (
+        'uploaded', 'processing', 'awaiting_month_confirmation',
+        'recognized', 'partial', 'failed', 'replaced'
+      )),
+      detected_months_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(detected_months_json) = 'array'),
+      warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(warnings_json) = 'array'),
+      anomalies_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(anomalies_json) = 'array'),
+      recognition_error TEXT,
+      uploaded_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      activated_at TEXT NOT NULL,
+      recognized_at TEXT,
+      replaced_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(report_month, account_code, file_version),
+      CHECK(replaces_file_id IS NULL OR replaces_file_id <> id),
+      CHECK(NOT is_active OR replaced_at IS NULL)
+    );
+
+    -- 单笔回单是跨文件版本稳定的规范化事实。相同电子回单号在新文件中再次
+    -- 出现时更新 current_file_id，first_seen_file_id 始终指向首次原始证据。
+    CREATE TABLE IF NOT EXISTS monthly_financial_bank_transactions (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL
+        REFERENCES monthly_financial_reports(id) ON DELETE RESTRICT,
+      report_month TEXT NOT NULL
+        CHECK(report_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      account_code TEXT NOT NULL
+        CHECK(account_code IN ('basic', 'general', 'business')),
+      first_seen_file_id TEXT NOT NULL
+        REFERENCES monthly_financial_bank_files(id) ON DELETE RESTRICT,
+      current_file_id TEXT NOT NULL
+        REFERENCES monthly_financial_bank_files(id) ON DELETE RESTRICT,
+      current_file_version INTEGER NOT NULL CHECK(current_file_version >= 1),
+      receipt_index INTEGER NOT NULL CHECK(receipt_index >= 1),
+      electronic_receipt_no TEXT,
+      normalized_electronic_receipt_no TEXT,
+      transaction_serial_no TEXT,
+      proof_no TEXT,
+      transaction_date TEXT,
+      amount NUMERIC(18,2) CHECK(amount IS NULL OR amount > 0),
+      currency TEXT NOT NULL DEFAULT 'CNY',
+      direction TEXT CHECK(
+        direction IS NULL OR direction IN ('inflow', 'outflow', 'unknown')
+      ),
+      payer_name TEXT,
+      payer_account TEXT,
+      payee_name TEXT,
+      payee_account TEXT,
+      matched_account_role TEXT CHECK(
+        matched_account_role IS NULL
+        OR matched_account_role IN ('payer', 'payee', 'both', 'none')
+      ),
+      summary TEXT,
+      remark TEXT,
+      page_number INTEGER NOT NULL CHECK(page_number >= 1),
+      receipt_position TEXT NOT NULL DEFAULT 'unknown' CHECK(receipt_position IN (
+        'single', 'full', 'top', 'bottom', 'unknown'
+      )),
+      crop_path TEXT,
+      category TEXT NOT NULL DEFAULT 'unclassified' CHECK(category IN (
+        'interest', 'bank_fee', 'basic_reimbursement', 'large_reimbursement',
+        'main_income', 'main_business_income', 'asset_expense', 'salary',
+        'business_reimbursement', 'internal_transfer', 'ignored', 'unclassified'
+      )),
+      recognition_status TEXT NOT NULL DEFAULT 'pending_review' CHECK(
+        recognition_status IN (
+          'recognized', 'pending_review', 'review_required', 'ignored', 'failed'
+        )
+      ),
+      warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(warnings_json) = 'array'),
+      anomalies_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(anomalies_json) = 'array'),
+      raw_ocr_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(raw_ocr_json) = 'object'),
+      include_in_report BOOLEAN NOT NULL DEFAULT FALSE,
+      is_current BOOLEAN NOT NULL DEFAULT TRUE,
+      recognized_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(
+        normalized_electronic_receipt_no IS NULL
+        OR BTRIM(normalized_electronic_receipt_no) <> ''
+      ),
+      CHECK(transaction_date IS NULL OR monthly_financial_date_is_valid(transaction_date)),
+      CHECK(NOT include_in_report OR recognition_status = 'recognized'),
+      UNIQUE(current_file_id, receipt_index)
+    );
+
+    -- 回单与既有报销、薪资、合同收支等业务事实通过通用对象键关联。
+    -- 链接只负责证据替换或匹配，不复制、删除原业务事实及其金额。
+    CREATE TABLE IF NOT EXISTS monthly_financial_bank_transaction_links (
+      id TEXT PRIMARY KEY,
+      transaction_id TEXT NOT NULL
+        REFERENCES monthly_financial_bank_transactions(id) ON DELETE RESTRICT,
+      business_object_type TEXT NOT NULL CHECK(BTRIM(business_object_type) <> ''),
+      business_object_id TEXT NOT NULL CHECK(BTRIM(business_object_id) <> ''),
+      link_kind TEXT NOT NULL DEFAULT 'matched' CHECK(link_kind IN (
+        'matched', 'display_replacement', 'classification_basis'
+      )),
+      match_method TEXT NOT NULL CHECK(match_method IN (
+        'electronic_receipt_no', 'account_date_amount', 'business_key', 'manual'
+      )),
+      match_status TEXT NOT NULL DEFAULT 'active' CHECK(match_status IN (
+        'active', 'conflict', 'dismissed', 'replaced'
+      )),
+      match_key_json JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK(jsonb_typeof(match_key_json) = 'object'),
+      allocated_amount NUMERIC(18,2)
+        CHECK(allocated_amount IS NULL OR allocated_amount > 0),
+      warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb
+        CHECK(jsonb_typeof(warnings_json) = 'array'),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK((match_status = 'active') = is_active)
+    );
+
+    -- 以下列与约束使用显式幂等迁移，兼容已经启动过早期版本的开发库。
+    ALTER TABLE monthly_financial_bank_transaction_links
+      ADD COLUMN IF NOT EXISTS allocated_amount NUMERIC(18,2);
+
+    -- 同一物理文件若确实包含多个交易月份，管理员需要分别在各月确认。
+    -- 因此文件摘要在报表月内唯一，而不是跨全部月份永久占用。
+    ALTER TABLE monthly_financial_bank_files
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_files_file_hash_key;
+
+    ALTER TABLE monthly_financial_bank_transactions
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_transactions_direction_check;
+    ALTER TABLE monthly_financial_bank_transactions
+      ADD CONSTRAINT monthly_financial_bank_transactions_direction_check CHECK(
+        direction IS NULL OR direction IN ('inflow', 'outflow', 'unknown')
+      );
+    ALTER TABLE monthly_financial_bank_transactions
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_transactions_receipt_position_check;
+    ALTER TABLE monthly_financial_bank_transactions
+      ADD CONSTRAINT monthly_financial_bank_transactions_receipt_position_check CHECK(
+        receipt_position IN ('single', 'full', 'top', 'bottom', 'unknown')
+      );
+    ALTER TABLE monthly_financial_bank_transactions
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_transactions_category_check;
+    ALTER TABLE monthly_financial_bank_transactions
+      ADD CONSTRAINT monthly_financial_bank_transactions_category_check CHECK(category IN (
+        'interest', 'bank_fee', 'basic_reimbursement', 'large_reimbursement',
+        'main_income', 'main_business_income', 'asset_expense', 'salary',
+        'business_reimbursement', 'internal_transfer', 'ignored', 'unclassified'
+      ));
+    ALTER TABLE monthly_financial_bank_transactions
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_transactions_recognition_status_check;
+    ALTER TABLE monthly_financial_bank_transactions
+      ADD CONSTRAINT monthly_financial_bank_transactions_recognition_status_check CHECK(
+        recognition_status IN (
+          'recognized', 'pending_review', 'review_required', 'ignored', 'failed'
+        )
+      );
+    ALTER TABLE monthly_financial_bank_transaction_links
+      DROP CONSTRAINT IF EXISTS monthly_financial_bank_transaction_links_allocated_amount_check;
+    ALTER TABLE monthly_financial_bank_transaction_links
+      ADD CONSTRAINT monthly_financial_bank_transaction_links_allocated_amount_check CHECK(
+        allocated_amount IS NULL OR allocated_amount > 0
+      );
+
+    CREATE OR REPLACE FUNCTION deactivate_monthly_bank_contract_links()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    AS $trigger$
+    DECLARE
+      object_type TEXT;
+    BEGIN
+      IF NEW.status <> 'reversed' OR OLD.status = 'reversed' THEN
+        RETURN NEW;
+      END IF;
+      object_type := CASE TG_TABLE_NAME
+        WHEN 'contract_receipts' THEN 'contract_receipt'
+        WHEN 'contract_payments' THEN 'contract_payment'
+        WHEN 'contract_external_payments' THEN 'contract_external_payment'
+        ELSE NULL
+      END;
+      IF object_type IS NOT NULL THEN
+        UPDATE monthly_financial_bank_transactions bank_transaction
+        SET include_in_report = FALSE,
+            recognition_status = 'review_required',
+            warnings_json = bank_transaction.warnings_json ||
+              jsonb_build_array('原合同财务凭证已冲正，该月底银行回单必须重新核对'),
+            updated_at = COALESCE(NEW.reversed_at, NOW()::text)
+        WHERE bank_transaction.is_current = TRUE
+          AND EXISTS (
+            SELECT 1
+            FROM monthly_financial_bank_transaction_links link
+            WHERE link.transaction_id = bank_transaction.id
+              AND link.business_object_type = object_type
+              AND link.business_object_id = NEW.id
+              AND link.is_active = TRUE
+          );
+
+        UPDATE monthly_financial_bank_files file
+        SET recognition_status = 'partial',
+            included_receipt_count = (
+              SELECT COUNT(*)::INTEGER
+              FROM monthly_financial_bank_transactions current_transaction
+              WHERE current_transaction.current_file_id = file.id
+                AND current_transaction.is_current = TRUE
+                AND current_transaction.include_in_report = TRUE
+                AND current_transaction.recognition_status = 'recognized'
+                AND current_transaction.account_code IN ('general', 'business')
+                AND current_transaction.category IN ('interest', 'bank_fee')
+            ),
+            warnings_json = file.warnings_json ||
+              jsonb_build_array('关联的合同财务凭证已冲正，文件已转为待复核'),
+            updated_at = COALESCE(NEW.reversed_at, NOW()::text)
+        WHERE file.is_active = TRUE
+          AND EXISTS (
+            SELECT 1
+            FROM monthly_financial_bank_transactions bank_transaction
+            JOIN monthly_financial_bank_transaction_links link
+              ON link.transaction_id = bank_transaction.id
+            WHERE bank_transaction.current_file_id = file.id
+              AND bank_transaction.is_current = TRUE
+              AND link.business_object_type = object_type
+              AND link.business_object_id = NEW.id
+              AND link.is_active = TRUE
+          );
+
+        UPDATE monthly_financial_bank_transaction_links
+        SET match_status = 'replaced', is_active = FALSE,
+            warnings_json = warnings_json ||
+              jsonb_build_array('原合同财务凭证已冲正，月底回单展示链接已停用'),
+            updated_at = COALESCE(NEW.reversed_at, NOW()::text)
+        WHERE business_object_type = object_type
+          AND business_object_id = NEW.id
+          AND is_active = TRUE;
+      END IF;
+      RETURN NEW;
+    END;
+    $trigger$;
+
+    DROP TRIGGER IF EXISTS trg_monthly_bank_contract_receipt_reversed
+      ON contract_receipts;
+    CREATE TRIGGER trg_monthly_bank_contract_receipt_reversed
+      AFTER UPDATE OF status ON contract_receipts
+      FOR EACH ROW EXECUTE FUNCTION deactivate_monthly_bank_contract_links();
+    DROP TRIGGER IF EXISTS trg_monthly_bank_contract_payment_reversed
+      ON contract_payments;
+    CREATE TRIGGER trg_monthly_bank_contract_payment_reversed
+      AFTER UPDATE OF status ON contract_payments
+      FOR EACH ROW EXECUTE FUNCTION deactivate_monthly_bank_contract_links();
+    DROP TRIGGER IF EXISTS trg_monthly_bank_contract_external_payment_reversed
+      ON contract_external_payments;
+    CREATE TRIGGER trg_monthly_bank_contract_external_payment_reversed
+      AFTER UPDATE OF status ON contract_external_payments
+      FOR EACH ROW EXECUTE FUNCTION deactivate_monthly_bank_contract_links();
+
     ALTER TABLE monthly_financial_manual_items
       DROP CONSTRAINT IF EXISTS monthly_financial_manual_items_amount_check;
     ALTER TABLE monthly_financial_manual_items
@@ -3619,7 +3979,9 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
         'general_interest', 'business_interest',
         'general_bank_fee', 'business_bank_fee', 'general_other',
         'welfare_one_supplement', 'welfare_two_supplement',
-        'welfare_one_407', 'welfare_one_407_ai', 'welfare_one_8h_ai',
+        'welfare_one_407', 'welfare_one_drinking_water',
+        'welfare_one_office', 'welfare_one_electricity',
+        'welfare_one_407_ai', 'welfare_one_8h_ai',
         'welfare_two_refreshment', 'welfare_two_team_building',
         'welfare_two_physical_exam'
       ));
@@ -3711,6 +4073,42 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       ON monthly_financial_snapshots(report_id, report_version DESC);
     CREATE INDEX IF NOT EXISTS idx_monthly_financial_audit_report
       ON monthly_financial_audit_logs(report_id, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_active
+      ON monthly_financial_bank_files(report_month, account_code)
+      WHERE is_active;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_month_hash
+      ON monthly_financial_bank_files(report_month, file_hash);
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_files_report
+      ON monthly_financial_bank_files(report_id, account_code, file_version DESC);
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_files_recognition
+      ON monthly_financial_bank_files(recognition_status, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_receipt_no
+      ON monthly_financial_bank_transactions(normalized_electronic_receipt_no)
+      WHERE normalized_electronic_receipt_no IS NOT NULL
+        AND BTRIM(normalized_electronic_receipt_no) <> '';
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_transactions_month
+      ON monthly_financial_bank_transactions(
+        report_month, account_code, transaction_date, category
+      )
+      WHERE is_current;
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_transactions_report
+      ON monthly_financial_bank_transactions(report_id, include_in_report, category)
+      WHERE is_current;
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_transactions_file_page
+      ON monthly_financial_bank_transactions(
+        current_file_id, page_number, receipt_position, receipt_index
+      );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_link_active
+      ON monthly_financial_bank_transaction_links(
+        transaction_id, business_object_type, business_object_id, link_kind
+      )
+      WHERE is_active;
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_links_object
+      ON monthly_financial_bank_transaction_links(
+        business_object_type, business_object_id, match_status
+      );
+    CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_links_transaction
+      ON monthly_financial_bank_transaction_links(transaction_id, match_status);
     CREATE INDEX IF NOT EXISTS idx_contract_receipts_monthly_confirmed_date
       ON contract_receipts(receipt_date, id)
       WHERE status = 'confirmed';
@@ -4302,22 +4700,6 @@ async function initContractDomainSchema(): Promise<void> {
       ON invoice_application_materials(application_id)
       WHERE is_system_generated_triplicate = TRUE;
 
-    CREATE TABLE IF NOT EXISTS invoice_application_invoice_allocations (
-      id TEXT PRIMARY KEY,
-      application_id TEXT NOT NULL
-        REFERENCES invoice_applications(id) ON DELETE RESTRICT,
-      invoice_id TEXT NOT NULL REFERENCES contract_invoices(id) ON DELETE CASCADE,
-      allocated_amount NUMERIC(18,2) NOT NULL CHECK(allocated_amount > 0),
-      created_at TEXT NOT NULL,
-      UNIQUE(application_id, invoice_id)
-    );
-
-    ALTER TABLE invoice_application_invoice_allocations
-      DROP CONSTRAINT IF EXISTS invoice_application_invoice_allocations_invoice_id_fkey;
-    ALTER TABLE invoice_application_invoice_allocations
-      ADD CONSTRAINT invoice_application_invoice_allocations_invoice_id_fkey
-      FOREIGN KEY (invoice_id) REFERENCES contract_invoices(id) ON DELETE CASCADE;
-
     CREATE TABLE IF NOT EXISTS invoice_application_audit_logs (
       id TEXT PRIMARY KEY,
       application_id TEXT NOT NULL
@@ -4364,10 +4746,6 @@ async function initContractDomainSchema(): Promise<void> {
       ON invoice_application_materials(application_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_invoice_application_generated_application
       ON invoice_application_generated_files(application_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_invoice_application_allocations_application
-      ON invoice_application_invoice_allocations(application_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_invoice_application_allocations_invoice
-      ON invoice_application_invoice_allocations(invoice_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_invoice_application_audit_application
       ON invoice_application_audit_logs(application_id, created_at);
 
@@ -4525,6 +4903,11 @@ async function initContractDomainSchema(): Promise<void> {
       snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
       blocking_reasons_json JSONB NOT NULL DEFAULT '[]'::jsonb,
       warnings_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      business_purpose TEXT CHECK(business_purpose IS NULL OR business_purpose IN (
+        'deposit_refund', 'engineering_return',
+        'engineering_internal_funding'
+      )),
+      target_id TEXT,
       requested_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
       record_id TEXT,
       started_at TEXT NOT NULL,
@@ -4533,6 +4916,8 @@ async function initContractDomainSchema(): Promise<void> {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       CHECK(status <> 'consumed' OR record_id IS NOT NULL),
+      CONSTRAINT contract_financial_ocr_jobs_business_context_check
+        CHECK((business_purpose IS NULL) = (target_id IS NULL)),
       CHECK(can_auto_post = FALSE OR (
         validation_status = 'verified' AND document_status = 'normal'
       ))
@@ -4654,6 +5039,28 @@ async function initContractDomainSchema(): Promise<void> {
       updated_at TEXT NOT NULL
     );
 
+    -- 开票申请分配依赖正式合同发票，必须在 contract_invoices 创建后定义，
+    -- 兼容全新数据库初始化及现有库幂等升级。
+    CREATE TABLE IF NOT EXISTS invoice_application_invoice_allocations (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL
+        REFERENCES invoice_applications(id) ON DELETE RESTRICT,
+      invoice_id TEXT NOT NULL REFERENCES contract_invoices(id) ON DELETE CASCADE,
+      allocated_amount NUMERIC(18,2) NOT NULL CHECK(allocated_amount > 0),
+      created_at TEXT NOT NULL,
+      UNIQUE(application_id, invoice_id)
+    );
+
+    ALTER TABLE invoice_application_invoice_allocations
+      DROP CONSTRAINT IF EXISTS invoice_application_invoice_allocations_invoice_id_fkey;
+    ALTER TABLE invoice_application_invoice_allocations
+      ADD CONSTRAINT invoice_application_invoice_allocations_invoice_id_fkey
+      FOREIGN KEY (invoice_id) REFERENCES contract_invoices(id) ON DELETE CASCADE;
+    CREATE INDEX IF NOT EXISTS idx_invoice_application_allocations_application
+      ON invoice_application_invoice_allocations(application_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_invoice_application_allocations_invoice
+      ON invoice_application_invoice_allocations(invoice_id, created_at);
+
     CREATE TABLE IF NOT EXISTS contract_invoice_line_items (
       id TEXT PRIMARY KEY,
       invoice_id TEXT NOT NULL REFERENCES contract_invoices(id) ON DELETE CASCADE,
@@ -4769,6 +5176,270 @@ async function initContractDomainSchema(): Promise<void> {
       reverse_reason TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS contract_payment_purpose_details (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+      payment_record_id TEXT REFERENCES contract_payments(id) ON DELETE CASCADE,
+      external_payment_record_id TEXT
+        REFERENCES contract_external_payments(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL
+        CHECK(purpose IN ('contract_payment', 'lease_deposit')),
+      amount NUMERIC(18,2) NOT NULL CHECK(amount > 0),
+      funding_source TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK(funding_source IN (
+          'engineering_allocation', 'technology_self_funded',
+          'mixed', 'pending_review'
+        )),
+      engineering_allocation_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(engineering_allocation_amount >= 0),
+      technology_self_funded_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(technology_self_funded_amount >= 0),
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      updated_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK((payment_record_id IS NULL) <> (external_payment_record_id IS NULL)),
+      CHECK(
+        (funding_source = 'pending_review'
+          AND engineering_allocation_amount = 0
+          AND technology_self_funded_amount = 0)
+        OR
+        (funding_source = 'engineering_allocation'
+          AND engineering_allocation_amount = amount
+          AND technology_self_funded_amount = 0)
+        OR
+        (funding_source = 'technology_self_funded'
+          AND engineering_allocation_amount = 0
+          AND technology_self_funded_amount = amount)
+        OR
+        (funding_source = 'mixed'
+          AND engineering_allocation_amount > 0
+          AND technology_self_funded_amount > 0
+          AND engineering_allocation_amount + technology_self_funded_amount = amount)
+      ),
+      UNIQUE(payment_record_id, purpose),
+      UNIQUE(external_payment_record_id, purpose)
+    );
+
+    CREATE TABLE IF NOT EXISTS contract_deposits (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL UNIQUE REFERENCES contracts(id) ON DELETE RESTRICT,
+      amount NUMERIC(18,2) NOT NULL CHECK(amount > 0),
+      clause_text TEXT CHECK(
+        clause_text IS NULL OR char_length(clause_text) <= 4000
+      ),
+      basis TEXT CHECK(basis IS NULL OR char_length(basis) <= 1000),
+      payment_purpose TEXT NOT NULL DEFAULT 'lease_deposit'
+        CHECK(payment_purpose = 'lease_deposit'),
+      funding_source TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK(funding_source IN (
+          'engineering_allocation', 'technology_self_funded',
+          'mixed', 'pending_review'
+        )),
+      engineering_allocation_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(engineering_allocation_amount >= 0),
+      technology_self_funded_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(technology_self_funded_amount >= 0),
+      payment_record_id TEXT REFERENCES contract_payments(id) ON DELETE RESTRICT,
+      external_payment_record_id TEXT
+        REFERENCES contract_external_payments(id) ON DELETE RESTRICT,
+      paid_at TEXT,
+      note TEXT CHECK(note IS NULL OR char_length(note) <= 1000),
+      status TEXT NOT NULL DEFAULT 'pending_payment'
+        CHECK(status IN (
+          'pending_payment', 'active', 'partially_settled', 'settled'
+        )),
+      settled_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(settled_amount >= 0 AND settled_amount <= amount),
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      updated_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(NOT (payment_record_id IS NOT NULL
+        AND external_payment_record_id IS NOT NULL)),
+      CHECK(
+        (funding_source = 'pending_review'
+          AND engineering_allocation_amount = 0
+          AND technology_self_funded_amount = 0)
+        OR
+        (funding_source = 'engineering_allocation'
+          AND engineering_allocation_amount = amount
+          AND technology_self_funded_amount = 0)
+        OR
+        (funding_source = 'technology_self_funded'
+          AND engineering_allocation_amount = 0
+          AND technology_self_funded_amount = amount)
+        OR
+        (funding_source = 'mixed'
+          AND engineering_allocation_amount > 0
+          AND technology_self_funded_amount > 0
+          AND engineering_allocation_amount + technology_self_funded_amount = amount)
+      ),
+      CHECK(
+        (status = 'pending_payment' AND paid_at IS NULL AND settled_amount = 0)
+        OR (status = 'active' AND paid_at IS NOT NULL AND settled_amount = 0)
+        OR (status = 'partially_settled' AND paid_at IS NOT NULL
+          AND settled_amount > 0 AND settled_amount < amount)
+        OR (status = 'settled' AND paid_at IS NOT NULL
+          AND settled_amount = amount)
+      )
+    );
+
+    CREATE TABLE IF NOT EXISTS contract_deposit_settlements (
+      id TEXT PRIMARY KEY,
+      deposit_id TEXT NOT NULL REFERENCES contract_deposits(id) ON DELETE RESTRICT,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+      settlement_type TEXT NOT NULL
+        CHECK(settlement_type IN ('refund', 'deduction', 'rent_offset')),
+      amount NUMERIC(18,2) NOT NULL CHECK(amount > 0),
+      settlement_date TEXT NOT NULL
+        CHECK(settlement_date ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+      note TEXT CHECK(note IS NULL OR char_length(note) <= 1000),
+      engineering_return_required_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(engineering_return_required_amount >= 0
+          AND engineering_return_required_amount <= amount),
+      engineering_returned_amount NUMERIC(18,2) NOT NULL DEFAULT 0
+        CHECK(engineering_returned_amount >= 0
+          AND engineering_returned_amount <= engineering_return_required_amount),
+      engineering_returned_at TEXT,
+      engineering_return_note TEXT CHECK(
+        engineering_return_note IS NULL
+        OR char_length(engineering_return_note) <= 1000
+      ),
+      engineering_returned_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      CHECK(
+        engineering_returned_amount = 0
+        OR (engineering_returned_at IS NOT NULL
+          AND engineering_returned_by IS NOT NULL)
+      )
+    );
+
+    CREATE TABLE IF NOT EXISTS contract_deposit_settlement_receipts (
+      id TEXT PRIMARY KEY,
+      settlement_id TEXT NOT NULL
+        REFERENCES contract_deposit_settlements(id) ON DELETE RESTRICT,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+      receipt_kind TEXT NOT NULL
+        CHECK(receipt_kind IN ('deposit_refund', 'engineering_return')),
+      amount NUMERIC(18,2) NOT NULL CHECK(amount > 0),
+      transaction_date TEXT NOT NULL
+        CHECK(transaction_date ~ '^\\d{4}-\\d{2}-\\d{2}$'),
+      file_name TEXT NOT NULL CHECK(BTRIM(file_name) <> ''),
+      file_path TEXT NOT NULL UNIQUE CHECK(BTRIM(file_path) <> ''),
+      file_size INTEGER NOT NULL CHECK(file_size > 0),
+      mime_type TEXT NOT NULL CHECK(mime_type IN (
+        'image/jpeg', 'image/png', 'application/pdf'
+      )),
+      file_hash TEXT NOT NULL UNIQUE CHECK(file_hash ~ '^[0-9a-f]{64}$'),
+      file_id TEXT UNIQUE REFERENCES contract_files(id) ON DELETE RESTRICT,
+      financial_ocr_job_id TEXT UNIQUE
+        REFERENCES contract_financial_ocr_jobs(id) ON DELETE RESTRICT,
+      electronic_receipt_no TEXT,
+      payer TEXT,
+      payer_account TEXT,
+      payee TEXT,
+      payee_account TEXT,
+      recognition_method TEXT,
+      ocr_engine_version TEXT,
+      ocr_parser_version TEXT,
+      evidence_text_hash TEXT CHECK(
+        evidence_text_hash IS NULL OR evidence_text_hash ~ '^[0-9a-f]{64}$'
+      ),
+      uploaded_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      CONSTRAINT contract_deposit_settlement_receipts_ocr_link_check
+        CHECK((file_id IS NULL) = (financial_ocr_job_id IS NULL))
+    );
+
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD COLUMN IF NOT EXISTS business_purpose TEXT;
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD COLUMN IF NOT EXISTS target_id TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS file_id TEXT
+        REFERENCES contract_files(id) ON DELETE RESTRICT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS financial_ocr_job_id TEXT
+        REFERENCES contract_financial_ocr_jobs(id) ON DELETE RESTRICT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS electronic_receipt_no TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payer TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payer_account TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payee TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payee_account TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS recognition_method TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS ocr_engine_version TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS ocr_parser_version TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS evidence_text_hash TEXT;
+
+    CREATE TABLE IF NOT EXISTS contract_payment_deposit_receipts (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+      payment_record_id TEXT REFERENCES contract_payments(id) ON DELETE CASCADE,
+      external_payment_record_id TEXT
+        REFERENCES contract_external_payments(id) ON DELETE CASCADE,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      file_size INTEGER NOT NULL CHECK(file_size > 0),
+      mime_type TEXT NOT NULL CHECK(mime_type IN (
+        'image/jpeg', 'image/png', 'application/pdf'
+      )),
+      file_hash TEXT NOT NULL CHECK(file_hash ~ '^[0-9a-f]{64}$'),
+      ocr_status TEXT NOT NULL CHECK(ocr_status IN (
+        'recognized', 'unrecognized', 'failed'
+      )),
+      recognized_amount NUMERIC(18,2)
+        CHECK(recognized_amount IS NULL OR recognized_amount > 0),
+      ocr_engine_version TEXT,
+      ocr_text_sha256 TEXT
+        CHECK(ocr_text_sha256 IS NULL OR ocr_text_sha256 ~ '^[0-9a-f]{64}$'),
+      ocr_evidence_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ocr_failure_message TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'confirmed', 'voided')),
+      confirmed_amount NUMERIC(18,2)
+        CHECK(confirmed_amount IS NULL OR confirmed_amount > 0),
+      confirmation_source TEXT
+        CHECK(confirmation_source IS NULL OR confirmation_source IN ('ocr', 'manual')),
+      uploaded_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      confirmed_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+      confirmed_at TEXT,
+      voided_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+      voided_at TEXT,
+      void_reason TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(contract_id, file_hash),
+      CHECK((payment_record_id IS NULL) <> (external_payment_record_id IS NULL)),
+      CHECK(
+        (status = 'pending' AND confirmed_amount IS NULL
+          AND confirmation_source IS NULL AND confirmed_by IS NULL
+          AND confirmed_at IS NULL AND voided_by IS NULL
+          AND voided_at IS NULL AND void_reason IS NULL)
+        OR
+        (status = 'confirmed' AND confirmed_amount IS NOT NULL
+          AND confirmation_source IS NOT NULL AND confirmed_by IS NOT NULL
+          AND confirmed_at IS NOT NULL AND voided_by IS NULL
+          AND voided_at IS NULL AND void_reason IS NULL)
+        OR
+        (status = 'voided' AND confirmed_amount IS NOT NULL
+          AND confirmation_source IS NOT NULL AND confirmed_by IS NOT NULL
+          AND confirmed_at IS NOT NULL AND voided_by IS NOT NULL
+          AND voided_at IS NOT NULL AND void_reason IS NOT NULL
+          AND char_length(trim(void_reason)) BETWEEN 1 AND 300)
+      )
     );
 
     CREATE TABLE IF NOT EXISTS contract_financial_registrations (
@@ -4899,6 +5570,10 @@ async function initContractDomainSchema(): Promise<void> {
       ON contract_financial_ocr_jobs(contract_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_contract_financial_ocr_status
       ON contract_financial_ocr_jobs(status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_contract_financial_ocr_business_purpose
+      ON contract_financial_ocr_jobs(
+        contract_id, business_purpose, target_id, status, created_at DESC
+      ) WHERE business_purpose IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_contract_approvals_contract ON contract_approval_records(contract_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_contract_approval_rounds_target
       ON contract_approval_rounds(target_approver_id, status, submitted_at);
@@ -4915,6 +5590,45 @@ async function initContractDomainSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_contract_payments_contract ON contract_payments(contract_id, status, payment_date);
     CREATE INDEX IF NOT EXISTS idx_contract_external_payments_contract
       ON contract_external_payments(contract_id, status, payment_date);
+    CREATE INDEX IF NOT EXISTS idx_contract_payment_purpose_contract
+      ON contract_payment_purpose_details(contract_id, purpose, created_at);
+    CREATE INDEX IF NOT EXISTS idx_contract_payment_purpose_payment
+      ON contract_payment_purpose_details(payment_record_id)
+      WHERE payment_record_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_contract_payment_purpose_external
+      ON contract_payment_purpose_details(external_payment_record_id)
+      WHERE external_payment_record_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_contract_deposits_status
+      ON contract_deposits(status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_settlements_deposit
+      ON contract_deposit_settlements(deposit_id, settlement_date, created_at);
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_settlement_receipts_settlement
+      ON contract_deposit_settlement_receipts(
+        settlement_id, receipt_kind, created_at
+      );
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_settlement_receipts_contract
+      ON contract_deposit_settlement_receipts(contract_id, created_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_settlement_receipt_hash
+      ON contract_deposit_settlement_receipts(file_hash);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_settlement_receipt_no
+      ON contract_deposit_settlement_receipts(
+        UPPER(REGEXP_REPLACE(
+          NORMALIZE(BTRIM(electronic_receipt_no), NFKC),
+          '[^[:alnum:]]+', '', 'g'
+        ))
+      ) WHERE electronic_receipt_no IS NOT NULL
+        AND BTRIM(electronic_receipt_no) <> '';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_refund_receipt
+      ON contract_deposit_settlement_receipts(settlement_id)
+      WHERE receipt_kind = 'deposit_refund';
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_receipts_contract
+      ON contract_payment_deposit_receipts(contract_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_receipts_payment
+      ON contract_payment_deposit_receipts(payment_record_id)
+      WHERE payment_record_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_contract_deposit_receipts_external_payment
+      ON contract_payment_deposit_receipts(external_payment_record_id)
+      WHERE external_payment_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_contract_financial_registrations_contract
       ON contract_financial_registrations(contract_id, status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_contract_financial_registration_items_registration
@@ -4942,6 +5656,120 @@ async function initContractDomainSchema(): Promise<void> {
       ON contract_financial_registration_matches(settlement_item_id);
     CREATE INDEX IF NOT EXISTS idx_contract_rates_effective ON contract_rate_configs(rate_code, effective_from DESC);
     CREATE INDEX IF NOT EXISTS idx_contract_audit_contract ON contract_audit_logs(contract_id, created_at DESC);
+  `);
+
+  // 押金退回与退工程回单复用财务识别任务，但与普通发票／回单草稿严格隔离。
+  await db.exec(`
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD COLUMN IF NOT EXISTS business_purpose TEXT;
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD COLUMN IF NOT EXISTS target_id TEXT;
+    ALTER TABLE contract_financial_ocr_jobs
+      DROP CONSTRAINT IF EXISTS contract_financial_ocr_jobs_business_purpose_check;
+    ALTER TABLE contract_financial_ocr_jobs
+      DROP CONSTRAINT IF EXISTS contract_financial_ocr_jobs_business_context_check;
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD CONSTRAINT contract_financial_ocr_jobs_business_purpose_check CHECK(
+        business_purpose IS NULL OR business_purpose IN (
+          'deposit_refund', 'engineering_return',
+          'engineering_internal_funding'
+        )
+      );
+    ALTER TABLE contract_financial_ocr_jobs
+      ADD CONSTRAINT contract_financial_ocr_jobs_business_context_check CHECK(
+        (business_purpose IS NULL) = (target_id IS NULL)
+      );
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS file_id TEXT
+        REFERENCES contract_files(id) ON DELETE RESTRICT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS financial_ocr_job_id TEXT
+        REFERENCES contract_financial_ocr_jobs(id) ON DELETE RESTRICT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS electronic_receipt_no TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payer TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payer_account TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payee TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS payee_account TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS recognition_method TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS ocr_engine_version TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS ocr_parser_version TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD COLUMN IF NOT EXISTS evidence_text_hash TEXT;
+    ALTER TABLE contract_deposit_settlement_receipts
+      DROP CONSTRAINT IF EXISTS contract_deposit_settlement_receipts_ocr_link_check;
+    ALTER TABLE contract_deposit_settlement_receipts
+      DROP CONSTRAINT IF EXISTS contract_deposit_settlement_receipts_evidence_text_hash_check;
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD CONSTRAINT contract_deposit_settlement_receipts_ocr_link_check CHECK(
+        (file_id IS NULL) = (financial_ocr_job_id IS NULL)
+      );
+    ALTER TABLE contract_deposit_settlement_receipts
+      ADD CONSTRAINT contract_deposit_settlement_receipts_evidence_text_hash_check CHECK(
+        evidence_text_hash IS NULL OR evidence_text_hash ~ '^[0-9a-f]{64}$'
+      );
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_settlement_receipt_file
+      ON contract_deposit_settlement_receipts(file_id)
+      WHERE file_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_settlement_receipt_job
+      ON contract_deposit_settlement_receipts(financial_ocr_job_id)
+      WHERE financial_ocr_job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_contract_financial_ocr_business_purpose
+      ON contract_financial_ocr_jobs(
+        contract_id, business_purpose, target_id, status, created_at DESC
+      ) WHERE business_purpose IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_contract_deposit_settlement_receipt_no
+      ON contract_deposit_settlement_receipts(
+        UPPER(REGEXP_REPLACE(
+          NORMALIZE(BTRIM(electronic_receipt_no), NFKC),
+          '[^[:alnum:]]+', '', 'g'
+        ))
+      ) WHERE electronic_receipt_no IS NOT NULL
+        AND BTRIM(electronic_receipt_no) <> '';
+  `);
+
+  // 兼容已经创建押金条表的开发库：已确认记录只能撤销留痕，不能硬删除。
+  await db.exec(`
+    ALTER TABLE contract_payment_deposit_receipts
+      ADD COLUMN IF NOT EXISTS voided_by TEXT REFERENCES users(id) ON DELETE RESTRICT;
+    ALTER TABLE contract_payment_deposit_receipts
+      ADD COLUMN IF NOT EXISTS voided_at TEXT;
+    ALTER TABLE contract_payment_deposit_receipts
+      ADD COLUMN IF NOT EXISTS void_reason TEXT;
+    ALTER TABLE contract_payment_deposit_receipts
+      DROP CONSTRAINT IF EXISTS contract_payment_deposit_receipts_status_check;
+    ALTER TABLE contract_payment_deposit_receipts
+      DROP CONSTRAINT IF EXISTS contract_payment_deposit_receipts_check1;
+    ALTER TABLE contract_payment_deposit_receipts
+      DROP CONSTRAINT IF EXISTS contract_deposit_receipts_state_check;
+    ALTER TABLE contract_payment_deposit_receipts
+      ADD CONSTRAINT contract_payment_deposit_receipts_status_check
+      CHECK(status IN ('pending', 'confirmed', 'voided'));
+    ALTER TABLE contract_payment_deposit_receipts
+      ADD CONSTRAINT contract_deposit_receipts_state_check CHECK(
+        (status = 'pending' AND confirmed_amount IS NULL
+          AND confirmation_source IS NULL AND confirmed_by IS NULL
+          AND confirmed_at IS NULL AND voided_by IS NULL
+          AND voided_at IS NULL AND void_reason IS NULL)
+        OR
+        (status = 'confirmed' AND confirmed_amount IS NOT NULL
+          AND confirmation_source IS NOT NULL AND confirmed_by IS NOT NULL
+          AND confirmed_at IS NOT NULL AND voided_by IS NULL
+          AND voided_at IS NULL AND void_reason IS NULL)
+        OR
+        (status = 'voided' AND confirmed_amount IS NOT NULL
+          AND confirmation_source IS NOT NULL AND confirmed_by IS NOT NULL
+          AND confirmed_at IS NOT NULL AND voided_by IS NOT NULL
+          AND voided_at IS NOT NULL AND void_reason IS NOT NULL
+          AND char_length(trim(void_reason)) BETWEEN 1 AND 300)
+      );
   `);
 
   // 财务登记允许先保存发票草稿，待实际回款后再补充银行回单。
@@ -5878,9 +6706,11 @@ async function initContractDomainSchema(): Promise<void> {
       VALIDATE CONSTRAINT contracts_supplement_sequence_check;
     ALTER TABLE contracts
       VALIDATE CONSTRAINT contracts_supplement_amount_chain_check;
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_contracts_business_contract_no_unique
+    DROP INDEX IF EXISTS idx_contracts_business_contract_no_unique;
+    CREATE UNIQUE INDEX idx_contracts_business_contract_no_unique
       ON contracts(business_contract_no)
-      WHERE business_contract_no IS NOT NULL AND is_deleted = FALSE;
+      WHERE business_contract_no IS NOT NULL AND is_deleted = FALSE
+        AND BTRIM(business_contract_no) <> '-';
     ALTER TABLE contracts
       DROP CONSTRAINT IF EXISTS contracts_declared_asset_category_check;
     ALTER TABLE contracts
@@ -6511,7 +7341,9 @@ async function initContractDomainSchema(): Promise<void> {
     SET asset_funding_mode = CASE
       WHEN NORMALIZE(REGEXP_REPLACE(COALESCE(party_a, '') || COALESCE(party_b, ''), '[[:space:]]+', '', 'g'), NFKC)
         LIKE '%北京羽隶工程咨询有限公司%' THEN 'engineering_direct'
-      ELSE 'engineering_to_technology'
+      WHEN NORMALIZE(REGEXP_REPLACE(COALESCE(party_a, '') || COALESCE(party_b, ''), '[[:space:]]+', '', 'g'), NFKC)
+        LIKE '%北京羽隶科技有限公司%' THEN 'engineering_to_technology'
+      ELSE 'pending_review'
     END
     WHERE COALESCE(category, declared_category) = 'asset'
       AND COALESCE(asset_funding_mode, 'pending_review') IN (

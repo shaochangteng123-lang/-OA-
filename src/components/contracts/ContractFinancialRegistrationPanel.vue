@@ -10,10 +10,15 @@
         <span class="registration-kicker">财务闭环</span>
         <h2 id="financial-registration-title">财务登记</h2>
         <p v-if="requiresExternalPayment">
-          先上传工程咨询划拨回单和科技向合同对方付款回单；物业最后开票后补充发票，三类凭证金额闭合后统一保存。
+          先上传工程咨询向{{ contractCompanyDisplayName }}的内部划拨回单和{{
+            contractCompanyDisplayName
+          }}向合同对方付款回单；发票可后补，三类凭证金额闭合后统一保存。
+        </p>
+        <p v-else-if="isIncomeDirection">
+          收到回款回单即可先保存并按银行日期计入主营收入，发票可后续补入同一登记；发票与累计回款金额完全覆盖后再确认整笔配对。
         </p>
         <p v-else>
-          发票识别通过后会按本公司在发票中的购销身份确定收支方向；收到{{
+          发票识别通过后会按本公司在发票中的购销身份确定付款方向；收到{{
             bankDocumentLabel
           }}并保存后立即计入{{
             postedSettlementLabel
@@ -29,7 +34,9 @@
       type="info"
       show-icon
       :closable="false"
-      title="正在补充待结清财务登记"
+      :title="
+        pendingInvoice ? '正在补充待补发票登记' : '正在补充待结清财务登记'
+      "
       :description="continuationDescription"
     />
     <div v-if="registrationId" class="continuation-actions">
@@ -68,7 +75,7 @@
           }}</span>
           <div>
             <h3>发票</h3>
-            <p>必传 · 选择后自动识别</p>
+            <p>{{ isIncomeDirection ? "可后补" : "必传" }} · 选择后自动识别</p>
           </div>
           <el-tag
             :type="credentialTagType(invoiceCredential.status)"
@@ -160,7 +167,11 @@
           :title="
             invoiceDirectionConflict
               ? '发票购销方向与合同类型不一致，不能登记'
-              : '请先上传并通过发票识别，系统再确定应上传回款还是付款凭证'
+              : isIncomeDirection
+                ? '发票可后补，也可先上传并保存实际回款'
+                : requiresExternalPayment
+                  ? `${contractCompanyDisplayName}对外付款可先保存，发票可后补；工程划拨回单按实际发生另行上传`
+                  : '请先上传并通过发票识别，系统再确定付款凭证方向'
           "
         />
 
@@ -473,7 +484,7 @@
           :show-file-list="false"
           :disabled="
             submitting ||
-            (!invoiceContextReady && !requiresExternalPayment) ||
+            (!bankUploadContextReady && !requiresExternalPayment) ||
             !fundingModeReady
           "
           :on-change="(file: UploadFile) => handleCredentialFile('bank', file)"
@@ -517,6 +528,16 @@
             >
           </div>
         </el-upload>
+
+        <el-alert
+          v-if="category === 'asset'"
+          class="credential-guidance"
+          type="info"
+          show-icon
+          :closable="false"
+          title="如本次付款包含押金，请先保存回单"
+          description="保存后可在下方回单行展开“登记押金”，上传押金条原件并验证金额；系统不会根据发票差额猜测押金。"
+        />
 
         <div
           v-if="bankCredential.status === 'recognizing'"
@@ -781,7 +802,9 @@
               }}
             </strong>
             <small>
-              支持一次选择多张或分批追加；付款人必须为科技公司，收款人必须为本合同对方
+              支持一次选择多张或分批追加；付款人必须为{{
+                contractCompanyDisplayName
+              }}，收款人必须为本合同对方
             </small>
           </div>
         </el-upload>
@@ -909,7 +932,7 @@
             </el-table-column>
           </el-table>
           <div class="table-total">
-            {{ externalPaymentLabel }}合计
+            {{ contractCompanyDisplayName }}对外付款需发票覆盖累计
             <strong>{{ formatRecognizedMoney(externalTotal) }}</strong>
           </div>
         </div>
@@ -920,18 +943,23 @@
       class="registration-totals"
       :class="{
         mismatch: settlementOverAmount,
-        partial: partialSettlement,
+        partial: partialSettlement || pendingInvoice,
       }"
     >
       <span
         >发票合计
         <strong>{{ formatRecognizedMoney(invoiceTotal) }}</strong></span
       >
-      <span
-        >回单合计 <strong>{{ formatRecognizedMoney(bankTotal) }}</strong></span
-      >
+      <span>
+        {{
+          requiresExternalPayment
+            ? "工程咨询划拨累计"
+            : `${bankDocumentLabel}合计`
+        }}
+        <strong>{{ formatRecognizedMoney(bankTotal) }}</strong>
+      </span>
       <span v-if="requiresExternalPayment"
-        >科技对外付款
+        >{{ contractCompanyDisplayName }}对外付款需发票覆盖累计
         <strong>{{ formatRecognizedMoney(externalTotal) }}</strong></span
       >
       <el-tag
@@ -948,13 +976,17 @@
         {{
           settlementOverAmount
             ? `${bankDocumentLabel}金额超过发票`
-            : partialSettlement
-              ? `部分${settlementActionLabel}，待补 ${formatRecognizedMoney(remainingSettlementAmount)}`
-              : totalsComparable
-                ? "金额已对应"
-                : canSaveInvoiceOnly
-                  ? `可先保存待${settlementActionLabel}草稿`
-                  : "等待识别完成"
+            : pendingInvoice
+              ? `待补发票 ${formatRecognizedMoney(remainingInvoiceAmount)}`
+              : partialSettlement
+                ? `待补${settlementActionLabel} ${formatRecognizedMoney(remainingSettlementAmount)}`
+                : totalsComparable
+                  ? "金额已对应"
+                  : canSaveIncomeReceiptFirst
+                    ? `可先保存${settlementActionLabel}并标记待补发票`
+                    : canSaveInvoiceOnly
+                      ? `可先保存待${settlementActionLabel}草稿`
+                      : "等待识别完成"
         }}
       </el-tag>
     </div>
@@ -1072,6 +1104,7 @@ import {
   getContractErrorMessage,
   getPendingContractFinancialOcrUploads,
   recognizeContractFinancialFile,
+  retryContractFinancialOcrUpload,
 } from "@/utils/contractApi";
 
 type CredentialKind = "invoice" | "bank" | "external";
@@ -1122,6 +1155,8 @@ interface RegisteredBankDocument {
   id: string;
   label: string;
   amount: number;
+  confirmedDepositAmount?: number | null;
+  invoiceRequiredAmount?: number | null;
   payer?: string | null;
   payerAccount?: string | null;
   payee?: string | null;
@@ -1163,6 +1198,7 @@ const props = defineProps<{
     | "technology_direct"
     | "pending_review";
   contractCounterparty?: string;
+  contractCompanySubject?: string;
   isRentalLease?: boolean;
   registrationId?: string;
   registeredInvoices?: RegisteredInvoice[];
@@ -1196,6 +1232,7 @@ const credentialQueues: Record<CredentialKind, Promise<void>> = {
   bank: Promise.resolve(),
   external: Promise.resolve(),
 };
+const automaticallyRetriedFinancialOcrJobIds = new Set<string>();
 
 const bankBlockingPresentation = computed<BankBlockingPresentation | null>(
   () => {
@@ -1245,6 +1282,12 @@ const newInvoiceDocumentDirections = computed(() =>
 const categoryBusinessDirection = computed<"income" | "cost">(() =>
   props.category === "asset" ? "cost" : "income",
 );
+const isIncomeDirection = computed(
+  () => categoryBusinessDirection.value === "income",
+);
+const receiptBeforeInvoiceAllowed = computed(
+  () => props.category === "main_business",
+);
 const expectedInvoiceDocumentDirection = computed<"input" | "output">(() =>
   categoryBusinessDirection.value === "cost" ? "input" : "output",
 );
@@ -1270,6 +1313,16 @@ const invoiceContextReady = computed(
     ((props.registeredInvoices?.length || 0) > 0 ||
       newInvoiceDocumentDirections.value.length > 0),
 );
+const incomeReceiptFirstAllowed = computed(
+  () =>
+    receiptBeforeInvoiceAllowed.value &&
+    !invoiceDirectionConflict.value &&
+    (props.registeredInvoices?.length || 0) === 0 &&
+    allInvoiceCredentials.value.length === 0,
+);
+const bankUploadContextReady = computed(
+  () => invoiceContextReady.value || incomeReceiptFirstAllowed.value,
+);
 const isCostDirection = computed(
   () => invoiceBusinessDirection.value === "cost",
 );
@@ -1285,14 +1338,19 @@ const requiresExternalPayment = computed(
     isCostDirection.value &&
     props.assetFundingMode === "engineering_to_technology",
 );
+const contractCompanyDisplayName = computed(
+  () => props.contractCompanySubject || "我方签约公司",
+);
 const bankDocumentLabel = computed(() =>
   isCostDirection.value
     ? requiresExternalPayment.value
-      ? "工程咨询→科技划拨回单"
+      ? `工程咨询→${contractCompanyDisplayName.value}划拨回单`
       : "付款凭证"
     : "回款回单",
 );
-const externalPaymentLabel = computed(() => "科技→合同对方付款回单");
+const externalPaymentLabel = computed(
+  () => `${contractCompanyDisplayName.value}→合同对方付款回单`,
+);
 const externalPaymentCounterpartyDescription = computed(() =>
   props.contractCounterparty
     ? `收款方：${props.contractCounterparty} · 只核销履约，不重复计入工程咨询支出`
@@ -1352,7 +1410,13 @@ const invoiceTotal = computed(
 const registeredBankTotal = computed(() =>
   props.registrationId
     ? (props.registeredBankDocuments || []).reduce(
-        (sum, item) => sum + Number(item.amount),
+        (sum, item) =>
+          sum +
+          Number(
+            requiresExternalPayment.value
+              ? item.amount
+              : (item.invoiceRequiredAmount ?? item.amount),
+          ),
         0,
       )
     : 0,
@@ -1366,7 +1430,7 @@ const bankTotal = computed(
 const registeredExternalTotal = computed(() =>
   props.registrationId
     ? (props.registeredExternalPayments || []).reduce(
-        (sum, item) => sum + Number(item.amount),
+        (sum, item) => sum + Number(item.invoiceRequiredAmount ?? item.amount),
         0,
       )
     : 0,
@@ -1408,10 +1472,22 @@ const partialSettlement = computed(
   () => totalsComparable.value && settlementDifferenceCents.value > 0,
 );
 const settlementOverAmount = computed(
-  () => totalsComparable.value && settlementDifferenceCents.value < 0,
+  () =>
+    !isIncomeDirection.value &&
+    totalsComparable.value &&
+    settlementDifferenceCents.value < 0,
+);
+const pendingInvoice = computed(
+  () =>
+    isIncomeDirection.value &&
+    Math.round(accountingSettlementTotal.value * 100) > 0 &&
+    settlementDifferenceCents.value < 0,
 );
 const remainingSettlementAmount = computed(
   () => Math.max(0, settlementDifferenceCents.value) / 100,
+);
+const remainingInvoiceAmount = computed(
+  () => Math.max(0, -settlementDifferenceCents.value) / 100,
 );
 const invoiceReady = computed(
   () =>
@@ -1430,7 +1506,6 @@ const canSaveInvoiceOnly = computed(
 );
 const canSaveExternalPaymentOnly = computed(
   () =>
-    !props.registrationId &&
     requiresExternalPayment.value &&
     allInvoiceCredentials.value.length === 0 &&
     allBankCredentials.value.length === 0 &&
@@ -1438,6 +1513,28 @@ const canSaveExternalPaymentOnly = computed(
     allExternalCredentials.value.every((item) => item.status === "verified") &&
     !anyRecognizing.value &&
     !submitting.value,
+);
+const canSaveIncomeRegistration = computed(
+  () =>
+    receiptBeforeInvoiceAllowed.value &&
+    !invoiceDirectionConflict.value &&
+    !submitting.value &&
+    !anyRecognizing.value &&
+    fundingModeReady.value &&
+    allExternalCredentials.value.length === 0 &&
+    allInvoiceCredentials.value.every((item) => item.status === "verified") &&
+    allBankCredentials.value.every((item) => item.status === "verified") &&
+    (allInvoiceCredentials.value.length > 0 ||
+      allBankCredentials.value.length > 0) &&
+    (Boolean(props.registrationId) ||
+      (props.registeredBankDocuments?.length || 0) > 0 ||
+      allBankCredentials.value.length > 0),
+);
+const canSaveIncomeReceiptFirst = computed(
+  () =>
+    canSaveIncomeRegistration.value &&
+    Math.round(invoiceTotal.value * 100) === 0 &&
+    allBankCredentials.value.length > 0,
 );
 const canSaveRegistrationDraft = computed(
   () =>
@@ -1448,6 +1545,7 @@ const canSaveRegistrationDraft = computed(
     allExternalCredentials.value.every((item) => item.status === "verified") &&
     fundingModeReady.value &&
     (!props.registrationId ||
+      allInvoiceCredentials.value.length > 0 ||
       allBankCredentials.value.length > 0 ||
       allExternalCredentials.value.length > 0) &&
     Boolean(invoiceBusinessDirection.value),
@@ -1489,19 +1587,28 @@ const allocationPreview = computed(() => {
         `第${index + 1}张发票`,
     })),
   ];
+  const allocationSettlementLabel = requiresExternalPayment.value
+    ? externalPaymentLabel.value
+    : bankDocumentLabel.value;
+  const registeredAllocationDocuments = requiresExternalPayment.value
+    ? props.registeredExternalPayments || []
+    : props.registeredBankDocuments || [];
+  const newAllocationCredentials = requiresExternalPayment.value
+    ? allExternalCredentials.value
+    : allBankCredentials.value;
   const banks = [
     ...(props.registrationId
-      ? (props.registeredBankDocuments || []).map((document) => ({
+      ? registeredAllocationDocuments.map((document) => ({
           cents: Math.round(Number(document.amount) * 100),
           label: document.label,
         }))
       : []),
-    ...allBankCredentials.value.map((credential, index) => ({
+    ...newAllocationCredentials.map((credential, index) => ({
       cents: Math.round(bankAmount(credential) * 100),
       label:
         bankFieldsFor(credential)?.electronicReceiptNo ||
         credential.file?.name ||
-        `第${index + 1}张${bankDocumentLabel.value}`,
+        `第${index + 1}张${allocationSettlementLabel}`,
     })),
   ];
   const result: Array<{
@@ -1522,7 +1629,7 @@ const allocationPreview = computed(() => {
       invoiceIndex,
       bankIndex,
       invoiceLabel: `发票 ${invoices[invoiceIndex]!.label}`,
-      bankLabel: `${bankDocumentLabel.value} ${banks[bankIndex]!.label}`,
+      bankLabel: `${allocationSettlementLabel} ${banks[bankIndex]!.label}`,
       amount: allocated / 100,
     });
   };
@@ -1562,10 +1669,27 @@ const canSubmit = computed(
   () =>
     canSaveInvoiceOnly.value ||
     canSaveExternalPaymentOnly.value ||
+    canSaveIncomeRegistration.value ||
     canSaveRegistrationDraft.value,
 );
+const savesOnlyInternalFunding = computed(
+  () =>
+    Boolean(props.registrationId) &&
+    requiresExternalPayment.value &&
+    allBankCredentials.value.length > 0 &&
+    allInvoiceCredentials.value.length === 0 &&
+    allExternalCredentials.value.length === 0,
+);
 const submitButtonLabel = computed(() => {
-  if (canSaveExternalPaymentOnly.value) return "先保存科技对外付款";
+  if (savesOnlyInternalFunding.value) return "保存工程咨询划拨回单";
+  if (canSaveExternalPaymentOnly.value) {
+    return props.registrationId
+      ? `保存${contractCompanyDisplayName.value}最终对外付款`
+      : `先保存${contractCompanyDisplayName.value}对外付款`;
+  }
+  if (canSaveIncomeReceiptFirst.value) {
+    return props.registrationId ? "保存本次回款" : "保存实际回款并标记待补发票";
+  }
   if (canSaveInvoiceOnly.value)
     return `保存待${settlementActionLabel.value}发票草稿`;
   if (props.registrationId) {
@@ -1581,22 +1705,32 @@ const submitButtonLabel = computed(() => {
       allBankCredentials.value.length === 0 &&
       allInvoiceCredentials.value.length === 0
     ) {
-      return "保存科技公司最终对外付款";
+      return `保存${contractCompanyDisplayName.value}最终对外付款`;
+    }
+    if (pendingInvoice.value) {
+      return allBankCredentials.value.length > 0
+        ? "保存回款并继续待补发票"
+        : "保存补充发票";
     }
     return partialSettlement.value
       ? `保存本次部分${settlementActionLabel.value}`
-      : `保存本次补充${bankDocumentLabel.value}`;
+      : totalsComparable.value
+        ? "保存并建立金额对应关系"
+        : `保存本次补充${bankDocumentLabel.value}`;
   }
+  if (pendingInvoice.value) return "保存回款并标记待补发票";
   return partialSettlement.value
     ? `保存部分${accountingDocumentLabel.value}`
     : requiresExternalPayment.value && allExternalCredentials.value.length
-      ? "保存发票和科技对外付款"
+      ? `保存发票和${contractCompanyDisplayName.value}对外付款`
       : allBankCredentials.value.length
         ? `保存并登记${settlementActionLabel.value}`
         : "保存财务登记";
 });
 const completionHint = computed(() => {
   if (anyRecognizing.value) return "正在识别凭证，请等待全部凭证完成";
+  if (savesOnlyInternalFunding.value)
+    return `本次${allBankCredentials.value.length}张工程咨询划拨回单合计 ${formatRecognizedMoney(newBankTotal.value)}；保存后按真实回单计入工程支出，原发票与${contractCompanyDisplayName.value}对外付款对应关系不变`;
   if (canSaveExternalPaymentOnly.value)
     return `当前已识别 ${allExternalCredentials.value.length} 张${externalPaymentLabel.value}，可先保存付款事实并进入合同付款进度，后续补充发票核算明细`;
   if (
@@ -1604,9 +1738,16 @@ const completionHint = computed(() => {
     totalsComparable.value &&
     settlementDifferenceCents.value < 0
   )
-    return `科技对外付款超过当前发票合计 ${formatRecognizedMoney(Math.abs(settlementDifferenceCents.value) / 100)}，可先保存并标记待补发票`;
+    return `${contractCompanyDisplayName.value}对外付款超过当前发票合计 ${formatRecognizedMoney(Math.abs(settlementDifferenceCents.value) / 100)}，可先保存并标记待补发票`;
   if (settlementOverAmount.value) {
     return `${accountingDocumentLabel.value}合计超过发票合计 ${formatRecognizedMoney(Math.abs(settlementDifferenceCents.value) / 100)}，请移除或核对凭证`;
+  }
+  if (pendingInvoice.value) {
+    const pendingHint = `当前累计回款 ${formatRecognizedMoney(accountingSettlementTotal.value)}，已补发票 ${formatRecognizedMoney(invoiceTotal.value)}，待补发票 ${formatRecognizedMoney(remainingInvoiceAmount.value)}`;
+    if (canSaveIncomeRegistration.value) {
+      return `${pendingHint}；保存后按银行日期计入主营收入，后续仍可在同一登记补充发票或回单`;
+    }
+    return `${pendingHint}；可继续添加发票或新的回款回单`;
   }
   if (canSaveInvoiceOnly.value)
     return `共${allInvoiceCredentials.value.length}张发票已识别，可先保存草稿，收到回单后再补充`;
@@ -1636,7 +1777,9 @@ const completionHint = computed(() => {
       ? totalExternalDocumentCount.value
       : totalBankDocumentCount.value)
   ) {
-    return `请上传至少一张发票和一张${accountingDocumentLabel.value}`;
+    return isIncomeDirection.value
+      ? "可先上传回款回单并保存，发票后续补入同一登记"
+      : `请上传至少一张发票和一张${accountingDocumentLabel.value}`;
   }
   if (
     !totalInvoiceDocumentCount.value ||
@@ -1999,6 +2142,34 @@ function restoredCredentialKind(
 async function loadPendingFinancialOcrUploads() {
   try {
     const jobs = await getPendingContractFinancialOcrUploads(props.contractId);
+    const resolvedJobs: ContractFinancialOcrResult[] = [];
+    const refreshErrors: string[] = [];
+    for (const job of jobs) {
+      if (
+        !job.requiresRefresh ||
+        automaticallyRetriedFinancialOcrJobIds.has(job.id)
+      ) {
+        resolvedJobs.push(job);
+        continue;
+      }
+      automaticallyRetriedFinancialOcrJobIds.add(job.id);
+      try {
+        resolvedJobs.push(
+          await retryContractFinancialOcrUpload(props.contractId, job.id),
+        );
+      } catch (error) {
+        resolvedJobs.push(job);
+        const documentLabel =
+          job.recordKind === "invoice"
+            ? "发票"
+            : job.recordKind === "receipt"
+              ? "回款回单"
+              : "付款回单";
+        refreshErrors.push(
+          `${documentLabel}旧版识别结果自动更新失败，已保留原任务：${getContractErrorMessage(error, "请刷新页面后重试")}`,
+        );
+      }
+    }
     const knownJobIds = new Set(
       [
         ...allInvoiceCredentials.value,
@@ -2008,13 +2179,16 @@ async function loadPendingFinancialOcrUploads() {
         .map((credential) => credential.result?.id)
         .filter((id): id is string => Boolean(id)),
     );
-    jobs.forEach((job) => {
+    resolvedJobs.forEach((job) => {
       if (knownJobIds.has(job.id)) return;
       credentialListFor(restoredCredentialKind(job)).push(
         restoredCredentialState(job),
       );
       knownJobIds.add(job.id);
     });
+    if (refreshErrors.length) {
+      pageError.value = refreshErrors.join("；");
+    }
   } catch (error) {
     pageError.value = getContractErrorMessage(
       error,
@@ -2042,7 +2216,7 @@ async function processCredentialFile(
   if (!file) return;
   if (
     (kind === "bank" || kind === "external") &&
-    !invoiceContextReady.value &&
+    !bankUploadContextReady.value &&
     !requiresExternalPayment.value
   ) {
     pageError.value = invoiceDirectionConflict.value
@@ -2194,7 +2368,7 @@ async function processCredentialFile(
         kind === "invoice"
           ? "发票"
           : kind === "external"
-            ? "科技公司对外付款"
+            ? `${contractCompanyDisplayName.value}对外付款`
             : bankDocumentLabel.value
       }识别失败，请重试`,
     );
@@ -2327,6 +2501,8 @@ async function submitRegistration() {
     pageError.value = completionHint.value;
     return;
   }
+  // 提交分支必须在进入提交状态前冻结，否则条件会随状态变化，错误落入普通登记。
+  const saveExternalPaymentOnly = canSaveExternalPaymentOnly.value;
   const invoiceJobIds = allInvoiceCredentials.value.map(
     (item) => item.result!.id,
   );
@@ -2345,7 +2521,9 @@ async function submitRegistration() {
   pageError.value = "";
   try {
     const savedAsPartial = partialSettlement.value;
+    const savedAsPendingInvoice = pendingInvoice.value;
     const remainingAmount = remainingSettlementAmount.value;
+    const remainingInvoice = remainingInvoiceAmount.value;
     const payload = {
       invoiceOcrJobIds: invoiceJobIds,
       bankOcrJobIds: allBankCredentials.value.map((item) => item.result!.id),
@@ -2357,13 +2535,21 @@ async function submitRegistration() {
       ),
       note: note.value.trim() || undefined,
     };
-    if (canSaveExternalPaymentOnly.value) {
-      await createContractExternalPaymentRegistration(
-        props.contractId,
-        externalPayload,
-      );
+    if (saveExternalPaymentOnly) {
+      if (props.registrationId) {
+        await appendContractFinancialRegistrationExternalPayments(
+          props.contractId,
+          props.registrationId,
+          externalPayload,
+        );
+      } else {
+        await createContractExternalPaymentRegistration(
+          props.contractId,
+          externalPayload,
+        );
+      }
       ElMessage.success(
-        "科技公司最终对外付款已保存，合同付款进度已更新；发票核算明细可后续补充",
+        `${contractCompanyDisplayName.value}最终对外付款已保存，合同付款进度已更新；发票核算明细可后续补充`,
       );
       reset();
       emit("created");
@@ -2389,16 +2575,27 @@ async function submitRegistration() {
         );
       }
       ElMessage.success(
-        allInvoiceCredentials.value.length > 0 &&
-          !allBankCredentials.value.length &&
+        requiresExternalPayment.value &&
+          allBankCredentials.value.length > 0 &&
+          !allInvoiceCredentials.value.length &&
           !allExternalCredentials.value.length
-          ? "发票已补充，合同核算明细和待补差额已更新"
-          : allExternalCredentials.value.length &&
-              !allBankCredentials.value.length
-            ? "科技公司最终对外付款已保存，已进入合同核算与履约核销"
-            : savedAsPartial
-              ? `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
-              : `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，发票与银行凭证金额已全部对应`,
+          ? `工程咨询划拨回单已按真实回单计入工程支出，发票与${contractCompanyDisplayName.value}对外付款的原对应关系不变`
+          : allInvoiceCredentials.value.length > 0 &&
+              !allBankCredentials.value.length &&
+              !allExternalCredentials.value.length
+            ? savedAsPendingInvoice
+              ? `发票已补充，仍待补发票 ${formatRecognizedMoney(remainingInvoice)}`
+              : savedAsPartial
+                ? `发票已补充，尚待回款 ${formatRecognizedMoney(remainingAmount)}`
+                : "发票已补充，发票与累计回款金额已全部对应"
+            : allExternalCredentials.value.length &&
+                !allBankCredentials.value.length
+              ? `${contractCompanyDisplayName.value}最终对外付款已保存，已进入合同核算与履约核销`
+              : savedAsPendingInvoice
+                ? `本次回款已保存并按银行日期计入主营收入，仍待补发票 ${formatRecognizedMoney(remainingInvoice)}`
+                : savedAsPartial
+                  ? `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
+                  : `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，发票与银行凭证金额已全部对应`,
       );
     } else {
       const created = await createContractFinancialRegistration(
@@ -2420,11 +2617,13 @@ async function submitRegistration() {
           ? savedAsPartial
             ? `发票和部分${externalPaymentLabel.value}已保存，已进入合同核算，尚待 ${formatRecognizedMoney(remainingAmount)}`
             : `发票和${externalPaymentLabel.value}已保存，已进入合同核算；工程咨询划拨回单可按实际发生情况另行补充统计`
-          : savedAsPartial
-            ? `部分${settlementActionLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
-            : allBankCredentials.value.length
-              ? `发票和${bankDocumentLabel.value}已保存，${bankDocumentLabel.value}已立即计入${postedSettlementLabel.value}；请确认整笔配对`
-              : `发票已保存为待${settlementActionLabel.value}草稿，收到${bankDocumentLabel.value}后可继续补充`,
+          : savedAsPendingInvoice
+            ? `实际回款已保存并按银行日期计入主营收入，登记已标记为待补发票 ${formatRecognizedMoney(remainingInvoice)}`
+            : savedAsPartial
+              ? `部分${settlementActionLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
+              : allBankCredentials.value.length
+                ? `发票和${bankDocumentLabel.value}已保存，${bankDocumentLabel.value}已立即计入${postedSettlementLabel.value}；请确认整笔配对`
+                : `发票已保存为待${settlementActionLabel.value}草稿，收到${bankDocumentLabel.value}后可继续补充`,
       );
     }
     reset();

@@ -366,7 +366,7 @@
           :note="
             isAssetContract
               ? isInternalFundingMode
-                ? '按工程咨询转给科技的回单日期计支出'
+                ? `按工程咨询转给${assetSigningSubject || '签约公司'}的回单日期计支出`
                 : '已上传有效付款凭证口径'
               : '作为收入核算 X 值'
           "
@@ -375,7 +375,7 @@
         />
         <ContractMetricCard
           v-if="isAssetContract && isInternalFundingMode"
-          label="科技已对外付款"
+          :label="`${assetSigningSubject || '签约公司'}已对外付款`"
           :value="formatContractMoney(detail.contract.externalPaidAmount)"
           note="仅用于合同履约核销，不重复增加经营支出"
           :icon="CircleCheck"
@@ -412,7 +412,7 @@
           :value="`${normalizedProgress}%`"
           :note="
             isAssetContract
-              ? `${isInternalFundingMode ? '科技对外付款' : '有效付款'} / ${hasPendingSupplementAmountChange ? '变更后合同金额' : '当前合同总额'}`
+              ? `${isInternalFundingMode ? `${assetSigningSubject || '签约公司'}对外付款` : '有效付款'} / ${hasPendingSupplementAmountChange ? '变更后合同金额' : '当前合同总额'}`
               : `有效回单 / ${hasPendingSupplementAmountChange ? '变更后合同金额' : '当前合同总额'}`
           "
           :icon="TrendCharts"
@@ -1006,7 +1006,7 @@
           name="finance"
         >
           <section
-            v-if="detail.contract.category === 'asset'"
+            v-if="detail.contract.category === 'asset' && isInternalFundingMode"
             class="content-card asset-financial-chain"
             aria-label="资产合同资金与经营核算链条"
           >
@@ -1024,12 +1024,12 @@
                 <strong>{{ assetFundingSourceSubject }}</strong>
                 <small>{{ assetFundingSourceDescription }}</small>
               </article>
-              <span v-if="assetSubjectChainMode === 'technology'">
+              <span>
                 <b>内部资金划拨</b>
                 <small>按工程回单日期计入支出</small>
               </span>
-              <article v-if="assetSubjectChainMode === 'technology'">
-                <strong>北京羽隶科技有限公司</strong>
+              <article>
+                <strong>{{ assetSigningSubject || "我方签约公司" }}</strong>
                 <small>签约主体／发票购买方／付款主体</small>
               </article>
               <span>
@@ -1049,24 +1049,34 @@
                 <small>资产合同支出</small>
               </article>
             </div>
-            <p v-if="assetSubjectChainMode === 'technology'">
-              工程咨询转给科技公司的款项是工程咨询的实际经营支出，按该回单付款日期入账；科技公司向合同对方的最终付款只用于履约核销，不再重复增加支出。
-            </p>
-            <p v-else-if="assetSubjectChainMode === 'accounting'">
-              本合同由工程咨询公司直接签约和对外付款，不经过集团内部资金划拨；已确认且未冲正的对外付款进入资产合同支出。
+            <p>
+              工程咨询转给{{
+                assetSigningSubject || "我方签约公司"
+              }}的款项是工程咨询的实际经营支出，按该回单付款日期入账；签约公司向合同对方的最终付款只用于履约核销，不再重复增加支出。
             </p>
           </section>
+          <ContractDepositManagementInline
+            v-if="isDepositLikelyContract"
+            :contract-id="contractId"
+            :subtype-label="depositSubtypeLabel"
+            :can-manage="canManageFinancials"
+            :contract-company-subject="assetSigningSubject || undefined"
+            :hide-empty-readonly="detail.contract.status === 'completed'"
+            @updated="handleDepositManagementUpdated"
+          />
+          <ContractCompletedInternalFundingPanel
+            v-if="shouldCheckCompletedInternalFunding"
+            :contract-id="contractId"
+            @saved="handleCompletedInternalFundingSaved"
+          />
           <ContractFinancialRegistrationPanel
             v-if="canManageFinancials && detail.contract.category"
             ref="financialRegistrationPanelRef"
             class="finance-registration-workspace"
             :contract-id="contractId"
             :category="detail.contract.category"
-            :asset-funding-mode="
-              assetSubjectChainMode === 'accounting'
-                ? 'engineering_direct'
-                : 'engineering_to_technology'
-            "
+            :asset-funding-mode="detail.contract.assetFundingMode || undefined"
+            :contract-company-subject="assetSigningSubject || undefined"
             :contract-counterparty="assetContractCounterparty"
             :is-rental-lease="isHouseRentalLease"
             :registration-id="
@@ -1106,26 +1116,12 @@
                   <div class="record-group-heading">
                     <span>
                       <el-icon><Connection /></el-icon>
-                      {{
-                        card.registrationId
-                          ? isAwaitingSettlement(card)
-                            ? isInternalFundingMode
-                              ? "发票与付款待闭环"
-                              : "待回款发票登记"
-                            : "发票与回单财务登记"
-                          : "历史财务记录"
-                      }}
+                      {{ financialRegistrationCardTitle(card) }}
                     </span>
                     <el-tag
                       :type="financeRecordStatusTagType(card.status)"
                       size="small"
-                      >{{
-                        isAwaitingSettlement(card)
-                          ? isInternalFundingMode
-                            ? financialCardInternalPendingLabel(card)
-                            : "待补回单"
-                          : financeRecordStatusLabel(card.status)
-                      }}</el-tag
+                      >{{ financialRegistrationCardStatusLabel(card) }}</el-tag
                     >
                   </div>
                   <div class="registration-record-documents">
@@ -1134,7 +1130,17 @@
                       :key="document.record.id"
                       class="registration-record-document"
                     >
-                      <span class="document-kind">{{ document.label }}</span>
+                      <div class="document-kind-cell">
+                        <span class="document-kind">{{ document.label }}</span>
+                        <el-tag
+                          v-if="document.record.historicalConfirmedImport"
+                          type="info"
+                          size="small"
+                          effect="plain"
+                          title="依据线下原始凭证和确认清单迁移，不代表 PP-OCR 自动识别"
+                          >历史确认导入</el-tag
+                        >
+                      </div>
                       <span class="document-summary">
                         <strong>{{
                           formatContractMoney(document.record.amount)
@@ -1143,14 +1149,105 @@
                           {{ financeRecordOccurredAt(document.record) }} ·
                           {{ financeRecordDescription(document.record) }}
                         </small>
+                        <small
+                          v-if="
+                            isAssetDepositEligibleDocument(document) &&
+                            Number(
+                              document.record.confirmedDepositAmount || 0,
+                            ) > 0
+                          "
+                          class="document-deposit-summary"
+                        >
+                          已验证押金
+                          {{
+                            formatContractMoney(
+                              document.record.confirmedDepositAmount,
+                            )
+                          }}
+                          · 需发票覆盖
+                          {{
+                            formatContractMoney(
+                              document.record.invoiceRequiredAmount,
+                              "待服务端核算",
+                            )
+                          }}
+                        </small>
                       </span>
-                      <el-button
-                        v-if="document.record.fileId"
-                        link
-                        type="primary"
-                        @click="openFile(document.record.fileId)"
-                        >在线预览</el-button
-                      >
+                      <div class="registration-document-actions">
+                        <el-button
+                          v-if="
+                            document.record.canonicalReceiptPreviewUrl ||
+                            document.record.fileId
+                          "
+                          link
+                          type="primary"
+                          @click="openFinancialRecordFile(document.record)"
+                          >在线预览</el-button
+                        >
+                        <template
+                          v-if="
+                            isAssetDepositEligibleDocument(document) &&
+                            (canManageFinancials ||
+                              depositReceiptForRecord(document.record.id) ||
+                              voidedDepositReceiptsForRecord(document.record.id)
+                                .length > 0)
+                          "
+                        >
+                          <el-tag
+                            v-if="depositReceiptForRecord(document.record.id)"
+                            :type="
+                              depositReceiptStatusTagType(
+                                depositReceiptForRecord(document.record.id)
+                                  ?.status,
+                              )
+                            "
+                            size="small"
+                            effect="plain"
+                          >
+                            {{
+                              depositReceiptStatusLabel(
+                                depositReceiptForRecord(document.record.id)
+                                  ?.status,
+                              )
+                            }}
+                          </el-tag>
+                          <el-button
+                            link
+                            type="primary"
+                            @click="toggleDepositReceipt(document.record.id)"
+                          >
+                            {{ depositReceiptActionLabel(document.record.id) }}
+                          </el-button>
+                        </template>
+                      </div>
+                      <ContractDepositReceiptInline
+                        v-if="
+                          isAssetDepositEligibleDocument(document) &&
+                          depositReceiptExpanded(document.record.id)
+                        "
+                        class="registration-document-deposit"
+                        :contract-id="contractId"
+                        :financial-record-id="document.record.id"
+                        :receipt-amount="document.record.amount"
+                        :confirmed-deposit-amount="
+                          document.record.confirmedDepositAmount
+                        "
+                        :invoice-required-amount="
+                          document.record.invoiceRequiredAmount
+                        "
+                        :deposit-receipt="
+                          depositReceiptForRecord(document.record.id)
+                        "
+                        :voided-receipts="
+                          voidedDepositReceiptsForRecord(document.record.id)
+                        "
+                        :can-manage="
+                          canManageFinancials &&
+                          document.record.status !== 'reversed'
+                        "
+                        @updated="handleDepositReceiptUpdated"
+                        @removed="handleDepositReceiptRemoved"
+                      />
                     </div>
                   </div>
                   <div
@@ -1174,7 +1271,27 @@
                       }}</strong></span
                     >
                     <span v-if="isInternalFundingMode"
-                      >科技已对外付款
+                      >银行付款合计
+                      <strong>{{
+                        formatContractMoney(
+                          financialCardExternalBankAmount(card),
+                        )
+                      }}</strong></span
+                    >
+                    <span
+                      v-if="
+                        isInternalFundingMode &&
+                        financialCardExternalDepositAmount(card) > 0
+                      "
+                      >其中押金
+                      <strong>{{
+                        formatContractMoney(
+                          financialCardExternalDepositAmount(card),
+                        )
+                      }}</strong></span
+                    >
+                    <span v-if="isInternalFundingMode"
+                      >需发票覆盖付款
                       <strong>{{
                         formatContractMoney(financialCardExternalAmount(card))
                       }}</strong></span
@@ -1193,10 +1310,7 @@
                       }}</strong></span
                     >
                     <span
-                      v-if="
-                        isInternalFundingMode &&
-                        financialCardInvoiceRemainingAmount(card) > 0
-                      "
+                      v-if="financialCardInvoiceRemainingAmount(card) > 0"
                       class="is-pending"
                       >待补发票
                       <strong>{{
@@ -1207,7 +1321,8 @@
                     >
                     <span
                       v-if="
-                        !isInternalFundingMode && isAwaitingSettlement(card)
+                        !isInternalFundingMode &&
+                        financialCardRemainingAmount(card) > 0
                       "
                       class="is-pending"
                       >待{{ financialCardSettlementAction(card) }}
@@ -1242,9 +1357,7 @@
                     class="record-actions registration-record-actions"
                   >
                     <el-button
-                      v-if="
-                        card.status === 'draft' && isAwaitingSettlement(card)
-                      "
+                      v-if="card.status === 'draft' && card.registrationId"
                       link
                       type="primary"
                       :disabled="actionLoading"
@@ -1267,7 +1380,7 @@
                       size="small"
                       >{{
                         isAwaitingSettlement(card)
-                          ? `尚待${financialCardSettlementAction(card)}，暂不可确认`
+                          ? financialCardPendingActionLabel(card)
                           : "金额或验证链未闭合，不可确认"
                       }}</el-tag
                     >
@@ -1900,11 +2013,16 @@ import ContractMetricCard from "@/components/contracts/ContractMetricCard.vue";
 import ContractAuxiliaryPackageManager from "@/components/contracts/ContractAuxiliaryPackageManager.vue";
 import ContractStatusTag from "@/components/contracts/ContractStatusTag.vue";
 import ContractApprovalWorkspace from "@/components/contracts/ContractApprovalWorkspace.vue";
+import ContractCompletedInternalFundingPanel from "@/components/contracts/ContractCompletedInternalFundingPanel.vue";
+import ContractDepositManagementInline from "@/components/contracts/ContractDepositManagementInline.vue";
+import ContractDepositReceiptInline from "@/components/contracts/ContractDepositReceiptInline.vue";
 import ContractFinancialRegistrationPanel from "@/components/contracts/ContractFinancialRegistrationPanel.vue";
 import ContractReadOnlyPreview from "@/components/contracts/ContractReadOnlyPreview.vue";
 import { useAuthStore } from "@/stores/auth";
 import type {
   ContractApprovalAction,
+  ContractDepositReceipt,
+  ContractDepositReceiptStatus,
   ContractDetailResponse,
   ContractFinanceRecord,
   ContractFinanceRecordStatus,
@@ -1940,6 +2058,7 @@ import {
 } from "@/utils/contractApi";
 import {
   CONTRACT_CATEGORY_LABELS,
+  CONTRACT_DECLARED_SUBTYPE_LABELS,
   CONTRACT_RELATION_LABELS,
   formatContractDate,
   formatContractDateTime,
@@ -1992,16 +2111,27 @@ const detailReturnsToApprovalCenter = computed(
   () =>
     route.query.from === "contract-approvals" || !canReadContractLedger.value,
 );
+const detailReturnsToLedger = computed(
+  () => route.query.from === "contract-ledger",
+);
 const detailHasPreviousPage = computed(() =>
   Boolean(routeQueryText(route.query.backContractId)),
 );
 const detailApprovalSourceTab = computed(() =>
   routeQueryText(route.query.fromTab) === "processed" ? "processed" : "pending",
 );
+const detailLedgerReturnPath = computed(() => {
+  const returnTo = routeQueryText(route.query.returnTo);
+  return returnTo === "/contracts" || returnTo.startsWith("/contracts?")
+    ? returnTo
+    : "/contracts";
+});
 const detailBackPath = computed(() =>
   detailReturnsToApprovalCenter.value
     ? `/contract-approvals?tab=${detailApprovalSourceTab.value}`
-    : "/contracts",
+    : detailReturnsToLedger.value
+      ? detailLedgerReturnPath.value
+      : "/contracts",
 );
 const detailBackLabel = computed(() =>
   detailHasPreviousPage.value
@@ -2015,6 +2145,13 @@ function handleDetailBack() {
   if (detailHasPreviousPage.value) {
     router.back();
     return;
+  }
+  if (detailReturnsToLedger.value) {
+    const historyBackPath = String(window.history.state?.back || "");
+    if (historyBackPath === detailLedgerReturnPath.value) {
+      router.back();
+      return;
+    }
   }
   void router.push(detailBackPath.value);
 }
@@ -2078,6 +2215,25 @@ const supplementAmountDelta = computed(() =>
 );
 const isAssetContract = computed(
   () => detail.value?.contract.category === "asset",
+);
+const depositSubtypeLabel = computed(() => {
+  const subtype = detail.value?.contract.declaredSubtype;
+  return subtype ? CONTRACT_DECLARED_SUBTYPE_LABELS[subtype] : "资产类合同";
+});
+const isDepositLikelyContract = computed(
+  () =>
+    isAssetContract.value &&
+    ["house_rental", "vehicle_rental", "parking_space"].includes(
+      detail.value?.contract.declaredSubtype || "",
+    ),
+);
+const shouldCheckCompletedInternalFunding = computed(
+  () =>
+    canEdit.value &&
+    detail.value?.contract.category === "asset" &&
+    detail.value.contract.relationType === "main" &&
+    detail.value.contract.status === "completed" &&
+    detail.value.contract.assetFundingMode === "engineering_to_technology",
 );
 const isRentalLifecycleContract = computed(
   () =>
@@ -2358,55 +2514,38 @@ const leaseCalculatedContractTotal = computed(
     Number(detail.value?.contract.leaseTermMonths || 12),
 );
 const GROUP_ACCOUNTING_SUBJECT = "北京羽隶工程咨询有限公司";
-const MANAGED_CONTRACT_SUBJECTS = new Set([
-  GROUP_ACCOUNTING_SUBJECT,
-  "北京羽隶科技有限公司",
-]);
 const assetSigningSubject = computed<string | null>(() => {
-  const contract = detail.value?.contract;
-  if (!contract) return null;
-  const matched = [contract.partyA, contract.partyB]
-    .map((party) => String(party || "").trim())
-    .filter((party) => MANAGED_CONTRACT_SUBJECTS.has(party));
-  return matched.length === 1 ? matched[0]! : null;
+  return detail.value?.contract.contractCompanySubjectName || null;
 });
-const assetSubjectChainMode = computed<"technology" | "accounting">(() =>
-  [detail.value?.contract.partyA, detail.value?.contract.partyB].some(
-    (party) =>
-      String(party || "")
-        .normalize("NFKC")
-        .replace(/\s+/gu, "") === GROUP_ACCOUNTING_SUBJECT,
-  )
-    ? "accounting"
-    : "technology",
-);
-const automaticFundingModeLabel = computed(() =>
-  assetSubjectChainMode.value === "accounting"
-    ? "工程咨询直接付款"
-    : "工程咨询划拨科技支付",
+const automaticFundingModeLabel = computed(
+  () => `工程咨询划拨${assetSigningSubject.value || "我方签约公司"}支付`,
 );
 const assetFundingSourceSubject = computed(() => {
   return GROUP_ACCOUNTING_SUBJECT;
 });
-const assetFundingSourceDescription = computed(() => {
-  return {
-    technology: "实际经营支出主体／资金来源",
-    accounting: "签约主体／直接付款主体",
-  }[assetSubjectChainMode.value];
-});
-const assetExternalPaymentDescription = computed(() =>
-  assetSubjectChainMode.value === "technology"
-    ? "只做履约核销，不重复计支出"
-    : "已确认且未冲正才计支出",
+const assetFundingSourceDescription = computed(
+  () => "实际经营支出主体／资金来源",
 );
+const assetExternalPaymentDescription = computed(
+  () => "只做履约核销，不重复计支出",
+);
+function normalizeContractSubjectName(value: unknown): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/gu, "")
+    .trim();
+}
 const assetContractCounterparty = computed(() => {
   const contract = detail.value?.contract;
   if (!contract || !assetSigningSubject.value) return "合同对方待核对";
+  const normalizedSigningSubject = normalizeContractSubjectName(
+    assetSigningSubject.value,
+  );
   return (
     [contract.partyA, contract.partyB].find(
       (party) =>
-        String(party || "").trim() &&
-        String(party || "").trim() !== assetSigningSubject.value,
+        normalizeContractSubjectName(party) &&
+        normalizeContractSubjectName(party) !== normalizedSigningSubject,
     ) || "合同对方／供应商"
   );
 });
@@ -2645,6 +2784,7 @@ const financialRegistrationPanelRef = ref<{
   reloadPendingUploads: () => Promise<void>;
 } | null>(null);
 const financialRegistrationTargetId = ref("");
+const depositReceiptExpandedIds = ref<string[]>([]);
 
 const sealedFileExtension = computed(() => {
   const extension = sealedForm.file?.name.split(".").pop()?.trim();
@@ -3066,6 +3206,119 @@ interface FinancialRegistrationCard {
   matches: ContractFinancialRegistrationMatch[];
 }
 
+function isAssetDepositEligibleDocument(
+  document: FinancialRegistrationDocument,
+): boolean {
+  if (detail.value?.contract.category !== "asset") return false;
+  if (document.type === "externalPayments") return true;
+  return document.type === "payments" && !isInternalFundingMode.value;
+}
+
+function depositReceiptForRecord(
+  financialRecordId: string,
+): ContractDepositReceipt | null {
+  return (
+    [...(detail.value?.depositReceipts || [])]
+      .reverse()
+      .find(
+        (receipt) =>
+          receipt.financialRecordId === financialRecordId &&
+          receipt.status !== "voided",
+      ) || null
+  );
+}
+
+function voidedDepositReceiptsForRecord(
+  financialRecordId: string,
+): ContractDepositReceipt[] {
+  return [...(detail.value?.depositReceipts || [])]
+    .filter(
+      (receipt) =>
+        receipt.financialRecordId === financialRecordId &&
+        receipt.status === "voided",
+    )
+    .reverse();
+}
+
+function depositReceiptExpanded(financialRecordId: string): boolean {
+  return depositReceiptExpandedIds.value.includes(financialRecordId);
+}
+
+function toggleDepositReceipt(financialRecordId: string) {
+  depositReceiptExpandedIds.value = depositReceiptExpanded(financialRecordId)
+    ? depositReceiptExpandedIds.value.filter((id) => id !== financialRecordId)
+    : [...depositReceiptExpandedIds.value, financialRecordId];
+}
+
+function depositReceiptActionLabel(financialRecordId: string): string {
+  if (depositReceiptExpanded(financialRecordId)) return "收起押金条";
+  if (depositReceiptForRecord(financialRecordId)) return "查看押金条";
+  return voidedDepositReceiptsForRecord(financialRecordId).length
+    ? "查看押金留痕"
+    : "登记押金";
+}
+
+function depositReceiptStatusLabel(
+  status?: ContractDepositReceiptStatus,
+): string {
+  if (!status) return "待上传";
+  return {
+    recognizing: "押金条识别中",
+    recognized: "押金待确认",
+    manual_review: "押金待手工验证",
+    verified: "押金已验证",
+    failed: "押金识别失败",
+    voided: "押金已撤销",
+  }[status];
+}
+
+function depositReceiptStatusTagType(
+  status?: ContractDepositReceiptStatus,
+): "info" | "warning" | "success" | "danger" {
+  if (status === "verified") return "success";
+  if (status === "failed" || status === "voided") return "danger";
+  if (status === "recognized" || status === "manual_review") return "warning";
+  return "info";
+}
+
+async function handleDepositReceiptUpdated(receipt: ContractDepositReceipt) {
+  if (!detail.value) return;
+  const receipts = detail.value.depositReceipts || [];
+  const index = receipts.findIndex((item) => item.id === receipt.id);
+  detail.value.depositReceipts =
+    index < 0
+      ? [...receipts, receipt]
+      : receipts.map((item, itemIndex) =>
+          itemIndex === index ? receipt : item,
+        );
+  liveStatus.value =
+    receipt.status === "voided"
+      ? "押金登记已撤销并留痕，可重新上传"
+      : receipt.status === "verified"
+        ? "押金金额已验证并留痕"
+        : "押金条已上传并留痕";
+  await loadDetail();
+}
+
+async function handleDepositReceiptRemoved(depositReceiptId: string) {
+  if (!detail.value) return;
+  detail.value.depositReceipts = (detail.value.depositReceipts || []).filter(
+    (receipt) => receipt.id !== depositReceiptId,
+  );
+  liveStatus.value = "误上传的押金条已删除，可重新上传";
+  await loadDetail();
+}
+
+async function handleDepositManagementUpdated() {
+  liveStatus.value = "押金记录已更新";
+  await loadDetail();
+}
+
+async function handleCompletedInternalFundingSaved() {
+  liveStatus.value = "工程咨询内部划拨回单已补充";
+  await loadDetail();
+}
+
 const financialRegistrationCards = computed<FinancialRegistrationCard[]>(() => {
   const documents: FinancialRegistrationDocument[] = [
     ...(detail.value?.invoices || []).map((record) => ({
@@ -3082,13 +3335,13 @@ const financialRegistrationCards = computed<FinancialRegistrationCard[]>(() => {
       type: "payments" as const,
       label:
         detail.value?.contract.assetFundingMode === "engineering_to_technology"
-          ? "工程咨询→科技划拨回单"
+          ? `工程咨询→${assetSigningSubject.value || "签约公司"}划拨回单`
           : "付款凭证",
       record,
     })),
     ...(detail.value?.externalPayments || []).map((record) => ({
       type: "externalPayments" as const,
-      label: "科技→合同对方付款回单",
+      label: `${assetSigningSubject.value || "签约公司"}→合同对方付款回单`,
       record,
     })),
   ];
@@ -3106,7 +3359,8 @@ const financialRegistrationCards = computed<FinancialRegistrationCard[]>(() => {
     cards.set(key, {
       key,
       registrationId,
-      status: document.record.status,
+      status:
+        document.record.financialRegistrationStatus || document.record.status,
       documents: [document],
       matches: registrationId
         ? (detail.value?.financialRegistrationMatches || []).filter(
@@ -3116,8 +3370,32 @@ const financialRegistrationCards = computed<FinancialRegistrationCard[]>(() => {
     });
   }
   for (const card of cards.values()) {
-    if (card.registrationId && !card.matches.length) {
+    const registrationStatus = card.documents
+      .map((document) => document.record.financialRegistrationStatus)
+      .find((status) => Boolean(status));
+    if (registrationStatus) {
+      card.status = registrationStatus;
+    }
+    if (card.registrationId && !registrationStatus && !card.matches.length) {
       card.matches = deriveLegacyFinancialMatches(card);
+    }
+    if (card.registrationId && !registrationStatus && !isAssetContract.value) {
+      const allReversed = card.documents.every(
+        (document) => document.record.status === "reversed",
+      );
+      const allConfirmed = card.documents.every(
+        (document) => document.record.status === "confirmed",
+      );
+      const { invoiceCents, settlementCents, matchedCents } =
+        financialRegistrationAmountSummary(card);
+      card.status = allReversed
+        ? "reversed"
+        : allConfirmed &&
+            invoiceCents > 0 &&
+            invoiceCents === settlementCents &&
+            invoiceCents === matchedCents
+          ? "confirmed"
+          : "draft";
     }
   }
   return [...cards.values()].sort((left, right) => {
@@ -3167,6 +3445,16 @@ const financialRegistrationTargetBankDocuments = computed(() =>
         document.record.fileName ||
         "未命名银行凭证",
       amount: Number(document.record.amount),
+      confirmedDepositAmount:
+        document.record.confirmedDepositAmount === null ||
+        document.record.confirmedDepositAmount === undefined
+          ? null
+          : Number(document.record.confirmedDepositAmount),
+      invoiceRequiredAmount:
+        document.record.invoiceRequiredAmount === null ||
+        document.record.invoiceRequiredAmount === undefined
+          ? null
+          : Number(document.record.invoiceRequiredAmount),
       payer: document.record.payer,
       payerAccount: document.record.payerAccount,
       payee: document.record.payee,
@@ -3174,9 +3462,11 @@ const financialRegistrationTargetBankDocuments = computed(() =>
       referenceNo: document.record.electronicReceiptNo,
       paymentTime: document.record.paymentTime,
       fileName: document.record.fileName,
-      previewUrl: document.record.fileId
-        ? getContractFileUrl(document.record.fileId)
-        : "",
+      previewUrl:
+        document.record.canonicalReceiptPreviewUrl ||
+        (document.record.fileId
+          ? getContractFileUrl(document.record.fileId)
+          : ""),
     })),
 );
 const financialRegistrationTargetExternalPayments = computed(() =>
@@ -3189,6 +3479,16 @@ const financialRegistrationTargetExternalPayments = computed(() =>
         document.record.fileName ||
         "未命名对外付款",
       amount: Number(document.record.amount),
+      confirmedDepositAmount:
+        document.record.confirmedDepositAmount === null ||
+        document.record.confirmedDepositAmount === undefined
+          ? null
+          : Number(document.record.confirmedDepositAmount),
+      invoiceRequiredAmount:
+        document.record.invoiceRequiredAmount === null ||
+        document.record.invoiceRequiredAmount === undefined
+          ? null
+          : Number(document.record.invoiceRequiredAmount),
       payer: document.record.payer,
       payerAccount: document.record.payerAccount,
       payee: document.record.payee,
@@ -3196,9 +3496,11 @@ const financialRegistrationTargetExternalPayments = computed(() =>
       referenceNo: document.record.electronicReceiptNo,
       paymentTime: document.record.paymentTime,
       fileName: document.record.fileName,
-      previewUrl: document.record.fileId
-        ? getContractFileUrl(document.record.fileId)
-        : "",
+      previewUrl:
+        document.record.canonicalReceiptPreviewUrl ||
+        (document.record.fileId
+          ? getContractFileUrl(document.record.fileId)
+          : ""),
     })),
 );
 const financialRegistrationTargetDirection = computed<"income" | "cost" | null>(
@@ -3217,6 +3519,13 @@ const financialRegistrationTargetDirection = computed<"income" | "cost" | null>(
       )
     )
       return "cost";
+    if (
+      directions.size === 0 &&
+      (financialRegistrationTarget.value?.documents || []).some(
+        (document) => document.type === "receipts",
+      )
+    )
+      return "income";
     if (directions.size !== 1) return null;
     return directions.has("output") ? "income" : "cost";
   },
@@ -3247,6 +3556,13 @@ watch(
   { immediate: true },
 );
 
+function financialRecordInvoiceRequiredCents(
+  record: ContractFinanceRecord,
+): number {
+  const amount = record.invoiceRequiredAmount ?? record.amount;
+  return Math.round(Number(amount || 0) * 100);
+}
+
 function financialRegistrationAmountSummary(card: FinancialRegistrationCard) {
   const invoiceCents = card.documents
     .filter((document) => document.type === "invoices")
@@ -3260,13 +3576,18 @@ function financialRegistrationAmountSummary(card: FinancialRegistrationCard) {
         document.type === "receipts" || document.type === "payments",
     )
     .reduce(
-      (sum, document) => sum + Math.round(Number(document.record.amount) * 100),
+      (sum, document) =>
+        sum +
+        (isInternalFundingMode.value && document.type === "payments"
+          ? Math.round(Number(document.record.amount || 0) * 100)
+          : financialRecordInvoiceRequiredCents(document.record)),
       0,
     );
   const externalCents = card.documents
     .filter((document) => document.type === "externalPayments")
     .reduce(
-      (sum, document) => sum + Math.round(Number(document.record.amount) * 100),
+      (sum, document) =>
+        sum + financialRecordInvoiceRequiredCents(document.record),
       0,
     );
   const matchedCents = card.matches
@@ -3310,6 +3631,35 @@ function financialCardExternalAmount(card: FinancialRegistrationCard): number {
   return financialRegistrationAmountSummary(card).externalCents / 100;
 }
 
+function financialCardExternalBankAmount(
+  card: FinancialRegistrationCard,
+): number {
+  return (
+    card.documents
+      .filter((document) => document.type === "externalPayments")
+      .reduce(
+        (sum, document) =>
+          sum + Math.round(Number(document.record.amount || 0) * 100),
+        0,
+      ) / 100
+  );
+}
+
+function financialCardExternalDepositAmount(
+  card: FinancialRegistrationCard,
+): number {
+  return (
+    card.documents
+      .filter((document) => document.type === "externalPayments")
+      .reduce(
+        (sum, document) =>
+          sum +
+          Math.round(Number(document.record.confirmedDepositAmount || 0) * 100),
+        0,
+      ) / 100
+  );
+}
+
 function financialCardExternalRemainingAmount(
   card: FinancialRegistrationCard,
 ): number {
@@ -3321,9 +3671,12 @@ function financialCardExternalRemainingAmount(
 function financialCardInvoiceRemainingAmount(
   card: FinancialRegistrationCard,
 ): number {
-  const { invoiceCents, externalCents } =
+  const { invoiceCents, settlementCents, externalCents } =
     financialRegistrationAmountSummary(card);
-  return Math.max(0, externalCents - invoiceCents) / 100;
+  const comparisonCents = isInternalFundingMode.value
+    ? externalCents
+    : settlementCents;
+  return Math.max(0, comparisonCents - invoiceCents) / 100;
 }
 
 function financialCardInternalPendingLabel(
@@ -3341,6 +3694,49 @@ function financialCardSettlementAction(card: FinancialRegistrationCard) {
     : "回款";
 }
 
+function financialRegistrationCardTitle(card: FinancialRegistrationCard) {
+  if (!card.registrationId) return "历史财务记录";
+  if (isInternalFundingMode.value) {
+    return isAwaitingSettlement(card)
+      ? "发票与付款待闭环"
+      : "发票与回单财务登记";
+  }
+  if (financialCardInvoiceRemainingAmount(card) > 0) {
+    return "回款登记·待补发票";
+  }
+  if (financialCardRemainingAmount(card) > 0) {
+    return "发票与回款待闭环";
+  }
+  return "发票与回单财务登记";
+}
+
+function financialRegistrationCardStatusLabel(card: FinancialRegistrationCard) {
+  if (!card.registrationId || card.status !== "draft") {
+    return financeRecordStatusLabel(card.status);
+  }
+  if (isInternalFundingMode.value) {
+    return isAwaitingSettlement(card)
+      ? financialCardInternalPendingLabel(card)
+      : financeRecordStatusLabel(card.status);
+  }
+  if (financialCardInvoiceRemainingAmount(card) > 0) return "待补发票";
+  if (financialCardRemainingAmount(card) > 0) return "待补回款";
+  if (canConfirmFinancialCard(card)) return "待整组确认";
+  return financeRecordStatusLabel(card.status);
+}
+
+function financialCardPendingActionLabel(card: FinancialRegistrationCard) {
+  if (!isInternalFundingMode.value) {
+    if (financialCardInvoiceRemainingAmount(card) > 0) {
+      return "尚待补发票，暂不可确认";
+    }
+    if (financialCardRemainingAmount(card) > 0) {
+      return "尚待补回款，暂不可确认";
+    }
+  }
+  return `尚待${financialCardSettlementAction(card)}，暂不可确认`;
+}
+
 function hasConfirmedSettlement(card: FinancialRegistrationCard): boolean {
   return card.documents.some(
     (document) =>
@@ -3353,6 +3749,9 @@ function isAwaitingSettlement(card: FinancialRegistrationCard): boolean {
   if (!card.registrationId) return false;
   const { invoiceCents, settlementCents } =
     financialRegistrationAmountSummary(card);
+  if (!isAssetContract.value) {
+    return invoiceCents !== settlementCents;
+  }
   const externalCents = financialRegistrationAmountSummary(card).externalCents;
   const usesExternalSettlement =
     detail.value?.contract.assetFundingMode === "engineering_to_technology";
@@ -3377,6 +3776,7 @@ async function continueFinancialRegistration(card: FinancialRegistrationCard) {
 function cancelFinancialRegistrationContinuation() {
   financialRegistrationPanelRef.value?.reset();
   financialRegistrationTargetId.value = "";
+  depositReceiptExpandedIds.value = [];
 }
 
 function deriveLegacyFinancialMatches(
@@ -4338,6 +4738,19 @@ function openFile(fileId: string) {
   readonlyPreviewMimeType.value = file.mimeType || "";
   readonlyPreviewFileId.value = file.id;
   readonlyPreviewVisible.value = true;
+}
+
+function openFinancialRecordFile(record: ContractFinanceRecord) {
+  if (record.canonicalReceiptPreviewUrl) {
+    window.open(
+      record.canonicalReceiptPreviewUrl,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    liveStatus.value = "已打开月底银行原件中的对应回单";
+    return;
+  }
+  if (record.fileId) openFile(record.fileId);
 }
 
 function closeReadonlyPreview() {
@@ -5406,6 +5819,13 @@ onBeforeUnmount(() => {
   border-radius: 9px;
   background: #f6f8fa;
 }
+.document-kind-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
 .document-kind {
   display: inline-flex;
   align-items: center;
@@ -5417,6 +5837,20 @@ onBeforeUnmount(() => {
   font-size: 12px;
   font-weight: 650;
 }
+.registration-document-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.registration-document-actions :deep(.el-button) {
+  margin-left: 0;
+}
+.registration-document-deposit {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+}
 .document-summary {
   display: flex;
   min-width: 0;
@@ -5427,6 +5861,10 @@ onBeforeUnmount(() => {
   color: #8996a2;
   overflow-wrap: anywhere;
   white-space: normal;
+}
+.document-summary .document-deposit-summary {
+  color: #247f77;
+  font-weight: 650;
 }
 .registration-balance-summary {
   display: flex;
@@ -5873,6 +6311,12 @@ onBeforeUnmount(() => {
   }
   .document-kind {
     justify-self: flex-start;
+  }
+  .registration-document-actions {
+    justify-content: flex-start;
+  }
+  .registration-document-deposit {
+    grid-column: 1;
   }
   .seal-file-summary {
     align-items: flex-start;

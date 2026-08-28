@@ -16,6 +16,14 @@ export function toFileUrl(filePath: string): string {
   const bankMatch = filePath.match(/(?:\/?)uploads\/bank-receipts\/(.+)/)
   if (bankMatch) return `/api/files/bank-receipts/${bankMatch[1]}`
 
+  // 月度银行原件自动挂载到报销单的付款回单裁片
+  const monthlyBankMatch = filePath.match(
+    /(?:\/?)uploads\/monthly-financial-bank\/(.+)/,
+  )
+  if (monthlyBankMatch) {
+    return `/api/files/monthly-bank-proofs/${monthlyBankMatch[1]}`
+  }
+
   const match = filePath.match(/(?:\/?)uploads\/invoices\/(.+)/)
   if (match) {
     const relativeFilePath = match[1]

@@ -64,6 +64,30 @@ export type ContractAssetFundingMode =
   | "technology_direct"
   | "pending_review";
 export type ContractFinanceRecordStatus = "draft" | "confirmed" | "reversed";
+export type ContractDepositReceiptStatus =
+  | "recognizing"
+  | "recognized"
+  | "manual_review"
+  | "verified"
+  | "failed"
+  | "voided";
+export type ContractDepositStatus =
+  | "pending_payment"
+  | "active"
+  | "partially_settled"
+  | "settled";
+export type ContractDepositPaymentPurpose = "lease_deposit";
+export type ContractDepositFundingSource =
+  | "engineering_allocation"
+  | "technology_self_funded"
+  | "mixed"
+  | "pending_review";
+export type ContractDepositPaymentRecordKind = "payment" | "external_payment";
+export type ContractDepositSettlementType =
+  | "refund"
+  | "deduction"
+  | "rent_offset";
+export type ContractPaymentPurpose = "contract_payment" | "lease_deposit";
 export type ContractBusinessFinancialDirection = "income" | "cost";
 export type ContractSettlementStatus = "unsettled" | "partial" | "settled";
 
@@ -264,6 +288,9 @@ export interface ContractListItem {
   currentEffectiveAmount?: MoneyValue | null;
   projectedAmount?: MoneyValue | null;
   pendingSupplementCount?: number | null;
+  relatedAgreementCount?: number;
+  supplementAgreementCount?: number;
+  terminationAgreementCount?: number;
   amountBeforeChange?: MoneyValue | null;
   amountAfterChange?: MoneyValue | null;
   fulfilledAmount?: MoneyValue | null;
@@ -272,6 +299,8 @@ export interface ContractListItem {
   receivedAmount?: MoneyValue | null;
   paidAmount?: MoneyValue | null;
   externalPaidAmount?: MoneyValue | null;
+  /** 合同履约结算额；房租合同不包含保证金、电费等合同外付款。 */
+  costSettledAmount?: MoneyValue | null;
   completionRate?: number | null;
   financialDirection?: ContractBusinessFinancialDirection | null;
   financialDirectionSource?: "contract_category" | "invoice" | null;
@@ -300,6 +329,7 @@ export interface ContractListItem {
   hasSealedContractFile?: boolean;
   leaseExpiringSoon?: boolean;
   ownerName?: string | null;
+  historicalImported?: boolean;
   updatedAt?: string | null;
   createdAt?: string | null;
   invoiceApplicationEligibility?: {
@@ -542,6 +572,8 @@ export interface ContractFinanceRecord {
   type?: ContractFinanceRecordType;
   status: ContractFinanceRecordStatus;
   amount: MoneyValue;
+  confirmedDepositAmount?: MoneyValue | null;
+  invoiceRequiredAmount?: MoneyValue | null;
   recordDate?: string | null;
   invoiceNo?: string | null;
   itemName?: string | null;
@@ -562,22 +594,241 @@ export interface ContractFinanceRecord {
   expenseCategory?: ContractExpenseCategory | null;
   financialOcrJobId?: string | null;
   financialOcrStatus?: ContractFinancialOcrTaskStatus | null;
+  financialRecognitionMethod?: string | null;
+  financialEngineVersion?: string | null;
+  historicalConfirmedImport?: boolean;
   financialValidationStatus?: ContractFinancialValidationStatus | null;
   financialDirection?: ContractFinancialDirection | null;
   financialDocumentStatus?: ContractFinancialDocumentStatus | null;
   financialCanAutoPost?: boolean;
   financialBlockingReasons?: ContractFinancialBlockingReason[];
   financialRegistrationId?: string | null;
+  financialRegistrationStatus?: ContractFinanceRecordStatus | null;
   paymentTime?: string | null;
   note?: string | null;
   fileId?: string | null;
   fileName?: string | null;
+  canonicalReceiptPreviewUrl?: string | null;
   reversed?: boolean;
   reversedAt?: string | null;
   confirmedBy?: string | null;
   confirmedAt?: string | null;
   createdByName?: string | null;
   createdAt?: string | null;
+}
+
+export interface ContractDepositReceipt {
+  id: string;
+  contractId: string;
+  financialRecordId: string;
+  fileId: string;
+  fileName: string;
+  mimeType?: string | null;
+  previewUrl?: string | null;
+  ocrAmount?: MoneyValue | null;
+  verifiedAmount?: MoneyValue | null;
+  status: ContractDepositReceiptStatus;
+  recognitionMessage?: string | null;
+  createdBy?: string | null;
+  createdByName?: string | null;
+  createdAt?: string | null;
+  verifiedBy?: string | null;
+  verifiedByName?: string | null;
+  verifiedAt?: string | null;
+  voidedBy?: string | null;
+  voidedByName?: string | null;
+  voidedAt?: string | null;
+  voidReason?: string | null;
+}
+
+export interface ContractDepositSettlement {
+  id: string;
+  type: ContractDepositSettlementType;
+  amount: MoneyValue;
+  settlementDate: string;
+  note?: string | null;
+  refundReceipt: ContractDepositSettlementReceipt | null;
+  engineeringReturnReceipts: ContractDepositSettlementReceipt[];
+  engineeringReturnRequiredAmount?: MoneyValue | null;
+  engineeringReturnedAmount?: MoneyValue | null;
+  engineeringReturnStatus?:
+    | "not_required"
+    | "pending"
+    | "partial"
+    | "returned"
+    | "completed"
+    | null;
+  createdBy?: string | null;
+  createdByName?: string | null;
+  createdAt?: string | null;
+}
+
+export interface ContractDepositSettlementReceipt {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  mimeType?: string | null;
+  amount: MoneyValue;
+  transactionDate: string;
+  fileUrl: string;
+  uploadedBy?: string | null;
+  uploadedByName?: string | null;
+  createdAt?: string | null;
+}
+
+export type ContractDepositReturnReceiptKind =
+  | "deposit_refund"
+  | "engineering_return";
+
+export interface ContractDepositReturnReceiptFields {
+  paymentTime: string;
+  amount: MoneyValue | null;
+  electronicReceiptNo: string;
+  payer: string;
+  payerAccount: string;
+  payee: string;
+  payeeAccount: string;
+}
+
+export interface ContractDepositReturnReceiptRecognition {
+  jobId: string;
+  fileId: string;
+  receiptKind: ContractDepositReturnReceiptKind;
+  targetId: string;
+  status: ContractFinancialOcrTaskStatus;
+  validationStatus: ContractFinancialValidationStatus | null;
+  canConfirm: boolean;
+  fields: ContractDepositReturnReceiptFields;
+  blockingReasons: ContractFinancialBlockingReason[];
+  warnings: string[];
+  engineVersion?: string | null;
+  parserVersion?: string | null;
+  fileUrl?: string | null;
+}
+
+export interface ContractDepositRecord {
+  id: string;
+  contractId: string;
+  amount: MoneyValue;
+  clauseText?: string | null;
+  basis?: string | null;
+  paymentPurpose: ContractDepositPaymentPurpose;
+  fundingSource: ContractDepositFundingSource;
+  paymentRecordId?: string | null;
+  paymentRecordKind?: ContractDepositPaymentRecordKind | null;
+  paidAt?: string | null;
+  note?: string | null;
+  engineeringAllocationAmount: MoneyValue;
+  technologySelfFundedAmount: MoneyValue;
+  pendingEngineeringReturn: MoneyValue;
+  status: ContractDepositStatus;
+  settledAmount: MoneyValue;
+  remainingAmount: MoneyValue;
+  settlements: ContractDepositSettlement[];
+  createdBy?: string | null;
+  createdByName?: string | null;
+  createdAt?: string | null;
+  updatedBy?: string | null;
+  updatedByName?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface ContractDepositEligibility {
+  likely: boolean;
+  reason: "rental_subtype" | "non_rental_subtype";
+  subtype?: ContractDeclaredSubtype | null;
+}
+
+export interface ContractDepositSnapshot {
+  eligibility: ContractDepositEligibility;
+  deposit: ContractDepositRecord | null;
+}
+
+export interface ContractDepositMutationPayload {
+  amount: MoneyValue;
+  clauseText?: string;
+  basis?: string;
+  paymentPurpose: ContractDepositPaymentPurpose;
+  fundingSource: ContractDepositFundingSource;
+  engineeringAllocationAmount?: MoneyValue;
+  technologySelfFundedAmount?: MoneyValue;
+  paymentRecordId?: string;
+  note?: string;
+}
+
+export type ContractDepositSettlementPayload =
+  | {
+      type: "refund";
+      ocrJobId: string;
+      note?: string;
+    }
+  | {
+      type: "deduction" | "rent_offset";
+      amount: MoneyValue;
+      settlementDate: string;
+      note: string;
+      file?: never;
+    };
+
+export interface ContractDepositEngineeringReturnPayload {
+  ocrJobId: string;
+  note?: string;
+}
+
+export interface ContractCompletedInternalFundingReceipt {
+  id: string;
+  fileId?: string | null;
+  fileName: string;
+  fileSize?: number | null;
+  mimeType?: string | null;
+  amount: MoneyValue;
+  paymentTime: string;
+  electronicReceiptNo?: string | null;
+  payer?: string | null;
+  payerAccount?: string | null;
+  payee?: string | null;
+  payeeAccount?: string | null;
+  previewUrl?: string | null;
+}
+
+export interface ContractCompletedInternalFundingRecognition {
+  jobId: string;
+  fileId: string;
+  fileName?: string | null;
+  fileSize?: number | null;
+  status: ContractFinancialOcrTaskStatus;
+  validationStatus: ContractFinancialValidationStatus | null;
+  canConfirm: boolean;
+  fields: ContractFinancialBankFields;
+  blockingReasons: ContractFinancialBlockingReason[];
+  warnings: string[];
+  fileUrl?: string | null;
+}
+
+export interface ContractCompletedInternalFundingSummary {
+  canAppendAfterCompletion: boolean;
+  contractCompanySubjectName: string;
+  requiredAmount: MoneyValue;
+  confirmedAmount: MoneyValue;
+  pendingAmount: MoneyValue;
+  remainingAmount: MoneyValue;
+  availableRecognitionAmount?: MoneyValue;
+  receipts: ContractCompletedInternalFundingReceipt[];
+  pendingRecognitions: ContractCompletedInternalFundingRecognition[];
+}
+
+export interface ContractPaymentPurposeDetail {
+  purpose: ContractPaymentPurpose;
+  amount: MoneyValue;
+  fundingSource: ContractDepositFundingSource;
+  engineeringAllocationAmount?: MoneyValue | null;
+  technologySelfFundedAmount?: MoneyValue | null;
+}
+
+export interface ContractPaymentPurposeDetails {
+  contractId: string;
+  recordId: string;
+  details: ContractPaymentPurposeDetail[];
 }
 
 export interface ContractRelation {
@@ -618,6 +869,9 @@ export interface ContractAccounting {
   unreceivedAmount?: MoneyValue | null;
   unpaidAmount?: MoneyValue | null;
   monthExpense?: MoneyValue | null;
+  costSettledAmount?: MoneyValue | null;
+  settledAmount?: MoneyValue | null;
+  completionRate?: number | null;
   overAmount?: MoneyValue | null;
   lines: ContractAccountingLine[];
   note?: string | null;
@@ -633,6 +887,7 @@ export interface ContractDetailResponse {
     effectiveAt?: string | null;
     completedAt?: string | null;
     terminatedAt?: string | null;
+    contractCompanySubjectName?: string | null;
   };
   files: ContractFile[];
   ocrJob: ContractOcrJob | null;
@@ -642,6 +897,7 @@ export interface ContractDetailResponse {
   receipts: ContractFinanceRecord[];
   payments: ContractFinanceRecord[];
   externalPayments: ContractFinanceRecord[];
+  depositReceipts: ContractDepositReceipt[];
   financialRegistrationMatches: ContractFinancialRegistrationMatch[];
   relations: ContractRelation[];
   accounting: ContractAccounting | null;
@@ -1006,7 +1262,7 @@ export interface ContractFinancialRegistrationResult {
   invoiceRecordId: string | null;
   settlementRecordId: string | null;
   matches: ContractFinancialRegistrationMatch[];
-  status: "draft";
+  status: "draft" | "confirmed";
 }
 
 export type ContractFinancialOcrTaskStatus =
@@ -1087,6 +1343,9 @@ export interface ContractFinancialOcrResult {
   status: ContractFinancialOcrTaskStatus;
   validationStatus: ContractFinancialValidationStatus | null;
   recognitionMethod: string | null;
+  engineVersion?: string | null;
+  parserVersion?: string | null;
+  requiresRefresh?: boolean;
   evidenceTextHash: string | null;
   direction: ContractFinancialDirection | null;
   expectedDirection: "input" | "output" | "receipt" | "payment" | "unknown";

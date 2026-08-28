@@ -2,6 +2,8 @@
  * 发票校验相关逻辑
  */
 
+import { buildUploadingInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
+
 export interface ValidationResult {
   valid: boolean
   message: string
@@ -116,17 +118,30 @@ export function validateInvoiceDate(invoiceDateStr: string): ValidationResult {
  */
 export function validateInvoiceDuplicate(
   invoiceNumber: string,
-  existingNumbers: string[]
+  existingNumbers: string[],
 ): ValidationResult {
   if (!invoiceNumber) {
     return { valid: true, message: '' }
   }
 
-  const isDuplicate = existingNumbers.includes(invoiceNumber)
+  const normalizedInvoiceNumber = invoiceNumber
+    .normalize('NFKC')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .toUpperCase()
+  const isDuplicate = Boolean(
+    normalizedInvoiceNumber &&
+      existingNumbers.some(
+        (existingNumber) =>
+          String(existingNumber || '')
+            .normalize('NFKC')
+            .replace(/[^A-Za-z0-9]/g, '')
+            .toUpperCase() === normalizedInvoiceNumber,
+      ),
+  )
   if (isDuplicate) {
     return {
       valid: false,
-      message: `发票号码 ${invoiceNumber} 已存在，请勿重复上传`,
+      message: buildUploadingInvoiceDuplicateMessage(invoiceNumber),
     }
   }
 

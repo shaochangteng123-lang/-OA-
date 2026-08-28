@@ -179,6 +179,57 @@
           </div>
 
           <div
+            v-if="
+              category.value === 'net_salary' &&
+              receiptSummary.monthly_salary_bank
+            "
+            class="receipt-file-list monthly-salary-bank-file"
+          >
+            <div class="receipt-file-list-heading">
+              <span>月报基本账户回单</span>
+              <small>
+                {{ receiptSummary.monthly_salary_bank.linked_item_count }}/{{
+                  receiptSummary.monthly_salary_bank.total_item_count
+                }}
+                笔已挂载
+              </small>
+            </div>
+            <div class="receipt-file-item">
+              <div class="receipt-file-main">
+                <a
+                  :href="
+                    getMonthlySalaryBankFilePreviewUrl(
+                      receiptSummary.monthly_salary_bank.id,
+                    )
+                  "
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  :title="receiptSummary.monthly_salary_bank.file_name"
+                >
+                  {{ receiptSummary.monthly_salary_bank.file_name }}
+                </a>
+                <small>
+                  已按员工逐笔挂载 · ¥{{
+                    formatExact(
+                      receiptSummary.monthly_salary_bank.recognized_amount,
+                    )
+                  }}
+                  <template
+                    v-if="
+                      receiptSummary.monthly_salary_bank.conflict_item_count > 0
+                    "
+                  >
+                    ·
+                    {{ receiptSummary.monthly_salary_bank.conflict_item_count }}
+                    笔待严格核对
+                  </template>
+                </small>
+              </div>
+              <el-tag type="success" effect="plain">当前凭证</el-tag>
+            </div>
+          </div>
+
+          <div
             v-if="getCategoryReceipts(category.value).length > 0"
             class="receipt-file-list"
           >
@@ -212,15 +263,27 @@
                 </small>
               </div>
               <el-button
+                v-if="!receipt.audit_locked"
                 link
                 type="danger"
                 :disabled="receipt.recognition_status === 'processing'"
                 @click="removeReceipt(receipt)"
                 >删除</el-button
               >
+              <el-tag v-else type="info" effect="plain">审计留存</el-tag>
             </div>
           </div>
-          <p v-else-if="!receiptLoading" class="receipt-empty">
+          <p
+            v-if="
+              getCategoryReceipts(category.value).length === 0 &&
+              !receiptLoading &&
+              !(
+                category.value === 'net_salary' &&
+                receiptSummary.monthly_salary_bank
+              )
+            "
+            class="receipt-empty"
+          >
             <span></span>本月尚未上传{{ category.label }}回单
           </p>
         </article>
@@ -605,12 +668,40 @@
           class="salary-receipt-preview-card"
         >
           <img
-            :src="getSalaryReceiptItemPreviewUrl(receipt.id)"
+            :src="getSalaryReceiptItemPreviewUrl(receipt)"
             :alt="`${selectedPayrollRow.employee_name}工资银行回单`"
           />
           <div>
             <strong>回单金额 ¥{{ formatExact(receipt.amount) }}</strong>
-            <span>{{ receipt.file_name }} · 第 {{ receipt.page_no }} 页</span>
+            <span>
+              {{ receipt.file_name }} · 第 {{ receipt.page_no }} 页
+              <template v-if="receipt.source === 'monthly_bank'">
+                · 月报基本账户
+              </template>
+            </span>
+            <span
+              v-if="receipt.transaction_date || receipt.electronic_receipt_no"
+            >
+              {{ receipt.transaction_date || "交易日期未识别" }}
+              <template v-if="receipt.electronic_receipt_no">
+                · 电子回单号 {{ receipt.electronic_receipt_no }}
+              </template>
+            </span>
+            <a
+              v-if="receipt.previous_receipt_item_id"
+              :href="
+                getPreviousSalaryReceiptItemPreviewUrl(
+                  receipt.previous_receipt_item_id,
+                )
+              "
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              查看替换前原回单
+              <template v-if="receipt.previous_file_name">
+                （{{ receipt.previous_file_name }}）
+              </template>
+            </a>
           </div>
         </article>
       </div>
@@ -626,8 +717,10 @@ import {
   deleteHumanCostReceipt,
   getHumanCostReceiptPreviewUrl,
   getHumanCostReceipts,
+  getMonthlySalaryBankFilePreviewUrl,
   getPayrollTaxDetailPreviewUrl,
   getPayroll,
+  getPreviousSalaryReceiptItemPreviewUrl,
   getSalaryReceiptItemPreviewUrl,
   uploadPayrollTaxDetail,
   uploadHumanCostReceipts,
@@ -664,6 +757,7 @@ const receiptSummary = ref<HumanCostReceiptSummary>({
     net_salary: "0.00",
   },
   processing_count: 0,
+  monthly_salary_bank: null,
   tax_detail: null,
 });
 const receiptUploading = reactive<Record<HumanCostReceiptCategory, boolean>>({
@@ -831,13 +925,31 @@ function getCategoryReceipts(
 }
 
 function isReceiptCategoryLocked(category: HumanCostReceiptCategory): boolean {
-  return getCategoryReceipts(category).length > 0;
+  return (
+    getCategoryReceipts(category).length > 0 ||
+    (category === "net_salary" &&
+      Boolean(receiptSummary.value.monthly_salary_bank?.linked_item_count))
+  );
 }
 
 function getReconciliation(category: (typeof receiptCategories)[number]) {
   const receipts = getCategoryReceipts(category.value);
+  const monthlySalaryBank =
+    category.value === "net_salary"
+      ? receiptSummary.value.monthly_salary_bank
+      : null;
   if (receipts.some((receipt) => receipt.recognition_status === "processing")) {
     return { label: "识别中", tagType: "warning" as const };
+  }
+  if (
+    monthlySalaryBank &&
+    (monthlySalaryBank.conflict_item_count > 0 ||
+      monthlySalaryBank.linked_item_count < monthlySalaryBank.total_item_count)
+  ) {
+    return { label: "待严格核对", tagType: "warning" as const };
+  }
+  if (monthlySalaryBank && receipts.length === 0) {
+    return { label: "已按员工挂载", tagType: "success" as const };
   }
   if (receipts.length === 0) {
     return { label: "待上传", tagType: "info" as const };

@@ -54,8 +54,10 @@ describe("报销发票与合同财务发票跨模块查重", () => {
       rows: [
         {
           source: "reimbursement",
+          usage_kind: "deduction",
           record_id: "reimbursement-invoice-1",
           owner_id: "reimbursement-1",
+          applicant_name: "刘行",
         },
       ],
     });
@@ -64,14 +66,23 @@ describe("报销发票与合同财务发票跨模块查重", () => {
       findReimbursementInvoiceUsage({ query } as any, "fp-001"),
     ).resolves.toEqual({
       source: "reimbursement",
+      usageKind: "deduction",
       recordId: "reimbursement-invoice-1",
       ownerId: "reimbursement-1",
+      applicantName: "刘行",
     });
     expect(query.mock.calls[0][0]).toContain("reimbursement_invoices");
     expect(query.mock.calls[0][0]).toContain(
       "reimbursement_deduction_invoices",
     );
     expect(query.mock.calls[0][0]).toContain("NOT LIKE 'receipt-%'");
+    expect(query.mock.calls[0][0]).toContain(
+      "COALESCE(invoice.is_deduction, 0) = 1",
+    );
+    expect(query.mock.calls[0][0]).toContain("AS usage_kind");
+    expect(query.mock.calls[0][0]).toContain(
+      "reimbursement.applicant_name",
+    );
   });
 
   it("报销预查、上传、创建、编辑、恢复和核减写入共用跨模块门禁", () => {

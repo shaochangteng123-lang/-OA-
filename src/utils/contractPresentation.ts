@@ -26,7 +26,7 @@ export const FALLBACK_CONTRACT_DECLARED_SUBTYPE_OPTIONS: ContractDeclaredSubtype
       { value: "equipment", label: "设备合同" },
       { value: "house_rental", label: "房屋租赁" },
       { value: "vehicle_rental", label: "汽车租赁" },
-      { value: "parking_space", label: "车位合同" },
+      { value: "parking_space", label: "车位租赁" },
       { value: "office_asset", label: "办公资产合同" },
     ],
   };
@@ -45,7 +45,7 @@ export const CONTRACT_DECLARED_SUBTYPE_LABELS: Record<
   equipment: "设备合同",
   house_rental: "房屋租赁",
   vehicle_rental: "汽车租赁",
-  parking_space: "车位合同",
+  parking_space: "车位租赁",
   office_asset: "办公资产合同",
 };
 
@@ -58,7 +58,7 @@ export const CONTRACT_ASSET_CATEGORY_LABELS: Record<
   equipment: "设备合同",
   house_rental: "房屋租赁",
   vehicle_rental: "汽车租赁",
-  parking_space: "车位合同",
+  parking_space: "车位租赁",
   office_asset: "办公资产合同",
   other: "其他",
 };

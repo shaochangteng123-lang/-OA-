@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import sharp from "sharp";
 
 jest.mock("../server/services/ocrDaemon", () => ({
   callPaddleOcr: jest.fn(),
@@ -42,6 +43,8 @@ const COMPANY_NAME = "北京羽隶工程咨询有限公司";
 const COMPANY_TAX_ID = "91110116MA01G3U20C";
 const TECHNOLOGY_NAME = "北京羽隶科技有限公司";
 const TECHNOLOGY_TAX_ID = "91110116MA01BN342Y";
+const THIRD_COMPANY_NAME = "北京羽隶企业管理有限公司";
+const THIRD_COMPANY_TAX_ID = "91110116MA01TEST3X";
 const COMPANY_BANK_ACCOUNTS = [
   "0200066019025904086",
   "0200303519000018418",
@@ -55,6 +58,12 @@ const GROUP_COMPANY_CONTEXT = {
   companySubjects: [
     { name: COMPANY_NAME, taxId: COMPANY_TAX_ID },
     { name: TECHNOLOGY_NAME, taxId: TECHNOLOGY_TAX_ID },
+  ],
+};
+const MULTI_COMPANY_CONTEXT = {
+  companySubjects: [
+    ...GROUP_COMPANY_CONTEXT.companySubjects,
+    { name: THIRD_COMPANY_NAME, taxId: THIRD_COMPANY_TAX_ID },
   ],
 };
 
@@ -1375,6 +1384,156 @@ describe("合同财务凭证独立识别服务", () => {
     }
   });
 
+  it("整图遗漏收款主体时仅增强一次动态主体带并恢复明确角色同行值", async () => {
+    const filePath = path.join(temporaryDirectory, "主体缺失回单.png");
+    await sharp({
+      create: {
+        width: 1904,
+        height: 882,
+        channels: 3,
+        background: "white",
+      },
+    })
+      .png()
+      .toFile(filePath);
+    const primaryText = `招商银行 出账回单
+交易日期：2026年04月30日
+付款账号：110933697910902
+付款人：北京羽隶科技有限公司
+付款开户行：招商银行北京分行北京大运村支行
+收款开户行：中国建设银行北京燕莎东支行
+交易金额(小写)：CNY195.30
+回单编号：979B2U1132024`;
+    const primary = ocrResult(primaryText);
+    primary.lines = [
+      positionedLine("招商银行", 1500, 120),
+      positionedLine("出账回单", 700, 140),
+      positionedLine("交易日期：2026年04月30日", 140, 210, 340),
+      positionedLine("付款账号：110933697910902", 140, 333, 360),
+      positionedLine("付款人：北京羽隶科技有限公司", 780, 336, 410),
+      positionedLine(
+        "付款开户行：招商银行北京分行北京大运村支行",
+        140,
+        376,
+        610,
+      ),
+      positionedLine("收款开户行：中国建设银行北京燕莎东支行", 140, 455, 550),
+      positionedLine("交易金额(小写)：CNY195.30", 140, 495, 370),
+      positionedLine("回单编号：979B2U1132024", 637, 776, 300),
+    ];
+    const enhanced = ocrResult(
+      `付款账号：110933697910902
+付款人：北京羽隶科技有限公司
+收款账号：11001053000056004126
+收款人：国航物业酒店管理有限公司国航大厦分公司`,
+    );
+    enhanced.lines = [
+      positionedLine("付款账号：110933697910902", 170, 126, 920),
+      positionedLine("付款人：北京羽隶科技有限公司", 1780, 126, 1020),
+      positionedLine("收款账号：11001053000056004126", 176, 335, 1110),
+      positionedLine(
+        "收款人：国航物业酒店管理有限公司国航大厦分公司",
+        1787,
+        323,
+        1680,
+      ),
+    ];
+    (callPaddleOcrDetailed as jest.Mock)
+      .mockResolvedValueOnce(primary)
+      .mockResolvedValueOnce(enhanced);
+
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: {
+        ...GROUP_COMPANY_CONTEXT,
+        contractCompanySubject: { name: TECHNOLOGY_NAME },
+      },
+    });
+
+    expect(result).toMatchObject({
+      validationStatus: "verified",
+      canAutoPost: true,
+      direction: "payment",
+      fields: {
+        payer: TECHNOLOGY_NAME,
+        payerAccount: "110933697910902",
+        payee: "国航物业酒店管理有限公司国航大厦分公司",
+        payeeAccount: "11001053000056004126",
+      },
+    });
+    expect(callPaddleOcrDetailed).toHaveBeenCalledTimes(2);
+    expect((callPaddleOcrDetailed as jest.Mock).mock.calls[1][0]).not.toBe(
+      filePath,
+    );
+    expect(result.warnings).toContain(
+      "回单主体区域已执行一次灰度对比度增强复扫，恢复字段：收款方、收款账号",
+    );
+    expect(result.recognition?.lineCount).toBe(primary.lines.length);
+  });
+
+  it("增强复扫与原图明确角色值冲突时保留原值并阻断", async () => {
+    const filePath = path.join(temporaryDirectory, "主体冲突回单.png");
+    await sharp({
+      create: {
+        width: 1600,
+        height: 800,
+        channels: 3,
+        background: "white",
+      },
+    })
+      .png()
+      .toFile(filePath);
+    const primaryText = `招商银行 出账回单
+交易日期：2026年04月30日
+付款账号：110933697910902
+付款人：北京羽隶科技有限公司
+付款开户行：招商银行北京分行
+收款人：原收款公司
+收款开户行：中国建设银行北京分行
+交易金额(小写)：CNY195.30
+回单编号：979B2U1132024`;
+    const primary = ocrResult(primaryText);
+    primary.lines = [
+      positionedLine("招商银行", 1200, 80),
+      positionedLine("出账回单", 600, 100),
+      positionedLine("交易日期：2026年04月30日", 100, 180),
+      positionedLine("付款账号：110933697910902", 100, 290),
+      positionedLine("付款人：北京羽隶科技有限公司", 700, 290),
+      positionedLine("付款开户行：招商银行北京分行", 100, 330),
+      positionedLine("收款人：原收款公司", 700, 370),
+      positionedLine("收款开户行：中国建设银行北京分行", 100, 410),
+      positionedLine("交易金额(小写)：CNY195.30", 100, 460),
+      positionedLine("回单编号：979B2U1132024", 500, 690),
+    ];
+    const enhanced = ocrResult(
+      `收款人：另一收款公司
+收款账号：11001053000056004126`,
+    );
+    (callPaddleOcrDetailed as jest.Mock)
+      .mockResolvedValueOnce(primary)
+      .mockResolvedValueOnce(enhanced);
+
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: {
+        ...GROUP_COMPANY_CONTEXT,
+        contractCompanySubject: { name: TECHNOLOGY_NAME },
+      },
+    });
+
+    if (result.kind !== "bank_receipt") throw new Error("凭证类型错误");
+    expect(result.fields.payee).toBe("原收款公司");
+    expect(result.canAutoPost).toBe(false);
+    expect(result.blockingReasons).toContainEqual(
+      expect.objectContaining({
+        code: "BANK_ENHANCED_ORIGINAL_CONFLICT",
+        field: "payee",
+      }),
+    );
+  });
+
   it("银行回单上传缺少可见页面顶部银行及回单标题时按文件类型失败关闭", async () => {
     const filePath = writePng("实际不是银行回单.png");
     const text = normalReceiptText().replace(
@@ -1502,6 +1661,70 @@ describe("合同财务凭证独立识别服务", () => {
       validationStatus: "verified",
       canAutoPost: true,
     });
+  });
+
+  it("第三家我方签约公司作为内部划拨收款主体时按合同上下文精确识别", async () => {
+    const filePath = writePng("工程划拨第三家签约公司.png");
+    const text = normalReceiptText()
+      .replace(COMPANY_NAME, THIRD_COMPANY_NAME)
+      .replace("国网北京市电力公司", COMPANY_NAME);
+    (callPaddleOcrDetailed as jest.Mock).mockResolvedValue(ocrResult(text));
+
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: {
+        ...MULTI_COMPANY_CONTEXT,
+        contractCompanySubject: {
+          name: THIRD_COMPANY_NAME,
+          taxId: THIRD_COMPANY_TAX_ID,
+        },
+        internalFundingPair: {
+          payerName: COMPANY_NAME,
+          payeeName: THIRD_COMPANY_NAME,
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      direction: "payment",
+      validationStatus: "verified",
+      canAutoPost: true,
+      fields: {
+        payer: COMPANY_NAME,
+        payee: THIRD_COMPANY_NAME,
+      },
+    });
+  });
+
+  it("第三家我方公司合同不得接受划拨到其他内部主体的回单", async () => {
+    const filePath = writePng("工程误划拨其他内部主体.png");
+    const text = normalReceiptText()
+      .replace(COMPANY_NAME, TECHNOLOGY_NAME)
+      .replace("国网北京市电力公司", COMPANY_NAME);
+    (callPaddleOcrDetailed as jest.Mock).mockResolvedValue(ocrResult(text));
+
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: {
+        ...MULTI_COMPANY_CONTEXT,
+        contractCompanySubject: {
+          name: THIRD_COMPANY_NAME,
+          taxId: THIRD_COMPANY_TAX_ID,
+        },
+        internalFundingPair: {
+          payerName: COMPANY_NAME,
+          payeeName: THIRD_COMPANY_NAME,
+        },
+      },
+    });
+
+    expect(result.direction).toBe("unknown");
+    expect(result.canAutoPost).toBe(false);
+    expect(result.blockingReasons).toContainEqual(
+      expect.objectContaining({ code: "BANK_DIRECTION_UNKNOWN" }),
+    );
   });
 
   it("内部划拨回单收付款方向相反时必须阻断", async () => {

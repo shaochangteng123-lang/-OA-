@@ -6,6 +6,13 @@ describe("合同经营看板与台账后端契约", () => {
     path.resolve(process.cwd(), "server/routes/contracts.ts"),
     "utf8",
   );
+  const settlementAccountingSource = fs.readFileSync(
+    path.resolve(
+      process.cwd(),
+      "server/services/contractSettlementAccounting.ts",
+    ),
+    "utf8",
+  );
 
   it("严格校验看板起止月份、三年范围、分类和项目参数", () => {
     expect(source).toContain("validateDashboardFilters");
@@ -127,19 +134,30 @@ describe("合同经营看板与台账后端契约", () => {
     );
     expect(source).toContain("c.status = ANY(?::text[])");
     expect(source).toContain("req.query.counterparty");
+    expect(source).toContain("FROM contracts counterparty_contract");
+    expect(source).toContain("counterparty_contract.party_a ILIKE ?");
+    expect(source).toContain("counterparty_contract.party_b ILIKE ?");
+    expect(source).toContain("counterparty_contract.title ILIKE ?");
+    expect(source).toContain("counterparty_contract.project_name ILIKE ?");
     expect(source).toContain("req.query.contractDateFrom");
     expect(source).toContain("req.query.contractDateTo");
     expect(source).toContain(
-      "list_page.sort_updated DESC, list_page.root_id DESC",
+      "list_page.sort_contract_date DESC NULLS LAST, list_page.sort_updated DESC, list_page.root_id DESC",
+    );
+    expect(source).toContain(
+      "MAX(c.contract_date) FILTER (WHERE c.relation_type = 'main')",
     );
     expect(source).toContain(
       "list_page.sort_submitted ASC NULLS LAST, list_page.sort_updated ASC, list_page.root_id ASC",
     );
     expect(source).toContain("creator.name AS owner_name");
     expect(source).toContain("ownerName: row.owner_name");
+    expect(source).toContain("if (projectName) return projectName");
+    expect(source).toContain('row.status === "draft" ? "项目名称待识别" : "—"');
+    expect(source).not.toContain("const recognizedName = String(row.title");
   });
 
-  it("合同截至日期在内部划拨模式同时覆盖只有划拨、只有外付和两者并存", () => {
+  it("合同截至日期与履约金额使用同一发票明细和内部划拨边界", () => {
     const cutoffStart = source.indexOf("END AS contract_cutoff_date");
     const cutoffSource = source.slice(
       source.lastIndexOf("CASE", cutoffStart),
@@ -149,21 +167,19 @@ describe("合同经营看板与台账后端契约", () => {
     expect(cutoffSource).toContain(
       "root_status NOT IN ('completed', 'terminated') THEN NULL",
     );
-    expect(cutoffSource).toContain(
-      "asset_funding_mode = 'engineering_to_technology' THEN GREATEST(",
+    expect(cutoffSource).toContain("contractCostSettlementLastDateSql");
+    expect(settlementAccountingSource).toContain(
+      "asset_funding_mode = 'engineering_to_technology'",
     );
-    expect(cutoffSource).toContain("FROM contract_payments payment");
-    expect(cutoffSource).toContain("FROM contract_external_payments payment");
-    expect(
-      cutoffSource.match(/SELECT MAX\(payment\.payment_date\)/gu),
-    ).toHaveLength(3);
-    expect(
-      cutoffSource.match(
-        /confirmedFinancialPredicate\("(?:receipt|payment)"\)/gu,
-      )?.length,
-    ).toBeGreaterThanOrEqual(4);
-    expect(cutoffSource).toContain("payment_contract.is_deleted = FALSE");
-    expect(cutoffSource).toContain("payment_contract.status <> 'rejected'");
+    expect(settlementAccountingSource).toContain(
+      '"contract_external_payments"',
+    );
+    expect(settlementAccountingSource).toContain(
+      "accounting_line.include_in_contract_accounting = TRUE",
+    );
+    expect(settlementAccountingSource).toContain(
+      "MAX(settlement_payment.payment_date)",
+    );
   });
 
   it("合同日期和资金发生日期均严格使用起止月份", () => {

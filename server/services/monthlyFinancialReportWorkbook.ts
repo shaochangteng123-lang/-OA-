@@ -34,6 +34,10 @@ interface WorkbookManualItem {
   amount: string;
   description?: string | null;
   voucherReference?: string | null;
+  sourceType?: "manual" | "monthly_bank_transaction";
+  readOnly?: boolean;
+  effective?: boolean;
+  previewUrl?: string | null;
 }
 
 export interface MonthlyFinancialWorkbookReport {
@@ -273,7 +277,9 @@ function populateSummaryXml(
     report.expenses.largeReimbursement || "0",
   );
   const welfareOneExpense = addFinancialAmounts(
-    report.expenses.welfareOne407 || "0",
+    report.expenses.welfareOneDrinkingWater || "0",
+    report.expenses.welfareOneOffice || "0",
+    report.expenses.welfareOneElectricity || "0",
     report.expenses.welfareOne407Ai || "0",
     report.expenses.welfareOne8hAi || "0",
   );
@@ -316,14 +322,14 @@ function populateSummaryXml(
     ["F15", report.expenses.generalBankFee],
     ["G15", report.expenses.businessBankFee],
     ["H15", report.expenses.assetAdministration],
-    ["C23", report.expenses.welfareOne407],
-    ["D23", report.expenses.welfareOne407Ai],
-    ["E23", report.expenses.welfareOne8hAi],
-    ["F23", report.income.welfareOneSupplement],
+    ["C23", report.expenses.welfareOneDrinkingWater],
+    ["D23", report.expenses.welfareOneOffice],
+    ["E23", report.expenses.welfareOneElectricity],
+    ["F23", report.expenses.welfareOne407Ai],
+    ["G23", report.expenses.welfareOne8hAi],
     ["C25", report.expenses.welfareTwoRefreshment],
     ["D25", report.expenses.welfareTwoTeamBuilding],
     ["E25", report.expenses.welfareTwoPhysicalExam],
-    ["F25", report.income.welfareTwoSupplement],
   ] as Array<[string, string | undefined]>) {
     xml = setAmount(xml, address, value);
   }
@@ -348,15 +354,23 @@ function populateSummaryXml(
       report.expenses.businessReimbursement || "0",
     ],
     ["B14", "ROUND(D15+E15+F15+A17,2)", administrativeExpense],
-    ["A23", "ROUND(SUM(C23:E23)+SUM(C25:E25),2)", welfareExpense],
-    ["B23", "ROUND(SUM(C23:E23),2)", welfareOneExpense],
+    ["A23", "ROUND(B23+B25,2)", welfareExpense],
+    ["B23", "ROUND(SUM(C23:G23),2)", welfareOneExpense],
     ["B25", "ROUND(SUM(C25:E25),2)", welfareTwoExpense],
     ["B29", "ROUND(A7+F11+G11-D15-E15-F15-H15-A17,2)", general.closing],
-    ["E29", "ROUND(C7+D11+E11+H11-G15-A19,2)", business.closing],
-    ["G31", "ROUND(G7+F23-C23-D23-E23,2)", welfareOne.closing],
-    ["G32", "ROUND(H7+F25-C25-D25-E25,2)", welfareTwo.closing],
-    ["G29", "ROUND(G31+G32,2)", welfareClosing],
-    ["C28", "ROUND(B29+E29+G31+G32,2)", closingTotal],
+    ["D29", "ROUND(C7+D11+E11+H11-G15-A19,2)", business.closing],
+    [
+      "H29",
+      `ROUND(G7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户一补充收入",'手工项目明细'!$E$2:$E$501)-SUM(C23:G23),2)`,
+      welfareOne.closing,
+    ],
+    [
+      "H30",
+      `ROUND(H7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户二补充收入",'手工项目明细'!$E$2:$E$501)-SUM(C25:E25),2)`,
+      welfareTwo.closing,
+    ],
+    ["F29", "ROUND(H29+H30,2)", welfareClosing],
+    ["C28", "ROUND(B29+D29+F29,2)", closingTotal],
   ]) {
     xml = setFormula(xml, address, formula, cachedValue);
   }
@@ -469,7 +483,7 @@ function populateWorkbookMetadata(originalXml: string): string {
     xml = xml.replace(
       /(<\/(?:[A-Za-z0-9_]+:)?workbook>)/,
       (closingTag) =>
-        `<${prefix}definedNames><${prefix}definedName name="_xlnm.Print_Area" localSheetId="0">&apos;月度结算&apos;!$A$1:$H$32</${prefix}definedName></${prefix}definedNames><${prefix}calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>${closingTag}`,
+        `<${prefix}definedNames><${prefix}definedName name="_xlnm.Print_Area" localSheetId="0">&apos;月度结算&apos;!$A$1:$H$30</${prefix}definedName></${prefix}definedNames><${prefix}calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>${closingTag}`,
     );
   }
   return xml;
@@ -502,15 +516,17 @@ export async function buildMonthlyFinancialWorkbook(
       textStyleId,
       amountStyleId,
       columnCount: 7,
-      rows: report.manualItems.map((item) => [
-        textCell(item.occurredOn),
-        textCell(item.categoryLabel),
-        textCell(item.accountCode),
-        textCell(item.direction),
-        amountCell(item.amount),
-        textCell(item.description),
-        textCell(item.voucherReference),
-      ]),
+      rows: report.manualItems
+        .filter((item) => item.effective !== false)
+        .map((item) => [
+          textCell(item.occurredOn),
+          textCell(item.categoryLabel),
+          textCell(item.accountCode),
+          textCell(item.direction),
+          amountCell(item.amount),
+          textCell(item.description),
+          textCell(item.voucherReference),
+        ]),
     }),
   );
 

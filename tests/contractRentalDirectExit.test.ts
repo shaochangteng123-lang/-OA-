@@ -145,9 +145,14 @@ describe("租赁合同满额直退后端闭环", () => {
         String(sql).includes("AS settled_amount"),
       )?.[0] || "",
     );
-    expect(settlementSql).toContain("FROM contract_payments record");
-    expect(settlementSql).not.toContain(
-      "FROM contract_external_payments record",
+    expect(settlementSql).toContain(
+      "FROM contract_payments settlement_payment",
+    );
+    expect(settlementSql).toContain(
+      "settlement_root.declared_subtype = 'house_rental'",
+    );
+    expect(settlementSql).toContain(
+      "line.include_in_contract_accounting = TRUE",
     );
     expect(client.query).toHaveBeenCalledWith(
       expect.stringContaining("UPDATE contracts SET status = 'terminated'"),
@@ -185,7 +190,12 @@ describe("租赁合同满额直退后端闭环", () => {
         String(sql).includes("AS settled_amount"),
       )?.[0] || "",
     );
-    expect(settlementSql).toContain("FROM contract_external_payments record");
+    expect(settlementSql).toContain(
+      "FROM contract_external_payments settlement_payment",
+    );
+    expect(settlementSql).toContain(
+      "asset_funding_mode = 'engineering_to_technology'",
+    );
   });
 
   it("未满100%时返回专门错误并要求继续上传解除协议", async () => {

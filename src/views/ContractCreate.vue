@@ -1309,7 +1309,7 @@ const uploadAssetCategoryOptions: Array<{
   { value: "equipment", label: "设备合同" },
   { value: "house_rental", label: "房屋租赁" },
   { value: "vehicle_rental", label: "汽车租赁" },
-  { value: "parking_space", label: "车位合同" },
+  { value: "parking_space", label: "车位租赁" },
   { value: "office_asset", label: "办公资产合同" },
 ];
 const uploadAssetCategorySet = new Set<ContractAssetCategory>(

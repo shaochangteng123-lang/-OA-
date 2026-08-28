@@ -52,6 +52,22 @@ export interface XmlInvoiceLineItem {
   grossAmount: number | null;
 }
 
+export interface ExtractInvoiceFromXmlOptions {
+  pageScope?: "first" | "all";
+}
+
+export function buildInvoiceXmlArgs(
+  pdfPath: string,
+  options: ExtractInvoiceFromXmlOptions = {},
+): string[] {
+  const args = ["-xml", "-stdout", "-nodrm", "-i"];
+  if ((options.pageScope || "first") === "first") {
+    args.push("-f", "1", "-l", "1");
+  }
+  args.push(pdfPath);
+  return args;
+}
+
 const TRANSPORT_PREPAID_CARD_PATTERN =
   /(市政交通一卡通|交通一卡通|交通卡|一卡通|公交卡|地铁卡|乘车卡)(?:充值|储值|加值)?/;
 
@@ -76,6 +92,7 @@ interface InvoicePartyFields {
 }
 
 export interface InvoicePositionedTextNode {
+  page?: number;
   top: number;
   left: number;
   width: number;
@@ -494,6 +511,7 @@ export function extractInvoiceTaxAmountFromPositionedText(
  */
 export async function extractInvoiceFromXml(
   pdfPath: string,
+  options: ExtractInvoiceFromXmlOptions = {},
 ): Promise<XmlInvoiceResult | null> {
   try {
     const { execFile } = await import("child_process");
@@ -501,7 +519,7 @@ export async function extractInvoiceFromXml(
     // 这里只读取文字坐标；忽略内嵌图片，避免 pdftohtml 在上传临时目录旁生成残留图片。
     const { stdout } = await promisify(execFile)(
       "pdftohtml",
-      ["-xml", "-stdout", "-nodrm", "-i", "-f", "1", "-l", "1", pdfPath],
+      buildInvoiceXmlArgs(pdfPath, options),
       {
         timeout: 15000,
         maxBuffer: 10 * 1024 * 1024,
@@ -512,29 +530,39 @@ export async function extractInvoiceFromXml(
 
     // 解析所有 <text> 元素，提取 top/left 坐标和文本内容
     const textNodes: InvoicePositionedTextNode[] = [];
-    const nodeRe =
-      /<text[^>]+top="(\d+)"[^>]+left="(\d+)"[^>]+width="(\d+)"[^>]*>([\s\S]*?)<\/text>/g;
-    let m: RegExpExecArray | null;
-    while ((m = nodeRe.exec(xml)) !== null) {
-      const raw = m[4]
-        .replace(/<[^>]+>/g, "")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code)))
-        .replace(/&#x([0-9a-fA-F]+);/g, (_, code) =>
-          String.fromCharCode(parseInt(code, 16)),
-        )
-        .trim();
-      const heightMatch = m[0].match(/height="(\d+)"/);
-      if (raw)
-        textNodes.push({
-          top: parseInt(m[1]),
-          left: parseInt(m[2]),
-          width: parseInt(m[3]),
-          height: heightMatch ? parseInt(heightMatch[1]) : undefined,
-          text: raw,
-        });
+    const pageBlocks = Array.from(
+      xml.matchAll(/<page\b[^>]*>([\s\S]*?)<\/page>/g),
+      (match) => match[1],
+    );
+    const pageSources = pageBlocks.length > 0 ? pageBlocks : [xml];
+    for (const [pageIndex, pageXml] of pageSources.entries()) {
+      const nodeRe =
+        /<text[^>]+top="(\d+)"[^>]+left="(\d+)"[^>]+width="(\d+)"[^>]*>([\s\S]*?)<\/text>/g;
+      let m: RegExpExecArray | null;
+      while ((m = nodeRe.exec(pageXml)) !== null) {
+        const raw = m[4]
+          .replace(/<[^>]+>/g, "")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&#(\d+);/g, (_, code) =>
+            String.fromCharCode(parseInt(code)),
+          )
+          .replace(/&#x([0-9a-fA-F]+);/g, (_, code) =>
+            String.fromCharCode(parseInt(code, 16)),
+          )
+          .trim();
+        const heightMatch = m[0].match(/height="(\d+)"/);
+        if (raw)
+          textNodes.push({
+            page: pageIndex + 1,
+            top: parseInt(m[1]),
+            left: parseInt(m[2]),
+            width: parseInt(m[3]),
+            height: heightMatch ? parseInt(heightMatch[1]) : undefined,
+            text: raw,
+          });
+      }
     }
 
     if (textNodes.length === 0) return null;
@@ -542,12 +570,17 @@ export async function extractInvoiceFromXml(
     const result: XmlInvoiceResult = {};
 
     // ── 1. 提取金额（价税合计小写）──
-    const labelNode = textNodes.find((n) =>
+    const amountLabelNodes = textNodes.filter((n) =>
       /[（(]\s*小\s*写\s*[）)]/.test(n.text),
     );
+    const labelNode =
+      options.pageScope === "all"
+        ? amountLabelNodes[amountLabelNodes.length - 1]
+        : amountLabelNodes[0];
     if (labelNode) {
       const sameLine = textNodes.filter(
-        (n) => Math.abs(n.top - labelNode.top) <= 10,
+        (n) =>
+          n.page === labelNode.page && Math.abs(n.top - labelNode.top) <= 10,
       );
       const yenNode = sameLine.find((n) => /^[¥￥]$/.test(n.text));
       if (yenNode) {
@@ -586,9 +619,16 @@ export async function extractInvoiceFromXml(
       }
     }
 
+    // 多页报销只跨页查找最终价税合计；抬头、购销双方和项目类型以第1页为准，
+    // 防止不同页面相同坐标的文字被错误拼接。
+    const headerTextNodes =
+      options.pageScope === "all"
+        ? textNodes.filter((node) => node.page === 1)
+        : textNodes;
+
     // ── 2. 提取发票号码 ──
     // 模板A：标签和值在同一节点，如 "发票号码:26119..."
-    const invoiceNodeA = textNodes.find((n) =>
+    const invoiceNodeA = headerTextNodes.find((n) =>
       /发票号码[：:]\s*(\d{15,25})/.test(n.text),
     );
     if (invoiceNodeA) {
@@ -597,11 +637,11 @@ export async function extractInvoiceFromXml(
     }
     // 模板B：标签和值分开，找"发票号码："标签右侧的数字节点
     if (!result.invoiceNumber) {
-      const labelInv = textNodes.find((n) =>
+      const labelInv = headerTextNodes.find((n) =>
         /^发票号码[：:]?\s*$/.test(n.text),
       );
       if (labelInv) {
-        const sameLine = textNodes.filter(
+        const sameLine = headerTextNodes.filter(
           (n) => Math.abs(n.top - labelInv.top) <= 8 && n.left > labelInv.left,
         );
         const numNode = sameLine
@@ -612,7 +652,7 @@ export async function extractInvoiceFromXml(
     }
     // 模板C：发票号码单独一行（20位数字）
     if (!result.invoiceNumber) {
-      const numNode = textNodes.find((n) => /^\d{20}$/.test(n.text));
+      const numNode = headerTextNodes.find((n) => /^\d{20}$/.test(n.text));
       if (numNode) result.invoiceNumber = numNode.text;
     }
     if (result.invoiceNumber)
@@ -620,7 +660,7 @@ export async function extractInvoiceFromXml(
 
     // ── 3. 提取开票日期 ──
     // 模板A：标签和值在同一节点，如 "开票日期:2026年04月07日"
-    const dateNodeA = textNodes.find((n) =>
+    const dateNodeA = headerTextNodes.find((n) =>
       /开票日期[：:]\s*(\d{4}年\d{2}月\d{2}日)/.test(n.text),
     );
     if (dateNodeA) {
@@ -631,11 +671,11 @@ export async function extractInvoiceFromXml(
     }
     // 模板B：标签和值分开
     if (!result.date) {
-      const labelDate = textNodes.find((n) =>
+      const labelDate = headerTextNodes.find((n) =>
         /^开票日期[：:]?\s*$/.test(n.text),
       );
       if (labelDate) {
-        const sameLine = textNodes.filter(
+        const sameLine = headerTextNodes.filter(
           (n) =>
             Math.abs(n.top - labelDate.top) <= 8 && n.left > labelDate.left,
         );
@@ -647,7 +687,7 @@ export async function extractInvoiceFromXml(
     }
     // 模板C：日期单独一行
     if (!result.date) {
-      const dateNode = textNodes.find((n) =>
+      const dateNode = headerTextNodes.find((n) =>
         /^\d{4}年\d{2}月\d{2}日$/.test(n.text),
       );
       if (dateNode) result.date = dateNode.text;
@@ -655,14 +695,17 @@ export async function extractInvoiceFromXml(
     if (result.date) console.log("📅 XML开票日期:", result.date);
 
     // ── 4. 提取购销双方名称和纳税人识别号 ──
-    const partyFields = extractInvoicePartyFieldsFromPositionedText(textNodes);
+    const partyFields =
+      extractInvoicePartyFieldsFromPositionedText(headerTextNodes);
     result.buyer = partyFields.buyer;
     result.buyerTaxId = partyFields.buyerTaxId;
     result.seller = partyFields.seller;
     result.sellerTaxId = partyFields.sellerTaxId;
-    result.itemName = extractInvoiceItemNameFromPositionedText(textNodes);
-    result.lineItems = extractInvoiceLineItemsFromPositionedText(textNodes);
-    result.taxAmount = extractInvoiceTaxAmountFromPositionedText(textNodes);
+    result.itemName = extractInvoiceItemNameFromPositionedText(headerTextNodes);
+    result.lineItems =
+      extractInvoiceLineItemsFromPositionedText(headerTextNodes);
+    result.taxAmount =
+      extractInvoiceTaxAmountFromPositionedText(headerTextNodes);
     result.rawText = [...textNodes]
       .sort((left, right) => left.top - right.top || left.left - right.left)
       .map((node) => node.text)
@@ -671,18 +714,20 @@ export async function extractInvoiceFromXml(
 
     // ── 5. 提取报销类型（项目名称 *...*格式）──
     // 预付卡销售需要继续看后面的具体名称，交通卡充值应进入交通额度
-    const allNodeText = textNodes.map((n) => n.text).join("");
+    const allNodeText = headerTextNodes.map((n) => n.text).join("");
     const transportPrepaidCardType =
       extractTransportPrepaidCardType(allNodeText);
     if (transportPrepaidCardType) {
       result.type = transportPrepaidCardType;
     } else {
       // 先找通行费（高速费需特殊处理）
-      const tollNode = textNodes.find((n) => /\*[^*]+\*\s*通行费/.test(n.text));
+      const tollNode = headerTextNodes.find((n) =>
+        /\*[^*]+\*\s*通行费/.test(n.text),
+      );
       if (tollNode) {
         result.type = "通行费";
       } else {
-        const typeNode = textNodes.find((n) => /\*[^*]+\*/.test(n.text));
+        const typeNode = headerTextNodes.find((n) => /\*[^*]+\*/.test(n.text));
         if (typeNode) {
           const m2 = typeNode.text.match(/\*([^*]+)\*/);
           if (m2) result.type = m2[1].trim();
@@ -1255,7 +1300,11 @@ export async function recognizeInvoiceLocally(
 
     // 第一步：用 pdftohtml XML 坐标方案提取所有关键字段（有文字层的 PDF）
     console.log("📐 尝试 XML 坐标方案提取发票信息...");
-    const xmlResult = await extractInvoiceFromXml(filePath);
+    // 报销发票允许多页，最终价税合计可能只出现在末页；合同财务识别继续使用默认首
+    // 页范围，并由其独立的页数门禁决定后续复核路径。
+    const xmlResult = await extractInvoiceFromXml(filePath, {
+      pageScope: "all",
+    });
     const xmlHasAllFields =
       xmlResult &&
       xmlResult.amount &&

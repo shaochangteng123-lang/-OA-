@@ -189,7 +189,7 @@ describe("合同识别候选安全门禁落库闭环", () => {
       query: jest.fn(async (sql: string, params: unknown[] = []) => {
         queryCalls.push({ sql, params });
         if (
-          sql.includes("SELECT id, relation_type") &&
+          sql.includes("SELECT contract.id, contract.relation_type") &&
           sql.includes("FOR UPDATE")
         ) {
           return {
@@ -371,7 +371,7 @@ describe("合同识别候选安全门禁落库闭环", () => {
         query: jest.fn(async (sql: string, params: unknown[] = []) => {
           queryCalls.push({ sql, params });
           if (
-            sql.includes("SELECT id, relation_type") &&
+            sql.includes("SELECT contract.id, contract.relation_type") &&
             sql.includes("FOR UPDATE")
           ) {
             return {

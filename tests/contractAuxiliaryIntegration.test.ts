@@ -13,6 +13,7 @@ import { api } from "@/utils/api";
 import {
   appendContractAuxiliaryFiles,
   createContractAuxiliaryPackage,
+  deleteContractAuxiliaryPackage,
 } from "@/utils/contractApi";
 
 function source(relativePath: string): string {
@@ -213,8 +214,9 @@ describe("辅助合同档案包全链路隔离", () => {
       receipt: [receipt],
     });
 
-    const [requestUrl, requestBody, requestConfig] = (api.post as jest.Mock)
-      .mock.calls.at(-1) as [string, FormData, { timeout: number }];
+    const [requestUrl, requestBody, requestConfig] = (
+      api.post as jest.Mock
+    ).mock.calls.at(-1) as [string, FormData, { timeout: number }];
     expect(requestUrl).toBe(
       "/api/contracts/contract-1/auxiliary-packages/package-1/files",
     );
@@ -224,6 +226,47 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(formData.getAll("invoice")).toEqual([invoice]);
     expect(formData.getAll("receipt")).toEqual([receipt]);
     expect(formData.get("expectedVersion")).toBe("1");
+  });
+
+  it("历史导入与新建辅助档案都直接显示删除键并复用受控整包删除", async () => {
+    (api.delete as jest.Mock).mockResolvedValueOnce({
+      data: { success: true, data: { deleted: true } },
+    });
+
+    await deleteContractAuxiliaryPackage("contract-1", "package-1", 3);
+
+    expect((api.delete as jest.Mock).mock.calls.at(-1)).toEqual([
+      "/api/contracts/contract-1/auxiliary-packages/package-1",
+      { params: { expectedVersion: 3 } },
+    ]);
+    expect(componentSource).toContain('class="package-actions"');
+    expect(componentSource).toContain('aria-label="删除辅助材料档案"');
+    expect(componentSource).toContain("删除档案");
+    expect(componentSource).not.toContain("historicalImported");
+
+    const deleteRoute = routeSource.slice(
+      routeSource.indexOf("router.delete("),
+      routeSource.indexOf(
+        'router.get(\n  "/:id/auxiliary-packages/:packageId/files/:fileId"',
+      ),
+    );
+    expect(deleteRoute).toContain("requireFinance");
+    expect(deleteRoute).toContain("deleteContractAuxiliaryPackage");
+    expect(deleteRoute).toContain("validateFilePath(storedPath)");
+    expect(deleteRoute).toContain("fs.unlinkSync(absolutePath)");
+
+    const deleteService = serviceSource.slice(
+      serviceSource.indexOf(
+        "export async function deleteContractAuxiliaryPackage",
+      ),
+      serviceSource.indexOf(
+        "export async function retryContractAuxiliaryPackageRecognition",
+      ),
+    );
+    expect(deleteService).toContain("FOR UPDATE");
+    expect(deleteService).toContain('action: "auxiliary_package_deleted"');
+    expect(deleteService).toContain("DELETE FROM contract_auxiliary_packages");
+    expect(deleteService).toContain("storedFilePaths");
   });
 
   it("辅助材料安全校验后直接归档且不调度内容识别", () => {
@@ -393,7 +436,9 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(detailSource).toContain("<ContractAuxiliaryPackageManager");
     expect(detailSource).toContain('name="auxiliary"');
     expect(listSource).not.toContain("<ContractAuxiliaryPackageManager");
-    expect(listSource).toContain('query: { tab: "auxiliary" }');
+    expect(listSource).toContain(
+      'query: contractDetailReturnQuery({ tab: "auxiliary" })',
+    );
     expect(listSource).toContain("添加辅助材料");
     expect(listSource).toContain("row.requiresAuxiliaryMaterials");
     expect(componentSource).toContain("添加辅助材料");
