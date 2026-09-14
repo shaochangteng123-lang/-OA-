@@ -45,6 +45,15 @@ describe("合同管理侧边栏归属", () => {
     expect(contractSection).toContain(
       "isAdmin && contractPendingSealCount > 0",
     );
+
+    const executorRoleBlock = source.slice(
+      source.indexOf("const isContractDownloadExecutor"),
+      source.indexOf("const contractTaskPendingCount"),
+    );
+    expect(executorRoleBlock).toContain('role === "admin"');
+    expect(executorRoleBlock).toContain('role === "super_admin"');
+    expect(executorRoleBlock).not.toContain('role === "chairman"');
+
     expect(source).toContain("getContractPendingSealCount");
     expect(source).toContain("contractPendingSealCount.value =");
   });

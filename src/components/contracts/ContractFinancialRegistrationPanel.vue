@@ -18,11 +18,7 @@
           收到回款回单即可先保存并按银行日期计入主营收入，发票可后续补入同一登记；发票与累计回款金额完全覆盖后再确认整笔配对。
         </p>
         <p v-else>
-          发票识别通过后会按本公司在发票中的购销身份确定付款方向；收到{{
-            bankDocumentLabel
-          }}并保存后立即计入{{
-            postedSettlementLabel
-          }}，金额全部闭合后再确认整笔配对。
+          可先上传付款回单，也可先上传发票；回单保存后立即计入已付款，并按银行日期计入支出，缺少的发票或回单后续补入同一登记，双方及累计金额核对一致后再确认整笔配对。
         </p>
       </div>
       <el-tag type="primary" effect="plain">多凭证配对登记</el-tag>
@@ -60,8 +56,8 @@
       type="warning"
       show-icon
       :closable="false"
-      title="请先在上方确认资金承担方式"
-      description="资金方式待核对时可以识别发票，但不能上传或登记资产付款。"
+      title="系统尚未识别出我方付款主体"
+      description="资金承担方式由系统根据合同主体自动判断，无需手动确认。请核对合同中的我方单位信息后刷新页面；在识别明确前，可识别发票，暂不能登记付款。"
     />
 
     <div class="credential-grid">
@@ -75,7 +71,14 @@
           }}</span>
           <div>
             <h3>发票</h3>
-            <p>{{ isIncomeDirection ? "可后补" : "必传" }} · 选择后自动识别</p>
+            <p>
+              {{
+                isIncomeDirection || receiptBeforeInvoiceAllowed
+                  ? "可后补"
+                  : "必传"
+              }}
+              · 选择后自动识别
+            </p>
           </div>
           <el-tag
             :type="credentialTagType(invoiceCredential.status)"
@@ -171,7 +174,7 @@
                 ? '发票可后补，也可先上传并保存实际回款'
                 : requiresExternalPayment
                   ? `${contractCompanyDisplayName}对外付款可先保存，发票可后补；工程划拨回单按实际发生另行上传`
-                  : '请先上传并通过发票识别，系统再确定付款凭证方向'
+                  : '可先保存付款回单，发票可后补；也可先保存发票、后补付款回单'
           "
         />
 
@@ -439,7 +442,7 @@
           }}</span>
           <div>
             <h3>{{ bankDocumentLabel }}</h3>
-            <p>必传 · 选择后自动识别</p>
+            <p>可先上传或后补 · 选择后自动识别</p>
           </div>
           <el-tag :type="bankCredentialTagType" size="small">
             {{
@@ -1066,6 +1069,7 @@ import {
 } from "@element-plus/icons-vue";
 import type {
   ContractCategory,
+  ContractDeclaredSubtype,
   ContractFinancialBankFields,
   ContractFinancialBlockingReason,
   ContractFinancialDirection,
@@ -1192,6 +1196,7 @@ const BANK_DUPLICATE_CODES = new Set([
 const props = defineProps<{
   contractId: string;
   category: ContractCategory;
+  declaredSubtype?: ContractDeclaredSubtype | null;
   assetFundingMode?:
     | "engineering_direct"
     | "engineering_to_technology"
@@ -1280,13 +1285,22 @@ const newInvoiceDocumentDirections = computed(() =>
     ),
 );
 const categoryBusinessDirection = computed<"income" | "cost">(() =>
-  props.category === "asset" ? "cost" : "income",
+  props.category === "asset" ||
+  (props.category === "non_main" &&
+    props.declaredSubtype === "non_main_expense")
+    ? "cost"
+    : "income",
 );
 const isIncomeDirection = computed(
   () => categoryBusinessDirection.value === "income",
 );
 const receiptBeforeInvoiceAllowed = computed(
-  () => props.category === "main_business",
+  () =>
+    props.category === "main_business" ||
+    (props.category === "asset" &&
+      ["engineering_direct", "technology_direct"].includes(
+        props.assetFundingMode || "",
+      )),
 );
 const expectedInvoiceDocumentDirection = computed<"input" | "output">(() =>
   categoryBusinessDirection.value === "cost" ? "input" : "output",
@@ -1328,6 +1342,7 @@ const isCostDirection = computed(
 );
 const fundingModeReady = computed(
   () =>
+    props.category !== "asset" ||
     !isCostDirection.value ||
     Boolean(
       props.assetFundingMode && props.assetFundingMode !== "pending_review",
@@ -1335,6 +1350,7 @@ const fundingModeReady = computed(
 );
 const requiresExternalPayment = computed(
   () =>
+    props.category === "asset" &&
     isCostDirection.value &&
     props.assetFundingMode === "engineering_to_technology",
 );
@@ -1474,12 +1490,13 @@ const partialSettlement = computed(
 const settlementOverAmount = computed(
   () =>
     !isIncomeDirection.value &&
+    !receiptBeforeInvoiceAllowed.value &&
     totalsComparable.value &&
     settlementDifferenceCents.value < 0,
 );
 const pendingInvoice = computed(
   () =>
-    isIncomeDirection.value &&
+    (isIncomeDirection.value || receiptBeforeInvoiceAllowed.value) &&
     Math.round(accountingSettlementTotal.value * 100) > 0 &&
     settlementDifferenceCents.value < 0,
 );
@@ -1688,7 +1705,9 @@ const submitButtonLabel = computed(() => {
       : `先保存${contractCompanyDisplayName.value}对外付款`;
   }
   if (canSaveIncomeReceiptFirst.value) {
-    return props.registrationId ? "保存本次回款" : "保存实际回款并标记待补发票";
+    return props.registrationId
+      ? `保存本次${settlementActionLabel.value}`
+      : `保存实际${settlementActionLabel.value}并标记待补发票`;
   }
   if (canSaveInvoiceOnly.value)
     return `保存待${settlementActionLabel.value}发票草稿`;
@@ -1743,11 +1762,11 @@ const completionHint = computed(() => {
     return `${accountingDocumentLabel.value}合计超过发票合计 ${formatRecognizedMoney(Math.abs(settlementDifferenceCents.value) / 100)}，请移除或核对凭证`;
   }
   if (pendingInvoice.value) {
-    const pendingHint = `当前累计回款 ${formatRecognizedMoney(accountingSettlementTotal.value)}，已补发票 ${formatRecognizedMoney(invoiceTotal.value)}，待补发票 ${formatRecognizedMoney(remainingInvoiceAmount.value)}`;
+    const pendingHint = `当前累计${settlementActionLabel.value} ${formatRecognizedMoney(accountingSettlementTotal.value)}，已补发票 ${formatRecognizedMoney(invoiceTotal.value)}，待补发票 ${formatRecognizedMoney(remainingInvoiceAmount.value)}`;
     if (canSaveIncomeRegistration.value) {
-      return `${pendingHint}；保存后按银行日期计入主营收入，后续仍可在同一登记补充发票或回单`;
+      return `${pendingHint}；保存后按银行日期计入${isIncomeDirection.value ? "主营收入" : "实际支出"}，后续仍可在同一登记补充发票或回单`;
     }
-    return `${pendingHint}；可继续添加发票或新的回款回单`;
+    return `${pendingHint}；可继续添加发票或新的${bankDocumentLabel.value}`;
   }
   if (canSaveInvoiceOnly.value)
     return `共${allInvoiceCredentials.value.length}张发票已识别，可先保存草稿，收到回单后再补充`;
@@ -1779,7 +1798,9 @@ const completionHint = computed(() => {
   ) {
     return isIncomeDirection.value
       ? "可先上传回款回单并保存，发票后续补入同一登记"
-      : `请上传至少一张发票和一张${accountingDocumentLabel.value}`;
+      : receiptBeforeInvoiceAllowed.value
+        ? "可先上传付款回单或发票，另一种凭证后续补入同一登记"
+        : `请上传至少一张发票和一张${accountingDocumentLabel.value}`;
   }
   if (
     !totalInvoiceDocumentCount.value ||
@@ -2586,13 +2607,13 @@ async function submitRegistration() {
             ? savedAsPendingInvoice
               ? `发票已补充，仍待补发票 ${formatRecognizedMoney(remainingInvoice)}`
               : savedAsPartial
-                ? `发票已补充，尚待回款 ${formatRecognizedMoney(remainingAmount)}`
-                : "发票已补充，发票与累计回款金额已全部对应"
+                ? `发票已补充，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
+                : `发票已补充，发票与累计${settlementActionLabel.value}金额已全部对应`
             : allExternalCredentials.value.length &&
                 !allBankCredentials.value.length
               ? `${contractCompanyDisplayName.value}最终对外付款已保存，已进入合同核算与履约核销`
               : savedAsPendingInvoice
-                ? `本次回款已保存并按银行日期计入主营收入，仍待补发票 ${formatRecognizedMoney(remainingInvoice)}`
+                ? `本次${settlementActionLabel.value}已保存并按银行日期计入${isIncomeDirection.value ? "主营收入" : "实际支出"}，仍待补发票 ${formatRecognizedMoney(remainingInvoice)}`
                 : savedAsPartial
                   ? `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
                   : `本次${bankDocumentLabel.value}已保存并立即计入${postedSettlementLabel.value}，发票与银行凭证金额已全部对应`,
@@ -2618,7 +2639,7 @@ async function submitRegistration() {
             ? `发票和部分${externalPaymentLabel.value}已保存，已进入合同核算，尚待 ${formatRecognizedMoney(remainingAmount)}`
             : `发票和${externalPaymentLabel.value}已保存，已进入合同核算；工程咨询划拨回单可按实际发生情况另行补充统计`
           : savedAsPendingInvoice
-            ? `实际回款已保存并按银行日期计入主营收入，登记已标记为待补发票 ${formatRecognizedMoney(remainingInvoice)}`
+            ? `实际${settlementActionLabel.value}已保存并按银行日期计入${isIncomeDirection.value ? "主营收入" : "实际支出"}，登记已标记为待补发票 ${formatRecognizedMoney(remainingInvoice)}`
             : savedAsPartial
               ? `部分${settlementActionLabel.value}已保存并立即计入${postedSettlementLabel.value}，尚待${settlementActionLabel.value} ${formatRecognizedMoney(remainingAmount)}`
               : allBankCredentials.value.length

@@ -29,6 +29,14 @@ describe("合同下载申请前端权限与流程", () => {
       routerSource.indexOf('path: "/contract-approvals"'),
       routerSource.indexOf('path: "/contract-applications/mine"'),
     );
+    const downloadTaskRoute = routerSource.slice(
+      routerSource.indexOf('path: "/contract-download-requests/tasks"'),
+      routerSource.indexOf('path: "/invoice-applications/new"'),
+    );
+    const executorRoleBlock = layoutSource.slice(
+      layoutSource.indexOf("const isContractDownloadExecutor"),
+      layoutSource.indexOf("const contractTaskPendingCount"),
+    );
     expect(contractListRoute).toContain('"user"');
     expect(approvalRoute).toContain('requiresRole: ["general_manager"]');
     expect(approvalRoute).not.toContain('"user"');
@@ -39,7 +47,12 @@ describe("合同下载申请前端权限与流程", () => {
     expect(layoutSource).toContain('label="合同待办"');
     expect(layoutSource).toContain('path="/contract-tasks"');
     expect(layoutSource).toContain("isContractDownloadExecutor");
-    expect(routerSource).toContain('requiresRole: ["admin"]');
+    expect(downloadTaskRoute).toContain(
+      'requiresRole: ["super_admin", "admin"]',
+    );
+    expect(executorRoleBlock).toContain('role === "admin"');
+    expect(executorRoleBlock).toContain('role === "super_admin"');
+    expect(executorRoleBlock).not.toContain('role === "chairman"');
   });
 
   it("员工台账显示申请下载入口，详情隐藏直接下载并使用当前页纯预览", () => {

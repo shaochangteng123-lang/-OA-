@@ -61,7 +61,7 @@ describe("合同上传归属与精确可信度门禁", () => {
     );
   });
 
-  it("二级分类未传时由合同类型赋兼容默认值，显式旧值仍校验匹配", () => {
+  it("新增非主营合同只接受收入或支出，旧其他服务数据仍兼容读取", () => {
     expect(
       validateNewContractUploadContext({
         area: "海淀区",
@@ -73,16 +73,33 @@ describe("合同上传归属与精确可信度门禁", () => {
       declaredSubtype: "engineering_consulting",
       assetCategory: null,
     });
-    expect(
+    expect(() =>
       validateNewContractUploadContext({
         area: "海淀区",
         declaredCategory: "non_main",
         declaredSubtype: "other_service",
       }),
+    ).toThrow(
+      expect.objectContaining({ code: "CONTRACT_DECLARED_SUBTYPE_MISMATCH" }),
+    );
+    expect(() =>
+      assertStoredContractUploadContext({
+        area: "海淀区",
+        declared_category: "non_main",
+        declared_subtype: "other_service",
+        asset_category: null,
+      }),
+    ).not.toThrow();
+    expect(
+      validateNewContractUploadContext({
+        area: "海淀区",
+        declaredCategory: "non_main",
+        declaredSubtype: "non_main_expense",
+      }),
     ).toEqual({
       area: "海淀区",
       declaredCategory: "non_main",
-      declaredSubtype: "other_service",
+      declaredSubtype: "non_main_expense",
       assetCategory: null,
     });
     expect(
@@ -143,6 +160,15 @@ describe("合同上传归属与精确可信度门禁", () => {
     );
     expect(() =>
       validateNewContractUploadContext({
+        area: "全部",
+        declaredCategory: "main_business",
+        declaredSubtype: "non_main_expense",
+      }),
+    ).toThrow(
+      expect.objectContaining({ code: "CONTRACT_DECLARED_SUBTYPE_MISMATCH" }),
+    );
+    expect(() =>
+      validateNewContractUploadContext({
         area: "朝阳区",
         declaredCategory: "asset",
         declaredSubtype: "software",
@@ -161,6 +187,22 @@ describe("合同上传归属与精确可信度门禁", () => {
     ).toThrow(
       expect.objectContaining({ code: "CONTRACT_ASSET_CATEGORY_REQUIRED" }),
     );
+  });
+
+  it("旧其他服务主合同上传补充协议时直接继承父合同二级分类", () => {
+    const routeSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
+    const supplementRoute = routeSource.slice(
+      routeSource.indexOf("async function handleSupplementRecognition"),
+      routeSource.indexOf('"/:id/supplements/recognize"'),
+    );
+    expect(supplementRoute).toContain("parent.declared_subtype");
+    expect(supplementRoute).toContain(
+      "declaredSubtype: parent.declared_subtype",
+    );
+    expect(supplementRoute).not.toContain("validateNewContractUploadContext");
   });
 
   it("自动采用只接受显式整数 100 且不会把比例值或小数进位", () => {
@@ -565,6 +607,10 @@ describe("合同上传归属与精确可信度门禁", () => {
     expect(databaseSource).toContain("contracts_beijing_area_check");
     expect(databaseSource).toContain("contracts_declared_asset_category_check");
     expect(databaseSource).toContain("contracts_declared_subtype_check");
+    expect(databaseSource).toContain("'non_main_expense'");
+    expect(databaseSource).toContain(
+      "declared_subtype = 'non_main_expense'",
+    );
     expect(databaseSource).toContain("'parking_space'");
     expect(databaseSource).toContain(
       "contract_ocr_fields_confidence_integer_check",
@@ -1043,7 +1089,7 @@ describe("合同上传归属与精确可信度门禁", () => {
               {
                 ...draft,
                 title: params?.[1],
-                project_name: params?.[12],
+                project_name: params?.[13],
                 version: 2,
               },
             ],
@@ -1065,7 +1111,7 @@ describe("合同上传归属与精确可信度门禁", () => {
     );
 
     expect(updateParams[1]).toBe(expectedName);
-    expect(updateParams[12]).toBe(expectedName);
+    expect(updateParams[13]).toBe(expectedName);
   });
 
   it("上传后不能修改行政区", async () => {

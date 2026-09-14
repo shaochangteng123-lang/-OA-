@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import JSZip from "jszip";
 import {
   Router,
   type NextFunction,
@@ -14,6 +15,7 @@ import { requireRole } from "../middleware/auth.js";
 import {
   appendContractAuxiliaryFiles,
   createContractAuxiliaryPackage,
+  deleteContractAuxiliaryFile,
   deleteContractAuxiliaryPackage,
   getContractAuxiliaryPackage,
   listContractAuxiliaryPackages,
@@ -43,6 +45,8 @@ const requireAuxiliaryRead = requireRole([
   "general_manager",
 ]);
 const MAX_AUXILIARY_FILES = 20;
+const MAX_AUXILIARY_ARCHIVE_ENTRIES = 5_000;
+const MAX_AUXILIARY_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
 
 const auxiliaryUpload = multer({
   storage: multer.diskStorage({
@@ -73,6 +77,7 @@ function uploadAuxiliaryFiles(req: Request, res: Response, next: NextFunction) {
     { name: "contract", maxCount: MAX_AUXILIARY_FILES },
     { name: "invoice", maxCount: MAX_AUXILIARY_FILES },
     { name: "receipt", maxCount: MAX_AUXILIARY_FILES },
+    { name: "other", maxCount: MAX_AUXILIARY_FILES },
   ])(req, res, (error: unknown) => {
     if (!error) return next();
     cleanupFiles(uploadedFiles(req));
@@ -84,7 +89,7 @@ function uploadAuxiliaryFiles(req: Request, res: Response, next: NextFunction) {
           ? `同一辅助档案包最多上传 ${MAX_AUXILIARY_FILES} 份文件`
           : error instanceof multer.MulterError &&
               error.code === "LIMIT_UNEXPECTED_FILE"
-            ? "仅支持上传辅助合同、发票和回单文件"
+            ? "仅支持上传辅助合同、发票、回单和其他材料文件"
             : error instanceof Error
               ? error.message
               : "辅助合同资料上传失败";
@@ -126,48 +131,110 @@ function sendError(res: Response, error: unknown, fallback: string) {
   return res.status(500).json({ success: false, message: fallback });
 }
 
-function actualKind(file: Express.Multer.File): ContractDocumentKind | null {
+type AuxiliaryDocumentKind = ContractDocumentKind | "xlsx" | "zip";
+
+function actualKind(file: Express.Multer.File): AuxiliaryDocumentKind | null {
   const header = fs.readFileSync(file.path).subarray(0, 8);
   const signature = header.toString("hex").toLowerCase();
+  const extension = path.extname(file.originalname).toLowerCase();
   if (header.subarray(0, 5).toString("ascii") === "%PDF-") return "pdf";
   if (signature.startsWith("ffd8ff")) return "jpeg";
   if (signature === "89504e470d0a1a0a") return "png";
   if (signature === "d0cf11e0a1b11ae1") return "doc";
-  if (signature.startsWith("504b0304")) return "docx";
+  if (
+    signature.startsWith("504b0304") ||
+    signature.startsWith("504b0506") ||
+    signature.startsWith("504b0708")
+  ) {
+    if (extension === ".docx") return "docx";
+    if (extension === ".xlsx") return "xlsx";
+    if (extension === ".zip") return "zip";
+  }
   return null;
 }
 
-const MIME_BY_KIND: Record<ContractDocumentKind, string> = {
+const MIME_BY_KIND: Record<AuxiliaryDocumentKind, string> = {
   pdf: "application/pdf",
   doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  zip: "application/zip",
   jpeg: "image/jpeg",
   png: "image/png",
 };
 
+async function assertAuxiliaryArchiveStructure(
+  buffer: Buffer,
+  kind: "xlsx" | "zip",
+): Promise<void> {
+  let archive: JSZip;
+  try {
+    archive = await JSZip.loadAsync(buffer);
+  } catch {
+    throw new Error(`${kind.toUpperCase()} 文件容器已损坏或已加密`);
+  }
+  const entries = Object.values(archive.files);
+  if (entries.length === 0 || entries.length > MAX_AUXILIARY_ARCHIVE_ENTRIES) {
+    throw new Error(`${kind.toUpperCase()} 文件条目数量异常`);
+  }
+  let uncompressedBytes = 0;
+  let contentFileCount = 0;
+  for (const entry of entries) {
+    const metadata = entry as typeof entry & {
+      unsafeOriginalName?: string;
+      _data?: { uncompressedSize?: number };
+    };
+    const originalName = metadata.unsafeOriginalName || entry.name;
+    const normalizedName = originalName.replace(/\\/gu, "/");
+    if (
+      normalizedName.includes("\0") ||
+      normalizedName.startsWith("/") ||
+      /^[a-z]:\//iu.test(normalizedName) ||
+      normalizedName.split("/").some((segment) => segment === "..")
+    ) {
+      throw new Error(`${kind.toUpperCase()} 文件包含不安全路径`);
+    }
+    if (entry.dir) continue;
+    contentFileCount += 1;
+    const declaredSize = Number(metadata._data?.uncompressedSize);
+    if (!Number.isSafeInteger(declaredSize) || declaredSize < 0) {
+      throw new Error(`${kind.toUpperCase()} 文件条目大小异常`);
+    }
+    uncompressedBytes += declaredSize;
+    if (uncompressedBytes > MAX_AUXILIARY_UNCOMPRESSED_BYTES) {
+      throw new Error(`${kind.toUpperCase()} 文件解压后超过安全上限`);
+    }
+  }
+  if (contentFileCount === 0) {
+    throw new Error(`${kind.toUpperCase()} 文件不能为空`);
+  }
+  if (
+    kind === "xlsx" &&
+    (!archive.file("[Content_Types].xml") || !archive.file("xl/workbook.xml"))
+  ) {
+    throw new Error("XLSX 文件缺少必要结构");
+  }
+}
+
 async function validatedStoredFile(
   file: Express.Multer.File,
-  fileKind: ContractAuxiliaryFileKind,
+  _fileKind: ContractAuxiliaryFileKind,
 ): Promise<ContractAuxiliaryStoredFile> {
   const kind = actualKind(file);
-  const allowed =
-    fileKind === "contract"
-      ? new Set<ContractDocumentKind>(["pdf", "doc", "docx"])
-      : new Set<ContractDocumentKind>(["pdf", "jpeg", "png"]);
-  if (!kind || !allowed.has(kind)) {
+  if (!kind) {
     throw new ContractDomainError(
       400,
-      fileKind === "contract"
-        ? "辅助合同仅支持真实 PDF、DOC 或 DOCX 文件"
-        : "辅助发票和回单仅支持真实 PDF、JPG 或 PNG 文件",
+      "辅助材料仅支持真实 PDF、DOC、DOCX、XLSX、JPG、JPEG、PNG 或 ZIP 文件",
       "CONTRACT_AUXILIARY_FILE_TYPE_INVALID",
     );
   }
   const extension = path.extname(file.originalname).toLowerCase();
-  const expectedExtensions: Record<ContractDocumentKind, string[]> = {
+  const expectedExtensions: Record<AuxiliaryDocumentKind, string[]> = {
     pdf: [".pdf"],
     doc: [".doc"],
     docx: [".docx"],
+    xlsx: [".xlsx"],
+    zip: [".zip"],
     jpeg: [".jpg", ".jpeg"],
     png: [".png"],
   };
@@ -185,6 +252,8 @@ async function validatedStoredFile(
       if (buffer.length < 64 || !tail.includes(Buffer.from("%%EOF"))) {
         throw new Error("PDF 文件不完整或缺少结束标记");
       }
+    } else if (kind === "xlsx" || kind === "zip") {
+      await assertAuxiliaryArchiveStructure(buffer, kind);
     } else {
       await assertContractFileStructure(buffer, kind);
     }
@@ -206,6 +275,18 @@ async function validatedStoredFile(
     mimeType: MIME_BY_KIND[kind],
     fileHash: crypto.createHash("sha256").update(buffer).digest("hex"),
   };
+}
+
+function removeStoredAuxiliaryFile(storedPath: string) {
+  try {
+    if (!validateFilePath(storedPath)) return;
+    const normalizedPath = storedPath.replace(/\\/gu, "/").replace(/^\/+/, "");
+    if (!normalizedPath.startsWith("uploads/contract-auxiliary/")) return;
+    const absolutePath = path.resolve(process.cwd(), normalizedPath);
+    if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
+  } catch {
+    // 数据库事务已成功后仅尽力清理本功能的独立物理副本。
+  }
 }
 
 async function validatedStoredFiles(
@@ -316,11 +397,13 @@ router.post(
     const files = uploadedFiles(req);
     try {
       const fields = (req.files || {}) as Record<string, Express.Multer.File[]>;
-      const contractFiles = fields.contract || [];
-      if (contractFiles.length === 0) {
-        throw new ContractDomainError(400, "必须上传辅助合同文件");
+      if (files.length === 0) {
+        throw new ContractDomainError(400, "请至少选择一份需要归档的辅助材料");
       }
-      const contract = await validatedStoredFiles(contractFiles, "contract");
+      const contract = await validatedStoredFiles(
+        fields.contract || [],
+        "contract",
+      );
       const invoice = await validatedStoredFiles(
         fields.invoice || [],
         "invoice",
@@ -329,10 +412,11 @@ router.post(
         fields.receipt || [],
         "receipt",
       );
+      const other = await validatedStoredFiles(fields.other || [], "other");
       const currentActor = actor(req);
       const created = await createContractAuxiliaryPackage({
         parentContractId: req.params.id,
-        files: { contract, invoice, receipt },
+        files: { contract, invoice, receipt, other },
         note: req.body?.note,
         actor: currentActor,
       });
@@ -374,11 +458,12 @@ router.post(
         fields.receipt || [],
         "receipt",
       );
+      const other = await validatedStoredFiles(fields.other || [], "other");
       const appended = await appendContractAuxiliaryFiles({
         parentContractId: req.params.id,
         packageId: req.params.packageId,
         expectedVersion: Number(req.body?.expectedVersion),
-        files: { contract, invoice, receipt },
+        files: { contract, invoice, receipt, other },
         ...(req.body?.note ? { note: req.body.note } : {}),
         actor: actor(req),
       });
@@ -436,17 +521,40 @@ router.delete(
         expectedVersion: Number(req.query.expectedVersion),
       });
       for (const storedPath of removed.storedFilePaths) {
-        try {
-          if (!validateFilePath(storedPath)) continue;
-          const absolutePath = path.resolve(process.cwd(), storedPath);
-          if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
-        } catch {
-          // 数据已删除后仅尽力清理物理文件。
-        }
+        removeStoredAuxiliaryFile(storedPath);
       }
       res.json({ success: true, data: { deleted: true } });
     } catch (error) {
       sendError(res, error, "删除辅助合同失败");
+    }
+  },
+);
+
+router.delete(
+  "/:id/auxiliary-packages/:packageId/files/:fileId",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const removed = await deleteContractAuxiliaryFile({
+        parentContractId: req.params.id,
+        packageId: req.params.packageId,
+        fileId: req.params.fileId,
+        actor: actor(req),
+        expectedVersion: Number(req.query.expectedVersion),
+      });
+      if (removed.storedFilePath) {
+        removeStoredAuxiliaryFile(removed.storedFilePath);
+      }
+      res.json({
+        success: true,
+        data: {
+          deleted: true,
+          packageDeleted: removed.packageDeleted,
+          version: removed.version,
+        },
+      });
+    } catch (error) {
+      sendError(res, error, "删除辅助材料失败");
     }
   },
 );

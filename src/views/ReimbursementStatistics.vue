@@ -75,9 +75,12 @@
           <el-form :inline="true" :model="filterForm" class="filter-form">
             <el-form-item label="报销类型">
               <el-select v-model="filterForm.type" placeholder="全部" clearable>
-                <el-option label="基础报销" value="basic" />
-                <el-option label="商务报销" value="business" />
-                <el-option label="大额报销" value="large" />
+                <el-option
+                  v-for="option in reimbursementTypeOptions"
+                  :key="option.type"
+                  :label="option.label"
+                  :value="option.type"
+                />
               </el-select>
             </el-form-item>
             <el-form-item label="状态">
@@ -134,7 +137,7 @@
           </el-table-column>
           <el-table-column label="报销范围/区域" min-width="120" align="center" header-align="center">
             <template #default="{ row }">
-              {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+              {{ getScopeText(row) }}
             </template>
           </el-table-column>
           <el-table-column prop="amount" label="报销金额" min-width="100" align="center" header-align="center">
@@ -510,10 +513,16 @@ import { useRouter } from 'vue-router'
 	import { useAuthStore } from '@/stores/auth'
 	import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 	import { toFileUrl } from '@/utils/file'
+	import {
+	  REIMBURSEMENT_FILTER_OPTIONS,
+	  getReimbursementTypeLabel,
+	  getReimbursementTypeRoute,
+	} from '@/utils/reimbursement/typeConfig'
 
 const router = useRouter()
 const pendingStore = usePendingStore()
 const authStore = useAuthStore()
+const reimbursementTypeOptions = REIMBURSEMENT_FILTER_OPTIONS
 
 // 报销范围/区域数据
 interface ScopeOption {
@@ -526,9 +535,17 @@ const scopeMap = ref<Record<string, string>>({})
 // 加载报销范围列表
 const loadScopeList = async () => {
   try {
-    const response = await fetch('/api/reimbursement-scope/list', { credentials: 'include' })
-    const result = await response.json()
-    if (result.success) {
+    const [generalResponse, welfareOneResponse, welfareTwoResponse] = await Promise.all([
+      fetch('/api/reimbursement-scope/list', { credentials: 'include' }),
+      fetch('/api/reimbursement-scope/welfare-one/list', { credentials: 'include' }),
+      fetch('/api/reimbursement-scope/welfare-two/list', { credentials: 'include' }),
+    ])
+    const [result, welfareOneResult, welfareTwoResult] = await Promise.all([
+      generalResponse.json(),
+      welfareOneResponse.json(),
+      welfareTwoResponse.json(),
+    ])
+    if (result.success || welfareOneResult.success || welfareTwoResult.success) {
       const buildMap = (items: ScopeOption[], parentName = '') => {
         for (const item of items) {
           if (item.value) {
@@ -540,7 +557,15 @@ const loadScopeList = async () => {
           }
         }
       }
-      buildMap(result.data)
+      if (result.success) buildMap(result.data)
+      for (const welfareResult of [welfareOneResult, welfareTwoResult]) {
+        if (welfareResult.success) {
+          for (const item of welfareResult.data || []) {
+            const key = String(item.id || item.code || '')
+            if (key) scopeMap.value[key] = item.name || item.code || key
+          }
+        }
+      }
     }
   } catch {
     console.error('加载报销范围列表失败')
@@ -913,12 +938,7 @@ const handleGoToDetail = () => {
   if (!currentApprovalRecord.value) return
 
   const row = currentApprovalRecord.value
-  const routeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    business: '/business-reimbursement',
-    large: '/large-reimbursement',
-  }
-  const routePath = routeMap[row.type]
+  const routePath = getReimbursementTypeRoute(row.type)
   if (routePath) {
     approvalDialogVisible.value = false
     // 添加 from 参数，使详情页返回时能回到报销统计页面
@@ -1041,12 +1061,20 @@ const confirmReject = async () => {
 
 // 获取类型文本
 const getTypeText = (type: string) => {
-  const typeMap: Record<string, string> = {
-    basic: '基础报销',
-    business: '商务报销',
-    large: '大额报销',
+  return getReimbursementTypeLabel(type)
+}
+
+const getScopeText = (row: Record<string, any>) => {
+  if (String(row.type || '').startsWith('welfare_')) {
+    return row.welfareCategoryName
+      || scopeMap.value[row.welfareCategoryId || row.reimbursementScope || '']
+      || row.welfareCategoryId
+      || row.reimbursementScope
+      || '-'
   }
-  return typeMap[type] || type
+  return row.reimbursementScope
+    ? scopeMap.value[row.reimbursementScope] || row.reimbursementScope
+    : '-'
 }
 
 // 获取状态文本

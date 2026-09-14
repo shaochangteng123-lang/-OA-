@@ -63,7 +63,7 @@ const dbUrl = process.env.DATABASE_URL
 if (!dbUrl) {
   warnings.push('⚠️  DATABASE_URL 未设置，将使用默认 PostgreSQL 连接')
 }
-console.log(`📊 数据库: ${dbUrl || 'postgresql://localhost:5432/yulilog_worklog (默认)'}`)
+console.log(`📊 数据库: ${dbUrl ? '已配置（敏感信息不输出）' : '使用默认连接（敏感信息不输出）'}`)
 
 // 输出结果
 console.log('\n' + '='.repeat(60))

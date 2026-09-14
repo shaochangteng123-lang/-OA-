@@ -31,12 +31,14 @@ export interface PayrollRow {
   withheld_housing_fund: string;
   withheld_tax: string;
   withheld_total: string;
+  withheld_actual_amount: string;
   personal_pension: string;
   personal_medical: string;
   personal_unemployment: string;
   personal_social_total: string;
   personal_housing_fund: string;
   net_salary: string;
+  net_salary_actual_amount: string;
   salary_receipts: SalaryReceiptLink[];
   updated_at: string;
 }
@@ -73,13 +75,15 @@ export type PayrollAmountField =
   | "withheld_housing_fund"
   | "withheld_tax"
   | "withheld_total"
+  | "withheld_actual_amount"
   | "personal_pension"
   | "personal_medical"
   | "personal_unemployment"
   | "personal_social_total"
   | "personal_housing_fund"
   | "individual_income_tax"
-  | "net_salary";
+  | "net_salary"
+  | "net_salary_actual_amount";
 
 export type PayrollTotals = Record<PayrollAmountField, string> & {
   cost_total: string;
@@ -180,7 +184,9 @@ export async function updatePayrollField(
     | "monthly_salary"
     | "housing_fund_base"
     | "contribution_base"
-    | "individual_income_tax",
+    | "individual_income_tax"
+    | "withheld_actual_amount"
+    | "net_salary_actual_amount",
   value: string,
   version: number,
 ): Promise<PayrollRow> {

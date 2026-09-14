@@ -116,6 +116,37 @@ export function requireRole(roles: string[]) {
   }
 }
 
+// 对财务等需要严格角色边界的接口，不应用董事长继承超级管理员权限的兼容规则。
+export function requireExactRole(roles: readonly string[]) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = await loadActiveUser(req, res)
+      if (!user) return
+
+      if (!roles.includes(user.role)) {
+        console.log('🔒 精确角色权限不足:', {
+          path: req.path,
+          userId: req.session.userId,
+          userRole: user.role,
+          requiredRoles: roles,
+        })
+        return res.status(403).json({
+          success: false,
+          message: '权限不足',
+        })
+      }
+
+      next()
+    } catch (error) {
+      console.error('❌ 精确角色权限检查失败:', error)
+      return res.status(500).json({
+        success: false,
+        message: '权限检查失败',
+      })
+    }
+  }
+}
+
 // BOSS角色只负责经营查看，禁止直接修改业务数据。
 export async function blockBossBusinessMutations(
   req: Request,

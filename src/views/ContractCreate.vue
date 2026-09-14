@@ -256,6 +256,12 @@
                 <el-descriptions-item label="乙方单位">
                   {{ terminationUploadContext.partyB }}
                 </el-descriptions-item>
+                <el-descriptions-item
+                  v-if="terminationUploadContext.partyC"
+                  label="丙方单位"
+                >
+                  {{ terminationUploadContext.partyC }}
+                </el-descriptions-item>
               </el-descriptions>
             </template>
             <template
@@ -296,6 +302,12 @@
                 <el-descriptions-item label="乙方单位">
                   {{ rentalRenewalUploadContext.partyB }}
                 </el-descriptions-item>
+                <el-descriptions-item
+                  v-if="rentalRenewalUploadContext.partyC"
+                  label="丙方单位"
+                >
+                  {{ rentalRenewalUploadContext.partyC }}
+                </el-descriptions-item>
               </el-descriptions>
             </template>
             <template v-else-if="supplementUploadContext">
@@ -335,6 +347,12 @@
                 <el-descriptions-item label="乙方单位">
                   {{ supplementUploadContext.partyB }}
                 </el-descriptions-item>
+                <el-descriptions-item
+                  v-if="supplementUploadContext.partyC"
+                  label="丙方单位"
+                >
+                  {{ supplementUploadContext.partyC }}
+                </el-descriptions-item>
               </el-descriptions>
             </template>
           </div>
@@ -345,7 +363,11 @@
                 placeholder="请先选择合同所属行政区"
                 style="width: 100%"
                 :disabled="
-                  Boolean(contractId) || uploading || recognizing || !metaReady
+                  Boolean(contractId) ||
+                  uploading ||
+                  recognizing ||
+                  !metaReady ||
+                  form.declaredSubtype === 'notary_fee'
                 "
                 @change="handleUploadContextChange"
               >
@@ -382,6 +404,33 @@
             </el-form-item>
             <el-form-item
               v-if="
+                form.declaredCategory === 'non_main' && !requiresParentContract
+              "
+              label="非主营收支分类"
+              required
+            >
+              <el-select
+                v-model="form.declaredSubtype"
+                placeholder="请选择非主营收入或支出"
+                style="width: 100%"
+                :disabled="
+                  Boolean(contractId) || uploading || recognizing || !metaReady
+                "
+                @change="handleNonMainSubtypeChange"
+              >
+                <el-option
+                  v-for="option in meta.declaredSubtypeOptions.non_main"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+              <p class="locked-field-tip">
+                收入合同登记销项发票与回款；支出合同登记进项发票与付款。上传后锁定。
+              </p>
+            </el-form-item>
+            <el-form-item
+              v-if="
                 form.declaredCategory === 'asset' && !requiresParentContract
               "
               label="合同二级分类"
@@ -409,7 +458,11 @@
                 v-model="form.relationType"
                 class="relation-options"
                 :disabled="
-                  Boolean(contractId) || uploading || recognizing || !metaReady
+                  Boolean(contractId) ||
+                  uploading ||
+                  recognizing ||
+                  !metaReady ||
+                  form.declaredSubtype === 'notary_fee'
                 "
                 @change="handleRelationTypeChange"
               >
@@ -417,7 +470,12 @@
                 <el-radio-button value="supplement">补充协议</el-radio-button>
               </el-radio-group>
               <p class="locked-field-tip">
-                合同层级决定金额识别口径，上传后锁定；主合同为一级合同，无需关联上级合同。
+                <template v-if="form.declaredSubtype === 'notary_fee'">
+                  仅上传对方已盖章的公证费付款通知PDF（便携式文档格式）；自动识别通知日期、合计金额、标题及公证处名称后直接进入生效中，无需合同审批或再次用印。
+                </template>
+                <template v-else>
+                  合同层级决定金额识别口径，上传后锁定；主合同为一级合同，无需关联上级合同。
+                </template>
               </p>
             </el-form-item>
             <el-form-item
@@ -466,7 +524,7 @@
               <div>
                 <strong>智能字段提取</strong
                 ><span
-                  >自动识别甲方、乙方、项目和金额；合同类型采用上传前选择值，草拟合同签订日期可留空，盖章归档时同步。</span
+                  >自动识别甲方、乙方、丙方（如有）、项目和金额；合同类型采用上传前选择值，草拟合同签订日期可留空，盖章归档时同步。</span
                 >
               </div>
             </article>
@@ -571,7 +629,7 @@
             type="error"
             :closable="false"
             show-icon
-            title="甲方单位与乙方单位不能相同"
+            title="甲方、乙方、丙方单位不能相同"
           />
 
           <el-alert
@@ -759,7 +817,11 @@
               </el-descriptions-item>
             </el-descriptions>
             <el-form-item
-              v-if="!paymentTermsOnlySupplement && !quickTerminationMode"
+              v-if="
+                !paymentTermsOnlySupplement &&
+                !quickTerminationMode &&
+                !targetPricingMode
+              "
               :label="
                 form.relationType === 'supplement' ? '本次增减金额' : '合同金额'
               "
@@ -780,6 +842,67 @@
                 {{ amountRuleText }}
               </p>
             </el-form-item>
+            <template v-if="targetPricingMode">
+              <el-alert
+                type="info"
+                show-icon
+                :closable="false"
+                title="该合同按目标金额管理"
+                description="合同正文只有单价或按实际数量结算，系统不会把单价误当合同总额。请设置目标金额；后续变更必须填写原因并永久留痕。"
+              />
+              <div class="target-amount-grid">
+                <el-form-item label="目标金额" required>
+                  <el-input v-model="form.targetAmount" inputmode="decimal">
+                    <template #prepend>¥</template>
+                  </el-input>
+                </el-form-item>
+                <el-form-item label="数量单位">
+                  <el-input
+                    v-model="form.quantityUnit"
+                    maxlength="20"
+                    placeholder="例如：套"
+                  />
+                </el-form-item>
+                <el-form-item label="目标数量">
+                  <el-input v-model="form.targetQuantity" inputmode="decimal" />
+                </el-form-item>
+                <el-form-item label="单价">
+                  <el-input v-model="form.unitPrice" inputmode="decimal">
+                    <template #prepend>¥</template>
+                  </el-input>
+                </el-form-item>
+                <el-form-item label="当前确认数量">
+                  <el-input
+                    v-model="form.confirmedQuantity"
+                    inputmode="decimal"
+                  />
+                </el-form-item>
+                <el-form-item label="当前确认金额">
+                  <el-input
+                    v-model="form.confirmedContractAmount"
+                    inputmode="decimal"
+                  >
+                    <template #prepend>¥</template>
+                  </el-input>
+                </el-form-item>
+              </div>
+              <el-form-item label="目标金额调整原因（首次设置可不填）">
+                <el-input
+                  v-model="form.targetChangeReason"
+                  type="textarea"
+                  :rows="2"
+                  maxlength="500"
+                  show-word-limit
+                  placeholder="再次修改目标金额、数量或单价时必须填写"
+                />
+              </el-form-item>
+              <p
+                class="amount-rule-tip"
+                :class="{ invalid: !targetAmountConfigValid }"
+              >
+                {{ targetAmountRuleText }}
+              </p>
+            </template>
             <el-form-item
               v-if="requiresParentContract && !quickTerminationMode"
               label="关联上级合同（二级）"
@@ -939,6 +1062,9 @@
             <el-descriptions-item label="乙方单位">{{
               form.partyB
             }}</el-descriptions-item>
+            <el-descriptions-item v-if="form.partyC" label="丙方单位">{{
+              form.partyC
+            }}</el-descriptions-item>
             <el-descriptions-item :label="subjectNameLabel">{{
               form.projectName
             }}</el-descriptions-item>
@@ -948,7 +1074,9 @@
                   ? '合同金额'
                   : form.relationType === 'supplement'
                     ? '本次增减'
-                    : '合同金额'
+                    : targetPricingMode
+                      ? '目标金额'
+                      : '合同金额'
               "
             >
               <strong class="amount-text">{{
@@ -956,7 +1084,9 @@
                   ? formatContractMoney(0)
                   : paymentTermsOnlySupplement
                     ? "仅变更付款方式"
-                    : formatContractMoney(form.amount)
+                    : targetPricingMode
+                      ? formatContractMoney(form.targetAmount)
+                      : formatContractMoney(form.amount)
               }}</strong>
             </el-descriptions-item>
             <el-descriptions-item label="合同类型">
@@ -1098,6 +1228,7 @@ import {
   signContractSealApplication,
   submitContract,
   updateContract,
+  updateContractTargetAmount,
   uploadContractFile,
 } from "@/utils/contractApi";
 import {
@@ -1189,6 +1320,7 @@ const meta = ref<ContractMeta>({
     "vehicle_rental",
     "parking_space",
     "office_asset",
+    "notary_fee",
     "other",
   ],
   declaredSubtypeOptions: FALLBACK_CONTRACT_DECLARED_SUBTYPE_OPTIONS,
@@ -1283,7 +1415,7 @@ const uploadCategoryOptions: Array<{
   {
     value: "non_main",
     label: "非主营项目合同",
-    description: "非主营业务收入合同、其他服务合同",
+    description: "非主营业务收入合同、非主营业务支出合同",
   },
   {
     value: "asset",
@@ -1311,6 +1443,7 @@ const uploadAssetCategoryOptions: Array<{
   { value: "vehicle_rental", label: "汽车租赁" },
   { value: "parking_space", label: "车位租赁" },
   { value: "office_asset", label: "办公资产合同" },
+  { value: "notary_fee", label: "公证费" },
 ];
 const uploadAssetCategorySet = new Set<ContractAssetCategory>(
   uploadAssetCategoryOptions.map((option) => option.value),
@@ -1319,8 +1452,17 @@ const uploadAssetCategorySet = new Set<ContractAssetCategory>(
 const form = reactive<{
   partyA: string;
   partyB: string;
+  partyC: string;
   projectName: string;
   amount: string;
+  pricingMode: "fixed" | "target";
+  targetAmount: string;
+  targetQuantity: string;
+  unitPrice: string;
+  confirmedQuantity: string;
+  confirmedContractAmount: string;
+  quantityUnit: string;
+  targetChangeReason: string;
   category: ContractCategory | "";
   declaredCategory: ContractCategory | "";
   declaredSubtype: ContractDeclaredSubtype | "";
@@ -1335,8 +1477,17 @@ const form = reactive<{
 }>({
   partyA: "",
   partyB: "",
+  partyC: "",
   projectName: "",
   amount: "",
+  pricingMode: "fixed",
+  targetAmount: "",
+  targetQuantity: "",
+  unitPrice: "",
+  confirmedQuantity: "",
+  confirmedContractAmount: "",
+  quantityUnit: "",
+  targetChangeReason: "",
   category: "",
   declaredCategory: "",
   declaredSubtype: "",
@@ -1352,6 +1503,9 @@ const form = reactive<{
 
 const projectAssociationAllowed = computed(
   () => (form.category || form.declaredCategory) !== "asset",
+);
+const targetPricingMode = computed(
+  () => form.relationType === "main" && form.pricingMode === "target",
 );
 const defaultSubjectNameLabel = computed(() =>
   projectAssociationAllowed.value ? "项目名称" : "合同名称",
@@ -1401,13 +1555,16 @@ const sealApplicationSummary = computed(() => ({
     sealApplication.value?.contract?.title || form.projectName || null,
   partyA: form.partyA,
   partyB: form.partyB,
+  partyC: form.partyC || null,
   projectName: form.projectName || null,
   amount:
     form.relationType === "termination"
       ? formatContractMoney(0)
-      : form.amount
-        ? formatContractMoney(form.amount)
-        : null,
+      : targetPricingMode.value && form.targetAmount
+        ? formatContractMoney(form.targetAmount)
+        : form.amount
+          ? formatContractMoney(form.amount)
+          : null,
   categoryLabel: form.category
     ? CONTRACT_CATEGORY_LABELS[form.category]
     : "待识别",
@@ -1483,6 +1640,7 @@ const requiredFieldsComplete = computed(() =>
     if (field.key === "amount" && paymentTermsOnlySupplement.value) {
       return true;
     }
+    if (field.key === "amount" && targetPricingMode.value) return true;
     if (!quickAgreementMode.value) return false;
     if (field.key === "party_a") return Boolean(form.partyA.trim());
     if (field.key === "party_b") return Boolean(form.partyB.trim());
@@ -1536,13 +1694,20 @@ const uploadSetupComplete = computed(() => {
     return false;
   }
   if (
-    form.declaredCategory !== "asset" &&
+    form.declaredCategory === "main_business" &&
     !requiresParentContract.value &&
-    form.declaredSubtype !==
-      DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY[form.declaredCategory]
+    form.declaredSubtype !== DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY.main_business
   ) {
     return false;
   }
+  if (
+    form.declaredCategory === "non_main" &&
+    !requiresParentContract.value &&
+    !meta.value.declaredSubtypeOptions.non_main.some(
+      (option) => option.value === form.declaredSubtype,
+    )
+  )
+    return false;
   if (!form.relationType) return false;
   if (
     form.declaredCategory === "asset" &&
@@ -1577,11 +1742,12 @@ const sameAreaProjects = computed(() =>
   ),
 );
 
-const partiesDifferent = computed(
-  () =>
-    form.partyA.trim().normalize("NFKC") !==
-    form.partyB.trim().normalize("NFKC"),
-);
+const partiesDifferent = computed(() => {
+  const parties = [form.partyA, form.partyB, form.partyC]
+    .map((party) => party.trim().normalize("NFKC"))
+    .filter(Boolean);
+  return new Set(parties).size === parties.length;
+});
 
 function normalizeProjectMatchText(value: string | null | undefined): string {
   return String(value || "")
@@ -1767,10 +1933,85 @@ const normalizedAmountText = computed(() =>
   String(form.amount).replace(/[,，￥¥\s]/g, ""),
 );
 const numericAmount = computed(() => Number(normalizedAmountText.value));
+function targetInputNumber(value: string): number | null {
+  const normalized = String(value)
+    .replace(/[,，￥¥\s]/gu, "")
+    .trim();
+  if (!normalized) return null;
+  return Number(normalized);
+}
+function targetInputPrecisionValid(value: string, scale: number): boolean {
+  const normalized = String(value)
+    .replace(/[,，￥¥\s]/gu, "")
+    .trim();
+  if (!normalized) return true;
+  const expression =
+    scale === 4 ? /^\d+(?:\.\d{1,4})?$/u : /^\d+(?:\.\d{1,2})?$/u;
+  const parsed = Number(normalized);
+  return (
+    expression.test(normalized) &&
+    Number.isFinite(parsed) &&
+    Number.isSafeInteger(Math.round(parsed * 10 ** scale))
+  );
+}
+const targetAmountConfigValid = computed(() => {
+  if (!targetPricingMode.value) return true;
+  const targetAmount = targetInputNumber(form.targetAmount);
+  const targetQuantity = targetInputNumber(form.targetQuantity);
+  const unitPrice = targetInputNumber(form.unitPrice);
+  const confirmedQuantity = targetInputNumber(form.confirmedQuantity);
+  const confirmedAmount = targetInputNumber(form.confirmedContractAmount);
+  if (
+    targetAmount == null ||
+    targetAmount <= 0 ||
+    !targetInputPrecisionValid(form.targetAmount, 2)
+  ) {
+    return false;
+  }
+  if ((targetQuantity == null) !== (unitPrice == null)) return false;
+  if (
+    targetQuantity != null &&
+    (targetQuantity <= 0 ||
+      unitPrice == null ||
+      unitPrice <= 0 ||
+      !targetInputPrecisionValid(form.targetQuantity, 4) ||
+      !targetInputPrecisionValid(form.unitPrice, 2) ||
+      Math.round(targetQuantity * unitPrice * 100) !==
+        Math.round(targetAmount * 100))
+  ) {
+    return false;
+  }
+  if (
+    confirmedQuantity != null &&
+    (!targetInputPrecisionValid(form.confirmedQuantity, 4) ||
+      confirmedQuantity < 0 ||
+      targetQuantity == null ||
+      confirmedQuantity > targetQuantity ||
+      !form.quantityUnit.trim())
+  ) {
+    return false;
+  }
+  if (
+    confirmedAmount != null &&
+    (!targetInputPrecisionValid(form.confirmedContractAmount, 2) ||
+      confirmedAmount < 0 ||
+      confirmedAmount > targetAmount)
+  ) {
+    return false;
+  }
+  return !(targetQuantity != null && !form.quantityUnit.trim());
+});
+const targetAmountRuleText = computed(() => {
+  if (targetAmountConfigValid.value) {
+    return "目标金额用于台账、看板和财务完成率；首次设置不计入变更次数。";
+  }
+  return "请核对目标金额；填写数量时目标数量、单价、单位必须完整，且数量×单价应等于目标金额。";
+});
 const displayedSupplementAmountDelta = computed(() =>
   paymentTermsOnlySupplement.value ? 0 : numericAmount.value,
 );
 const amountPrecisionValid = computed(() => {
+  if (targetPricingMode.value) return targetAmountConfigValid.value;
   if (paymentTermsOnlySupplement.value) {
     return (
       (!normalizedAmountText.value || numericAmount.value === 0) &&
@@ -1784,6 +2025,7 @@ const amountPrecisionValid = computed(() => {
 });
 
 const amountRelationValid = computed(() => {
+  if (targetPricingMode.value) return targetAmountConfigValid.value;
   if (paymentTermsOnlySupplement.value) {
     return !normalizedAmountText.value || numericAmount.value === 0;
   }
@@ -1897,7 +2139,7 @@ const canContinue = computed(() => {
       ocrJob.value?.status === "succeeded" &&
       requiredFieldsComplete.value &&
       partiesDifferent.value &&
-      amountPrecisionValid.value &&
+      (targetPricingMode.value || amountPrecisionValid.value) &&
       supplementRecognitionStateReady.value
     );
   }
@@ -1926,11 +2168,9 @@ function categoryLabel(category: ContractCategory | ""): string {
 function handleDeclaredCategoryChange() {
   if (form.declaredCategory === "asset") form.projectId = "";
   form.declaredSubtype =
-    form.declaredCategory === "asset"
-      ? ""
-      : form.declaredCategory
-        ? DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY[form.declaredCategory]
-        : "";
+    form.declaredCategory === "main_business"
+      ? DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY.main_business
+      : "";
   form.assetCategory =
     form.declaredCategory === "asset"
       ? (form.declaredSubtype as ContractUploadAssetCategory)
@@ -1941,6 +2181,15 @@ function handleDeclaredCategoryChange() {
 
 function handleAssetSubtypeChange() {
   form.assetCategory = form.declaredSubtype as ContractUploadAssetCategory;
+  if (form.declaredSubtype === "notary_fee") {
+    form.relationType = "main";
+    form.requiresAuxiliaryMaterials = false;
+  }
+  handleUploadContextChange();
+}
+
+function handleNonMainSubtypeChange() {
+  form.assetCategory = "";
   handleUploadContextChange();
 }
 
@@ -1950,6 +2199,14 @@ function handleUploadContextChange() {
   lockedParentContractName.value = "";
   relatedContracts.value = [];
   form.projectName = "";
+  form.pricingMode = "fixed";
+  form.targetAmount = "";
+  form.targetQuantity = "";
+  form.unitPrice = "";
+  form.confirmedQuantity = "";
+  form.confirmedContractAmount = "";
+  form.quantityUnit = "";
+  form.targetChangeReason = "";
   if (requiresParentContract.value && uploadParentContextReady.value) {
     void loadRelatedContracts();
   }
@@ -1970,6 +2227,7 @@ function applyRentalRenewalContext(
   form.projectName = "";
   form.partyA = context.partyA;
   form.partyB = context.partyB;
+  form.partyC = context.partyC || "";
   form.amount = "";
   lockedParentContractName.value = "";
 }
@@ -1987,6 +2245,7 @@ function applyQuickSupplementContext(context: ContractSupplementUploadContext) {
   form.projectName = context.generatedContractName;
   form.partyA = context.partyA;
   form.partyB = context.partyB;
+  form.partyC = context.partyC || "";
   lockedParentContractName.value = context.parentContractName;
   supplementAmountContext.value = {
     originalContractAmount: context.originalContractAmount,
@@ -2013,6 +2272,7 @@ function applyQuickTerminationContext(
     buildTerminationDisplayName(context.targetName);
   form.partyA = context.partyA;
   form.partyB = context.partyB;
+  form.partyC = context.partyC || "";
   const unperformedAmount = Number(context.unperformedAmount || 0);
   form.amount = String(unperformedAmount > 0 ? -unperformedAmount : 0);
   lockedParentContractName.value = context.targetName;
@@ -2251,6 +2511,17 @@ async function pollRecognition(id: string, sequence: number) {
             "自动识别未达到采用标准，请财务对照合同原文确认必需字段";
         } else {
           pageError.value = "";
+          if (
+            form.declaredCategory === "asset" &&
+            form.declaredSubtype === "notary_fee"
+          ) {
+            dirty.value = false;
+            createdDraftInCurrentSession.value = false;
+            submitted.value = true;
+            ElMessage.success("公证费付款通知识别成功，已直接生效");
+            await router.replace(`/contracts/${contractId.value}`);
+            return;
+          }
           if (form.relationType === "supplement") {
             await syncSupplementContractState();
           }
@@ -2296,6 +2567,10 @@ function syncFormFromFields() {
     terminationUploadContext.value?.partyB ||
     supplementUploadContext.value?.partyB ||
     valueOf("party_b");
+  form.partyC =
+    terminationUploadContext.value?.partyC ||
+    supplementUploadContext.value?.partyC ||
+    valueOf("party_c");
   form.projectName =
     form.relationType === "termination" && inheritedTerminationName.value
       ? inheritedTerminationName.value
@@ -2303,7 +2578,20 @@ function syncFormFromFields() {
         ? inheritedSupplementName.value
         : valueOf("project_name");
   if (!quickTerminationMode.value) {
-    form.amount = valueOf("amount").replace(/[^\d.-]/g, "");
+    const recognizedAmount = valueOf("amount").replace(/[^\d.-]/g, "");
+    form.amount = recognizedAmount;
+    if (form.relationType === "main") {
+      form.pricingMode = recognizedAmount ? "fixed" : "target";
+      if (recognizedAmount) {
+        form.targetAmount = "";
+        form.targetQuantity = "";
+        form.unitPrice = "";
+        form.confirmedQuantity = "";
+        form.confirmedContractAmount = "";
+        form.quantityUnit = "";
+        form.targetChangeReason = "";
+      }
+    }
   }
   form.category =
     terminationUploadContext.value?.declaredCategory ||
@@ -2321,6 +2609,10 @@ function clearRecognizedFormValues() {
     terminationUploadContext.value?.partyB ||
     supplementUploadContext.value?.partyB ||
     "";
+  form.partyC =
+    terminationUploadContext.value?.partyC ||
+    supplementUploadContext.value?.partyC ||
+    "";
   const systemInheritedProjectName = ocrFields.value.find(
     (field) => field.key === "project_name",
   )?.value;
@@ -2330,7 +2622,17 @@ function clearRecognizedFormValues() {
       ? String(systemInheritedProjectName).trim()
       : supplementUploadContext.value?.generatedContractName || "";
   preserveInheritedSupplementName();
-  if (!quickTerminationMode.value) form.amount = "";
+  if (!quickTerminationMode.value) {
+    form.amount = "";
+    form.pricingMode = "fixed";
+    form.targetAmount = "";
+    form.targetQuantity = "";
+    form.unitPrice = "";
+    form.confirmedQuantity = "";
+    form.confirmedContractAmount = "";
+    form.quantityUnit = "";
+    form.targetChangeReason = "";
+  }
   form.category =
     terminationUploadContext.value?.declaredCategory ||
     supplementUploadContext.value?.declaredCategory ||
@@ -2361,6 +2663,7 @@ async function syncSupplementContractState() {
   contractVersion.value = contract.version;
   form.partyA = supplementUploadContext.value?.partyA || contract.partyA || "";
   form.partyB = supplementUploadContext.value?.partyB || contract.partyB || "";
+  form.partyC = supplementUploadContext.value?.partyC || contract.partyC || "";
   form.projectName =
     supplementUploadContext.value?.generatedContractName ||
     contract.projectName ||
@@ -2652,6 +2955,10 @@ async function restoreDraft(id: string) {
       recognitionSucceeded || restoringSupplement || restoringTermination
         ? detail.contract.partyB || ""
         : "";
+    form.partyC =
+      recognitionSucceeded || restoringSupplement || restoringTermination
+        ? detail.contract.partyC || ""
+        : "";
     form.projectName =
       recognitionSucceeded || restoringSupplement || restoringTermination
         ? detail.contract.projectName || ""
@@ -2662,6 +2969,16 @@ async function restoreDraft(id: string) {
         : recognitionSucceeded
           ? String(detail.contract.amount ?? "")
           : "";
+    form.pricingMode = detail.contract.pricingMode || "fixed";
+    form.targetAmount = String(detail.contract.targetAmount ?? "");
+    form.targetQuantity = String(detail.contract.targetQuantity ?? "");
+    form.unitPrice = String(detail.contract.unitPrice ?? "");
+    form.confirmedQuantity = String(detail.contract.confirmedQuantity ?? "");
+    form.confirmedContractAmount = String(
+      detail.contract.confirmedContractAmount ?? "",
+    );
+    form.quantityUnit = detail.contract.quantityUnit || "";
+    form.targetChangeReason = "";
     form.category =
       (recognitionSucceeded || restoringSupplement || restoringTermination) &&
       detail.contract.category &&
@@ -2707,6 +3024,7 @@ async function restoreDraft(id: string) {
         projectName: detail.contract.projectName || "",
         partyA: detail.contract.partyA || "",
         partyB: detail.contract.partyB || "",
+        partyC: detail.contract.partyC || null,
         currentEffectiveAmount,
         settledAmount,
         unperformedAmount: Math.max(0, currentEffectiveAmount - settledAmount),
@@ -2881,7 +3199,25 @@ async function saveDraft(showMessage: boolean) {
   }
   saving.value = true;
   try {
-    const updated = await updateContract(contractId.value, buildPayload());
+    let updated = await updateContract(contractId.value, buildPayload());
+    if (targetPricingMode.value && targetAmountConfigValid.value) {
+      const targetAmount = targetInputNumber(form.targetAmount);
+      if (targetAmount == null) throw new Error("目标金额配置不完整");
+      const targetResult = await updateContractTargetAmount(contractId.value, {
+        expectedVersion: updated.version,
+        targetAmount,
+        targetQuantity: targetInputNumber(form.targetQuantity),
+        unitPrice: targetInputNumber(form.unitPrice),
+        confirmedQuantity: targetInputNumber(form.confirmedQuantity),
+        confirmedContractAmount: targetInputNumber(
+          form.confirmedContractAmount,
+        ),
+        quantityUnit: form.quantityUnit.trim() || null,
+        reason: form.targetChangeReason.trim() || null,
+      });
+      updated = targetResult.contract;
+      form.targetChangeReason = "";
+    }
     contractVersion.value = updated.version;
     dirty.value = false;
     if (showMessage) ElMessage.success("合同草稿已保存");
@@ -3530,6 +3866,11 @@ onBeforeRouteLeave(async () => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
+.target-amount-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 12px;
+}
 .support-file-grid {
   display: grid;
   gap: 12px;
@@ -3686,6 +4027,7 @@ onBeforeRouteLeave(async () => {
     padding: 13px;
   }
   .form-grid,
+  .target-amount-grid,
   .relation-options,
   .upload-category-group {
     grid-template-columns: 1fr;

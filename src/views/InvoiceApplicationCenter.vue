@@ -238,6 +238,14 @@
               >撤回申请</el-button
             >
             <el-button
+              v-if="mode === 'mine' && item.status === 'draft'"
+              type="danger"
+              plain
+              :loading="actionLoading"
+              @click="deleteDraftApplication(item)"
+              >删除草稿</el-button
+            >
+            <el-button
               v-if="mode === 'admin' && item.status === 'pending_seal'"
               type="warning"
               @click="openAdminProcessing(item)"
@@ -684,6 +692,7 @@ import type {
 import { INVOICE_APPLICATION_STATUS_LABELS } from "@/types/invoiceApplication";
 import {
   decideInvoiceApplication,
+  deleteInvoiceApplicationDraft,
   deliverInvoiceApplication,
   getInvoiceApplication,
   getInvoiceApplicationErrorMessage,
@@ -1044,6 +1053,38 @@ async function withdrawApplication(item: InvoiceApplication) {
   } catch (error) {
     ElMessage.error(
       getInvoiceApplicationErrorMessage(error, "撤回开票申请失败"),
+    );
+  } finally {
+    actionLoading.value = false;
+  }
+}
+async function deleteDraftApplication(item: InvoiceApplication) {
+  try {
+    await ElMessageBox.confirm(
+      "删除后将同时清理该草稿的三联单和申请材料，且无法恢复。是否继续？",
+      "删除开票申请草稿",
+      {
+        type: "warning",
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消",
+      },
+    );
+  } catch {
+    return;
+  }
+  actionLoading.value = true;
+  try {
+    await deleteInvoiceApplicationDraft(item.id, item.version);
+    if (selected.value?.id === item.id) {
+      detailVisible.value = false;
+      selected.value = null;
+    }
+    ElMessage.success("开票申请草稿已删除");
+    requestContractDownloadBadgeRefresh();
+    await loadApplications();
+  } catch (error) {
+    ElMessage.error(
+      getInvoiceApplicationErrorMessage(error, "删除开票申请草稿失败"),
     );
   } finally {
     actionLoading.value = false;

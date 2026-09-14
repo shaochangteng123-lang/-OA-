@@ -81,6 +81,7 @@ describe("月度财务趋势点", () => {
       month: "2026-01",
       status: "closed",
       valueState: "closed",
+      actualReceiptState: "closed",
       actualReceipt: "200",
       settlementInflow: "107",
       totalOutflow: "34",
@@ -135,6 +136,7 @@ describe("月度财务趋势点", () => {
     );
     expect(currentPoint).toMatchObject({
       valueState: "current",
+      actualReceiptState: "current",
       actualReceipt: "0.123456789012",
       settlementInflow: "0.2",
       totalOutflow: "0",
@@ -146,6 +148,7 @@ describe("月度财务趋势点", () => {
       month: "2026-03",
       status: null,
       valueState: null,
+      actualReceiptState: null,
       actualReceipt: null,
       settlementInflow: null,
       totalOutflow: null,
@@ -223,6 +226,70 @@ describe("月度财务趋势响应", () => {
           message: "上月尚未月结",
           months: ["2026-03"],
         },
+      ]),
+    );
+  });
+
+  it("缺少月报时仅用合同已确认回款补主营实际到账且其他指标保持断点", () => {
+    const data = buildMonthlyFinancialTrendData({
+      from: "2026-01",
+      to: "2026-03",
+      availableYears: [2025, 2026],
+      reports: [report()],
+      actualReceipts: [
+        { month: "2026-01", amount: "999" },
+        { month: "2026-02", amount: "50000" },
+      ],
+      mainBusinessRegions: ["海淀区", "朝阳区", "海淀区"],
+      mainBusinessPoints: [
+        {
+          month: "2026-02",
+          region: "朝阳区",
+          actualReceipt: "0",
+          contractAmount: "0",
+          contractCount: 0,
+        },
+      ],
+    });
+
+    expect(data.points[0]).toMatchObject({
+      actualReceipt: "200",
+      actualReceiptState: "closed",
+    });
+    expect(data.points[1]).toEqual({
+      month: "2026-02",
+      status: null,
+      valueState: null,
+      actualReceiptState: "confirmed_source",
+      actualReceipt: "50000",
+      settlementInflow: null,
+      totalOutflow: null,
+      netChange: null,
+      closingTotal: null,
+      accountClosing: {
+        general: null,
+        business: null,
+        welfare_one: null,
+        welfare_two: null,
+      },
+    });
+    expect(data.points[2]?.actualReceipt).toBeNull();
+    expect(data.mainBusinessRegions).toEqual(["朝阳区", "海淀区"]);
+    expect(data.mainBusinessPoints).toEqual([
+      {
+        month: "2026-02",
+        region: "朝阳区",
+        actualReceipt: "0",
+        contractAmount: "0",
+        contractCount: 0,
+      },
+    ]);
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "MONTHLY_FINANCE_TREND_CONFIRMED_RECEIPT_SOURCE",
+          months: ["2026-02"],
+        }),
       ]),
     );
   });

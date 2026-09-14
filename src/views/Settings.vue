@@ -97,6 +97,66 @@
         </div>
       </el-card>
 
+      <el-card
+        v-if="isChairman"
+        v-loading="paymentProfileLoading"
+        class="settings-card"
+      >
+        <template #header>
+          <div class="card-header">
+            <el-icon><Wallet /></el-icon>
+            <span>报销收款资料</span>
+          </div>
+        </template>
+
+        <el-form
+          ref="paymentProfileFormRef"
+          :model="paymentProfileForm"
+          :rules="paymentProfileRules"
+          label-width="110px"
+          style="max-width: 560px"
+        >
+          <el-form-item label="收款人姓名" prop="bankAccountName">
+            <el-input
+              v-model="paymentProfileForm.bankAccountName"
+              maxlength="50"
+              placeholder="请输入银行卡开户姓名"
+            />
+          </el-form-item>
+          <el-form-item label="预留手机号" prop="bankAccountPhone">
+            <el-input
+              v-model="paymentProfileForm.bankAccountPhone"
+              maxlength="11"
+              placeholder="请输入银行预留手机号（选填）"
+            />
+          </el-form-item>
+          <el-form-item label="开户银行" prop="bankName">
+            <el-input
+              v-model="paymentProfileForm.bankName"
+              maxlength="100"
+              placeholder="请输入开户银行"
+            />
+          </el-form-item>
+          <el-form-item label="银行卡号" prop="bankAccountNumber">
+            <el-input
+              v-model="paymentProfileForm.bankAccountNumber"
+              maxlength="19"
+              inputmode="numeric"
+              placeholder="请输入16至19位银行卡号"
+            />
+          </el-form-item>
+          <el-form-item>
+            <el-button
+              type="primary"
+              :loading="paymentProfileSaving"
+              @click="handleSavePaymentProfile"
+            >
+              保存收款资料
+            </el-button>
+          </el-form-item>
+        </el-form>
+      </el-card>
+
       <!-- 修改密码卡片 -->
       <el-card class="settings-card">
         <template #header>
@@ -170,7 +230,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from "vue";
-import { EditPen, Lock, Upload, User } from "@element-plus/icons-vue";
+import { EditPen, Lock, Upload, User, Wallet } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { useAuthStore } from "@/stores/auth";
@@ -185,13 +245,17 @@ import {
 const authStore = useAuthStore();
 
 const passwordFormRef = ref<FormInstance>();
+const paymentProfileFormRef = ref<FormInstance>();
 const passwordLoading = ref(false);
 const signatureLoading = ref(false);
 const signatureSaving = ref(false);
 const signatureDialogVisible = ref(false);
+const paymentProfileLoading = ref(false);
+const paymentProfileSaving = ref(false);
 const personalSignature = ref<PersonalSignatureData | null>(null);
 const signatureLocked = ref(false);
 const isBoss = computed(() => authStore.user?.role === "boss");
+const isChairman = computed(() => authStore.user?.role === "chairman");
 const signatureDialogTitle = "上传本人电子签名";
 
 // 密码表单
@@ -200,6 +264,37 @@ const passwordForm = reactive({
   newPassword: "",
   confirmPassword: "",
 });
+
+const paymentProfileForm = reactive({
+  bankAccountName: "",
+  bankAccountPhone: "",
+  bankName: "",
+  bankAccountNumber: "",
+});
+
+const paymentProfileRules: FormRules = {
+  bankAccountName: [
+    { required: true, message: "请输入收款人姓名", trigger: "blur" },
+  ],
+  bankAccountPhone: [
+    {
+      pattern: /^$|^1\d{10}$/,
+      message: "请输入正确的11位手机号",
+      trigger: "blur",
+    },
+  ],
+  bankName: [
+    { required: true, message: "请输入开户银行", trigger: "blur" },
+  ],
+  bankAccountNumber: [
+    { required: true, message: "请输入银行卡号", trigger: "blur" },
+    {
+      pattern: /^\d{16,19}$/,
+      message: "银行卡号应为16至19位数字",
+      trigger: "blur",
+    },
+  ],
+};
 
 // 验证确认密码
 const validateConfirmPassword = (
@@ -324,6 +419,48 @@ async function handleSaveSignature(dataUrl: string) {
   }
 }
 
+async function fetchPaymentProfile() {
+  paymentProfileLoading.value = true;
+  try {
+    const response = await api.get("/api/users/me/payment-profile");
+    if (!response.data.success) return;
+    const data = response.data.data || {};
+    paymentProfileForm.bankAccountName = data.bankAccountName || "";
+    paymentProfileForm.bankAccountPhone = data.bankAccountPhone || "";
+    paymentProfileForm.bankName = data.bankName || "";
+    paymentProfileForm.bankAccountNumber = data.bankAccountNumber || "";
+  } catch (error: unknown) {
+    ElMessage.error(getRequestErrorMessage(error, "获取收款资料失败"));
+  } finally {
+    paymentProfileLoading.value = false;
+  }
+}
+
+async function handleSavePaymentProfile() {
+  if (!paymentProfileFormRef.value) return;
+  try {
+    await paymentProfileFormRef.value.validate();
+  } catch {
+    return;
+  }
+
+  paymentProfileSaving.value = true;
+  try {
+    const response = await api.put(
+      "/api/users/me/payment-profile",
+      paymentProfileForm,
+    );
+    if (response.data.success) {
+      ElMessage.success(response.data.message || "收款资料已保存");
+      await fetchPaymentProfile();
+    }
+  } catch (error: unknown) {
+    ElMessage.error(getRequestErrorMessage(error, "保存收款资料失败"));
+  } finally {
+    paymentProfileSaving.value = false;
+  }
+}
+
 // 修改密码
 async function handleChangePassword() {
   if (!passwordFormRef.value) return;
@@ -357,6 +494,9 @@ async function handleChangePassword() {
 onMounted(() => {
   if (!isBoss.value) {
     fetchPersonalSignature();
+  }
+  if (isChairman.value) {
+    fetchPaymentProfile();
   }
 });
 </script>

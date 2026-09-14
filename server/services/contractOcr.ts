@@ -24,7 +24,7 @@ import type {
  * 合同字段结构解析版本。解析规则或安全候选结构发生变化时必须升级，
  * 使历史草稿可以自动复跑，避免继续沿用旧规则的部分结果。
  */
-export const CONTRACT_OCR_PARSER_VERSION = "contract-structure-v19";
+export const CONTRACT_OCR_PARSER_VERSION = "contract-structure-v21";
 
 const execFileAsync = promisify(execFile);
 
@@ -75,6 +75,7 @@ export function runWithContractPdfRenderPermit<T>(
 export type ContractOcrFieldName =
   | "party_a"
   | "party_b"
+  | "party_c"
   | "project_name"
   | "amount"
   | "category"
@@ -951,6 +952,8 @@ const FIELD_NAMES: readonly ContractOcrFieldName[] = [
   "contract_date",
 ];
 
+const OPTIONAL_FIELD_NAMES: readonly ContractOcrFieldName[] = ["party_c"];
+
 const CORE_FIELD_NAMES: readonly ContractOcrFieldName[] = [
   "party_a",
   "party_b",
@@ -963,6 +966,7 @@ const CORE_FIELD_NAMES: readonly ContractOcrFieldName[] = [
 const FIELD_LABELS: Record<ContractOcrFieldName, string> = {
   party_a: "甲方单位",
   party_b: "乙方单位",
+  party_c: "丙方单位",
   project_name: "项目名称",
   amount: "合同金额",
   category: "合同类型",
@@ -1232,7 +1236,7 @@ function collectPartyCandidates(
       ),
     );
   const anchorPattern =
-    /(?<![\p{Script=Han}A-Za-z0-9:：])(被许可方|许可方|甲\s*方|乙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|用户|接入商|[\p{Script=Han}A-Za-z0-9·]{1,12}(?=\s*[:：]?\s*[（(][^）)\n]{0,12}(?:甲方|乙方)[^）)\n]{0,12}[）)]))(?:\s*(?:单位(?:名称)?|名称))?\s*[:：]?(?:\s*[（(]([^）)\n]{0,12})[）)])?(?:\s*[（(](?:盖章|签章|公章)[）)])?\s*[:：]?/gu;
+    /(?<![\p{Script=Han}A-Za-z0-9:：])(被许可方|许可方|甲\s*方|乙\s*方|丙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|用户|接入商|[\p{Script=Han}A-Za-z0-9·]{1,12}(?=\s*[:：]?\s*[（(][^）)\n]{0,12}(?:甲方|乙方|丙方)[^）)\n]{0,12}[）)]))(?:\s*(?:单位(?:名称)?|名称))?\s*[:：]?(?:\s*[（(]([^）)\n]{0,12})[）)])?(?:\s*[（(](?:盖章|签章|公章)[）)])?\s*[:：]?/gu;
 
   for (const context of contexts) {
     for (let lineIndex = 0; lineIndex < context.lines.length; lineIndex += 1) {
@@ -1244,13 +1248,15 @@ function collectPartyCandidates(
         const anchor = match[1].replace(/\s/g, "");
         const explicitSide = String(match[2] || "").replace(/\s/g, "");
         const field: ContractOcrFieldName =
-          explicitSide.includes("甲方") ||
-          (!explicitSide.includes("乙方") &&
-            /^(?:甲方|委托人|委托方|发包方|采购方|买方|许可方|出租方|用户)$/.test(
-              anchor,
-            ))
-            ? "party_a"
-            : "party_b";
+          explicitSide.includes("丙方") || anchor === "丙方"
+            ? "party_c"
+            : explicitSide.includes("甲方") ||
+                (!explicitSide.includes("乙方") &&
+                  /^(?:甲方|委托人|委托方|发包方|采购方|买方|许可方|出租方|用户)$/.test(
+                    anchor,
+                  ))
+              ? "party_a"
+              : "party_b";
         const start = (match.index || 0) + match[0].length;
         const end = matches[matchIndex + 1]?.index ?? line.normalized.length;
         let originalValue = line.normalized.slice(start, end);
@@ -1278,7 +1284,7 @@ function collectPartyCandidates(
         const hasSeal = /盖章|签章|公章/.test(match[0]);
         const hasAmbiguousLicenseRole =
           /^(?:许可方|被许可方)$/.test(anchor) &&
-          !/甲方|乙方/.test(explicitSide);
+          !/甲方|乙方|丙方/.test(explicitSide);
         const looksLikeOrganization =
           /(?:公司|集团|中心|研究院|设计院|事务所|委员会|政府|大学|学院|学校|医院|协会|基金会|合作社|联合体|银行|支行|机关|事业单位|社区|局|厂|所|部|店)$/.test(
             normalizedValue,
@@ -1292,7 +1298,7 @@ function collectPartyCandidates(
           );
         const looksLikeAssetRentalNaturalPerson =
           isAssetRentalDocument &&
-          /^(?:甲方|乙方)$/u.test(anchor) &&
+          /^(?:甲方|乙方|丙方)$/u.test(anchor) &&
           /(?:出租方|承租方)/u.test(`${explicitSide}${match[0]}`) &&
           /^[\p{Script=Han}·]{2,6}$/u.test(normalizedValue) &&
           hasNearbyIdentityNumber;
@@ -1302,15 +1308,20 @@ function collectPartyCandidates(
         if (!looksLikeOrganization && !looksLikeAssetRentalNaturalPerson) {
           continue;
         }
+        // 丙方没有可安全回退的通用角色映射，只接受带字段分隔符或签章标记
+        // 的明确标签，避免正文中的“丙方”叙述被误当成第三签约主体。
+        if (field === "party_c" && !hasExplicitDelimiter && !hasSeal) {
+          continue;
+        }
 
-        let anchorScore = /^(?:甲方|乙方)$/.test(anchor) ? 96 : 90;
+        let anchorScore = /^(?:甲方|乙方|丙方)$/.test(anchor) ? 96 : 90;
         if (
           /^(?:用户|接入商)$/.test(anchor) ||
-          /甲方|乙方/.test(explicitSide)
+          /甲方|乙方|丙方/.test(explicitSide)
         ) {
           anchorScore = 94;
         }
-        if (/甲方|乙方/.test(explicitSide)) anchorScore = 97;
+        if (/甲方|乙方|丙方/.test(explicitSide)) anchorScore = 97;
         if (hasAmbiguousLicenseRole) anchorScore = 84;
         if (context.pageNumber === 1) anchorScore += 2;
         if (hasSeal) anchorScore += 2;
@@ -1333,7 +1344,8 @@ function collectPartyCandidates(
             !hasAmbiguousLicenseRole && (hasExplicitDelimiter || hasSeal),
           recognitionEngine: context.recognitionEngine,
           partyAnchorPriority:
-            /^(?:甲方|乙方)$/.test(anchor) || /甲方|乙方/.test(explicitSide)
+            /^(?:甲方|乙方|丙方)$/.test(anchor) ||
+            /甲方|乙方|丙方/.test(explicitSide)
               ? 2
               : 1,
         });
@@ -1397,7 +1409,7 @@ function cleanProjectName(
     .replace(/^[：:、，,；;\s]+/, "")
     .replace(/^[（(](?:全称|项目全称)[）)]\s*[:：]?\s*/, "")
     .split(
-      /(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称)\s*[:：]|合同(?:签订|签署|生效)?(?:日期|时间)|签订(?:日期|时间|地点)|签署(?:日期|地点)|生效(?:日期|时间)|有效期限|有效期|合同期限|履行期限|合同(?:总金额|金额|总价|价款|编号)|服务费用总额|含税金额|总金额|协议金额|甲\s*方|乙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|服务内容|项目地点|工程地点|服务地点|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费/,
+      /(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称)\s*[:：]|合同(?:签订|签署|生效)?(?:日期|时间)|签订(?:日期|时间|地点)|签署(?:日期|地点)|生效(?:日期|时间)|有效期限|有效期|合同期限|履行期限|合同(?:总金额|金额|总价|价款|编号)|服务费用总额|含税金额|总金额|协议金额|甲\s*方|乙\s*方|丙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|服务内容|项目地点|工程地点|服务地点|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费/,
     )[0]
     .split(
       /(?:[（(]\s*(?:以下简称|简称)|[，,；;\s]+(?:以下简称|简称|项目编号|合同编号|项目负责人|联系人)\s*[:：]?)/,
@@ -1568,7 +1580,7 @@ function cleanProjectName(
 
 function isProjectMetadataBoundary(value: string): boolean {
   return (
-    /^(?:(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]|[（(][一二三四五六七八九十百\d]+[）)])\s*)?(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|甲\s*方|乙\s*方|委\s*托\s*人|受\s*托\s*人|委\s*托\s*方|受\s*托\s*方|发\s*包\s*方|承\s*包\s*方|采购方|供应商|买方|卖方|出租方|承租方|合同(?:总金额|金额|总价|价款|编号|类型|日期|签订日期|签订时间|生效日期|生效时间|期限)|服务费用总额|含税金额|总金额|协议金额|签订时间|签订日期|签订地点|签署日期|签署地点|生效日期|生效时间|有效期限|有效期|履行期限|日期|项目地点|工程地点|服务地点|服务内容|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费|第[一二三四五六七八九十\d]+条)\s*(?:[（(:：]|\s|$)/u.test(
+    /^(?:(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]|[（(][一二三四五六七八九十百\d]+[）)])\s*)?(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|甲\s*方|乙\s*方|丙\s*方|委\s*托\s*人|受\s*托\s*人|委\s*托\s*方|受\s*托\s*方|发\s*包\s*方|承\s*包\s*方|采购方|供应商|买方|卖方|出租方|承租方|合同(?:总金额|金额|总价|价款|编号|类型|日期|签订日期|签订时间|生效日期|生效时间|期限)|服务费用总额|含税金额|总金额|协议金额|签订时间|签订日期|签订地点|签署日期|签署地点|生效日期|生效时间|有效期限|有效期|履行期限|日期|项目地点|工程地点|服务地点|服务内容|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费|第[一二三四五六七八九十\d]+条)\s*(?:[（(:：]|\s|$)/u.test(
       value,
     ) || /^(?:项目编号|合同编号|编号)/u.test(value)
   );
@@ -1775,7 +1787,7 @@ function isExplicitProjectNameFieldAnchor(anchor: string): boolean {
 
 function hasCompleteExplicitProjectServiceSuffix(value: string): boolean {
   const boundedValue = normalizeLine(value).split(
-    /合同(?:签订|签署|生效)?(?:日期|时间)|签订(?:日期|时间|地点)|签署(?:日期|地点)|生效(?:日期|时间)|有效期限|有效期|合同期限|履行期限|合同(?:总金额|金额|总价|价款|编号)|服务费用总额|含税金额|总金额|协议金额|甲\s*方|乙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|服务内容|项目地点|工程地点|服务地点|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费/u,
+    /合同(?:签订|签署|生效)?(?:日期|时间)|签订(?:日期|时间|地点)|签署(?:日期|地点)|生效(?:日期|时间)|有效期限|有效期|合同期限|履行期限|合同(?:总金额|金额|总价|价款|编号)|服务费用总额|含税金额|总金额|协议金额|甲\s*方|乙\s*方|丙\s*方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方|出租方|承租方|服务内容|项目地点|工程地点|服务地点|付款(?:金额|方式)|预付款|进度款|支付方式|税额|税费/u,
   )[0];
   return /(?:工程咨询服务|项目管理咨询服务|管理咨询服务|技术咨询服务|咨询服务|技术服务)(?:合同)?$/u.test(
     boundedValue.replace(/[：:\s]+$/g, "").replace(/\s+/g, ""),
@@ -1919,7 +1931,7 @@ function projectValueQuality(value: string): number {
     quality += 5;
   }
   if (
-    /(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|合同编号|甲方|乙方|委托方|受托方|付款|签订日期|签署日期|国网北京.{0,8}供电公司)/u.test(
+    /(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|合同编号|甲方|乙方|丙方|委托方|受托方|付款|签订日期|签署日期|国网北京.{0,8}供电公司)/u.test(
       compacted,
     )
   ) {
@@ -2250,6 +2262,76 @@ const NON_MAIN_PROJECT_SUBJECT_SHAPE_PATTERN =
 
 const PROJECT_DOCUMENT_TYPE_PATTERN =
   /(?:工程咨询服务|项目管理咨询服务|管理咨询服务|技术咨询服务|技术服务|工程咨询|技术咨询|项目管理咨询|管理咨询|咨询服务|网络服务|通信服务|服务|采购)?(?:合同(?:及)?(?:补充|变更|追加|终止)?协议(?:书)?|合同书?|补充协议(?:书)?|变更协议(?:书)?|追加协议(?:书)?|续签协议(?:书)?|续租协议(?:书)?|协议(?:书)?)(?:[（(][^（）()]{1,30}[）)])?$/u;
+
+/** 标题支路只排除完整条款句式，不能因名称含“法律”而排除法律服务。 */
+function isContractBodyClauseTitle(value: string): boolean {
+  const compacted = normalizeLine(value).replace(/\s+/gu, "");
+  return (
+    /^(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]|[（(][一二三四五六七八九十百\d]+[）)])?(?:其他约定|其它约定|其他条款|其它条款|本合同|本协议|双方应|双方须|根据|依据|经甲乙双方)/u.test(
+      compacted,
+    ) ||
+    /(?:同等法律效力|本合同未尽事宜|经双方协商|签订本(?:采购)?合同|另行(?:议定|签订)补充)/u.test(
+      compacted,
+    )
+  );
+}
+
+/**
+ * 无“合同／协议”后缀的采购名称，只从首页双方主体之前的独立短标题提取。
+ * 同页正文必须明确声明甲方向乙方采购同一对象；对象只用于佐证，不补写标题。
+ * 裁片、后页标题和无采购对象的通用标题不得借此形成强证据。
+ */
+function bareProcurementCoverTitleEvidence(
+  context: SourceContext,
+  index: number,
+): { evidence: string; confidence: number } | null {
+  if (
+    context.fieldScope != null ||
+    (context.pageNumber != null && context.pageNumber !== 1)
+  ) {
+    return null;
+  }
+  const title = context.lines[index]?.normalized.replace(/\s+/gu, "") || "";
+  const titleMatch = title.match(
+    /^([\p{Script=Han}A-Za-z0-9（）()·—-]{2,36}?)(?:定制)?(?:采购|购置)$/u,
+  );
+  if (!titleMatch || isContractBodyClauseTitle(title)) return null;
+  const firstPartyIndex = context.lines.findIndex((line) =>
+    /^(?:甲方|乙方|采购方|供应商|买方|卖方|购货方|售货方)(?:[（(:：]|$)/u.test(
+      line.normalized.replace(/\s+/gu, ""),
+    ),
+  );
+  if (firstPartyIndex <= index) return null;
+  let bodyOffset = 0;
+  const bodyLines = context.lines.slice(firstPartyIndex).map((line) => {
+    const text = line.normalized.replace(/\s+/gu, "");
+    const start = bodyOffset;
+    bodyOffset += text.length;
+    return { text, start, end: bodyOffset, confidence: line.confidence };
+  });
+  const body = bodyLines.map((line) => line.text).join("");
+  const purchaseObjects = [
+    ...body.matchAll(
+      /(?:甲方|采购方|买方|购货方)(?:向|委托)(?:乙方|供应商|卖方|售货方)(?:定制)?(?:采购|购置)([\p{Script=Han}A-Za-z0-9（）()·—-]{2,36}?)(?:事宜|事项|产品|[，,。；;])/gu,
+    ),
+  ];
+  const matchingObject = purchaseObjects.find(
+    (match) => match[1] === titleMatch[1],
+  );
+  if (!matchingObject || matchingObject.index == null) return null;
+  const evidenceStart = matchingObject.index;
+  const evidenceEnd = evidenceStart + matchingObject[0].length;
+  const evidenceConfidences = bodyLines
+    .filter((line) => line.start < evidenceEnd && line.end > evidenceStart)
+    .map((line) => line.confidence);
+  return {
+    evidence: `${title}\n${matchingObject[0]}`,
+    confidence: Math.min(
+      context.lines[index].confidence,
+      ...evidenceConfidences,
+    ),
+  };
+}
 
 /**
  * 从首页合同标题或“合同名称”字段中只剥离末尾文档类型。这里不决定最终
@@ -2741,9 +2823,43 @@ function collectProjectCandidates(
         .filter((candidate) => candidate.normalized).length;
       if (meaningfulLinePosition <= 8) {
         const isMetadataLine =
-          /^(?:(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]|[（(][一二三四五六七八九十百\d]+[）)])\s*)?(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|合同(?:类型|类别|金额|总价)|服务内容|业务类型|签订日期|甲方|乙方)\s*[:：]/.test(
+          isContractBodyClauseTitle(line.normalized) ||
+          /^(?:(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]|[（(][一二三四五六七八九十百\d]+[）)])\s*)?(?:信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名[称标]|工程名称|合同名称|合同(?:类型|类别|金额|总价)|服务内容|业务类型|签订日期|甲方|乙方|丙方)\s*[:：]/.test(
             line.normalized,
           );
+        const bareProcurementEvidence =
+          expectedCategory === "non_main" &&
+          relationType !== "termination" &&
+          !contextHasExplicitProjectField &&
+          !isMetadataLine
+            ? bareProcurementCoverTitleEvidence(context, index)
+            : null;
+        if (bareProcurementEvidence) {
+          const titleValue = cleanProjectName(line.normalized);
+          if (titleValue) {
+            candidates.push({
+              field: "project_name",
+              originalValue: line.normalized,
+              normalizedValue: titleValue,
+              ...buildCandidateScoring(
+                scoreProjectCandidate(
+                  titleValue,
+                  "cover_title",
+                  context.pageNumber,
+                  bareProcurementEvidence.confidence,
+                ),
+                bareProcurementEvidence.confidence,
+                context.source,
+              ),
+              source: context.source,
+              pageNumber: context.pageNumber,
+              evidence: bareProcurementEvidence.evidence,
+              strongEvidence: true,
+              recognitionEngine: context.recognitionEngine,
+              projectOrigin: "cover_title",
+            });
+          }
+        }
         const titleMatch = isMetadataLine
           ? null
           : line.normalized.match(
@@ -2846,6 +2962,7 @@ function collectProjectCandidates(
         for (let offset = 0; offset < 4; offset += 1) {
           const titleLine = context.lines[index + offset];
           if (!titleLine?.normalized) continue;
+          if (isContractBodyClauseTitle(titleLine.normalized)) break;
           if (isStandaloneCoverDocumentIdentifier(titleLine.normalized)) {
             // 条形码流水号可与下一行标题处于同一识别窗口，但不得参与标题
             // 拼接，也不能通过“多档一致”取得项目候选排序优势。
@@ -3404,6 +3521,12 @@ function amountRolePriority(role: InternalCandidate["amountRole"]): number {
   }
 }
 
+// 采购正文会使用“本合同所列产品的产品总金额”等完整范围声明。
+// 只接纳明确限定本合同全部所列标的的短语，部分产品、单件及裸“总金额”
+// 不能因出现在采购合同内而升级为整份合同总额。
+const CONTRACT_PROCUREMENT_TOTAL_ANCHOR =
+  /本(?:合同|协议)(?:所列|约定)(?:的)?(?:(?:全部|所有)(?:的)?)?(?:产品|货物|设备|商品)(?:的(?:产品|货物|设备|商品)?)?总(?:金额|价款|价)/u;
+
 function classifyAmountRole(
   line: string,
   anchorText: string,
@@ -3418,6 +3541,7 @@ function classifyAmountRole(
     .at(-1)
     ?.replace(/\s+/g, "");
   const roleContext = `${clausePrefix || ""}${anchorText}`.replace(/\s+/g, "");
+  const isProcurementTotal = CONTRACT_PROCUREMENT_TOTAL_ANCHOR.test(anchorText);
   if (
     isHistoricalAmount ||
     /(?:原合同|原协议|变更前|调整前)/.test(clausePrefix || "")
@@ -3441,12 +3565,27 @@ function classifyAmountRole(
     /合同(?:总)?金额(?:的)?\d+(?:\.\d+)?%/u.test(compacted) ||
     /合同(?:总)?金额(?:的)?百分之[零〇一二三四五六七八九十百千万两]+/u.test(
       compacted,
-    )
+    ) ||
+    (isProcurementTotal &&
+      (/^(?:的)?(?:\d+(?:\.\d+)?%|百分之[零〇一二三四五六七八九十百千万两]+)/u.test(
+        normalizedLine
+          .slice(anchorIndex + anchorText.length)
+          .replace(/\s+/g, ""),
+      ) ||
+        /(?:定金|订金|预付款|进度款|尾款|本期|首期|分期)/u.test(
+          clausePrefix || "",
+        )))
   ) {
     return "payment_amount";
   }
   if (/税额|税费|税款/.test(roleContext)) return "tax_amount";
   if (/单价|每(?:项|个|份|套|次).{0,8}(?:金额|费用|价格)/.test(roleContext)) {
+    return "unit_price";
+  }
+  if (
+    isProcurementTotal &&
+    /(?:每|[/／])(?:件|台|项|个|份|套|次|吨|米|平方米)/u.test(compacted)
+  ) {
     return "unit_price";
   }
   if (
@@ -3471,6 +3610,18 @@ function classifyAmountRole(
     )
   ) {
     return "contract_total";
+  }
+  if (isProcurementTotal) {
+    // “按本合同所列产品总金额计算本期金额”等只引用总额基数，未直接
+    // 声明该基数的数值，不能把随后出现的部分金额绑定为合同总额。
+    const afterProcurementAnchor = normalizedLine
+      .slice(anchorIndex + anchorText.length)
+      .replace(/\s+/g, "");
+    return /^[:：=]*(?:(?:为|是|共计|合计|计)[:：=]*)?(?:$|人民币|[￥¥\d]|[（(](?:小写|大写|人民币)|[壹贰貳两兩参叁參肆伍陆陸柒捌玖拾佰仟万萬亿億])/u.test(
+      afterProcurementAnchor,
+    )
+      ? "contract_total"
+      : "generic_total";
   }
   if (
     /合同总额|合同总金额|合同总价|合同价款|签约金额|项目金额|协议总金额|合同费用总额|(?:咨询服务费|技术服务费|咨询费|顾问费|服务费)?总价款|服务费(?:用)?(?:总额|合计)|报酬总额/.test(
@@ -3523,8 +3674,12 @@ function collectAmountCandidates(
   contexts: readonly SourceContext[],
 ): InternalCandidate[] {
   const candidates: InternalCandidate[] = [];
-  const strongAnchor =
+  const conventionalStrongAnchor =
     /含税合同金额|合同含税金额|本(?:合同|协议)含税金额|服务费用(?:总额|合计)|各项费用合计|费用共计|收费金额|合同总额|合同总价|合同总金额|合同金额|合同价格|含税总价|(?<!不)含税金额|合同价款|签约金额|项目金额|价税合计|协议总金额|本协议金额|协议金额|合同费用总额|本合同费用(?:为|是)?|合同费用(?:为|是)|本次(?:技术咨询|技术服务|咨询服务)?总费用|(?:技术咨询|技术服务|咨询服务)总费用|(?:咨询服务费|技术服务费|咨询费|顾问费|服务费)?总价款|技术服务报酬总额|服务报酬总额|报酬总额|付款金额|预付款|进度款|税额|税费|税款|服务费(?:总额|合计)?|单价|每(?:项|个|份|套|次).{0,8}(?:金额|费用|价格)/gu;
+  const strongAnchor = new RegExp(
+    `${CONTRACT_PROCUREMENT_TOTAL_ANCHOR.source}|${conventionalStrongAnchor.source}`,
+    "gu",
+  );
   const secondaryAnchor = /总价|总金额|总费用|价款|人民币\s*[（(]?大写/gu;
 
   for (const context of contexts) {
@@ -3648,7 +3803,7 @@ function collectAmountCandidates(
               );
             if (
               (!awaitingAmountCompletion || !startsWithAmountFragment) &&
-              /^(?:其\s*中|不\s*含税|税(?:额|率|费)|分项|明细|序号|[（(]?\d+[）).、]|(?:合同|协议|项目|甲方|乙方|第[一二三四五六七八九十]+条))/u.test(
+              /^(?:其\s*中|不\s*含税|税(?:额|率|费)|分项|明细|序号|[（(]?\d+[）).、]|(?:合同|协议|项目|甲方|乙方|丙方|第[一二三四五六七八九十]+条))/u.test(
                 continuation.normalized,
               )
             ) {
@@ -3783,6 +3938,16 @@ function collectAmountCandidates(
               nextLine.confidence,
             );
           }
+        }
+        if (CONTRACT_PROCUREMENT_TOTAL_ANCHOR.test(strongAnchorText)) {
+          // 总额短语与“的50%／每套”等限制可能被扫描版式分开；续行后
+          // 必须重新判定完整条款，避免将下一行的分期款或单价升级为总额。
+          amountRole = classifyAmountRole(
+            evidenceLines.join(" "),
+            strongAnchorText,
+            strongAnchorIndex,
+            isHistoricalAmount,
+          );
         }
         // 合同金额只采用阿拉伯数字。中文大写常因印章、字体或扫描噪声把
         // “仟”误成“任”等字符；即使位于金额标题附近，也不得独立形成
@@ -5097,7 +5262,7 @@ function collectCategoryCandidates(
         meaningfulLinePosition <= 8 &&
         /(?:合同|协议)(?:书)?[。.]?$/.test(line.normalized);
       const looksLikePartyOrOrganization =
-        /(?:甲方|乙方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方)\s*[（(:：]/.test(
+        /(?:甲方|乙方|丙方|委\s*托\s*人|受\s*托\s*人|委托方|受托方|发包方|承包方|采购方|供应商|买方|卖方)\s*[（(:：]/.test(
           line.normalized,
         ) ||
         /(?:有限责任公司|股份有限公司|集团有限公司|有限公司)$/.test(
@@ -5295,7 +5460,7 @@ function isContractSignaturePageContext(context: SourceContext): boolean {
 const CONTRACT_DATE_FRAGMENT_PATTERN =
   /^[0-9Oo〇○零一壹二两贰三叁四肆五伍六陆七柒八捌九玖十拾年月日曰\s./‐‑‒–—―－-]+$/u;
 const CONTRACT_DATE_FOLLOWING_FIELD_BOUNDARY =
-  /^(?:签订地点|签署地点|合同地点|甲\s*方|乙\s*方|委托方|受托方|合同金额|合同总价|有效期|有效期限|服务期限|履行期限|付款|发票|开票|验收|合同编号|编号)\s*[:：]?/u;
+  /^(?:签订地点|签署地点|合同地点|甲\s*方|乙\s*方|丙\s*方|委托方|受托方|合同金额|合同总价|有效期|有效期限|服务期限|履行期限|付款|发票|开票|验收|合同编号|编号)\s*[:：]?/u;
 
 function collectAdjacentContractDateFragments(
   context: SourceContext,
@@ -5385,10 +5550,58 @@ function collectFormalExecutionDateCandidates(
   return candidates;
 }
 
+/**
+ * 甲乙方表格有时只在独立行印“（公章）”，日期也没有字段标签。只有同一
+ * 紧邻区域存在两个明确主体标签和两个独立签章占位，才将其下方视为落款区。
+ */
+function findPairedStampSignatureBlock(context: SourceContext): {
+  lastLineIndex: number;
+  lines: LineContext[];
+} | null {
+  for (let index = 0; index < context.lines.length; index += 1) {
+    if (
+      !/^(?:甲方|乙方|委托方|受托方)\s*[:：]/u.test(
+        context.lines[index].normalized,
+      )
+    ) {
+      continue;
+    }
+    const block: LineContext[] = [];
+    let stamps = 0;
+    for (
+      let next = index;
+      next < context.lines.length && block.length < 8;
+      next += 1
+    ) {
+      const line = context.lines[next];
+      if (!line.normalized) continue;
+      if (/^[（(](?:公章|盖章|签章)[）)]$/u.test(line.normalized)) {
+        stamps += 1;
+      } else if (
+        !/^(?:甲方|乙方|委托方|受托方)\s*[:：]/u.test(line.normalized)
+      ) {
+        break;
+      }
+      block.push(line);
+      const blockText = block.map((item) => item.normalized).join("\n");
+      if (
+        stamps >= 2 &&
+        /(?:^|\s)(?:甲方|委托方)\s*[:：]/u.test(blockText) &&
+        /(?:^|\s)(?:乙方|受托方)\s*[:：]/u.test(blockText)
+      ) {
+        return { lastLineIndex: next, lines: block };
+      }
+    }
+  }
+  return null;
+}
+
 function collectSignaturePageFooterDateCandidates(
   context: SourceContext,
 ): InternalCandidate[] {
-  if (!isContractSignaturePageContext(context)) return [];
+  const isSignaturePage = isContractSignaturePageContext(context);
+  const stampBlock = findPairedStampSignatureBlock(context);
+  if (!isSignaturePage && !stampBlock) return [];
   const pageText = context.lines
     .map((line) => line.normalized)
     .filter(Boolean)
@@ -5407,10 +5620,24 @@ function collectSignaturePageFooterDateCandidates(
   const nonSignatureDateRole =
     /(?:验收|付款|支付|开票|发票|交付|完成|生效|服务|履行|出生|成立|申请|结算|到账|收款)日期|(?:有效期限|有效期|服务期限|履行期限)/u;
 
-  for (let index = 0; index < context.lines.length; index += 1) {
+  for (
+    let index = isSignaturePage ? 0 : stampBlock!.lastLineIndex + 1;
+    index < context.lines.length;
+    index += 1
+  ) {
     const line = context.lines[index];
     const normalized = line.normalized.trim();
     if (!normalized) continue;
+    // 独立公章占位只能证明当前落款区；遇到附件或新的业务时间段落即结束，
+    // 不允许借后续交货清单中的裸日期填充签订日期。
+    if (
+      !isSignaturePage &&
+      /^(?:(?:第?[一二三四五六七八九十百\d]+)[、.．)）:：]\s*)?(?:附件|附表|附录|交货|交付|收货|签收|出库|入库|发货|生产|验收|付款|支付|开票|发票|收据|回单|有效期|服务期限|履行期限)/u.test(
+        normalized,
+      )
+    ) {
+      break;
+    }
     const localWindow = context.lines
       .slice(Math.max(0, index - 4), index + 5)
       .map((candidate) => candidate.normalized)
@@ -5462,9 +5689,10 @@ function collectSignaturePageFooterDateCandidates(
   if (distinctDates.size !== 1) return [];
   const selectedOccurrences = [...distinctDates.values()][0];
   const representative = selectedOccurrences[0];
-  const evidenceLines = selectedOccurrences.flatMap(
-    (occurrence) => occurrence.lines,
-  );
+  const evidenceLines = [
+    ...(!isSignaturePage && stampBlock ? stampBlock.lines : []),
+    ...selectedOccurrences.flatMap((occurrence) => occurrence.lines),
+  ];
   const sourceConfidence = Math.min(
     ...evidenceLines.map((line) => line.confidence),
   );
@@ -5842,6 +6070,9 @@ function hasExactVerificationAnchor(
     return /乙方|受\s*托\s*人|受托方|承包方|供应商|卖方|被许可方|承租方/.test(
       comparableEvidence,
     );
+  }
+  if (field === "party_c") {
+    return /丙方/.test(comparableEvidence);
   }
   if (field === "project_name") {
     return /项目名称|工程名称|服务项目|甲方委托乙方就|项目进行/.test(
@@ -6558,7 +6789,10 @@ function mergeCandidates(
     }
   }
 
-  if ((field === "party_a" || field === "party_b") && ranked.length > 1) {
+  if (
+    (field === "party_a" || field === "party_b" || field === "party_c") &&
+    ranked.length > 1
+  ) {
     const leading = ranked[0];
     const isTruncatedOrganization = (left: string, right: string) => {
       const shorter = left.length <= right.length ? left : right;
@@ -6726,17 +6960,29 @@ function applyCrossFieldValidation(
   fields: ContractOcrField[],
   candidates: readonly InternalCandidate[],
 ): void {
-  const partyA = fields.find((field) => field.field === "party_a");
-  const partyB = fields.find((field) => field.field === "party_b");
-  if (
-    partyA?.normalizedValue &&
-    partyA.normalizedValue === partyB?.normalizedValue
-  ) {
-    partyA.confidence = Math.min(partyA.confidence, 40);
-    partyB.confidence = Math.min(partyB.confidence, 40);
-    const warning = "甲乙方识别为同一单位，系统未自动采用";
-    partyA.warnings = [...(partyA.warnings || []), warning];
-    partyB.warnings = [...(partyB.warnings || []), warning];
+  const partyFields = fields.filter((field) =>
+    ["party_a", "party_b", "party_c"].includes(field.field),
+  );
+  for (let leftIndex = 0; leftIndex < partyFields.length; leftIndex += 1) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < partyFields.length;
+      rightIndex += 1
+    ) {
+      const left = partyFields[leftIndex]!;
+      const right = partyFields[rightIndex]!;
+      if (
+        !left.normalizedValue ||
+        left.normalizedValue !== right.normalizedValue
+      ) {
+        continue;
+      }
+      left.confidence = Math.min(left.confidence, 40);
+      right.confidence = Math.min(right.confidence, 40);
+      const warning = `${FIELD_LABELS[left.field]}与${FIELD_LABELS[right.field]}识别为同一单位，系统未自动采用`;
+      left.warnings = [...(left.warnings || []), warning];
+      right.warnings = [...(right.warnings || []), warning];
+    }
   }
 
   const amountField = fields.find((field) => field.field === "amount");
@@ -6992,7 +7238,9 @@ function selectDirectPartyLabelCandidates(
   const fieldsWithDirectLabels = new Set<ContractOcrFieldName>();
   for (const candidate of candidates) {
     if (
-      (candidate.field === "party_a" || candidate.field === "party_b") &&
+      (candidate.field === "party_a" ||
+        candidate.field === "party_b" ||
+        candidate.field === "party_c") &&
       candidate.partyAnchorPriority === 2
     ) {
       fieldsWithDirectLabels.add(candidate.field);
@@ -7476,7 +7724,7 @@ function looksLikeOrganizationProjectValue(
       compacted,
     );
   const partyValues = fields
-    .filter((field) => field.field === "party_a" || field.field === "party_b")
+    .filter((field) => ["party_a", "party_b", "party_c"].includes(field.field))
     .map((field) => normalizeLine(field.normalizedValue).replace(/\s+/g, ""))
     .filter(Boolean);
   if (
@@ -7532,7 +7780,7 @@ function hasUnresolvedContractAmountFact(
   const continuedBareMoney =
     /^[-－+＋]?(?:\d{1,3}(?:[,，]\d{3})+|\d{3,})(?:\.\d{1,2})?$/u;
   const nextFieldBoundary =
-    /^(?:合同|服务|履行|租赁)?期限|^有效期|^(?:签订|签署|生效)?日期|^(?:合同|项目)?编号|^(?:项目|工程)名称|^(?:甲方|乙方|委托方|受托方)|^(?:付款|预付款|进度款|税额|税费|税率|单价|第[一二三四五六七八九十\d]+条)/u;
+    /^(?:合同|服务|履行|租赁)?期限|^有效期|^(?:签订|签署|生效)?日期|^(?:合同|项目)?编号|^(?:项目|工程)名称|^(?:甲方|乙方|丙方|委托方|受托方)|^(?:付款|预付款|进度款|税额|税费|税率|单价|第[一二三四五六七八九十\d]+条)/u;
   return contexts.some((context) =>
     context.lines.some((line, index) => {
       const anchorMatch = line.normalized.match(contractAmountAnchor);
@@ -8198,14 +8446,26 @@ export function parseContractText(
   // 实际排序摘要同时供生产安全门禁和离线漏斗使用；只有候选编号及完整轨迹
   // 仍受诊断开关控制，因此不会扩展现有 OCR（光学字符识别）输出。
   const mergeDiagnostics = { candidateIds, ranking };
-  const fields = FIELD_NAMES.map((field) =>
-    mergeCandidates(
-      field,
-      candidates,
-      mergeDiagnostics,
-      options.expectedCategory,
+  const fields = [
+    ...FIELD_NAMES.map((field) =>
+      mergeCandidates(
+        field,
+        candidates,
+        mergeDiagnostics,
+        options.expectedCategory,
+      ),
     ),
-  );
+    ...OPTIONAL_FIELD_NAMES.filter((field) =>
+      candidates.some((candidate) => candidate.field === field),
+    ).map((field) =>
+      mergeCandidates(
+        field,
+        candidates,
+        mergeDiagnostics,
+        options.expectedCategory,
+      ),
+    ),
+  ];
   applyCrossFieldValidation(fields, candidates);
   applyContractDateContextValidation(fields, dateContexts);
   applyExpectedCategoryValidation(fields, options.expectedCategory);
@@ -8318,7 +8578,7 @@ export function parseContractText(
         filterStages,
         ranking,
       ),
-      ranking: FIELD_NAMES.map((field) => ({
+      ranking: fields.map(({ field }) => ({
         field,
         candidates: (ranking.get(field) || []).map((candidate) => ({
           ...candidate,
@@ -9905,7 +10165,7 @@ export function selectContractOcrPriorityPages(
   for (const source of textSources) {
     if (
       source.pageNumber &&
-      /甲\s*方|乙\s*方|信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名称|工程名称|合同金额|合同总价|合同价款|服务费用(?:总额|合计)|含税金额|总金额|协议金额|签订(?:日期|时间)|签定(?:日期|时间)|签署日期|盖章|签章/.test(
+      /甲\s*方|乙\s*方|丙\s*方|信息咨询项目名称|工程项目名称|咨询项目名称|项目[（(]工程[）)]名称|项目名称|工程名称|合同金额|合同总价|合同价款|服务费用(?:总额|合计)|含税金额|总金额|协议金额|签订(?:日期|时间)|签定(?:日期|时间)|签署日期|盖章|签章/.test(
         source.text,
       )
     ) {

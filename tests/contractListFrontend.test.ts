@@ -66,11 +66,12 @@ describe("合同台账前端筛选与动作", () => {
       pageSize: 50,
       keyword: "示例项目",
       counterparty: "示例公司",
-      category: ["main_business", "asset"],
+      category: ["main_business", "non_main"],
+      declaredSubtype: ["non_main_income", "non_main_expense"],
       status: ["effective", "executing"],
       settlementStatus: "partial",
       projectId: "project-1",
-      area: "城区",
+      area: "全部",
       contractDateFrom: "2026-01-01",
       contractDateTo: "2026-08-05",
     });
@@ -81,11 +82,12 @@ describe("合同台账前端筛选与动作", () => {
         pageSize: 50,
         keyword: "示例项目",
         counterparty: "示例公司",
-        category: "main_business,asset",
+        category: "main_business,non_main",
+        declaredSubtype: "non_main_income,non_main_expense",
         status: "effective,executing",
         settlementStatus: "partial",
         projectId: "project-1",
-        area: "城区",
+        area: "全部",
         contractDateFrom: "2026-01-01",
         contractDateTo: "2026-08-05",
       },
@@ -180,6 +182,7 @@ describe("合同台账前端筛选与动作", () => {
       "keyword",
       "counterparty",
       "category",
+      "declaredSubtype",
       "status",
       "settlementStatus",
       "projectId",
@@ -193,6 +196,205 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).toContain("normalizedRouteQuery");
     expect(source).toContain("{ immediate: true }");
     expect(source).toContain("multiple");
+  });
+
+  it("台账将不限区域与行政区全部区分并透传全部区域筛选", async () => {
+    (api.get as jest.Mock).mockImplementation((url: string) => {
+      if (url === "/api/contracts") {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: { items: [], total: 0, summary: {} },
+          },
+        });
+      }
+      if (url === "/api/contracts/meta") {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              projects: [],
+              areas: ["全部", "朝阳区"],
+              assetCategories: [],
+            },
+          },
+        });
+      }
+      throw new Error(`测试未声明接口：${url}`);
+    });
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/contracts", component: ContractList }],
+    });
+    await router.push({
+      path: "/contracts",
+      query: { page: "1", pageSize: "20", area: "全部" },
+    });
+    await router.isReady();
+
+    const wrapper = mount(ContractList, {
+      global: {
+        plugins: [pinia, router],
+        components: { ElTable, ElTableColumn },
+        stubs: elementStubs,
+        directives: { loading: () => undefined },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    expect(api.get).toHaveBeenCalledWith("/api/contracts", {
+      params: expect.objectContaining({ area: "全部" }),
+    });
+    expect(router.currentRoute.value.query.area).toBe("全部");
+    wrapper.unmount();
+  });
+
+  it("非主营收入与支出保留为台账二级筛选字段", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractList.vue"),
+      "utf8",
+    );
+    const backendSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
+    const presentationSource = fs.readFileSync(
+      path.resolve(process.cwd(), "src/utils/contractPresentation.ts"),
+      "utf8",
+    );
+
+    expect(source).toContain('v-model="filters.declaredSubtypes"');
+    expect(source).toContain(
+      "v-if=\"filters.categories.includes('non_main')\"",
+    );
+    expect(source).toContain('placeholder="非主营二级分类（多选）"');
+    expect(presentationSource).toContain("非主营业务收入合同");
+    expect(presentationSource).toContain("非主营业务支出合同");
+    expect(source).not.toContain("contractLedgerSubtypeLabel");
+    expect(source).not.toContain('class="declared-subtype-label"');
+    expect(source).toContain("route.query.declaredSubtype");
+    expect(source).toContain("function handleCategoryFilterChange()");
+    expect(source).toContain("filters.declaredSubtypes = []");
+    expect(source).toContain(
+      'declaredSubtypes.length > 0 && !categories.includes("non_main")',
+    );
+    expect(source).toContain("returnTo: route.fullPath");
+    expect(backendSource).toContain("req.query.declaredSubtype");
+    expect(backendSource).toContain(
+      'addFilter("c.declared_subtype = ANY(?::text[])", storedDeclaredSubtypes)',
+    );
+    expect(backendSource).toContain('["non_main_income", "other_service"]');
+    expect(backendSource).toContain(
+      "where.push(\"COALESCE(c.category, c.declared_category) = 'non_main'\")",
+    );
+  });
+
+  it("非主营合同在三种台账布局仅显示父分类和收入支出方向", async () => {
+    const nonMainContracts = [
+      {
+        id: "non-main-income",
+        contractNo: "NM-INCOME",
+        name: "非主营收入项目",
+        partyA: "收入甲方",
+        partyB: "本公司",
+        projectName: "非主营收入项目",
+        category: "non_main",
+        declaredCategory: "non_main",
+        declaredSubtype: "non_main_income",
+        relationType: "main",
+        status: "executing",
+        version: 1,
+        amount: 100,
+        currentAmount: 100,
+        receivedAmount: 20,
+        completionRate: 20,
+      },
+      {
+        id: "non-main-expense",
+        contractNo: "NM-EXPENSE",
+        name: "非主营支出项目",
+        partyA: "支出甲方",
+        partyB: "本公司",
+        projectName: "非主营支出项目",
+        category: "non_main",
+        declaredCategory: "non_main",
+        declaredSubtype: "non_main_expense",
+        relationType: "main",
+        status: "executing",
+        version: 1,
+        amount: 100,
+        currentAmount: 100,
+        paidAmount: 40,
+        completionRate: 40,
+      },
+    ];
+    (api.get as jest.Mock).mockImplementation((url: string) => {
+      if (url === "/api/contracts") {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: {
+              items: nonMainContracts,
+              total: nonMainContracts.length,
+              summary: {},
+            },
+          },
+        });
+      }
+      if (url === "/api/contracts/meta") {
+        return Promise.resolve({
+          data: {
+            success: true,
+            data: { projects: [], areas: [], assetCategories: [] },
+          },
+        });
+      }
+      throw new Error(`测试未声明接口：${url}`);
+    });
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/contracts", component: ContractList }],
+    });
+    await router.push("/contracts?page=1&pageSize=20");
+    await router.isReady();
+
+    const wrapper = mount(ContractList, {
+      global: {
+        plugins: [pinia, router],
+        components: { ElTable, ElTableColumn },
+        stubs: elementStubs,
+        directives: { loading: () => undefined },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    for (const selector of [
+      ".contract-table-full .category-direction-cell",
+      ".contract-table-compact .category-direction-cell",
+      ".mobile-category-line",
+    ]) {
+      const cells = wrapper.findAll(selector);
+      expect(cells).toHaveLength(2);
+      expect(cells[0].text()).toContain("非主营项目合同");
+      expect(cells[0].text()).toContain("收入");
+      expect(cells[1].text()).toContain("非主营项目合同");
+      expect(cells[1].text()).toContain("支出");
+      expect(cells.map((cell) => cell.text()).join(" ")).not.toContain(
+        "非主营业务收入合同",
+      );
+      expect(cells.map((cell) => cell.text()).join(" ")).not.toContain(
+        "非主营业务支出合同",
+      );
+    }
+    wrapper.unmount();
   });
 
   it("从筛选后的合同台账进入详情并返回原筛选页面", () => {
@@ -303,6 +505,8 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).toContain("不含待签合同");
     expect(source).toContain("含草稿、初始审批中和待盖章");
     expect(source).toContain('label="已付"');
+    expect(source).toContain('item.declaredSubtype === "non_main_expense"');
+    expect(source).toContain('item.financialDirection === "cost"');
     expect(source).toContain('label="责任人"');
     expect(source).toContain("contractOwnerLabel(row)");
     expect(source).toMatch(
@@ -974,12 +1178,24 @@ describe("合同台账前端筛选与动作", () => {
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
     );
+    const backendSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
     const categoryColumn = source.indexOf('label="分类"');
     const areaColumn = source.indexOf('label="行政区域"', categoryColumn);
 
     expect(categoryColumn).toBeGreaterThan(-1);
     expect(areaColumn).toBeGreaterThan(categoryColumn);
-    expect(source).toContain('<el-option label="全部" value="" />');
+    expect(source).toContain('<el-option label="不限区域" value="" />');
+    expect(source).toContain('v-for="area in meta.areas"');
+    expect(source).not.toContain(
+      "meta.areas.filter((item) => item !== '全部')",
+    );
+    expect(backendSource).toContain("if (!CONTRACT_AREA_SET.has(area))");
+    expect(backendSource).toContain(
+      "addFilter(CONTRACT_LEDGER_ROOT_AREA_FILTER_SQL, area)",
+    );
     expect(source).toContain('row.area || "—"');
     expect(source).toContain(
       'v-if="canCreate && row.requiresAuxiliaryMaterials"',

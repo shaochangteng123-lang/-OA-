@@ -11,7 +11,7 @@ const connectionString =
   process.env.DATABASE_URL ||
   `postgresql://${process.env.DB_USER || "postgres"}:${process.env.DB_PASSWORD || "postgres"}@${process.env.DB_HOST || "localhost"}:${process.env.DB_PORT || "5432"}/${process.env.DB_NAME || "yulilog_worklog"}`;
 
-console.log("📦 数据库连接:", connectionString.replace(/:[^:@]+@/, ":****@"));
+console.log("📦 数据库连接: 已配置（敏感信息不输出）");
 
 export const pool = new Pool({
   connectionString,
@@ -303,6 +303,8 @@ export async function initDatabase() {
       report_specialist_phone TEXT NOT NULL,
       project_manager TEXT NOT NULL,
       project_manager_phone TEXT NOT NULL,
+      client_contact_name TEXT NOT NULL DEFAULT '',
+      client_contact_phone TEXT NOT NULL DEFAULT '',
       description TEXT,
       requires_auxiliary_materials BOOLEAN NOT NULL DEFAULT FALSE,
       current_task TEXT,
@@ -467,6 +469,7 @@ export async function initDatabase() {
       batch_no TEXT UNIQUE NOT NULL,
       total_amount NUMERIC(12,2) NOT NULL,
       payment_proof_path TEXT,
+      proof_hash_set TEXT,
       payer_id TEXT NOT NULL REFERENCES users(id),
       pay_time TEXT,
       payment_business_date DATE,
@@ -478,9 +481,47 @@ export async function initDatabase() {
   `);
 
     await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS welfare_expense_category_tombstones (
+      account_code TEXT NOT NULL CHECK(account_code IN ('welfare_one', 'welfare_two')),
+      code TEXT NOT NULL,
+      deleted_at TEXT NOT NULL,
+      PRIMARY KEY(account_code, code),
+      CHECK(BTRIM(code) <> '')
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS welfare_one_expense_categories (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order >= 0),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(BTRIM(code) <> ''),
+      CHECK(BTRIM(name) <> '')
+    )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS welfare_two_expense_categories (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order >= 0),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(BTRIM(code) <> ''),
+      CHECK(BTRIM(name) <> '')
+    )
+  `);
+
+    await ddlClient.query(`
     CREATE TABLE IF NOT EXISTS reimbursements (
       id TEXT PRIMARY KEY,
-      type TEXT NOT NULL CHECK(type IN ('basic', 'large', 'business')),
+      type TEXT NOT NULL CHECK(type IN ('basic', 'large', 'business', 'welfare_one', 'welfare_two')),
       title TEXT NOT NULL,
       total_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'pending', 'pending_first', 'pending_second', 'pending_final', 'approved', 'paid', 'payment_uploaded', 'completed', 'rejected')),
@@ -512,7 +553,29 @@ export async function initDatabase() {
       deduction_reason TEXT,
       original_amount NUMERIC(12,2),
       reimbursement_month TEXT,
-      payment_batch_id TEXT
+      payment_batch_id TEXT,
+      welfare_category_id TEXT REFERENCES welfare_one_expense_categories(id) ON DELETE RESTRICT,
+      welfare_category_name_snapshot TEXT,
+      welfare_two_category_id TEXT REFERENCES welfare_two_expense_categories(id) ON DELETE RESTRICT,
+      welfare_two_category_name_snapshot TEXT,
+      CONSTRAINT reimbursements_welfare_category_check CHECK(
+        (type = 'welfare_one'
+          AND welfare_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_category_name_snapshot, ''))) > 0)
+        OR
+        (type <> 'welfare_one'
+          AND welfare_category_id IS NULL
+          AND welfare_category_name_snapshot IS NULL)
+      ),
+      CONSTRAINT reimbursements_welfare_two_category_check CHECK(
+        (type = 'welfare_two'
+          AND welfare_two_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_two_category_name_snapshot, ''))) > 0)
+        OR
+        (type <> 'welfare_two'
+          AND welfare_two_category_id IS NULL
+          AND welfare_two_category_name_snapshot IS NULL)
+      )
     )
   `);
 
@@ -688,6 +751,8 @@ export async function initDatabase() {
       housing_fund_base NUMERIC NOT NULL DEFAULT 0 CHECK(housing_fund_base >= 0),
       contribution_base NUMERIC NOT NULL DEFAULT 0 CHECK(contribution_base >= 0),
       individual_income_tax NUMERIC NOT NULL DEFAULT 0 CHECK(individual_income_tax >= 0),
+      withheld_actual_amount NUMERIC CHECK(withheld_actual_amount >= 0),
+      net_salary_actual_amount NUMERIC CHECK(net_salary_actual_amount >= 0),
       monthly_salary_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
       housing_fund_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
       contribution_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE,
@@ -706,7 +771,7 @@ export async function initDatabase() {
       payroll_record_id TEXT NOT NULL REFERENCES payroll_records(id) ON DELETE CASCADE,
       employee_id TEXT NOT NULL REFERENCES employee_profiles(id) ON DELETE CASCADE,
       payroll_month TEXT NOT NULL,
-      field_name TEXT NOT NULL CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax')),
+      field_name TEXT NOT NULL CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax', 'withheld_actual_amount', 'net_salary_actual_amount')),
       old_value NUMERIC NOT NULL CHECK(old_value >= 0),
       new_value NUMERIC NOT NULL CHECK(new_value >= 0),
       changed_by TEXT NOT NULL REFERENCES users(id),
@@ -737,6 +802,18 @@ export async function initDatabase() {
       updated_at TEXT NOT NULL,
       UNIQUE(payroll_month, category, file_hash)
     )
+  `);
+
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS human_cost_receipt_numbers (
+      electronic_receipt_no TEXT PRIMARY KEY,
+      receipt_id TEXT NOT NULL REFERENCES human_cost_receipts(id) ON DELETE CASCADE,
+      amount NUMERIC(14,2) NOT NULL CHECK(amount > 0)
+    )
+  `);
+    await ddlClient.query(`
+    CREATE INDEX IF NOT EXISTS idx_human_cost_receipt_numbers_receipt
+      ON human_cost_receipt_numbers(receipt_id)
   `);
 
     await ddlClient.query(`
@@ -1270,6 +1347,10 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_payment_batches_status ON payment_batches(status);
     CREATE INDEX IF NOT EXISTS idx_payment_batch_items_batch_id ON payment_batch_items(batch_id);
     CREATE INDEX IF NOT EXISTS idx_payment_batch_items_reimbursement_id ON payment_batch_items(reimbursement_id);
+    CREATE INDEX IF NOT EXISTS idx_welfare_one_expense_categories_sort
+      ON welfare_one_expense_categories(is_active, sort_order, id);
+    CREATE INDEX IF NOT EXISTS idx_welfare_two_expense_categories_sort
+      ON welfare_two_expense_categories(is_active, sort_order, id);
     CREATE INDEX IF NOT EXISTS idx_reimbursements_user_id ON reimbursements(user_id);
     CREATE INDEX IF NOT EXISTS idx_reimbursements_type ON reimbursements(type);
     CREATE INDEX IF NOT EXISTS idx_reimbursements_status ON reimbursements(status);
@@ -2102,6 +2183,226 @@ export async function initDatabase() {
     await ddlClient.end();
   }
 
+  // 数据库迁移：福利账户报销类型、共享费用分类和历史快照字段。
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS welfare_expense_category_tombstones (
+      account_code TEXT NOT NULL CHECK(account_code IN ('welfare_one', 'welfare_two')),
+      code TEXT NOT NULL,
+      deleted_at TEXT NOT NULL,
+      PRIMARY KEY(account_code, code),
+      CHECK(BTRIM(code) <> '')
+    );
+
+    CREATE TABLE IF NOT EXISTS welfare_one_expense_categories (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order >= 0),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(BTRIM(code) <> ''),
+      CHECK(BTRIM(name) <> '')
+    );
+
+    CREATE TABLE IF NOT EXISTS welfare_two_expense_categories (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0 CHECK(sort_order >= 0),
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK(BTRIM(code) <> ''),
+      CHECK(BTRIM(name) <> '')
+    );
+
+    ALTER TABLE reimbursements
+      ADD COLUMN IF NOT EXISTS welfare_category_id TEXT;
+    ALTER TABLE reimbursements
+      ADD COLUMN IF NOT EXISTS welfare_category_name_snapshot TEXT;
+    ALTER TABLE reimbursements
+      ADD COLUMN IF NOT EXISTS welfare_two_category_id TEXT;
+    ALTER TABLE reimbursements
+      ADD COLUMN IF NOT EXISTS welfare_two_category_name_snapshot TEXT;
+
+    ALTER TABLE reimbursements
+      DROP CONSTRAINT IF EXISTS reimbursements_type_check;
+    ALTER TABLE reimbursements
+      ADD CONSTRAINT reimbursements_type_check
+      CHECK(type IN ('basic', 'large', 'business', 'welfare_one', 'welfare_two'));
+
+    ALTER TABLE reimbursements
+      DROP CONSTRAINT IF EXISTS reimbursements_welfare_category_id_fkey;
+    ALTER TABLE reimbursements
+      ADD CONSTRAINT reimbursements_welfare_category_id_fkey
+      FOREIGN KEY(welfare_category_id)
+      REFERENCES welfare_one_expense_categories(id) ON DELETE RESTRICT;
+
+    ALTER TABLE reimbursements
+      DROP CONSTRAINT IF EXISTS reimbursements_welfare_category_check;
+    ALTER TABLE reimbursements
+      ADD CONSTRAINT reimbursements_welfare_category_check CHECK(
+        (type = 'welfare_one'
+          AND welfare_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_category_name_snapshot, ''))) > 0)
+        OR
+        (type <> 'welfare_one'
+          AND welfare_category_id IS NULL
+          AND welfare_category_name_snapshot IS NULL)
+      ) NOT VALID;
+    ALTER TABLE reimbursements
+      VALIDATE CONSTRAINT reimbursements_welfare_category_check;
+
+    ALTER TABLE reimbursements
+      DROP CONSTRAINT IF EXISTS reimbursements_welfare_two_category_id_fkey;
+    ALTER TABLE reimbursements
+      ADD CONSTRAINT reimbursements_welfare_two_category_id_fkey
+      FOREIGN KEY(welfare_two_category_id)
+      REFERENCES welfare_two_expense_categories(id) ON DELETE RESTRICT;
+
+    ALTER TABLE reimbursements
+      DROP CONSTRAINT IF EXISTS reimbursements_welfare_two_category_check;
+    ALTER TABLE reimbursements
+      ADD CONSTRAINT reimbursements_welfare_two_category_check CHECK(
+        (type = 'welfare_two'
+          AND welfare_two_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_two_category_name_snapshot, ''))) > 0)
+        OR
+        (type <> 'welfare_two'
+          AND welfare_two_category_id IS NULL
+          AND welfare_two_category_name_snapshot IS NULL)
+      ) NOT VALID;
+    ALTER TABLE reimbursements
+      VALIDATE CONSTRAINT reimbursements_welfare_two_category_check;
+
+    CREATE INDEX IF NOT EXISTS idx_welfare_one_expense_categories_sort
+      ON welfare_one_expense_categories(is_active, sort_order, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_welfare_one_expense_categories_name
+      ON welfare_one_expense_categories(LOWER(BTRIM(name)));
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_welfare_category
+      ON reimbursements(welfare_category_id)
+      WHERE welfare_category_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_welfare_two_expense_categories_sort
+      ON welfare_two_expense_categories(is_active, sort_order, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_welfare_two_expense_categories_name
+      ON welfare_two_expense_categories(LOWER(BTRIM(name)));
+    CREATE INDEX IF NOT EXISTS idx_reimbursements_welfare_two_category
+      ON reimbursements(welfare_two_category_id)
+      WHERE welfare_two_category_id IS NOT NULL;
+  `);
+
+  const welfareCategorySeedTime = new Date().toISOString();
+  await db.run(
+    `WITH seed(id, code, name, sort_order, is_active, created_at, updated_at) AS (
+       VALUES
+         (?, ?, ?, ?::integer, TRUE, ?, ?),
+         (?, ?, ?, ?::integer, TRUE, ?, ?),
+         (?, ?, ?, ?::integer, TRUE, ?, ?),
+         (?, ?, ?, ?::integer, FALSE, ?, ?),
+         (?, ?, ?, ?::integer, FALSE, ?, ?),
+         (?, ?, ?, ?::integer, TRUE, ?, ?)
+     )
+     INSERT INTO welfare_one_expense_categories
+       (id, code, name, sort_order, is_active, created_at, updated_at)
+     SELECT seed.id, seed.code, seed.name, seed.sort_order, seed.is_active,
+            seed.created_at, seed.updated_at
+     FROM seed
+     WHERE NOT EXISTS (
+       SELECT 1 FROM welfare_expense_category_tombstones tombstone
+       WHERE tombstone.account_code = 'welfare_one'
+         AND tombstone.code = seed.code
+     )
+     ON CONFLICT (code) DO NOTHING`,
+    "welfare_one_drinking_water",
+    "drinking_water",
+    "饮用水",
+    1,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_one_office",
+    "office",
+    "办公",
+    2,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_one_electricity",
+    "electricity",
+    "电费",
+    3,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_one_407_ai",
+    "407_ai",
+    "407-AI",
+    4,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_one_8h_ai",
+    "8h_ai",
+    "8H-AI",
+    5,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_one_other",
+    "other",
+    "其他",
+    6,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+  );
+  await db.run(
+    `UPDATE welfare_one_expense_categories
+     SET is_active = FALSE, updated_at = ?
+     WHERE code IN ('407_ai', '8h_ai')
+       AND is_active = TRUE
+       AND updated_at = created_at`,
+    welfareCategorySeedTime,
+  );
+  await db.run(
+    `UPDATE welfare_one_expense_categories
+     SET sort_order = 6, updated_at = ?
+     WHERE code = 'other' AND sort_order = 4 AND updated_at = created_at`,
+    welfareCategorySeedTime,
+  );
+  await db.run(
+    `WITH seed(id, code, name, sort_order, created_at, updated_at) AS (
+       VALUES
+         (?, ?, ?, ?::integer, ?, ?),
+         (?, ?, ?, ?::integer, ?, ?),
+         (?, ?, ?, ?::integer, ?, ?)
+     )
+     INSERT INTO welfare_two_expense_categories
+       (id, code, name, sort_order, is_active, created_at, updated_at)
+     SELECT seed.id, seed.code, seed.name, seed.sort_order, TRUE,
+            seed.created_at, seed.updated_at
+     FROM seed
+     WHERE NOT EXISTS (
+       SELECT 1 FROM welfare_expense_category_tombstones tombstone
+       WHERE tombstone.account_code = 'welfare_two'
+         AND tombstone.code = seed.code
+     )
+     ON CONFLICT (code) DO NOTHING`,
+    "welfare_two_refreshment",
+    "refreshment",
+    "茶歇",
+    1,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_two_team_building",
+    "team_building",
+    "团建",
+    2,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+    "welfare_two_physical_exam",
+    "physical_exam",
+    "体检",
+    3,
+    welfareCategorySeedTime,
+    welfareCategorySeedTime,
+  );
+
   const migrated = await db.run(
     `UPDATE reimbursements SET status = 'approved', updated_at = NOW()::text WHERE status = 'paying'`,
   );
@@ -2218,6 +2519,12 @@ export async function initDatabase() {
   );
   await db.run(
     `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS housing_fund_base_is_manual BOOLEAN NOT NULL DEFAULT FALSE`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS withheld_actual_amount NUMERIC`,
+  );
+  await db.run(
+    `ALTER TABLE payroll_records ADD COLUMN IF NOT EXISTS net_salary_actual_amount NUMERIC`,
   );
   await db.run(
     `ALTER TABLE human_cost_receipts ADD COLUMN IF NOT EXISTS ignored_item_count INTEGER NOT NULL DEFAULT 0`,
@@ -2515,10 +2822,19 @@ export async function initDatabase() {
       ],
     },
     {
+      name: "工资实际发生额",
+      statements: [
+        `ALTER TABLE payroll_records DROP CONSTRAINT IF EXISTS payroll_records_withheld_actual_amount_check`,
+        `ALTER TABLE payroll_records ADD CONSTRAINT payroll_records_withheld_actual_amount_check CHECK(withheld_actual_amount IS NULL OR withheld_actual_amount >= 0)`,
+        `ALTER TABLE payroll_records DROP CONSTRAINT IF EXISTS payroll_records_net_salary_actual_amount_check`,
+        `ALTER TABLE payroll_records ADD CONSTRAINT payroll_records_net_salary_actual_amount_check CHECK(net_salary_actual_amount IS NULL OR net_salary_actual_amount >= 0)`,
+      ],
+    },
+    {
       name: "工资变更日志字段",
       statements: [
         `ALTER TABLE payroll_change_logs DROP CONSTRAINT IF EXISTS payroll_change_logs_field_name_check`,
-        `ALTER TABLE payroll_change_logs ADD CONSTRAINT payroll_change_logs_field_name_check CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax'))`,
+        `ALTER TABLE payroll_change_logs ADD CONSTRAINT payroll_change_logs_field_name_check CHECK(field_name IN ('monthly_salary', 'housing_fund_base', 'contribution_base', 'individual_income_tax', 'withheld_actual_amount', 'net_salary_actual_amount'))`,
       ],
     },
     {
@@ -3515,6 +3831,20 @@ export async function initDatabase() {
 
   // ==================== 项目日志模块字典 seed ====================
   await initContractDomainSchema();
+  await db.exec(`
+    ALTER TABLE projects
+      ADD COLUMN IF NOT EXISTS client_contact_name TEXT NOT NULL DEFAULT '';
+    ALTER TABLE projects
+      ADD COLUMN IF NOT EXISTS client_contact_phone TEXT NOT NULL DEFAULT '';
+    ALTER TABLE payment_batches
+      ADD COLUMN IF NOT EXISTS proof_hash_set TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_batches_proof_hash_set
+      ON payment_batches(proof_hash_set)
+      WHERE proof_hash_set IS NOT NULL;
+    ALTER TABLE contract_download_requests
+      ADD COLUMN IF NOT EXISTS applicant_department_snapshot TEXT NOT NULL DEFAULT '';
+  `);
+  console.log("✅ 数据库迁移：开发与生产历史兼容字段检查完成");
   await initMonthlyFinancialReportSchema();
   await seedWorklogDicts();
   await seedWorklogPermissions();
@@ -3577,7 +3907,7 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       SELECT
         (item_category = 'general_interest'
           AND item_account_code = 'general' AND item_direction = 'income')
-        OR (item_category IN ('general_bank_fee', 'general_other')
+        OR (item_category IN ('general_bank_fee', 'general_tax_payment', 'general_other')
           AND item_account_code = 'general' AND item_direction = 'expense')
         OR (item_category = 'business_interest'
           AND item_account_code = 'business' AND item_direction = 'income')
@@ -3585,6 +3915,8 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
           AND item_account_code = 'business' AND item_direction = 'expense')
         OR (item_category = 'welfare_one_supplement'
           AND item_account_code = 'welfare_one' AND item_direction = 'income')
+        OR (item_category = 'welfare_one_expense'
+          AND item_account_code = 'welfare_one' AND item_direction = 'expense')
         OR (item_category IN (
           'welfare_one_407', 'welfare_one_drinking_water',
           'welfare_one_office', 'welfare_one_electricity',
@@ -3593,6 +3925,8 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
           AND item_account_code = 'welfare_one' AND item_direction = 'expense')
         OR (item_category = 'welfare_two_supplement'
           AND item_account_code = 'welfare_two' AND item_direction = 'income')
+        OR (item_category = 'welfare_two_expense'
+          AND item_account_code = 'welfare_two' AND item_direction = 'expense')
         OR (item_category IN (
           'welfare_two_refreshment', 'welfare_two_team_building',
           'welfare_two_physical_exam'
@@ -3640,11 +3974,13 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       report_id TEXT NOT NULL REFERENCES monthly_financial_reports(id) ON DELETE CASCADE,
       category TEXT NOT NULL CHECK(category IN (
         'general_interest', 'business_interest',
-        'general_bank_fee', 'business_bank_fee', 'general_other',
+        'general_bank_fee', 'business_bank_fee', 'general_tax_payment', 'general_other',
         'welfare_one_supplement', 'welfare_two_supplement',
+        'welfare_one_expense',
         'welfare_one_407', 'welfare_one_drinking_water',
         'welfare_one_office', 'welfare_one_electricity',
         'welfare_one_407_ai', 'welfare_one_8h_ai',
+        'welfare_two_expense',
         'welfare_two_refreshment', 'welfare_two_team_building',
         'welfare_two_physical_exam'
       )),
@@ -3655,9 +3991,40 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       occurred_on TEXT NOT NULL CHECK(occurred_on ~ '^[0-9]{4}-(0[1-9]|1[0-2])-[0-9]{2}$'),
       description TEXT,
       voucher_reference TEXT,
+      welfare_category_id TEXT
+        REFERENCES welfare_one_expense_categories(id) ON DELETE RESTRICT,
+      welfare_category_name_snapshot TEXT,
+      welfare_two_category_id TEXT
+        REFERENCES welfare_two_expense_categories(id) ON DELETE RESTRICT,
+      welfare_two_category_name_snapshot TEXT,
       created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      CONSTRAINT monthly_financial_manual_tax_evidence_check CHECK(
+        category <> 'general_tax_payment'
+        OR (
+          CHAR_LENGTH(BTRIM(COALESCE(description, ''))) > 0
+          AND CHAR_LENGTH(BTRIM(COALESCE(voucher_reference, ''))) > 0
+        )
+      ),
+      CONSTRAINT monthly_financial_manual_welfare_category_check CHECK(
+        (category = 'welfare_one_expense'
+          AND welfare_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_category_name_snapshot, ''))) > 0)
+        OR
+        (category <> 'welfare_one_expense'
+          AND welfare_category_id IS NULL
+          AND welfare_category_name_snapshot IS NULL)
+      ),
+      CONSTRAINT monthly_financial_manual_welfare_two_category_check CHECK(
+        (category = 'welfare_two_expense'
+          AND welfare_two_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_two_category_name_snapshot, ''))) > 0)
+        OR
+        (category <> 'welfare_two_expense'
+          AND welfare_two_category_id IS NULL
+          AND welfare_two_category_name_snapshot IS NULL)
+      )
     );
 
     CREATE TABLE IF NOT EXISTS monthly_financial_snapshots (
@@ -3676,7 +4043,8 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       report_id TEXT NOT NULL REFERENCES monthly_financial_reports(id) ON DELETE RESTRICT,
       report_version INTEGER NOT NULL CHECK(report_version >= 1),
       action TEXT NOT NULL CHECK(action IN (
-        'create', 'save_manual_items', 'refresh', 'close', 'reopen', 'export'
+        'create', 'save_manual_items', 'refresh', 'close', 'reopen', 'export',
+        'bank_receipt_correction'
       )),
       actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
       actor_role TEXT NOT NULL,
@@ -3684,6 +4052,55 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       changes_json JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TEXT NOT NULL
     );
+
+    ALTER TABLE monthly_financial_audit_logs
+      DROP CONSTRAINT IF EXISTS monthly_financial_audit_logs_action_check;
+    ALTER TABLE monthly_financial_audit_logs
+      ADD CONSTRAINT monthly_financial_audit_logs_action_check CHECK(action IN (
+        'create', 'save_manual_items', 'refresh', 'close', 'reopen', 'export',
+        'bank_receipt_correction'
+      ));
+
+    -- 同一电子回单号的新旧规范字段不一致时，先保存一次性复核挑战。
+    -- 挑战只保存令牌消息认证摘要；确认时必须重新上传同一整批原件、重新识别，
+    -- 并在同一事务内复核月报版本、操作者会话、旧事实与全部差异摘要。
+    CREATE TABLE IF NOT EXISTS monthly_financial_bank_correction_reviews (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL
+        REFERENCES monthly_financial_reports(id) ON DELETE RESTRICT,
+      report_month TEXT NOT NULL
+        CHECK(report_month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+      expected_report_version INTEGER NOT NULL CHECK(expected_report_version >= 0),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN (
+        'pending', 'confirmed', 'expired', 'cancelled'
+      )),
+      requested_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      requested_role TEXT NOT NULL,
+      session_binding_hash TEXT NOT NULL CHECK(session_binding_hash ~ '^[0-9a-f]{64}$'),
+      token_hash TEXT NOT NULL CHECK(token_hash ~ '^[0-9a-f]{64}$'),
+      batch_digest TEXT NOT NULL CHECK(batch_digest ~ '^[0-9a-f]{64}$'),
+      file_hashes_json JSONB NOT NULL CHECK(jsonb_typeof(file_hashes_json) = 'array'),
+      parser_version TEXT NOT NULL,
+      analysis_digest TEXT NOT NULL CHECK(analysis_digest ~ '^[0-9a-f]{64}$'),
+      conflict_fingerprint TEXT NOT NULL CHECK(conflict_fingerprint ~ '^[0-9a-f]{64}$'),
+      conflicts_json JSONB NOT NULL CHECK(jsonb_typeof(conflicts_json) = 'array'),
+      expires_at TEXT NOT NULL,
+      reason TEXT,
+      confirmed_by TEXT REFERENCES users(id) ON DELETE RESTRICT,
+      confirmed_role TEXT,
+      confirmed_at TEXT,
+      confirmed_report_version INTEGER CHECK(confirmed_report_version IS NULL OR confirmed_report_version >= 1),
+      audit_log_id TEXT REFERENCES monthly_financial_audit_logs(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_monthly_bank_correction_reviews_lookup
+      ON monthly_financial_bank_correction_reviews(
+        report_month, requested_by, status, created_at DESC
+      );
+    CREATE INDEX IF NOT EXISTS idx_monthly_bank_correction_reviews_expiry
+      ON monthly_financial_bank_correction_reviews(status, expires_at);
 
     -- 月报银行原件按“月度 + 账户”保存版本链。替换时旧文件只转为非当前，
     -- 原文件路径、摘要和识别审计信息继续保留，不覆盖历史证据。
@@ -3701,6 +4118,8 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       file_size BIGINT CHECK(file_size IS NULL OR file_size >= 0),
       file_hash TEXT NOT NULL
         CHECK(file_hash ~ '^[0-9a-f]{64}$'),
+      recognition_version TEXT NOT NULL DEFAULT 'legacy-unknown'
+        CHECK(BTRIM(recognition_version) <> ''),
       file_version INTEGER NOT NULL DEFAULT 1 CHECK(file_version >= 1),
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       replaces_file_id TEXT UNIQUE
@@ -3731,6 +4150,10 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       CHECK(replaces_file_id IS NULL OR replaces_file_id <> id),
       CHECK(NOT is_active OR replaced_at IS NULL)
     );
+
+    ALTER TABLE monthly_financial_bank_files
+      ADD COLUMN IF NOT EXISTS recognition_version TEXT NOT NULL
+      DEFAULT 'legacy-unknown';
 
     -- 单笔回单是跨文件版本稳定的规范化事实。相同电子回单号在新文件中再次
     -- 出现时更新 current_file_id，first_seen_file_id 始终指向首次原始证据。
@@ -3968,6 +4391,27 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       FOR EACH ROW EXECUTE FUNCTION deactivate_monthly_bank_contract_links();
 
     ALTER TABLE monthly_financial_manual_items
+      ADD COLUMN IF NOT EXISTS welfare_category_id TEXT;
+    ALTER TABLE monthly_financial_manual_items
+      ADD COLUMN IF NOT EXISTS welfare_category_name_snapshot TEXT;
+    ALTER TABLE monthly_financial_manual_items
+      ADD COLUMN IF NOT EXISTS welfare_two_category_id TEXT;
+    ALTER TABLE monthly_financial_manual_items
+      ADD COLUMN IF NOT EXISTS welfare_two_category_name_snapshot TEXT;
+    ALTER TABLE monthly_financial_manual_items
+      DROP CONSTRAINT IF EXISTS monthly_financial_manual_items_welfare_category_id_fkey;
+    ALTER TABLE monthly_financial_manual_items
+      ADD CONSTRAINT monthly_financial_manual_items_welfare_category_id_fkey
+      FOREIGN KEY(welfare_category_id)
+      REFERENCES welfare_one_expense_categories(id) ON DELETE RESTRICT NOT VALID;
+    ALTER TABLE monthly_financial_manual_items
+      DROP CONSTRAINT IF EXISTS monthly_financial_manual_items_welfare_two_category_id_fkey;
+    ALTER TABLE monthly_financial_manual_items
+      ADD CONSTRAINT monthly_financial_manual_items_welfare_two_category_id_fkey
+      FOREIGN KEY(welfare_two_category_id)
+      REFERENCES welfare_two_expense_categories(id) ON DELETE RESTRICT NOT VALID;
+
+    ALTER TABLE monthly_financial_manual_items
       DROP CONSTRAINT IF EXISTS monthly_financial_manual_items_amount_check;
     ALTER TABLE monthly_financial_manual_items
       ADD CONSTRAINT monthly_financial_manual_items_amount_check CHECK(amount > 0);
@@ -3977,11 +4421,13 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
     ALTER TABLE monthly_financial_manual_items
       ADD CONSTRAINT monthly_financial_manual_items_category_check CHECK(category IN (
         'general_interest', 'business_interest',
-        'general_bank_fee', 'business_bank_fee', 'general_other',
+        'general_bank_fee', 'business_bank_fee', 'general_tax_payment', 'general_other',
         'welfare_one_supplement', 'welfare_two_supplement',
+        'welfare_one_expense',
         'welfare_one_407', 'welfare_one_drinking_water',
         'welfare_one_office', 'welfare_one_electricity',
         'welfare_one_407_ai', 'welfare_one_8h_ai',
+        'welfare_two_expense',
         'welfare_two_refreshment', 'welfare_two_team_building',
         'welfare_two_physical_exam'
       ));
@@ -3998,6 +4444,53 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       ADD CONSTRAINT monthly_financial_manual_items_rule_check CHECK(
         monthly_financial_manual_rule_is_valid(category, account_code, direction)
       ) NOT VALID;
+
+    ALTER TABLE monthly_financial_manual_items
+      DROP CONSTRAINT IF EXISTS monthly_financial_manual_tax_evidence_check;
+    ALTER TABLE monthly_financial_manual_items
+      ADD CONSTRAINT monthly_financial_manual_tax_evidence_check CHECK(
+        category <> 'general_tax_payment'
+        OR (
+          CHAR_LENGTH(BTRIM(COALESCE(description, ''))) > 0
+          AND CHAR_LENGTH(BTRIM(COALESCE(voucher_reference, ''))) > 0
+        )
+      ) NOT VALID;
+    ALTER TABLE monthly_financial_manual_items
+      VALIDATE CONSTRAINT monthly_financial_manual_tax_evidence_check;
+
+    ALTER TABLE monthly_financial_manual_items
+      DROP CONSTRAINT IF EXISTS monthly_financial_manual_welfare_category_check;
+    ALTER TABLE monthly_financial_manual_items
+      ADD CONSTRAINT monthly_financial_manual_welfare_category_check CHECK(
+        (category = 'welfare_one_expense'
+          AND welfare_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_category_name_snapshot, ''))) > 0)
+        OR
+        (category <> 'welfare_one_expense'
+          AND welfare_category_id IS NULL
+          AND welfare_category_name_snapshot IS NULL)
+      ) NOT VALID;
+    ALTER TABLE monthly_financial_manual_items
+      VALIDATE CONSTRAINT monthly_financial_manual_welfare_category_check;
+    ALTER TABLE monthly_financial_manual_items
+      VALIDATE CONSTRAINT monthly_financial_manual_items_welfare_category_id_fkey;
+
+    ALTER TABLE monthly_financial_manual_items
+      DROP CONSTRAINT IF EXISTS monthly_financial_manual_welfare_two_category_check;
+    ALTER TABLE monthly_financial_manual_items
+      ADD CONSTRAINT monthly_financial_manual_welfare_two_category_check CHECK(
+        (category = 'welfare_two_expense'
+          AND welfare_two_category_id IS NOT NULL
+          AND CHAR_LENGTH(BTRIM(COALESCE(welfare_two_category_name_snapshot, ''))) > 0)
+        OR
+        (category <> 'welfare_two_expense'
+          AND welfare_two_category_id IS NULL
+          AND welfare_two_category_name_snapshot IS NULL)
+      ) NOT VALID;
+    ALTER TABLE monthly_financial_manual_items
+      VALIDATE CONSTRAINT monthly_financial_manual_welfare_two_category_check;
+    ALTER TABLE monthly_financial_manual_items
+      VALIDATE CONSTRAINT monthly_financial_manual_items_welfare_two_category_id_fkey;
 
     ALTER TABLE monthly_financial_reports
       DROP CONSTRAINT IF EXISTS monthly_financial_reports_opening_balances_check;
@@ -4076,8 +4569,11 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_active
       ON monthly_financial_bank_files(report_month, account_code)
       WHERE is_active;
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_month_hash
-      ON monthly_financial_bank_files(report_month, file_hash);
+    DROP INDEX IF EXISTS uq_monthly_financial_bank_files_month_hash;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_month_hash_version
+      ON monthly_financial_bank_files(
+        report_month, file_hash, recognition_version
+      );
     CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_files_report
       ON monthly_financial_bank_files(report_id, account_code, file_version DESC);
     CREATE INDEX IF NOT EXISTS idx_monthly_financial_bank_files_recognition
@@ -4126,7 +4622,9 @@ async function initMonthlyFinancialReportSchema(): Promise<void> {
       name = EXCLUDED.name,
       sort_order = EXCLUDED.sort_order,
       is_active = TRUE,
-      updated_at = EXCLUDED.updated_at;
+      updated_at = EXCLUDED.updated_at
+    WHERE (financial_accounts.name, financial_accounts.sort_order, financial_accounts.is_active)
+      IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.sort_order, TRUE);
   `);
 }
 
@@ -4152,14 +4650,15 @@ async function initContractDomainSchema(): Promise<void> {
         CHECK(declared_category IN ('main_business', 'non_main', 'asset')),
       declared_subtype TEXT CHECK(declared_subtype IN (
         'engineering_consulting', 'preliminary_procedures',
-        'technical_consulting', 'non_main_income', 'other_service',
+        'technical_consulting', 'non_main_income', 'non_main_expense',
+        'other_service',
         'procurement', 'software', 'equipment', 'house_rental',
-        'vehicle_rental', 'parking_space', 'office_asset'
+        'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
       )),
       category TEXT CHECK(category IN ('main_business', 'non_main', 'asset')),
       asset_category TEXT CHECK(asset_category IN (
         'procurement', 'software', 'equipment', 'house_rental',
-        'vehicle_rental', 'parking_space', 'office_asset', 'other'
+        'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee', 'other'
       )),
       relation_type TEXT NOT NULL
         CHECK(relation_type IN ('main', 'supplement', 'termination')),
@@ -4179,6 +4678,7 @@ async function initContractDomainSchema(): Promise<void> {
       renewed_from_lease_end_date TEXT,
       party_a TEXT,
       party_b TEXT,
+      party_c TEXT,
       project_name TEXT,
       amount_delta NUMERIC(18,2)
         CHECK(amount_delta IS NULL OR ABS(amount_delta) <= 999999999999.99),
@@ -4188,6 +4688,16 @@ async function initContractDomainSchema(): Promise<void> {
       amount_before_change NUMERIC(18,2),
       amount_after_change NUMERIC(18,2),
       current_effective_amount NUMERIC(18,2),
+      pricing_mode TEXT NOT NULL DEFAULT 'fixed'
+        CHECK(pricing_mode IN ('fixed', 'target')),
+      target_amount NUMERIC(18,2),
+      target_quantity NUMERIC(18,4),
+      unit_price NUMERIC(18,2),
+      confirmed_quantity NUMERIC(18,4),
+      confirmed_contract_amount NUMERIC(18,2),
+      quantity_unit TEXT CHECK(
+        quantity_unit IS NULL OR char_length(BTRIM(quantity_unit)) BETWEEN 1 AND 20
+      ),
       supplement_change_type TEXT CHECK(supplement_change_type IS NULL OR
         supplement_change_type IN (
           'payment_terms_only', 'amount_adjustment',
@@ -4253,11 +4763,13 @@ async function initContractDomainSchema(): Promise<void> {
         (declared_category = 'main_business' AND asset_category IS NULL AND
           declared_subtype IN ('engineering_consulting', 'preliminary_procedures', 'technical_consulting')) OR
         (declared_category = 'non_main' AND asset_category IS NULL AND
-          declared_subtype IN ('non_main_income', 'other_service')) OR
+          declared_subtype IN (
+            'non_main_income', 'non_main_expense', 'other_service'
+          )) OR
         (declared_category = 'asset' AND asset_category = declared_subtype AND
           declared_subtype IN (
             'procurement', 'software', 'equipment', 'house_rental',
-            'vehicle_rental', 'parking_space', 'office_asset'
+            'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
           ))
       ),
       CONSTRAINT contracts_asset_project_check
@@ -4277,8 +4789,92 @@ async function initContractDomainSchema(): Promise<void> {
       ),
       CHECK(lease_operation_type IS NULL OR relation_type = 'supplement'),
       CHECK(lease_operation_type IS NULL OR lease_previous_end_date IS NOT NULL),
+      CHECK(
+        (pricing_mode = 'fixed' AND target_amount IS NULL AND
+          target_quantity IS NULL AND unit_price IS NULL AND
+          confirmed_quantity IS NULL AND confirmed_contract_amount IS NULL AND
+          quantity_unit IS NULL) OR
+        (pricing_mode = 'target' AND relation_type = 'main' AND
+          target_amount > 0 AND current_effective_amount = target_amount AND
+          (target_quantity IS NULL OR target_quantity > 0) AND
+          (unit_price IS NULL OR unit_price > 0) AND
+          ((target_quantity IS NULL AND unit_price IS NULL) OR
+            (target_quantity IS NOT NULL AND unit_price IS NOT NULL AND
+              ROUND(target_quantity * unit_price, 2) = target_amount)) AND
+          (confirmed_quantity IS NULL OR confirmed_quantity >= 0) AND
+          (confirmed_quantity IS NULL OR target_quantity IS NULL OR
+            confirmed_quantity <= target_quantity) AND
+          (confirmed_contract_amount IS NULL OR
+            (confirmed_contract_amount >= 0 AND
+              confirmed_contract_amount <= target_amount)) AND
+          (confirmed_quantity IS NULL OR quantity_unit IS NOT NULL))
+      ),
       CHECK(root_contract_id IS NULL OR root_contract_id <> id OR relation_type = 'main')
     );
+
+    -- 历史环境可能已经写入非主营支出合同，但仍保留旧分类约束。
+    -- 必须先升级约束，再执行后续合同归一更新，否则更新既有行时会被旧
+    -- 白名单拒绝并导致整个开发或生产服务无法启动。
+    ALTER TABLE contracts
+      DROP CONSTRAINT IF EXISTS contracts_declared_asset_category_check;
+    ALTER TABLE contracts
+      ADD CONSTRAINT contracts_declared_asset_category_check
+      CHECK(
+        declared_category IS NULL OR
+        declared_subtype IS NULL OR
+        (declared_category = 'main_business' AND asset_category IS NULL AND
+          declared_subtype IN (
+            'engineering_consulting', 'preliminary_procedures',
+            'technical_consulting'
+          )) OR
+        (declared_category = 'non_main' AND asset_category IS NULL AND
+          declared_subtype IN (
+            'non_main_income', 'non_main_expense', 'other_service'
+          )) OR
+        (declared_category = 'asset' AND asset_category = declared_subtype AND
+          declared_subtype IN (
+            'procurement', 'software', 'equipment', 'house_rental',
+            'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
+          ))
+      ) NOT VALID;
+    ALTER TABLE contracts
+      DROP CONSTRAINT IF EXISTS contracts_declared_subtype_check;
+    ALTER TABLE contracts
+      ADD CONSTRAINT contracts_declared_subtype_check
+      CHECK(declared_subtype IS NULL OR declared_subtype IN (
+        'engineering_consulting', 'preliminary_procedures',
+        'technical_consulting', 'non_main_income', 'non_main_expense',
+        'other_service', 'procurement', 'software', 'equipment',
+        'house_rental', 'vehicle_rental', 'parking_space', 'office_asset',
+        'notary_fee'
+      )) NOT VALID;
+
+    CREATE TABLE IF NOT EXISTS contract_target_amount_changes (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+      change_no INTEGER NOT NULL CHECK(change_no >= 0),
+      change_type TEXT NOT NULL CHECK(change_type IN ('initial', 'update')),
+      old_target_amount NUMERIC(18,2),
+      new_target_amount NUMERIC(18,2) NOT NULL CHECK(new_target_amount > 0),
+      old_target_quantity NUMERIC(18,4),
+      new_target_quantity NUMERIC(18,4),
+      old_unit_price NUMERIC(18,2),
+      new_unit_price NUMERIC(18,2),
+      reason TEXT NOT NULL CHECK(char_length(BTRIM(reason)) BETWEEN 1 AND 500),
+      changed_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      changed_at TEXT NOT NULL,
+      UNIQUE(contract_id, change_no),
+      CHECK(
+        (change_type = 'initial' AND change_no = 0 AND
+          old_target_amount IS NULL AND old_target_quantity IS NULL AND
+          old_unit_price IS NULL) OR
+        (change_type = 'update' AND change_no > 0 AND
+          old_target_amount IS NOT NULL)
+      )
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contract_target_amount_changes_contract
+      ON contract_target_amount_changes(contract_id, change_no DESC);
 
     CREATE TABLE IF NOT EXISTS contract_files (
       id TEXT PRIMARY KEY,
@@ -4790,7 +5386,7 @@ async function initContractDomainSchema(): Promise<void> {
     CREATE TABLE IF NOT EXISTS contract_auxiliary_files (
       id TEXT PRIMARY KEY,
       package_id TEXT NOT NULL REFERENCES contract_auxiliary_packages(id) ON DELETE CASCADE,
-      file_kind TEXT NOT NULL CHECK(file_kind IN ('contract', 'invoice', 'receipt')),
+      file_kind TEXT NOT NULL CHECK(file_kind IN ('contract', 'invoice', 'receipt', 'other')),
       file_name TEXT NOT NULL,
       file_path TEXT NOT NULL,
       file_size INTEGER NOT NULL CHECK(file_size > 0),
@@ -4803,12 +5399,63 @@ async function initContractDomainSchema(): Promise<void> {
       UNIQUE(package_id, file_hash)
     );
 
+    ALTER TABLE contract_auxiliary_files
+      DROP CONSTRAINT IF EXISTS contract_auxiliary_files_file_kind_check;
+    ALTER TABLE contract_auxiliary_files
+      ADD CONSTRAINT contract_auxiliary_files_file_kind_check
+      CHECK(file_kind IN ('contract', 'invoice', 'receipt', 'other')) NOT VALID;
+    ALTER TABLE contract_auxiliary_files
+      VALIDATE CONSTRAINT contract_auxiliary_files_file_kind_check;
+
     DROP INDEX IF EXISTS idx_contract_auxiliary_files_current_kind;
     DROP INDEX IF EXISTS idx_contract_auxiliary_files_current_contract;
     CREATE INDEX IF NOT EXISTS idx_contract_auxiliary_files_kind
       ON contract_auxiliary_files(package_id, file_kind, created_at, id);
     CREATE INDEX IF NOT EXISTS idx_contract_auxiliary_packages_parent
       ON contract_auxiliary_packages(parent_contract_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS contract_historical_import_batches (
+      batch_key TEXT PRIMARY KEY,
+      manifest_hash TEXT NOT NULL CHECK(manifest_hash ~ '^[0-9a-f]{64}$'),
+      source_file_count INTEGER NOT NULL CHECK(source_file_count > 0),
+      source_total_bytes BIGINT NOT NULL CHECK(source_total_bytes > 0),
+      status TEXT NOT NULL CHECK(status IN ('completed')),
+      imported_contract_count INTEGER NOT NULL
+        CHECK(imported_contract_count >= 0),
+      restored_contract_count INTEGER NOT NULL
+        CHECK(restored_contract_count >= 0),
+      created_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT NOT NULL,
+      summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+
+    CREATE TABLE IF NOT EXISTS contract_historical_import_files (
+      batch_key TEXT NOT NULL
+        REFERENCES contract_historical_import_batches(batch_key)
+        ON DELETE RESTRICT,
+      source_path TEXT NOT NULL,
+      source_hash TEXT NOT NULL CHECK(source_hash ~ '^[0-9a-f]{64}$'),
+      source_bytes BIGINT NOT NULL CHECK(source_bytes > 0),
+      family_key TEXT NOT NULL,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE RESTRICT,
+      target_kind TEXT NOT NULL,
+      accounting_included BOOLEAN NOT NULL,
+      contract_file_id TEXT REFERENCES contract_files(id) ON DELETE RESTRICT,
+      auxiliary_file_id TEXT
+        REFERENCES contract_auxiliary_files(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(batch_key, source_path),
+      CHECK(
+        (contract_file_id IS NOT NULL AND auxiliary_file_id IS NULL) OR
+        (contract_file_id IS NULL AND auxiliary_file_id IS NOT NULL)
+      )
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contract_historical_import_files_contract
+      ON contract_historical_import_files(contract_id, batch_key);
+    CREATE INDEX IF NOT EXISTS idx_contract_historical_import_files_hash
+      ON contract_historical_import_files(source_hash);
 
     CREATE TABLE IF NOT EXISTS contract_ocr_jobs (
       id TEXT PRIMARY KEY,
@@ -4960,7 +5607,7 @@ async function initContractDomainSchema(): Promise<void> {
         REFERENCES contract_seal_verifications(id) ON DELETE CASCADE,
       contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
       field_code TEXT NOT NULL
-        CHECK(field_code IN ('party_a', 'party_b', 'amount', 'contract_date')),
+        CHECK(field_code IN ('party_a', 'party_b', 'party_c', 'amount', 'contract_date')),
       approved_value TEXT,
       recognized_value TEXT,
       final_value TEXT,
@@ -4976,6 +5623,16 @@ async function initContractDomainSchema(): Promise<void> {
       updated_at TEXT NOT NULL,
       UNIQUE(verification_id, field_code)
     );
+
+    ALTER TABLE contract_seal_verification_fields
+      DROP CONSTRAINT IF EXISTS contract_seal_verification_fields_field_code_check;
+    ALTER TABLE contract_seal_verification_fields
+      ADD CONSTRAINT contract_seal_verification_fields_field_code_check
+      CHECK(field_code IN (
+        'party_a', 'party_b', 'party_c', 'amount', 'contract_date'
+      )) NOT VALID;
+    ALTER TABLE contract_seal_verification_fields
+      VALIDATE CONSTRAINT contract_seal_verification_fields_field_code_check;
 
     CREATE TABLE IF NOT EXISTS contract_approval_rounds (
       id TEXT PRIMARY KEY,
@@ -6031,6 +6688,80 @@ async function initContractDomainSchema(): Promise<void> {
       END IF;
     END $$;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS requires_auxiliary_materials BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS party_c TEXT;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS pricing_mode TEXT NOT NULL DEFAULT 'fixed';
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS target_amount NUMERIC(18,2);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS target_quantity NUMERIC(18,4);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS unit_price NUMERIC(18,2);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS confirmed_quantity NUMERIC(18,4);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS confirmed_contract_amount NUMERIC(18,2);
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS quantity_unit TEXT;
+    ALTER TABLE contracts ADD COLUMN IF NOT EXISTS current_effective_amount NUMERIC(18,2);
+    ALTER TABLE contracts
+      DROP CONSTRAINT IF EXISTS contracts_target_amount_consistency_check;
+    ALTER TABLE contracts
+      ADD CONSTRAINT contracts_target_amount_consistency_check CHECK(
+        (pricing_mode = 'fixed' AND target_amount IS NULL AND
+          target_quantity IS NULL AND unit_price IS NULL AND
+          confirmed_quantity IS NULL AND confirmed_contract_amount IS NULL AND
+          quantity_unit IS NULL) OR
+        (pricing_mode = 'target' AND relation_type = 'main' AND
+          target_amount > 0 AND current_effective_amount = target_amount AND
+          (target_quantity IS NULL OR target_quantity > 0) AND
+          (unit_price IS NULL OR unit_price > 0) AND
+          ((target_quantity IS NULL AND unit_price IS NULL) OR
+            (target_quantity IS NOT NULL AND unit_price IS NOT NULL AND
+              ROUND(target_quantity * unit_price, 2) = target_amount)) AND
+          (confirmed_quantity IS NULL OR confirmed_quantity >= 0) AND
+          (confirmed_quantity IS NULL OR target_quantity IS NULL OR
+            confirmed_quantity <= target_quantity) AND
+          (confirmed_contract_amount IS NULL OR
+            (confirmed_contract_amount >= 0 AND
+              confirmed_contract_amount <= target_amount)) AND
+          (confirmed_quantity IS NULL OR quantity_unit IS NOT NULL))
+      ) NOT VALID;
+    ALTER TABLE contracts
+      VALIDATE CONSTRAINT contracts_target_amount_consistency_check;
+
+    CREATE TABLE IF NOT EXISTS contract_target_amount_changes (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+      change_no INTEGER NOT NULL CHECK(change_no >= 0),
+      change_type TEXT NOT NULL CHECK(change_type IN ('initial', 'update')),
+      old_target_amount NUMERIC(18,2),
+      new_target_amount NUMERIC(18,2) NOT NULL CHECK(new_target_amount > 0),
+      old_target_quantity NUMERIC(18,4),
+      new_target_quantity NUMERIC(18,4),
+      old_unit_price NUMERIC(18,2),
+      new_unit_price NUMERIC(18,2),
+      reason TEXT NOT NULL CHECK(char_length(BTRIM(reason)) BETWEEN 1 AND 500),
+      changed_by TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      changed_at TEXT NOT NULL,
+      UNIQUE(contract_id, change_no),
+      CHECK(
+        (change_type = 'initial' AND change_no = 0 AND
+          old_target_amount IS NULL AND old_target_quantity IS NULL AND
+          old_unit_price IS NULL) OR
+        (change_type = 'update' AND change_no > 0 AND
+          old_target_amount IS NOT NULL)
+      )
+    );
+    CREATE INDEX IF NOT EXISTS idx_contract_target_amount_changes_contract
+      ON contract_target_amount_changes(contract_id, change_no DESC);
+    CREATE OR REPLACE FUNCTION prevent_contract_target_amount_history_mutation()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF pg_trigger_depth() > 1 THEN
+        RETURN OLD;
+      END IF;
+      RAISE EXCEPTION '合同目标金额历史为不可变审计记录';
+    END;
+    $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS trg_contract_target_amount_history_immutable
+      ON contract_target_amount_changes;
+    CREATE TRIGGER trg_contract_target_amount_history_immutable
+      BEFORE UPDATE OR DELETE ON contract_target_amount_changes
+      FOR EACH ROW EXECUTE FUNCTION prevent_contract_target_amount_history_mutation();
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS declared_subtype TEXT;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS asset_category TEXT;
     ALTER TABLE contracts ADD COLUMN IF NOT EXISTS financial_direction TEXT;
@@ -6089,15 +6820,23 @@ async function initContractDomainSchema(): Promise<void> {
       ADD CONSTRAINT contract_financial_registrations_direction_invoice_record_id_fkey
       FOREIGN KEY (direction_invoice_record_id) REFERENCES contract_invoices(id)
       ON DELETE RESTRICT;
+    -- 仅补齐缺失的历史关联，不能在重启时覆盖财务登记中已经选定的发票。
     UPDATE contract_financial_registrations registration
-    SET financial_direction = CASE invoice_job.direction
+    SET financial_direction = COALESCE(registration.financial_direction, CASE invoice_job.direction
           WHEN 'output' THEN 'income'
           WHEN 'input' THEN 'cost'
-        END,
+        END),
         direction_invoice_record_id = registration.invoice_record_id
     FROM contract_financial_ocr_jobs invoice_job
     WHERE invoice_job.id = registration.invoice_ocr_job_id
       AND invoice_job.direction IN ('input', 'output')
+      AND registration.direction_invoice_record_id IS NULL
+      AND registration.invoice_record_id IS NOT NULL
+      AND (registration.financial_direction IS NULL
+        OR registration.financial_direction = CASE invoice_job.direction
+          WHEN 'output' THEN 'income'
+          WHEN 'input' THEN 'cost'
+        END)
       AND NOT EXISTS (
         SELECT 1
         FROM contract_financial_registration_items item
@@ -6148,6 +6887,9 @@ async function initContractDomainSchema(): Promise<void> {
     SET financial_direction = CASE
           WHEN COALESCE(contract.declared_category, contract.category) = 'asset'
             THEN 'cost'
+          WHEN COALESCE(contract.declared_category, contract.category) = 'non_main'
+            AND contract.declared_subtype = 'non_main_expense'
+            THEN 'cost'
           ELSE 'income'
         END,
         financial_direction_source = 'contract_category',
@@ -6156,7 +6898,22 @@ async function initContractDomainSchema(): Promise<void> {
         financial_direction_confirmed_at = NULL,
         financial_direction_version = GREATEST(contract.financial_direction_version, 1)
     WHERE COALESCE(contract.declared_category, contract.category)
-      IN ('main_business', 'non_main', 'asset');
+      IN ('main_business', 'non_main', 'asset')
+      AND (
+        contract.financial_direction IS DISTINCT FROM CASE
+          WHEN COALESCE(contract.declared_category, contract.category) = 'asset'
+            THEN 'cost'
+          WHEN COALESCE(contract.declared_category, contract.category) = 'non_main'
+            AND contract.declared_subtype = 'non_main_expense'
+            THEN 'cost'
+          ELSE 'income'
+        END
+        OR contract.financial_direction_source IS DISTINCT FROM 'contract_category'
+        OR contract.financial_direction_invoice_id IS NOT NULL
+        OR contract.financial_direction_confirmed_by IS NOT NULL
+        OR contract.financial_direction_confirmed_at IS NOT NULL
+        OR contract.financial_direction_version < 1
+      );
     ALTER TABLE contracts
       DROP CONSTRAINT IF EXISTS contracts_financial_direction_check;
     ALTER TABLE contracts
@@ -6173,6 +6930,8 @@ async function initContractDomainSchema(): Promise<void> {
           financial_direction_source = 'contract_category' AND
           financial_direction = CASE
             WHEN COALESCE(declared_category, category) = 'asset' THEN 'cost'
+            WHEN COALESCE(declared_category, category) = 'non_main'
+              AND declared_subtype = 'non_main_expense' THEN 'cost'
             ELSE 'income'
           END AND
           financial_direction_invoice_id IS NULL AND
@@ -6293,7 +7052,7 @@ async function initContractDomainSchema(): Promise<void> {
         AND declared_category = 'asset'
         AND asset_category IN (
           'procurement', 'software', 'equipment', 'house_rental',
-          'vehicle_rental', 'parking_space', 'office_asset'
+          'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
         );
     ALTER TABLE contracts ALTER COLUMN area DROP DEFAULT;
     ALTER TABLE contracts
@@ -6721,11 +7480,13 @@ async function initContractDomainSchema(): Promise<void> {
         (declared_category = 'main_business' AND asset_category IS NULL AND
           declared_subtype IN ('engineering_consulting', 'preliminary_procedures', 'technical_consulting')) OR
         (declared_category = 'non_main' AND asset_category IS NULL AND
-          declared_subtype IN ('non_main_income', 'other_service')) OR
+          declared_subtype IN (
+            'non_main_income', 'non_main_expense', 'other_service'
+          )) OR
         (declared_category = 'asset' AND asset_category = declared_subtype AND
           declared_subtype IN (
             'procurement', 'software', 'equipment', 'house_rental',
-            'vehicle_rental', 'parking_space', 'office_asset'
+            'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
           ))
       ) NOT VALID;
     ALTER TABLE contracts
@@ -6734,10 +7495,30 @@ async function initContractDomainSchema(): Promise<void> {
       ADD CONSTRAINT contracts_declared_subtype_check
       CHECK(declared_subtype IS NULL OR declared_subtype IN (
         'engineering_consulting', 'preliminary_procedures',
-        'technical_consulting', 'non_main_income', 'other_service',
+        'technical_consulting', 'non_main_income', 'non_main_expense',
+        'other_service',
         'procurement', 'software', 'equipment', 'house_rental',
-        'vehicle_rental', 'parking_space', 'office_asset'
+        'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee'
       )) NOT VALID;
+    -- 旧建表版本可能留下未命名的分类组合白名单；新版等价约束已建立，
+    -- 清除尚不包含公证费的旧组合约束，避免旧约束拒绝既有公证费记录。
+    DO $$
+    DECLARE legacy_constraint RECORD;
+    BEGIN
+      FOR legacy_constraint IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'contracts'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%declared_subtype%'
+          AND pg_get_constraintdef(oid) LIKE '%asset_category%'
+          AND pg_get_constraintdef(oid) LIKE '%office_asset%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%notary_fee%'
+      LOOP
+        EXECUTE format(
+          'ALTER TABLE contracts DROP CONSTRAINT %I',
+          legacy_constraint.conname
+        );
+      END LOOP;
+    END $$;
     WITH affected_projects AS MATERIALIZED (
       SELECT DISTINCT project_id
       FROM contracts
@@ -7468,7 +8249,7 @@ async function initContractDomainSchema(): Promise<void> {
     ALTER TABLE contracts ADD CONSTRAINT contracts_asset_category_check
       CHECK(asset_category IS NULL OR asset_category IN (
         'procurement', 'software', 'equipment', 'house_rental',
-        'vehicle_rental', 'parking_space', 'office_asset', 'other'
+        'vehicle_rental', 'parking_space', 'office_asset', 'notary_fee', 'other'
       ));
 
     UPDATE contracts
@@ -7589,7 +8370,12 @@ async function initContractDomainSchema(): Promise<void> {
         (amount_after_change IS NULL OR
           amount_after_change BETWEEN 0 AND 999999999999.99) AND
         (current_effective_amount IS NULL OR
-          current_effective_amount BETWEEN 0 AND 999999999999.99)
+          current_effective_amount BETWEEN 0 AND 999999999999.99) AND
+        (target_amount IS NULL OR
+          target_amount BETWEEN 0 AND 999999999999.99) AND
+        (unit_price IS NULL OR unit_price BETWEEN 0 AND 999999999999.99) AND
+        (confirmed_contract_amount IS NULL OR
+          confirmed_contract_amount BETWEEN 0 AND 999999999999.99)
       )
       NOT VALID;
     ALTER TABLE contract_invoices
@@ -7662,7 +8448,13 @@ async function initContractDomainSchema(): Promise<void> {
           OR (amount_after_change IS NOT NULL AND
             amount_after_change NOT BETWEEN 0 AND 999999999999.99)
           OR (current_effective_amount IS NOT NULL AND
-            current_effective_amount NOT BETWEEN 0 AND 999999999999.99)) AS contracts,
+            current_effective_amount NOT BETWEEN 0 AND 999999999999.99)
+          OR (target_amount IS NOT NULL AND
+            target_amount NOT BETWEEN 0 AND 999999999999.99)
+          OR (unit_price IS NOT NULL AND
+            unit_price NOT BETWEEN 0 AND 999999999999.99)
+          OR (confirmed_contract_amount IS NOT NULL AND
+            confirmed_contract_amount NOT BETWEEN 0 AND 999999999999.99)) AS contracts,
       (SELECT COUNT(*)::int FROM contract_invoices
        WHERE amount > 999999999999.99
           OR tax_amount > 999999999999.99) AS invoices,

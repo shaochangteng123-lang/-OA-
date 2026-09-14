@@ -1112,14 +1112,11 @@ const humanCostPie = computed(() => {
   return {
     labels: [periodLabel.value],
     series: [
-      createPieSeries("salary", "工资总额", "#3d78b6", [
-        sumPeriodValues(rows, (item) => item.salary),
+      createPieSeries("withheld-actual", "代扣实际发生额", "#7257b6", [
+        sumPeriodValues(rows, (item) => item.withheldActualAmount),
       ]),
-      createPieSeries("company-social", "单位缴纳社保", "#7257b6", [
-        sumPeriodValues(rows, (item) => item.companySocial),
-      ]),
-      createPieSeries("company-housing", "单位缴纳公积金", "#d1893d", [
-        sumPeriodValues(rows, (item) => item.companyHousingFund),
+      createPieSeries("net-salary-actual", "工资实际发生额", "#3d78b6", [
+        sumPeriodValues(rows, (item) => item.netSalaryActualAmount),
       ]),
     ],
   };

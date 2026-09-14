@@ -1,6 +1,9 @@
 <template>
   <div class="monthly-financial-report">
-    <section class="report-hero">
+    <section
+      class="report-hero"
+      :class="{ 'is-analysis-view': activeTab === 'trend' }"
+    >
       <div class="hero-copy">
         <span class="hero-kicker">财务区 · 月度资金结算</span>
         <div class="hero-title-row">
@@ -36,7 +39,12 @@
           v-if="canRefresh"
           :icon="RefreshRight"
           :loading="activeAction === 'refresh'"
-          :disabled="actionLoading || hasUnsavedChanges"
+          :disabled="
+            actionLoading ||
+            hasUnsavedChanges ||
+            requiresFirstMonthInitialization
+          "
+          :title="refreshActionReason || undefined"
           @click="handleRefreshSources"
         >
           同步自动数据
@@ -123,6 +131,16 @@
     />
 
     <el-alert
+      v-else-if="requiresFirstMonthInitialization"
+      class="page-alert"
+      title="请先保存首月期初余额"
+      description="当前月份是首月且尚未建账，请完整填写四个账户期初余额并点击“保存维护数据”，保存后才能同步自动数据。"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+
+    <el-alert
       v-if="loadError"
       class="page-alert"
       title="月度财务报表加载失败"
@@ -142,37 +160,35 @@
       <el-skeleton :rows="9" animated />
     </div>
 
-    <el-empty
-      v-else-if="!report && !loadError"
-      class="empty-report"
-      description="该月份尚无月度财务报表"
-    >
-      <p class="empty-hint">
-        {{
-          isAdminRole
-            ? "报表将在管理员首次读取或后端完成月份初始化后显示。"
-            : "请联系管理员完成该月份初始化。"
-        }}
-      </p>
-      <el-button type="primary" :icon="Refresh" @click="handleReloadReport">
-        重新检查
-      </el-button>
-    </el-empty>
+    <section v-else-if="!report && !loadError" class="empty-month-shell">
+      <MonthlyFinancialAnalysisPanel
+        :selected-month="selectedMonth"
+        :active="true"
+      />
+      <el-empty
+        class="empty-report"
+        description="该月份尚无月度财务报表，仍可查看财务趋势分析"
+      >
+        <p class="empty-hint">
+          {{
+            isAdminRole
+              ? "当前月份尚未建账；历史主营实际到账仍按合同已确认回款展示，其他资金指标保持断点。"
+              : "当前月份尚未建账；历史主营实际到账仍按合同已确认回款展示。"
+          }}
+        </p>
+        <el-button type="primary" :icon="Refresh" @click="handleReloadReport">
+          重新检查
+        </el-button>
+      </el-empty>
+    </section>
 
     <template v-else-if="report">
       <el-tabs v-model="activeTab" class="report-tabs">
         <el-tab-pane label="财务趋势" name="trend">
-          <MonthlyFinancialTrendChart
-            :selected-year="trendSelectedYear"
+          <MonthlyFinancialAnalysisPanel
             :selected-month="selectedMonth"
-            :comparison-year="trendComparisonYear"
-            :available-years="trendAvailableYears"
-            :points="trendPoints"
-            :warnings="trendWarnings"
-            :loading="trendLoading"
-            :error="trendError"
-            @comparison-year-change="handleTrendComparisonYearChange"
-            @retry="handleTrendRetry"
+            :active="activeTab === 'trend'"
+            :refresh-key="report.version"
           />
         </el-tab-pane>
 
@@ -406,7 +422,7 @@
                       </tr>
                       <template
                         v-for="(category, categoryIndex) in group.categories"
-                        :key="category.value"
+                        :key="`${category.value}:${category.welfareCategoryId || category.label}`"
                       >
                         <tr class="manual-category-row">
                           <td
@@ -458,7 +474,7 @@
                               回单自动匹配
                             </el-tag>
                             <el-button
-                              v-else-if="canEdit"
+                              v-else-if="canEdit && category.canAdd"
                               link
                               type="primary"
                               :icon="Plus"
@@ -466,6 +482,14 @@
                             >
                               添加
                             </el-button>
+                            <el-tag
+                              v-else-if="category.isActive === false"
+                              type="info"
+                              effect="plain"
+                              size="small"
+                            >
+                              已停用
+                            </el-tag>
                             <span v-else>—</span>
                           </td>
                         </tr>
@@ -475,7 +499,14 @@
                           class="manual-entry-row"
                         >
                           <td class="manual-detail-label">
-                            明细 {{ entryIndex + 1 }}
+                            {{
+                              entry.sourceType === "reimbursement"
+                                ? `自动报销 ${entryIndex + 1}`
+                                : entry.sourceType ===
+                                    "monthly_bank_transaction"
+                                  ? `回单自动匹配 ${entryIndex + 1}`
+                                  : `手工明细 ${entryIndex + 1}`
+                            }}
                           </td>
                           <td>
                             <el-date-picker
@@ -525,7 +556,11 @@
                             <el-input
                               v-if="canEdit && !entry.bankDerived"
                               v-model="entry.item.voucherReference"
-                              placeholder="选填"
+                              :placeholder="
+                                category.voucherReferenceRequired
+                                  ? '必填：凭证号'
+                                  : '选填'
+                              "
                               maxlength="120"
                               @input="markManualItemsDirty"
                             />
@@ -716,11 +751,13 @@ import {
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import MonthlyBankReceiptPanel from "@/components/monthly-financial/MonthlyBankReceiptPanel.vue";
-import MonthlyFinancialTrendChart from "@/components/monthly-financial/MonthlyFinancialTrendChart.vue";
+import MonthlyFinancialAnalysisPanel from "@/components/monthly-financial/MonthlyFinancialAnalysisPanel.vue";
 import { useAuthStore } from "@/stores/auth";
+import { canMaintainMonthlyFinancialReport } from "@/utils/monthlyFinancialReportPermissions";
 import {
   addFinancialAmountTexts,
   aggregateAutomaticDetailsByPerson,
+  formatMonthlyFinancialAmount,
   isMonthlyFinancialAmountText,
   isPositiveMonthlyFinancialAmountText,
   monthlyFinancialBankSourceLabel,
@@ -730,7 +767,6 @@ import {
   downloadMonthlyFinancialReport,
   getMonthlyFinancialReport,
   getMonthlyFinancialReportErrorMessage,
-  getMonthlyFinancialReportTrend,
   isMonthlyFinancialReportNotFound,
   isMonthlyFinancialReportVersionConflict,
   refreshMonthlyFinancialReport,
@@ -748,8 +784,6 @@ import type {
   MonthlyFinancialOpeningBalances,
   MonthlyFinancialReport,
   MonthlyFinancialSourceStatus,
-  MonthlyFinancialTrendPoint,
-  MonthlyFinancialTrendWarning,
 } from "@/types/monthlyFinancialReport";
 
 type ReportTab = "trend" | "summary" | "manual" | "quality" | "bankReceipt";
@@ -762,6 +796,11 @@ interface ManualCategoryOption {
   accountName: string;
   direction: MonthlyFinancialManualDirection;
   descriptionRequired?: boolean;
+  voucherReferenceRequired?: boolean;
+  welfareCategoryId?: string;
+  welfareCategoryCode?: string;
+  welfareCategoryNameSnapshot?: string;
+  isActive?: boolean;
 }
 
 interface EditableManualItem extends MonthlyFinancialManualItem {
@@ -773,6 +812,7 @@ interface ManualSheetEntry {
   index: number;
   bankDerived: boolean;
   previewUrl: string | null;
+  sourceType: "manual" | "monthly_bank_transaction" | "reimbursement";
 }
 
 interface MonthActionContext {
@@ -791,13 +831,6 @@ const loading = ref(false);
 const loadError = ref("");
 const activeAction = ref<ActiveAction>("");
 const activeTab = ref<ReportTab>("trend");
-const trendSelectedYear = ref(currentYearNumber());
-const trendComparisonYear = ref<number | null>(null);
-const trendAvailableYears = ref<number[]>([]);
-const trendPoints = ref<MonthlyFinancialTrendPoint[]>([]);
-const trendWarnings = ref<MonthlyFinancialTrendWarning[]>([]);
-const trendLoading = ref(false);
-const trendError = ref("");
 const bankReceiptBusy = ref(false);
 const bankReceiptPending = ref(false);
 const bankReceiptOutcomeUncertain = ref(false);
@@ -818,7 +851,6 @@ let requestSequence = 0;
 let clientKeySequence = 0;
 let monthViewSequence = 0;
 let allowNextMonthRouteChange = false;
-let trendRequestSequence = 0;
 
 const manualCategoryGroups: Array<{
   label: string;
@@ -833,6 +865,14 @@ const manualCategoryGroups: Array<{
         "一般账户跨行手续费",
         "general",
         "expense",
+      ),
+      categoryOption(
+        "general_tax_payment",
+        "一般账户实际税费支付",
+        "general",
+        "expense",
+        true,
+        true,
       ),
       categoryOption(
         "general_other",
@@ -864,21 +904,6 @@ const manualCategoryGroups: Array<{
         "welfare_one",
         "income",
       ),
-      categoryOption(
-        "welfare_one_drinking_water",
-        "饮用水",
-        "welfare_one",
-        "expense",
-      ),
-      categoryOption("welfare_one_office", "办公", "welfare_one", "expense"),
-      categoryOption(
-        "welfare_one_electricity",
-        "电费",
-        "welfare_one",
-        "expense",
-      ),
-      categoryOption("welfare_one_407_ai", "407-AI", "welfare_one", "expense"),
-      categoryOption("welfare_one_8h_ai", "8H-AI", "welfare_one", "expense"),
     ],
   },
   {
@@ -890,31 +915,144 @@ const manualCategoryGroups: Array<{
         "welfare_two",
         "income",
       ),
-      categoryOption(
-        "welfare_two_refreshment",
-        "茶歇",
-        "welfare_two",
-        "expense",
-      ),
-      categoryOption(
-        "welfare_two_team_building",
-        "团建",
-        "welfare_two",
-        "expense",
-      ),
-      categoryOption(
-        "welfare_two_physical_exam",
-        "体检",
-        "welfare_two",
-        "expense",
-      ),
     ],
   },
 ];
 
-const manualCategoryOptions = manualCategoryGroups.flatMap(
+const baseManualCategoryOptions = manualCategoryGroups.flatMap(
   (group) => group.options,
 );
+
+const fallbackWelfareCategories = {
+  welfare_one: [
+    ["welfare_one_drinking_water", "drinking_water", "饮用水"],
+    ["welfare_one_office", "office", "办公"],
+    ["welfare_one_electricity", "electricity", "电费"],
+    ["welfare_one_407_ai", "407_ai", "407-AI"],
+    ["welfare_one_8h_ai", "8h_ai", "8H-AI"],
+  ],
+  welfare_two: [
+    ["welfare_two_refreshment", "refreshment", "茶歇"],
+    ["welfare_two_team_building", "team_building", "团建"],
+    ["welfare_two_physical_exam", "physical_exam", "体检"],
+  ],
+} as const;
+
+const legacyWelfareCategoryCode: Partial<
+  Record<MonthlyFinancialManualCategory, string>
+> = {
+  welfare_one_407: "office",
+  welfare_one_drinking_water: "drinking_water",
+  welfare_one_office: "office",
+  welfare_one_electricity: "electricity",
+  welfare_one_407_ai: "407_ai",
+  welfare_one_8h_ai: "8h_ai",
+  welfare_two_refreshment: "refreshment",
+  welfare_two_team_building: "team_building",
+  welfare_two_physical_exam: "physical_exam",
+};
+
+function welfareCategoryOptions(
+  accountCode: "welfare_one" | "welfare_two",
+): ManualCategoryOption[] {
+  const current =
+    accountCode === "welfare_one"
+      ? report.value?.welfareOneExpenseCategories
+      : report.value?.welfareTwoExpenseCategories;
+  const categories = Array.isArray(current)
+    ? current
+    : fallbackWelfareCategories[accountCode].map(([id, code, name], index) => ({
+        id,
+        code,
+        name,
+        sortOrder: index + 1,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "0",
+        totalAmount: "0",
+        isFixed: true,
+      }));
+  const categoryValue =
+    accountCode === "welfare_one"
+      ? "welfare_one_expense"
+      : "welfare_two_expense";
+  return categories
+    .filter(
+      (category) =>
+        category.isFixed ||
+        category.isActive ||
+        category.automaticAmount !== "0" ||
+        category.manualAmount !== "0",
+    )
+    .map((category) => ({
+      ...categoryOption(categoryValue, category.name, accountCode, "expense"),
+      welfareCategoryId: category.id,
+      welfareCategoryCode: category.code,
+      welfareCategoryNameSnapshot: category.name,
+      isActive: category.isActive,
+    }));
+}
+
+const welfareOneCategoryOptions = computed<ManualCategoryOption[]>(() =>
+  welfareCategoryOptions("welfare_one"),
+);
+const welfareTwoCategoryOptions = computed<ManualCategoryOption[]>(() =>
+  welfareCategoryOptions("welfare_two"),
+);
+const dynamicWelfareCategoryOptions = computed<ManualCategoryOption[]>(() => [
+  ...welfareOneCategoryOptions.value,
+  ...welfareTwoCategoryOptions.value,
+]);
+
+function resolvedManualCategoryOptions(
+  group: (typeof manualCategoryGroups)[number],
+): ManualCategoryOption[] {
+  if (group.label === "福利账户一") {
+    return [...group.options, ...welfareOneCategoryOptions.value];
+  }
+  if (group.label === "福利账户二") {
+    return [...group.options, ...welfareTwoCategoryOptions.value];
+  }
+  return group.options;
+}
+
+function normalizedCategoryName(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .normalize("NFKC")
+    .replace(/[\s_-]+/g, "")
+    .toLocaleLowerCase("zh-CN");
+}
+
+function manualItemMatchesCategory(
+  item: MonthlyFinancialManualItem,
+  category: ManualCategoryOption,
+): boolean {
+  const dynamicCategory =
+    category.accountCode === "welfare_one"
+      ? "welfare_one_expense"
+      : category.accountCode === "welfare_two"
+        ? "welfare_two_expense"
+        : null;
+  if (dynamicCategory && category.value === dynamicCategory) {
+    if (item.category === dynamicCategory) {
+      return (
+        item.welfareCategoryId === category.welfareCategoryId ||
+        (!item.welfareCategoryId &&
+          normalizedCategoryName(item.welfareCategoryNameSnapshot) ===
+            normalizedCategoryName(category.label))
+      );
+    }
+    return (
+      item.accountCode === category.accountCode &&
+      legacyWelfareCategoryCode[
+        item.category as MonthlyFinancialManualCategory
+      ] === category.welfareCategoryCode
+    );
+  }
+  if (item.category === category.value) return true;
+  return false;
+}
 
 const bankChargeCategories = new Set<MonthlyFinancialManualCategory>([
   "general_interest",
@@ -950,6 +1088,29 @@ function bankChargeEntries(category: ManualCategoryOption): ManualSheetEntry[] {
       index: -1,
       bankDerived: true,
       previewUrl: item.previewUrl || null,
+      sourceType: "monthly_bank_transaction" as const,
+    }));
+}
+
+function reimbursementEntries(
+  category: ManualCategoryOption,
+): ManualSheetEntry[] {
+  return (report.value?.manualItems || [])
+    .filter(
+      (item) =>
+        item.sourceType === "reimbursement" &&
+        item.effective !== false &&
+        manualItemMatchesCategory(item, category),
+    )
+    .map((item) => ({
+      item: {
+        ...item,
+        clientKey: item.id || nextClientKey(),
+      },
+      index: -1,
+      bankDerived: true,
+      previewUrl: item.previewUrl || null,
+      sourceType: "reimbursement" as const,
     }));
 }
 
@@ -957,21 +1118,26 @@ const manualSheetGroups = computed(() =>
   manualCategoryGroups.map((group) => ({
     label: group.label,
     accountCode: group.options[0].accountCode,
-    categories: group.options.map((category) => {
+    categories: resolvedManualCategoryOptions(group).map((category) => {
       const bankControlled = bankControlsManualCategory(category);
       const entries: ManualSheetEntry[] = bankControlled
         ? bankChargeEntries(category)
-        : manualItems.value
-            .map((item, index) => ({
-              item,
-              index,
-              bankDerived: false,
-              previewUrl: null,
-            }))
-            .filter(({ item }) => item.category === category.value);
+        : [
+            ...manualItems.value
+              .map((item, index) => ({
+                item,
+                index,
+                bankDerived: false,
+                previewUrl: null,
+                sourceType: "manual" as const,
+              }))
+              .filter(({ item }) => manualItemMatchesCategory(item, category)),
+            ...reimbursementEntries(category),
+          ];
       return {
         ...category,
         bankControlled,
+        canAdd: category.isActive !== false,
         entries,
         totalAmount: entries.reduce(
           (total, entry) =>
@@ -985,7 +1151,9 @@ const manualSheetGroups = computed(() =>
   })),
 );
 
-const isAdminRole = computed(() => authStore.user?.role === "admin");
+const isAdminRole = computed(() =>
+  canMaintainMonthlyFinancialReport(authStore.user?.role),
+);
 const isGeneralManagerRole = computed(
   () => authStore.user?.role === "general_manager",
 );
@@ -1004,6 +1172,16 @@ const canEdit = computed(
 );
 const canRefresh = computed(
   () => canEdit.value && report.value?.permissions?.canRefresh !== false,
+);
+const requiresFirstMonthInitialization = computed(
+  () =>
+    Boolean(report.value?.isFirstMonth) &&
+    Number(report.value?.version || 0) === 0,
+);
+const refreshActionReason = computed(() =>
+  requiresFirstMonthInitialization.value
+    ? "请先完整填写并保存四个账户的首月期初余额"
+    : "",
 );
 const canShowClose = computed(
   () =>
@@ -1118,6 +1296,40 @@ const accountFlowDetails = computed(() => {
   if (!report.value) return [];
   const { income, expenses, accounts } = report.value;
   const automaticDetails = report.value.automaticDetails || [];
+  const hasWelfareOneCategoryCatalog = Array.isArray(
+    report.value.welfareOneExpenseCategories,
+  );
+  const hasWelfareTwoCategoryCatalog = Array.isArray(
+    report.value.welfareTwoExpenseCategories,
+  );
+  const welfareOneCategories = (
+    report.value.welfareOneExpenseCategories || []
+  ).filter(
+    (category) =>
+      category.isFixed ||
+      category.isActive ||
+      category.automaticAmount !== "0" ||
+      category.manualAmount !== "0",
+  );
+  const welfareTwoCategories = (
+    report.value.welfareTwoExpenseCategories || []
+  ).filter(
+    (category) =>
+      category.isFixed ||
+      category.isActive ||
+      category.automaticAmount !== "0" ||
+      category.manualAmount !== "0",
+  );
+  const welfareCategorySource = (
+    category: (typeof welfareOneCategories)[number],
+    accountName: "福利账户一" | "福利账户二",
+  ) => {
+    const automatic = category.automaticAmount !== "0";
+    const manual = category.manualAmount !== "0";
+    if (automatic && manual) return `${accountName}报销＋手工录入`;
+    if (automatic) return `${accountName}报销自动来源`;
+    return "手工录入";
+  };
   const account = (code: MonthlyFinancialAccountCode) =>
     accounts.find((item) => item.code === code)!;
   const bankAccountSource = (code: "basic" | "general" | "business") =>
@@ -1189,6 +1401,11 @@ const accountFlowDetails = computed(() => {
           expenses.generalBankFee,
           bankAccountSource("general"),
         ),
+        row(
+          "一般账户实际税费支付",
+          expenses.generalTaxPayment,
+          "实际税费支付凭证（手工录入）",
+        ),
         row("其他支出", expenses.generalOther, "手工录入"),
       ],
     },
@@ -1225,24 +1442,40 @@ const accountFlowDetails = computed(() => {
       inflowTotal: account("welfare_one").inflow,
       outflowTotal: account("welfare_one").outflow,
       inflows: [row("补充收入", income.welfareOneSupplement, "手工录入")],
-      outflows: [
-        row("饮用水", expenses.welfareOneDrinkingWater, "手工录入"),
-        row("办公", expenses.welfareOneOffice, "手工录入"),
-        row("电费", expenses.welfareOneElectricity, "手工录入"),
-        row("407-AI", expenses.welfareOne407Ai, "手工录入"),
-        row("8H-AI", expenses.welfareOne8hAi, "手工录入"),
-      ],
+      outflows: hasWelfareOneCategoryCatalog
+        ? welfareOneCategories.map((category) =>
+            row(
+              category.name,
+              category.totalAmount,
+              welfareCategorySource(category, "福利账户一"),
+            ),
+          )
+        : [
+            row("饮用水", expenses.welfareOneDrinkingWater, "手工录入"),
+            row("办公", expenses.welfareOneOffice, "手工录入"),
+            row("电费", expenses.welfareOneElectricity, "手工录入"),
+            row("407-AI", expenses.welfareOne407Ai, "手工录入"),
+            row("8H-AI", expenses.welfareOne8hAi, "手工录入"),
+          ],
     },
     {
       ...account("welfare_two"),
       inflowTotal: account("welfare_two").inflow,
       outflowTotal: account("welfare_two").outflow,
       inflows: [row("补充收入", income.welfareTwoSupplement, "手工录入")],
-      outflows: [
-        row("茶歇", expenses.welfareTwoRefreshment, "手工录入"),
-        row("团建", expenses.welfareTwoTeamBuilding, "手工录入"),
-        row("体检", expenses.welfareTwoPhysicalExam, "手工录入"),
-      ],
+      outflows: hasWelfareTwoCategoryCatalog
+        ? welfareTwoCategories.map((category) =>
+            row(
+              category.name,
+              category.totalAmount,
+              welfareCategorySource(category, "福利账户二"),
+            ),
+          )
+        : [
+            row("茶歇", expenses.welfareTwoRefreshment, "手工录入"),
+            row("团建", expenses.welfareTwoTeamBuilding, "手工录入"),
+            row("体检", expenses.welfareTwoPhysicalExam, "手工录入"),
+          ],
     },
   ];
 });
@@ -1285,7 +1518,6 @@ watch(
     }
     monthViewSequence += 1;
     selectedMonth.value = normalizedMonth;
-    void ensureTrendForMonth(normalizedMonth);
     if (report.value && loadedMonth.value === normalizedMonth) return;
     void loadReport(normalizedMonth, monthViewSequence);
   },
@@ -1352,150 +1584,6 @@ onBeforeUnmount(() =>
   window.removeEventListener("beforeunload", handleBeforeUnload),
 );
 
-async function ensureTrendForMonth(month: string) {
-  const year = yearFromMonth(month);
-  if (year === null) return;
-  const alreadyLoaded = trendPoints.value.some((point) =>
-    point.month.startsWith(`${year}-`),
-  );
-  if (
-    year === trendSelectedYear.value &&
-    (trendLoading.value || alreadyLoaded)
-  ) {
-    return;
-  }
-  trendSelectedYear.value = year;
-  trendComparisonYear.value = null;
-  await loadTrend(year);
-}
-
-async function loadTrend(
-  selectedYear = trendSelectedYear.value,
-  requestedComparisonYear = trendComparisonYear.value,
-) {
-  const sequence = ++trendRequestSequence;
-  trendLoading.value = true;
-  trendError.value = "";
-  try {
-    const selectedData = await getMonthlyFinancialReportTrend(
-      `${selectedYear}-01`,
-      `${selectedYear}-12`,
-    );
-    if (
-      sequence !== trendRequestSequence ||
-      selectedYear !== trendSelectedYear.value
-    ) {
-      return;
-    }
-
-    const availableYears = normalizeTrendYears(selectedData.availableYears);
-    const comparisonYear = resolveTrendComparisonYear(
-      selectedYear,
-      availableYears,
-      requestedComparisonYear,
-    );
-    const comparisonData =
-      comparisonYear === null
-        ? null
-        : await getMonthlyFinancialReportTrend(
-            `${comparisonYear}-01`,
-            `${comparisonYear}-12`,
-          );
-    if (
-      sequence !== trendRequestSequence ||
-      selectedYear !== trendSelectedYear.value
-    ) {
-      return;
-    }
-
-    trendAvailableYears.value = normalizeTrendYears([
-      ...availableYears,
-      ...(comparisonData?.availableYears || []),
-    ]);
-    trendComparisonYear.value = comparisonYear;
-    trendPoints.value = mergeTrendPoints([
-      ...selectedData.points,
-      ...(comparisonData?.points || []),
-    ]);
-    trendWarnings.value = mergeTrendWarnings([
-      ...selectedData.warnings,
-      ...(comparisonData?.warnings || []),
-    ]);
-  } catch (error) {
-    if (
-      sequence !== trendRequestSequence ||
-      selectedYear !== trendSelectedYear.value
-    ) {
-      return;
-    }
-    trendError.value = getMonthlyFinancialReportErrorMessage(
-      error,
-      "暂时无法获取年度趋势，请稍后重试。",
-    );
-  } finally {
-    if (sequence === trendRequestSequence) trendLoading.value = false;
-  }
-}
-
-function handleTrendComparisonYearChange(year: number | null) {
-  trendComparisonYear.value = year;
-  void loadTrend(trendSelectedYear.value, year);
-}
-
-function handleTrendRetry() {
-  void loadTrend(trendSelectedYear.value, trendComparisonYear.value);
-}
-
-function refreshTrendAfterReportMutation(month: string) {
-  if (yearFromMonth(month) !== trendSelectedYear.value) return;
-  void loadTrend(trendSelectedYear.value, trendComparisonYear.value);
-}
-
-function resolveTrendComparisonYear(
-  selectedYear: number,
-  availableYears: number[],
-  requestedYear: number | null,
-): number | null {
-  const historicalYears = availableYears.filter((year) => year < selectedYear);
-  if (requestedYear !== null && historicalYears.includes(requestedYear)) {
-    return requestedYear;
-  }
-  return historicalYears.at(-1) ?? null;
-}
-
-function normalizeTrendYears(years: number[]): number[] {
-  return [...new Set(years)]
-    .filter((year) => Number.isInteger(year) && year >= 1900 && year <= 9999)
-    .sort((left, right) => left - right);
-}
-
-function mergeTrendPoints(
-  points: MonthlyFinancialTrendPoint[],
-): MonthlyFinancialTrendPoint[] {
-  const pointByMonth = new Map<string, MonthlyFinancialTrendPoint>();
-  for (const point of points) pointByMonth.set(point.month, point);
-  return [...pointByMonth.values()].sort((left, right) =>
-    left.month.localeCompare(right.month),
-  );
-}
-
-function mergeTrendWarnings(
-  warnings: MonthlyFinancialTrendWarning[],
-): MonthlyFinancialTrendWarning[] {
-  const warningByKey = new Map<string, MonthlyFinancialTrendWarning>();
-  for (const warning of warnings) {
-    const key = `${warning.code}:${warning.message}`;
-    const existing = warningByKey.get(key);
-    warningByKey.set(key, {
-      ...warning,
-      months: [
-        ...new Set([...(existing?.months || []), ...warning.months]),
-      ].sort(),
-    });
-  }
-  return [...warningByKey.values()];
-}
-
 async function handleReloadReport() {
   const confirmed = await confirmDiscardUnsavedChanges("重新加载");
   if (!confirmed) return;
@@ -1529,7 +1617,6 @@ function handleBankReceiptUploaded(
   requestSequence += 1;
   loading.value = false;
   applyReport(result.report);
-  refreshTrendAfterReportMutation(result.report.month);
 }
 
 function handleBankReceiptReportRefreshed(
@@ -1545,7 +1632,6 @@ function handleBankReceiptReportRefreshed(
   requestSequence += 1;
   loading.value = false;
   applyReport(latestReport);
-  refreshTrendAfterReportMutation(latestReport.month);
 }
 
 async function loadReport(
@@ -1573,15 +1659,13 @@ async function loadReport(
     ) {
       return;
     }
-    if (!isMonthlyFinancialReportNotFound(error)) {
+    if (isMonthlyFinancialReportNotFound(error)) {
+      clearReportForMissingMonth(targetMonth);
+    } else {
       loadError.value = getMonthlyFinancialReportErrorMessage(
         error,
         "暂时无法获取月度财务报表，请稍后重试。",
       );
-    }
-    if (report.value && loadedMonth.value !== targetMonth) {
-      selectedMonth.value = loadedMonth.value;
-      await replaceMonthRouteWithoutPrompt(loadedMonth.value);
     }
   } finally {
     if (sequence === requestSequence) loading.value = false;
@@ -1610,6 +1694,10 @@ async function handleMonthChange(value: string | null) {
 
 async function handleRefreshSources() {
   if (!report.value) return;
+  if (requiresFirstMonthInitialization.value) {
+    ElMessage.warning(refreshActionReason.value);
+    return;
+  }
   const context = captureMonthActionContext(report.value);
   activeAction.value = "refresh";
   try {
@@ -1666,6 +1754,14 @@ async function handleSaveManualItems() {
         amount: item.amount,
         description: item.description?.trim() || null,
         voucherReference: item.voucherReference?.trim() || null,
+        ...(item.category === "welfare_one_expense" ||
+        item.category === "welfare_two_expense"
+          ? {
+              welfareCategoryId: item.welfareCategoryId || null,
+              welfareCategoryNameSnapshot:
+                item.welfareCategoryNameSnapshot?.trim() || null,
+            }
+          : {}),
       }),
     );
     const result = await saveMonthlyFinancialManualItems(
@@ -1801,6 +1897,7 @@ function applyReport(nextReport: MonthlyFinancialReport) {
     .filter(
       (item) =>
         item.sourceType !== "monthly_bank_transaction" &&
+        item.sourceType !== "reimbursement" &&
         item.readOnly !== true,
     )
     .map((item) => ({
@@ -1810,6 +1907,16 @@ function applyReport(nextReport: MonthlyFinancialReport) {
   for (const account of nextReport.accounts) {
     openingBalances[account.code] = account.opening;
   }
+  manualItemsDirty.value = false;
+  openingBalancesDirty.value = false;
+}
+
+function clearReportForMissingMonth(month: string) {
+  report.value = null;
+  selectedMonth.value = month;
+  loadedMonth.value = month;
+  manualItems.value = [];
+  expandedAccountCodes.value = [];
   manualItemsDirty.value = false;
   openingBalancesDirty.value = false;
 }
@@ -1846,7 +1953,6 @@ function applyActionReport(
   requestSequence += 1;
   loading.value = false;
   applyReport(nextReport);
-  refreshTrendAfterReportMutation(nextReport.month);
   return true;
 }
 
@@ -1883,6 +1989,7 @@ function resetManualItems() {
     .filter(
       (item) =>
         item.sourceType !== "monthly_bank_transaction" &&
+        item.sourceType !== "reimbursement" &&
         item.readOnly !== true,
     )
     .map((item) => ({
@@ -1913,6 +2020,8 @@ function addManualItem(category: ManualCategoryOption) {
     amount: "",
     description: null,
     voucherReference: null,
+    welfareCategoryId: category.welfareCategoryId || null,
+    welfareCategoryNameSnapshot: category.welfareCategoryNameSnapshot || null,
   });
   markManualItemsDirty();
 }
@@ -1940,10 +2049,12 @@ async function removeManualItem(index: number) {
 }
 
 function validateManualItems(): string {
-  for (const [index, item] of manualItems.value.entries()) {
-    const category = manualCategoryOptions.find(
-      (option) => option.value === item.category,
-    );
+  for (let index = 0; index < manualItems.value.length; index += 1) {
+    const item = manualItems.value[index];
+    const category = [
+      ...baseManualCategoryOptions,
+      ...dynamicWelfareCategoryOptions.value,
+    ].find((option) => manualItemMatchesCategory(item, option));
     if (!category) return `第${index + 1}行项目分类无效`;
     if (!item.occurredOn.startsWith(`${selectedMonth.value}-`)) {
       return `${category.label}的发生日期必须位于当前报表月份`;
@@ -1953,6 +2064,9 @@ function validateManualItems(): string {
     }
     if (category.descriptionRequired && !item.description?.trim()) {
       return `${category.label}必须填写业务说明`;
+    }
+    if (category.voucherReferenceRequired && !item.voucherReference?.trim()) {
+      return `${category.label}必须填写凭证号`;
     }
   }
   return "";
@@ -1979,6 +2093,7 @@ function categoryOption(
   accountCode: MonthlyFinancialAccountCode,
   direction: MonthlyFinancialManualDirection,
   descriptionRequired = false,
+  voucherReferenceRequired = false,
 ): ManualCategoryOption {
   return {
     value,
@@ -1987,6 +2102,7 @@ function categoryOption(
     accountName: accountName(accountCode),
     direction,
     descriptionRequired,
+    voucherReferenceRequired,
   };
 }
 
@@ -2050,12 +2166,7 @@ function sourceStatusText(status: MonthlyFinancialSourceStatus): string {
 function formatAmount(
   value: MonthlyFinancialAmount | null | undefined,
 ): string {
-  if (value === null || value === undefined || value === "") return "—";
-  const text = String(value).trim();
-  const match = text.match(/^([+-]?)(\d+)(\.\d+)?$/);
-  if (!match) return text;
-  const integer = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `¥${match[1]}${integer}${match[3] || ""}`;
+  return formatMonthlyFinancialAmount(value);
 }
 
 function isNegative(value: MonthlyFinancialAmount): boolean {
@@ -2092,16 +2203,6 @@ function validMonth(value: string): boolean {
 function currentMonthKey(): string {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-}
-
-function currentYearNumber(): number {
-  return new Date().getFullYear();
-}
-
-function yearFromMonth(month: string): number | null {
-  if (!validMonth(month)) return null;
-  const year = Number(month.slice(0, 4));
-  return Number.isInteger(year) ? year : null;
 }
 
 function queryText(value: unknown): string {
@@ -2206,6 +2307,24 @@ function isMessageBoxCancel(error: unknown): boolean {
 
 .hero-copy {
   max-width: 690px;
+}
+
+.report-hero.is-analysis-view {
+  padding: 15px 22px;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: none;
+}
+.report-hero.is-analysis-view .hero-actions,
+.report-hero.is-analysis-view .hero-kicker,
+.report-hero.is-analysis-view .hero-copy > p,
+.report-hero.is-analysis-view .hero-meta,
+.report-hero.is-analysis-view :deep(.el-tag) {
+  display: none;
+}
+.report-hero.is-analysis-view .hero-title-row h1 {
+  margin: 0;
+  font-size: 23px;
 }
 
 .hero-kicker {
@@ -2323,6 +2442,16 @@ function isMessageBoxCancel(error: unknown): boolean {
 
 .page-alert {
   margin-top: 18px;
+}
+
+.empty-month-shell {
+  display: grid;
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.empty-month-shell .empty-report {
+  margin-top: 0;
 }
 
 .loading-shell,

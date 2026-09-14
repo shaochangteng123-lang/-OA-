@@ -13,7 +13,7 @@ export const CONTRACT_OCR_FUNNEL_DIAGNOSTIC_SCHEMA_VERSION = 2;
 
 export type ContractOcrDiagnosedField = Exclude<
   ContractOcrFieldName,
-  "category"
+  "category" | "party_c"
 >;
 
 export type ContractOcrFunnelFailureStage =

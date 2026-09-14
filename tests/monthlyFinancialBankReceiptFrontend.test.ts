@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 const mockGetBankReceipts = jest.fn();
 const mockGetReport = jest.fn();
 const mockUploadBankReceipts = jest.fn();
+const mockConfirmBankCorrection = jest.fn();
 const mockReviewBankTransaction = jest.fn();
 
 jest.mock("@/utils/monthlyFinancialReportApi", () => ({
@@ -11,11 +12,21 @@ jest.mock("@/utils/monthlyFinancialReportApi", () => ({
   getMonthlyFinancialReport: (...args: unknown[]) => mockGetReport(...args),
   uploadMonthlyFinancialBankReceipts: (...args: unknown[]) =>
     mockUploadBankReceipts(...args),
+  confirmMonthlyFinancialBankContentCorrection: (...args: unknown[]) =>
+    mockConfirmBankCorrection(...args),
   reviewMonthlyFinancialBankTransaction: (...args: unknown[]) =>
     mockReviewBankTransaction(...args),
   getMonthlyFinancialReportErrorCode: (error: {
     response?: { data?: { code?: string } };
   }) => String(error?.response?.data?.code || ""),
+  getMonthlyFinancialBankContentCorrectionReview: (error: {
+    response?: { status?: number; data?: { code?: string; data?: unknown } };
+  }) =>
+    error?.response?.status === 409 &&
+    error?.response?.data?.code ===
+      "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED"
+      ? error.response.data.data || null
+      : null,
   getMonthlyFinancialReportErrorMessage: (
     error: {
       response?: { data?: { message?: string } };
@@ -55,6 +66,7 @@ jest.mock("element-plus", () => ({
 }));
 
 import { nextTick } from "vue";
+import { ElMessageBox } from "element-plus";
 import MonthlyBankReceiptPanel from "@/components/monthly-financial/MonthlyBankReceiptPanel.vue";
 import type {
   MonthlyFinancialBankReceiptState,
@@ -203,6 +215,53 @@ function report(
       canReopen: status === "closed",
       canDownload: true,
     },
+  };
+}
+
+function correctionReview(fileHash: string) {
+  return {
+    reviewId: "mfbcr-review-1",
+    expectedVersion: 1,
+    batchDigest: "b".repeat(64),
+    confirmationToken: "confirmation-token-".repeat(3),
+    expiresAt: "2099-08-31T08:00:00.000Z",
+    requiredFiles: [
+      {
+        originalName: "2026年06月一般账户.pdf",
+        fileHash,
+        accountCode: "general",
+      },
+    ],
+    conflicts: [
+      {
+        transactionId: "bank-transaction-1",
+        receiptNo: "0918-9264-4631-1100",
+        normalizedReceiptNo: "0918926446311100",
+        differenceDigest: "d".repeat(64),
+        accountCode: "general",
+        accountName: "一般账户",
+        differences: ["amount", "payeeAccount"],
+        correctable: true,
+        blockingReason: null,
+        previous: {
+          fileName: "１.pdf",
+          fileVersion: 1,
+          transactionDate: "2026-06-12",
+          amount: "19794.20",
+          payerAccount: "0200…8418（19位）",
+          payeeAccount: "0200…11（10位片段）",
+        },
+        incoming: {
+          fileName: "2026年06月一般账户.pdf",
+          pageNo: 17,
+          position: "bottom",
+          transactionDate: "2026-06-12",
+          amount: "19794.27",
+          payerAccount: "0200…8418（19位）",
+          payeeAccount: "未识别为完整账号",
+        },
+      },
+    ],
   };
 }
 
@@ -448,6 +507,80 @@ describe("月报银行回单组件真实交互", () => {
     expect(wrapper.emitted("uploaded")?.[0]?.[0]).toMatchObject({
       report: nextReport,
     });
+    wrapper.unmount();
+  });
+
+  it("历史识别差异逐项展示并填写原因后用同一原件确认换版", async () => {
+    const content = "%PDF-1.7 测试回单";
+    const fileHash = createHash("sha256").update(content).digest("hex");
+    const review = correctionReview(fileHash);
+    mockUploadBankReceipts.mockRejectedValue({
+      response: {
+        status: 409,
+        data: {
+          code: "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED",
+          message: "发现1笔历史识别结果与本次原件不一致",
+          data: review,
+        },
+      },
+    });
+    mockConfirmBankCorrection.mockResolvedValue({
+      report: report("2026-06", 2),
+      bankStatements: emptyBankState(),
+      duplicateFiles: [],
+      affectedMonths: [],
+      correctionReview: {
+        reviewId: review.reviewId,
+        status: "confirmed",
+        correctedTransactionIds: ["bank-transaction-1"],
+      },
+      message: "历史识别差异已核实",
+    });
+    (ElMessageBox.prompt as jest.Mock).mockResolvedValue({
+      value: "已逐笔核对银行原件，确认本次金额和账号展示正确",
+    });
+    const wrapper = mountPanel();
+    await flushPromises();
+    await openDialog(wrapper);
+    const file = await selectFile(wrapper, "2026年06月一般账户.pdf", content);
+    await buttonByText(wrapper, "上传并识别").trigger("click");
+    await settleUploadWork();
+
+    expect(wrapper.find(".dialog-stub").text()).toContain(
+      "0918-9264-4631-1100",
+    );
+    expect(wrapper.find(".dialog-stub").text()).toContain("¥19,794.20");
+    expect(wrapper.find(".dialog-stub").text()).toContain("¥19,794.27");
+    expect(wrapper.find(".dialog-stub").text()).toContain("10位片段");
+    expect(wrapper.get(".bank-file-drop").attributes("aria-disabled")).toBe(
+      "true",
+    );
+
+    await buttonByText(wrapper, "核实后替换旧识别结果").trigger("click");
+    await settleUploadWork();
+
+    expect(mockConfirmBankCorrection).toHaveBeenCalledWith(
+      "2026-06",
+      1,
+      [file],
+      expect.objectContaining({
+        reviewId: review.reviewId,
+        batchDigest: review.batchDigest,
+        confirmationToken: review.confirmationToken,
+        reason: "已逐笔核对银行原件，确认本次金额和账号展示正确",
+        acknowledgements: [
+          {
+            transactionId: "bank-transaction-1",
+            normalizedReceiptNo: "0918926446311100",
+            differenceDigest: "d".repeat(64),
+          },
+        ],
+      }),
+      false,
+      expect.any(AbortSignal),
+    );
+    expect(wrapper.find(".dialog-stub").exists()).toBe(false);
+    expect(wrapper.emitted("uploaded")).toHaveLength(1);
     wrapper.unmount();
   });
 

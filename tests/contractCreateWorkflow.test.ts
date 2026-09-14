@@ -151,13 +151,20 @@ describe("合同新增向导业务保护", () => {
     expect(backendSource).toContain('"/:id/renewals/recognize"');
   });
 
-  it("上传前资产合同显式选择二级分类，收入合同仍由系统内部赋值", () => {
+  it("上传前资产合同和非主营合同显式选择二级分类", () => {
     expect(source).toContain('v-model="form.area"');
     expect(backendSource).toContain('"全部"');
     expect(source).toContain('v-model="form.declaredCategory"');
     expect(source).toContain('v-model="form.declaredSubtype"');
     expect(source).toContain('label="合同二级分类"');
     expect(source).toContain("请选择资产合同二级分类");
+    expect(source).toContain('label="非主营收支分类"');
+    expect(source).toContain("请选择非主营收入或支出");
+    expect(source).toContain("handleNonMainSubtypeChange");
+    expect(source).toContain("非主营业务支出合同");
+    expect(source).not.toContain(
+      "非主营业务收入合同、非主营业务支出合同、其他服务合同",
+    );
     expect(source).toContain('value: "house_rental"');
     expect(source).toContain('value: "vehicle_rental"');
     expect(source).toContain('value: "parking_space"');
@@ -345,9 +352,9 @@ describe("合同新增向导业务保护", () => {
     expect(source).toContain(
       'ocrFields.value.filter((field) => field.key !== "amount")',
     );
-    expect(source).toContain(
-      'v-if="!paymentTermsOnlySupplement && !quickTerminationMode"',
-    );
+    expect(source).toContain("!paymentTermsOnlySupplement &&");
+    expect(source).toContain("!quickTerminationMode &&");
+    expect(source).toContain("!targetPricingMode");
     expect(source).toContain("paymentTermsOnlySupplement.value ? 0");
     expect(source).toContain(
       'supplementChangeType.value === "payment_terms_only"\n      ? ""',
@@ -424,7 +431,7 @@ describe("合同新增向导业务保护", () => {
   it("前端拒绝相同双方及超过两位小数的金额", () => {
     expect(source).toContain("const partiesDifferent = computed");
     expect(source).toContain("const amountPrecisionValid = computed");
-    expect(source).toContain("甲方单位与乙方单位不能相同");
+    expect(source).toContain("甲方、乙方、丙方单位不能相同");
     expect(source).toContain("金额最多保留两位小数");
   });
 

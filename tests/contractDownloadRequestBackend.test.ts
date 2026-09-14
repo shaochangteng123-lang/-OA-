@@ -19,6 +19,7 @@ import * as XLSX from "xlsx";
 import { db, pool } from "../server/db/index";
 import {
   acknowledgeContractDownloadResults,
+  completeContractDownloadRequest,
   createContractDownloadRequest,
   deleteWithdrawnContractDownloadRequest,
   decideContractDownloadRequest,
@@ -30,6 +31,7 @@ import {
   getContractDownloadPendingCounts,
   isContractDownloadAdminRole,
   listContractDownloadRequests,
+  markApprovedContractFileDownloaded,
   prepareApprovedContractFileDownload,
   prepareContractDownloadRequestFilePreview,
   resubmitContractDownloadRequest,
@@ -337,6 +339,209 @@ describe("员工合同文件下载申请后端", () => {
     });
   });
 
+  it("超级管理员可认领未认领的已批准任务，普通管理员仍受分配限制且执行中不可抢占", async () => {
+    const fixtureDirectory = path.join(
+      projectRoot,
+      "uploads",
+      `contract-download-super-admin-${process.pid}`,
+    );
+    const fixturePath = path.join(fixtureDirectory, "contract.pdf");
+    fs.mkdirSync(fixtureDirectory, { recursive: true });
+    fs.writeFileSync(fixturePath, Buffer.from("approved-contract"));
+    const storedPath = path.relative(projectRoot, fixturePath);
+    const fileHash = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(fixturePath))
+      .digest("hex");
+    const requestFile = {
+      id: "request-file-1",
+      request_id: "request-1",
+      contract_file_id: "contract-file-1",
+      file_type_snapshot: "sealed_contract",
+      file_name_snapshot: "盖章合同.pdf",
+      file_path_snapshot: storedPath,
+      file_hash_snapshot: fileHash,
+      file_size_snapshot: fs.statSync(fixturePath).size,
+      mime_type_snapshot: "application/pdf",
+      downloaded_by: null,
+      downloaded_at: null,
+      created_at: "2026-08-19T02:00:00.000Z",
+    };
+    let claimUpdateParameters: unknown[] = [];
+    const claimQuery = jest.fn(
+      async (sqlValue: unknown, parameters?: unknown[]) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT * FROM contract_download_requests")) {
+          return {
+            rows: [
+              requestRow({
+                status: "approved",
+                approver_id: "gm-1",
+                decided_at: "2026-08-19T02:00:00.000Z",
+              }),
+            ],
+          };
+        }
+        if (sql.includes("SELECT u.id, u.name, u.role")) {
+          return {
+            rows: [
+              {
+                id: "super-admin-1",
+                name: "超级管理员甲",
+                role: "super_admin",
+                position: null,
+              },
+            ],
+          };
+        }
+        if (sql.includes("FROM contract_download_request_files")) {
+          return { rows: [requestFile] };
+        }
+        if (sql.includes("UPDATE contract_download_requests SET")) {
+          claimUpdateParameters = parameters || [];
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`测试未处理的数据库查询：${sql}`);
+      },
+    );
+    (db.transaction as jest.Mock).mockImplementationOnce(
+      async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+        handler({ query: claimQuery }),
+    );
+
+    try {
+      await expect(
+        prepareApprovedContractFileDownload(
+          { id: "super-admin-1", role: "super_admin" },
+          "request-1",
+          "request-file-1",
+        ),
+      ).resolves.toMatchObject({ fileName: "盖章合同.pdf" });
+      expect(claimUpdateParameters.slice(0, 3)).toEqual([
+        "request-1",
+        "super-admin-1",
+        "超级管理员甲",
+      ]);
+
+      const assignedAdminQuery = jest.fn(async (sqlValue: unknown) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT * FROM contract_download_requests")) {
+          return { rows: [requestRow({ status: "approved" })] };
+        }
+        throw new Error(`测试未处理的数据库查询：${sql}`);
+      });
+      (db.transaction as jest.Mock).mockImplementationOnce(
+        async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+          handler({ query: assignedAdminQuery }),
+      );
+      await expect(
+        prepareApprovedContractFileDownload(
+          { id: "admin-2", role: "admin" },
+          "request-1",
+          "request-file-1",
+        ),
+      ).rejects.toMatchObject({
+        code: "CONTRACT_DOWNLOAD_EXECUTOR_MISMATCH",
+      });
+
+      const claimedQuery = jest.fn(async (sqlValue: unknown) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT * FROM contract_download_requests")) {
+          return {
+            rows: [
+              requestRow({
+                status: "processing",
+                executor_id: "admin-1",
+                executor_name_snapshot: "管理员甲",
+                processing_started_at: "2026-08-19T02:30:00.000Z",
+              }),
+            ],
+          };
+        }
+        throw new Error(`测试未处理的数据库查询：${sql}`);
+      });
+      (db.transaction as jest.Mock).mockImplementationOnce(
+        async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+          handler({ query: claimedQuery }),
+      );
+      await expect(
+        prepareApprovedContractFileDownload(
+          { id: "super-admin-1", role: "super_admin" },
+          "request-1",
+          "request-file-1",
+        ),
+      ).rejects.toMatchObject({ code: "CONTRACT_DOWNLOAD_TASK_CLAIMED" });
+    } finally {
+      fs.rmSync(fixtureDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("超级管理员只能记录本人认领任务的文件下载事实", async () => {
+    const clientQuery = jest.fn(async (sqlValue: unknown) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT * FROM contract_download_requests")) {
+        return {
+          rows: [
+            requestRow({
+              status: "processing",
+              executor_id: "super-admin-1",
+              executor_name_snapshot: "超级管理员甲",
+              processing_started_at: "2026-08-19T02:30:00.000Z",
+            }),
+          ],
+        };
+      }
+      if (sql.includes("SELECT u.id, u.name, u.role")) {
+        return {
+          rows: [
+            {
+              id: "super-admin-1",
+              name: "超级管理员甲",
+              role: "super_admin",
+              position: null,
+            },
+          ],
+        };
+      }
+      if (sql.includes("FROM contract_download_request_files")) {
+        return {
+          rows: [
+            {
+              id: "request-file-1",
+              request_id: "request-1",
+              contract_file_id: "contract-file-1",
+              file_name_snapshot: "盖章合同.pdf",
+            },
+          ],
+        };
+      }
+      if (
+        sql.includes("UPDATE contract_download_request_files") ||
+        sql.includes("INSERT INTO contract_download_request_audit_logs")
+      ) {
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`测试未处理的数据库查询：${sql}`);
+    });
+    (db.transaction as jest.Mock).mockImplementationOnce(
+      async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+        handler({ query: clientQuery }),
+    );
+
+    await expect(
+      markApprovedContractFileDownloaded(
+        { id: "super-admin-1", role: "super_admin" },
+        "request-1",
+        "request-file-1",
+      ),
+    ).resolves.toBeUndefined();
+    expect(
+      clientQuery.mock.calls.some(([sql]) =>
+        String(sql).includes("UPDATE contract_download_request_files"),
+      ),
+    ).toBe(true);
+  });
+
   it("总经理待办和管理员待办默认不会混入已处理历史", async () => {
     (pool.query as jest.Mock)
       .mockResolvedValueOnce({ rows: [{ count: 0 }] })
@@ -369,6 +574,24 @@ describe("员工合同文件下载申请后端", () => {
     expect((pool.query as jest.Mock).mock.calls[0][0]).toContain(
       "target_executor_id",
     );
+
+    (pool.query as jest.Mock).mockReset();
+    (pool.query as jest.Mock)
+      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    await listContractDownloadRequests(
+      { id: "super-admin-1", role: "super_admin" },
+      "admin",
+    );
+    const superAdminSql = String((pool.query as jest.Mock).mock.calls[0][0]);
+    expect(superAdminSql).toContain("status = 'approved'");
+    expect(superAdminSql).toContain("executor_id IS NULL");
+    expect(superAdminSql).toContain("status = 'processing'");
+    expect(superAdminSql).toContain("executor_id = $1");
+    expect(superAdminSql).not.toContain("target_executor_id = $1");
+    expect((pool.query as jest.Mock).mock.calls[0][1]).toEqual([
+      "super-admin-1",
+    ]);
   });
 
   it("总经理审批历史只按本人实际审批记录分页并按决定时间倒序", async () => {
@@ -487,6 +710,29 @@ describe("员工合同文件下载申请后端", () => {
     expect(listCall[1]).toEqual(["admin-2", "%合同甲%", 10, 20]);
   });
 
+  it("超级管理员处理历史仍只按本人实际执行记录返回", async () => {
+    (pool.query as jest.Mock)
+      .mockResolvedValueOnce({ rows: [{ count: 2 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      listContractDownloadRequests(
+        { id: "super-admin-1", role: "super_admin" },
+        "admin_history",
+        undefined,
+        1,
+        20,
+        "项目甲",
+      ),
+    ).resolves.toMatchObject({ total: 2 });
+
+    const countCall = (pool.query as jest.Mock).mock.calls[0];
+    expect(String(countCall[0])).toContain("executor_id = $1");
+    expect(String(countCall[0])).toContain("status = 'completed'");
+    expect(String(countCall[0])).not.toContain("target_executor_id");
+    expect(countCall[1]).toEqual(["super-admin-1", "%项目甲%"]);
+  });
+
   it("总经理按本人审批范围和关键词导出包含北京时间的Excel", async () => {
     (pool.query as jest.Mock)
       .mockResolvedValueOnce({ rows: [{ count: 1 }] })
@@ -595,7 +841,25 @@ describe("员工合同文件下载申请后端", () => {
     expect(exported.mimeType).toContain("spreadsheetml.sheet");
   });
 
-  it("非实际管理员不能导出且超过五千条时要求缩小范围", async () => {
+  it("超级管理员只导出本人实际办结的合同下载处理记录", async () => {
+    (pool.query as jest.Mock)
+      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(
+      exportAdminContractDownloadHistory(
+        { id: "super-admin-1", role: "super_admin" },
+        "合同乙",
+      ),
+    ).resolves.toMatchObject({
+      fileName: expect.stringContaining("合同下载处理记录"),
+    });
+    const countCall = (pool.query as jest.Mock).mock.calls[0];
+    expect(String(countCall[0])).toContain("request.executor_id = $1");
+    expect(countCall[1]).toEqual(["super-admin-1", "%合同乙%"]);
+  });
+
+  it("非执行角色不能导出且超过五千条时要求缩小范围", async () => {
     await expect(
       exportManagerContractDownloadHistory(
         { id: "admin-2", role: "admin" },
@@ -607,7 +871,7 @@ describe("员工合同文件下载申请后端", () => {
     });
     await expect(
       exportAdminContractDownloadHistory(
-        { id: "super-1", role: "super_admin" },
+        { id: "chairman-1", role: "chairman" },
         "",
       ),
     ).rejects.toMatchObject({
@@ -692,10 +956,10 @@ describe("员工合同文件下载申请后端", () => {
     expect(pool.query).not.toHaveBeenCalled();
   });
 
-  it("非管理员和未完成状态不能读取管理员处理历史", async () => {
+  it("董事长和未完成状态不能读取管理员处理历史", async () => {
     await expect(
       listContractDownloadRequests(
-        { id: "super-admin-1", role: "super_admin" },
+        { id: "chairman-1", role: "chairman" },
         "admin_history",
       ),
     ).rejects.toMatchObject({ statusCode: 403 });
@@ -852,7 +1116,7 @@ describe("员工合同文件下载申请后端", () => {
     );
   });
 
-  it("下载申请提醒按员工、总经理和指定管理员分别统计", async () => {
+  it("下载申请提醒按员工、总经理、指定管理员和超级管理员分别统计", async () => {
     (pool.query as jest.Mock).mockResolvedValueOnce({
       rows: [{ count: 2 }],
     });
@@ -897,8 +1161,33 @@ describe("员工合同文件下载申请后端", () => {
       "target_executor_id = $1",
     );
     expect((pool.query as jest.Mock).mock.calls[0][0]).toContain(
-      "status IN ('approved', 'processing')",
+      "status = 'approved'",
     );
+    expect((pool.query as jest.Mock).mock.calls[0][0]).toContain(
+      "status = 'processing'",
+    );
+
+    (pool.query as jest.Mock).mockReset();
+    (pool.query as jest.Mock).mockResolvedValueOnce({
+      rows: [{ count: 5 }],
+    });
+    await expect(
+      getContractDownloadPendingCounts({
+        id: "super-admin-1",
+        role: "super_admin",
+      }),
+    ).resolves.toMatchObject({ executorPending: 5, total: 5 });
+    const superAdminCountSql = String(
+      (pool.query as jest.Mock).mock.calls[0][0],
+    );
+    expect(superAdminCountSql).toContain("status = 'approved'");
+    expect(superAdminCountSql).toContain("executor_id IS NULL");
+    expect(superAdminCountSql).toContain("status = 'processing'");
+    expect(superAdminCountSql).toContain("executor_id = $1");
+    expect(superAdminCountSql).not.toContain("target_executor_id = $1");
+    expect((pool.query as jest.Mock).mock.calls[0][1]).toEqual([
+      "super-admin-1",
+    ]);
 
     (pool.query as jest.Mock).mockClear();
     await expect(
@@ -1463,6 +1752,127 @@ describe("员工合同文件下载申请后端", () => {
         { recursive: true, force: true },
       );
     }
+  });
+
+  it("超级管理员可办结本人认领任务，且不能办结其他执行人的任务", async () => {
+    const processingRequest = requestRow({
+      status: "processing",
+      approver_id: "gm-1",
+      decided_at: "2026-08-19T02:00:00.000Z",
+      executor_id: "super-admin-1",
+      executor_name_snapshot: "超级管理员甲",
+      processing_started_at: "2026-08-19T02:30:00.000Z",
+      version: 2,
+    });
+    let completionUpdateParameters: unknown[] = [];
+    const completeQuery = jest.fn(
+      async (sqlValue: unknown, parameters?: unknown[]) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT * FROM contract_download_requests")) {
+          return { rows: [processingRequest] };
+        }
+        if (sql.includes("SELECT COUNT(*)::int AS count")) {
+          return { rows: [{ count: 0 }] };
+        }
+        if (sql.includes("SELECT u.id, u.name, u.role")) {
+          return {
+            rows: [
+              {
+                id: "super-admin-1",
+                name: "超级管理员甲",
+                role: "super_admin",
+                position: null,
+              },
+            ],
+          };
+        }
+        if (sql.includes("UPDATE contract_download_requests SET")) {
+          completionUpdateParameters = parameters || [];
+          return { rows: [], rowCount: 1 };
+        }
+        if (sql.includes("INSERT INTO contract_download_request_audit_logs")) {
+          return { rows: [], rowCount: 1 };
+        }
+        throw new Error(`测试未处理的数据库查询：${sql}`);
+      },
+    );
+    (db.transaction as jest.Mock).mockImplementationOnce(
+      async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+        handler({ query: completeQuery }),
+    );
+    (pool.query as jest.Mock).mockImplementation(async (sqlValue: unknown) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT * FROM contract_download_requests")) {
+        return {
+          rows: [
+            requestRow({
+              ...processingRequest,
+              status: "completed",
+              completed_at: "2026-08-19T03:00:00.000Z",
+              version: 3,
+            }),
+          ],
+        };
+      }
+      if (sql.includes("FROM contract_download_request_files")) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM contract_download_request_audit_logs")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INNER JOIN contract_download_requests")) {
+        return { rows: [] };
+      }
+      if (sql.includes("SELECT attempt_no")) {
+        return { rows: [{ attempt_no: 1 }] };
+      }
+      throw new Error(`测试未处理的结果查询：${sql}`);
+    });
+
+    await expect(
+      completeContractDownloadRequest(
+        { id: "super-admin-1", role: "super_admin" },
+        "request-1",
+        "已安全交付",
+        2,
+      ),
+    ).resolves.toMatchObject({ status: "completed" });
+    expect(completionUpdateParameters.slice(0, 4)).toEqual([
+      "request-1",
+      "super-admin-1",
+      "超级管理员甲",
+      "已安全交付",
+    ]);
+
+    const otherExecutorQuery = jest.fn(async (sqlValue: unknown) => {
+      const sql = String(sqlValue);
+      if (sql.includes("SELECT * FROM contract_download_requests")) {
+        return {
+          rows: [
+            requestRow({
+              status: "processing",
+              executor_id: "admin-1",
+              executor_name_snapshot: "管理员甲",
+              processing_started_at: "2026-08-19T02:30:00.000Z",
+              version: 2,
+            }),
+          ],
+        };
+      }
+      throw new Error(`测试未处理的数据库查询：${sql}`);
+    });
+    (db.transaction as jest.Mock).mockImplementationOnce(
+      async (handler: (client: { query: jest.Mock }) => Promise<unknown>) =>
+        handler({ query: otherExecutorQuery }),
+    );
+    await expect(
+      completeContractDownloadRequest(
+        { id: "super-admin-1", role: "super_admin" },
+        "request-1",
+        "",
+        2,
+      ),
+    ).rejects.toMatchObject({ code: "CONTRACT_DOWNLOAD_TASK_CLAIMED" });
   });
 
   it("总经理驳回只保存决定与原因，不生成批准版申请单或签名快照", async () => {

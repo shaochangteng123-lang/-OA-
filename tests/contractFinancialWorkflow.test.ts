@@ -350,7 +350,7 @@ describe("合同财务凭证业务方向与客户端一致性门禁", () => {
     expect(contractFinancialOcrEngineVersion("receipt")).toBe("v6_medium");
     expect(contractFinancialOcrEngineVersion("payment")).toBe("v6_medium");
     expect(contractFinancialOcrParserVersion("receipt")).toBe(
-      "contract-bank-receipt-parser-v11",
+      "contract-bank-receipt-parser-v12",
     );
   });
 

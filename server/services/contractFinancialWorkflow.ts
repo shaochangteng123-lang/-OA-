@@ -8,7 +8,7 @@ export type ContractFinancialCategory = "main_business" | "non_main" | "asset";
 
 export const CONTRACT_BANK_RECEIPT_OCR_ENGINE_VERSION = "v6_medium";
 export const CONTRACT_BANK_RECEIPT_OCR_PARSER_VERSION =
-  "contract-bank-receipt-parser-v11";
+  "contract-bank-receipt-parser-v12";
 export const CONTRACT_INVOICE_OCR_PARSER_VERSION =
   "contract-invoice-parser-v10";
 

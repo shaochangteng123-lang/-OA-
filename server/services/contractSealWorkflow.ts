@@ -266,6 +266,7 @@ function parseJson<T>(value: unknown, fallback: T): T {
 const AUTOMATIC_CORE_FIELDS = new Set<SealedVerificationField>([
   "party_a",
   "party_b",
+  "party_c",
   "amount",
 ]);
 
@@ -309,8 +310,9 @@ function hasUnqualifiedAutomaticRecognition(
   const requiredFields = [
     ...[...AUTOMATIC_CORE_FIELDS].filter(
       (fieldCode) =>
-        fieldCode !== "amount" ||
-        approvedSnapshot.amountVerificationRequired !== false,
+        (fieldCode !== "party_c" || Boolean(approvedSnapshot.partyC)) &&
+        (fieldCode !== "amount" ||
+          approvedSnapshot.amountVerificationRequired !== false),
     ),
     "contract_date" as const,
   ];
@@ -404,7 +406,7 @@ async function loadVerificationWithClient(
      WHERE verification_id = $1
      ORDER BY CASE field_code
        WHEN 'party_a' THEN 1 WHEN 'party_b' THEN 2
-       WHEN 'amount' THEN 3 ELSE 4 END`,
+       WHEN 'party_c' THEN 3 WHEN 'amount' THEN 4 ELSE 5 END`,
     [verificationId],
   );
   return toVerificationView(verification, fieldResult.rows);
@@ -435,7 +437,7 @@ export async function getSealedContractVerification(
      WHERE verification_id = ?
      ORDER BY CASE field_code
        WHEN 'party_a' THEN 1 WHEN 'party_b' THEN 2
-       WHEN 'amount' THEN 3 ELSE 4 END`,
+       WHEN 'party_c' THEN 3 WHEN 'amount' THEN 4 ELSE 5 END`,
     verification.id,
   );
   return toVerificationView(verification, fields);
@@ -539,6 +541,7 @@ function approvedSnapshotFromContract(
   return {
     partyA: contract.party_a,
     partyB: contract.party_b,
+    partyC: contract.party_c || null,
     amount: contract.amount_delta,
     amountVerificationRequired: !(
       contract.relation_type === "termination" ||
@@ -555,6 +558,7 @@ function approvedFieldValue(
 ): string | null {
   if (field === "party_a") return snapshot.partyA;
   if (field === "party_b") return snapshot.partyB;
+  if (field === "party_c") return snapshot.partyC || null;
   if (field === "amount") return String(snapshot.amount);
   return snapshot.contractDate || null;
 }

@@ -8,15 +8,24 @@ import { PDFDocument, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
 
 jest.mock("nanoid", () => ({ nanoid: () => "monthly-bank-test-id" }));
-jest.mock("../server/services/ocrDaemon", () => ({
-  callPaddleOcr: jest.fn(),
-}));
+jest.mock("../server/services/ocrDaemon", () => {
+  const callPaddleOcr = jest.fn();
+  return {
+    callPaddleOcr,
+    callPaddleOcrDetailed: jest.fn(async (...args: unknown[]) => ({
+      fullText: await callPaddleOcr(...args),
+      lines: [],
+      modelVersion: "v6_medium",
+    })),
+  };
+});
 
 import {
   MONTHLY_BANK_ACCOUNTS,
   analyzeMonthlyFinancialBankFile,
   classifyMonthlyBankTransaction,
   detectMonthlyBankFileAccount,
+  extractMonthlyBankStructuredPartyNames,
   extractMonthlyBankTransactionDates,
   normalizeMonthlyBankAccount,
   normalizeMonthlyBankReceiptNo,
@@ -27,12 +36,38 @@ import {
   recognizeBankReceiptImage,
   splitImage,
 } from "../server/services/bankReceiptProcessor";
-import { callPaddleOcr } from "../server/services/ocrDaemon";
+import {
+  callPaddleOcr,
+  callPaddleOcrDetailed,
+  type PaddleOcrLine,
+} from "../server/services/ocrDaemon";
 import { parsePaymentProofText } from "../server/services/paymentProofOcr";
 
 const callPaddleOcrMock = callPaddleOcr as jest.MockedFunction<
   typeof callPaddleOcr
 >;
+const callPaddleOcrDetailedMock = callPaddleOcrDetailed as jest.MockedFunction<
+  typeof callPaddleOcrDetailed
+>;
+
+function positionedOcrLine(
+  text: string,
+  x: number,
+  y: number,
+  width = 180,
+): PaddleOcrLine {
+  return {
+    text,
+    confidence: 0.99,
+    box: [
+      [x, y],
+      [x + width, y],
+      [x + width, y + 28],
+      [x, y + 28],
+    ],
+    modelVersion: "v6_medium",
+  };
+}
 
 function scannedReceiptText(input: {
   receiptNo?: string;
@@ -563,6 +598,139 @@ describe("月度银行回单精确账号与分类规则", () => {
     expect(recognized.amount).toBe(1000);
   });
 
+  it("扫描回单账号位于显式标签下一行时主识别链保留双方归属", async () => {
+    callPaddleOcrMock.mockReset();
+    callPaddleOcrMock.mockResolvedValueOnce(`
+中国工商银行 网上银行电子回单
+付款账号
+0200303519000018418
+收款账号
+6212260200012345678
+金额 ¥100.00元
+电子回单号码：0914-4933-8879-1100
+交易日期：2026-05-25
+`);
+
+    const recognized = await recognizeBankReceiptImage("mock-receipt.jpg");
+
+    expect(recognized.payerAccount).toBe("0200303519000018418");
+    expect(recognized.payeeAccount).toBe("6212260200012345678");
+  });
+
+  it("扫描回单单一付款角色分行时保留付款账号且不猜测收款账号", async () => {
+    callPaddleOcrMock.mockReset();
+    callPaddleOcrMock.mockResolvedValueOnce(`
+中国工商银行 网上银行电子回单
+付款
+账号
+0200303519000018418
+金额 ¥100.00元
+电子回单号码：0914-4933-8880-1100
+交易日期：2026-05-25
+`);
+
+    const recognized = await recognizeBankReceiptImage("mock-receipt.jpg");
+
+    expect(recognized.payerAccount).toBe("0200303519000018418");
+    expect(recognized.payeeAccount).toBe("");
+  });
+
+  it("工商银行双栏按文字坐标绑定户名与账号，不受全文行序交错影响", async () => {
+    const fullText = `
+中国工商银行
+网上银行电子回单（补打）
+电子回单号码：0918-9307-1615-1100
+北京金和万盛房地产开发有限公司
+户名
+户名
+北京羽隶工程咨询有限公司
+付款
+860584105610001
+收款
+账号
+账号
+0200049609201258271
+金额
+￥1,000,000.00元
+交易流水号
+67681297
+时间戳
+2026-08-17-15.02.10.487003
+`;
+    callPaddleOcrDetailedMock.mockResolvedValueOnce({
+      fullText,
+      modelVersion: "v6_medium",
+      lines: [
+        positionedOcrLine("户名", 80, 100, 80),
+        positionedOcrLine("北京金和万盛房地产开发有限公司", 190, 100, 320),
+        positionedOcrLine("户名", 570, 100, 80),
+        positionedOcrLine("北京羽隶工程咨询有限公司", 680, 100, 290),
+        positionedOcrLine("账号", 80, 160, 80),
+        positionedOcrLine("860584105610001", 190, 160, 220),
+        positionedOcrLine("账号", 570, 160, 80),
+        positionedOcrLine("0200049609201258271", 680, 160, 260),
+      ],
+    });
+
+    const recognized = await recognizeBankReceiptImage("mock-receipt.jpg");
+
+    expect(recognized).toMatchObject({
+      payer: "北京金和万盛房地产开发有限公司",
+      payerAccount: "860584105610001",
+      payee: "北京羽隶工程咨询有限公司",
+      payeeAccount: "0200049609201258271",
+    });
+  });
+
+  it("工商银行收款户名为空时保持为空，不从付款侧或账号文字猜测", async () => {
+    const fullText = `
+中国工商银行 网上银行电子回单
+电子回单号码：0919-5826-5303-1100
+北京羽隶工程咨询有限公司
+户名
+户名
+付款
+0200303519000018418
+收款
+账号
+账号
+0200303511*********
+金额 ¥9.00元
+交易日期：2026-08-26
+`;
+    callPaddleOcrDetailedMock.mockResolvedValueOnce({
+      fullText,
+      modelVersion: "v6_medium",
+      lines: [
+        positionedOcrLine("户名", 80, 100, 80),
+        positionedOcrLine("北京羽隶工程咨询有限公司", 190, 100, 290),
+        positionedOcrLine("户名", 570, 100, 80),
+        positionedOcrLine("账号", 80, 160, 80),
+        positionedOcrLine("0200303519000018418", 190, 160, 260),
+        positionedOcrLine("账号", 570, 160, 80),
+        positionedOcrLine("0200303511*********", 680, 160, 260),
+      ],
+    });
+
+    const recognized = await recognizeBankReceiptImage("mock-receipt.jpg");
+
+    expect(recognized.payer).toBe("北京羽隶工程咨询有限公司");
+    expect(recognized.payee).toBe("");
+    expect(recognized.payerAccount).toBe("0200303519000018418");
+    expect(recognized.payeeAccount).toBe("");
+  });
+
+  it("兴业结构化同一行付款与收款名称严格截断，不互相串列", () => {
+    expect(
+      extractMonthlyBankStructuredPartyNames(
+        "付款名称: 北京羽隶工程咨询有限公司  收款名称: 北京羽隶工程咨询有限公司\n付款账号: 321240100100245908  收款账号: 0200049609201258271",
+      ),
+    ).toEqual({
+      payer: "北京羽隶工程咨询有限公司",
+      payee: "北京羽隶工程咨询有限公司",
+    });
+  });
+
   it("真实工商银行双列表格识别为一般账户流出并保留六分尾数", async () => {
     const outputRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "monthly-bank-icbc-columns-test-"),
@@ -590,9 +758,9 @@ describe("月度银行回单精确账号与分类规则", () => {
 户名
 北京羽隶科技有限公司
 付款
+0200303519000018418
 收款
 账号
-0200303519000018418
 账号
 110933697910902
 人
@@ -634,6 +802,55 @@ describe("月度银行回单精确账号与分类规则", () => {
         amount: 79_818.36,
         direction: "outflow",
       });
+      expect(analysis.transactions[0]?.warnings).not.toContain(
+        "该回单未出现当前文件对应的完整账号",
+      );
+    } finally {
+      fs.rmSync(outputRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("工商银行双方同号时月报不得用通用兜底静默判定流出", async () => {
+    const outputRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "monthly-bank-same-account-test-"),
+    );
+    try {
+      const pdfPath = path.join(outputRoot, "icbc-same-account.pdf");
+      const document = await PDFDocument.create();
+      const page = document.addPage([595, 842]);
+      const font = await document.embedFont(StandardFonts.Helvetica);
+      page.drawText("synthetic scanned receipt", {
+        x: 40,
+        y: 780,
+        size: 12,
+        font,
+      });
+      fs.writeFileSync(pdfPath, await document.save());
+
+      callPaddleOcrMock.mockReset();
+      callPaddleOcrMock.mockResolvedValueOnce(`
+中国工商银行 网上银行电子回单
+电子回单号码：0914-4933-8878-1100
+付款人：北京羽隶工程咨询有限公司
+付款账号：0200303519000018418
+收款人：测试收款人
+收款账号：0200303519000018418
+金额 ¥100.00元
+交易日期：2026-05-25
+`);
+
+      const analysis = await analyzeMonthlyFinancialBankFile({
+        filePath: pdfPath,
+        originalName: "工程-工行-回单（一般户）202605.pdf",
+        reportMonth: "2026-05",
+        outputDir: path.join(outputRoot, "recognized"),
+      });
+
+      expect(analysis.accountCode).toBeNull();
+      expect(analysis.transactions).toHaveLength(0);
+      expect(analysis.warnings).toContain(
+        "文件内无法精确确定唯一的基本、一般或商务账户完整账号",
+      );
     } finally {
       fs.rmSync(outputRoot, { recursive: true, force: true });
     }
@@ -1026,6 +1243,30 @@ describe("月度银行回单后端持久化与汇总契约", () => {
     );
   });
 
+  it("历史内容差异使用一次性复核挑战并保存前后值审计", () => {
+    expect(routeSource).toContain(
+      '"/:month/bank-receipt-corrections/:reviewId/confirm"',
+    );
+    expect(routeSource).toContain(
+      "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED",
+    );
+    expect(routeSource).toContain(
+      "createMonthlyBankContentCorrectionChallengeToken",
+    );
+    expect(routeSource).toContain(
+      "verifyMonthlyBankContentCorrectionChallengeToken",
+    );
+    expect(routeSource).toContain("confirmedCorrectionEntries");
+    expect(routeSource).toContain("bank_receipt_correction");
+    expect(databaseSource).toContain(
+      "CREATE TABLE IF NOT EXISTS monthly_financial_bank_correction_reviews",
+    );
+    expect(databaseSource).toContain("session_binding_hash");
+    expect(databaseSource).toContain("conflict_fingerprint");
+    expect(databaseSource).toContain("recognition_version TEXT NOT NULL");
+    expect(databaseSource).toContain("'bank_receipt_correction'");
+  });
+
   it("文件摘要按报表月查重，规范化电子回单号全局查重", () => {
     const bankFileTableStart = databaseSource.indexOf(
       "CREATE TABLE IF NOT EXISTS monthly_financial_bank_files",
@@ -1045,10 +1286,10 @@ describe("月度银行回单后端持久化与汇总契约", () => {
       "DROP CONSTRAINT IF EXISTS monthly_financial_bank_files_file_hash_key",
     );
     expect(databaseSource).toContain(
-      "CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_month_hash",
+      "CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_files_month_hash_version",
     );
     expect(databaseSource).toContain(
-      "ON monthly_financial_bank_files(report_month, file_hash)",
+      "report_month, file_hash, recognition_version",
     );
     expect(databaseSource).toContain(
       "CREATE UNIQUE INDEX IF NOT EXISTS uq_monthly_financial_bank_receipt_no",
@@ -1057,7 +1298,7 @@ describe("月度银行回单后端持久化与汇总契约", () => {
       "ON monthly_financial_bank_transactions(normalized_electronic_receipt_no)",
     );
     expect(routeSource).toMatch(
-      /SELECT id FROM monthly_financial_bank_files\s+WHERE report_month = \? AND file_hash = \?/u,
+      /SELECT id FROM monthly_financial_bank_files\s+WHERE report_month = \? AND file_hash = \?\s+AND recognition_version = \?/u,
     );
     expect(routeSource).toContain("MONTHLY_BANK_FILE_ALREADY_UPLOADED");
     expect(routeSource).toContain(
@@ -1127,7 +1368,7 @@ describe("月度银行回单后端持久化与汇总契约", () => {
     expect(routeSource).toContain("transaction.transactionMonth === month");
     expect(routeSource).toContain("请切换到对应月份重新上传并确认");
     expect(routeSource).toMatch(
-      /SELECT id FROM monthly_financial_bank_files\s+WHERE report_month = \? AND file_hash = \?/u,
+      /SELECT id FROM monthly_financial_bank_files\s+WHERE report_month = \? AND file_hash = \?\s+AND recognition_version = \?/u,
     );
   });
 

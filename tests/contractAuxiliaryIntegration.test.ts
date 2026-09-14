@@ -13,6 +13,7 @@ import { api } from "@/utils/api";
 import {
   appendContractAuxiliaryFiles,
   createContractAuxiliaryPackage,
+  deleteContractAuxiliaryFile,
   deleteContractAuxiliaryPackage,
 } from "@/utils/contractApi";
 
@@ -57,7 +58,7 @@ describe("辅助合同档案包全链路隔离", () => {
     );
     expect(packageSchema).toContain("CHECK(accounting_included = FALSE)");
     expect(packageSchema).toContain(
-      "file_kind TEXT NOT NULL CHECK(file_kind IN ('contract', 'invoice', 'receipt'))",
+      "file_kind TEXT NOT NULL CHECK(file_kind IN ('contract', 'invoice', 'receipt', 'other'))",
     );
     expect(packageSchema).toContain("UNIQUE(package_id, file_hash)");
     expect(packageSchema).not.toContain(
@@ -65,7 +66,13 @@ describe("辅助合同档案包全链路隔离", () => {
     );
   });
 
-  it("旧库显式补齐四个档案运行列并移除全部按文件类型唯一索引", () => {
+  it("旧库显式补齐档案运行列、其他材料约束并移除类型唯一索引", () => {
+    const auxiliarySchema = schemaSource.slice(
+      schemaSource.indexOf(
+        "CREATE TABLE IF NOT EXISTS contract_auxiliary_packages",
+      ),
+      schemaSource.indexOf("CREATE TABLE IF NOT EXISTS contract_ocr_jobs"),
+    );
     for (const column of [
       "ocr_lines_json",
       "error_message",
@@ -82,6 +89,12 @@ describe("辅助合同档案包全链路隔离", () => {
     );
     expect(schemaSource).not.toContain(
       "CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_auxiliary_files_current_contract",
+    );
+    expect(auxiliarySchema).toContain(
+      "DROP CONSTRAINT IF EXISTS contract_auxiliary_files_file_kind_check",
+    );
+    expect(auxiliarySchema).toContain(
+      "CHECK(file_kind IN ('contract', 'invoice', 'receipt', 'other')) NOT VALID",
     );
   });
 
@@ -110,7 +123,7 @@ describe("辅助合同档案包全链路隔离", () => {
     );
   });
 
-  it("上传接口要求至少一份合同并允许三类多份，总文件不超过二十份", () => {
+  it("上传接口允许四类材料任选一类首建，总文件不超过二十份", () => {
     expect(serviceSource).toContain("CONTRACT_AUXILIARY_MAX_FILES = 20");
     expect(routeSource).toMatch(
       /(?:const MAX_AUXILIARY_FILES = 20|CONTRACT_AUXILIARY_MAX_FILES)/u,
@@ -124,12 +137,15 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(routeSource).toMatch(
       /\{ name: "receipt", maxCount: (?:20|MAX_AUXILIARY_FILES|CONTRACT_AUXILIARY_MAX_FILES) \}/u,
     );
+    expect(routeSource).toMatch(
+      /\{ name: "other", maxCount: (?:20|MAX_AUXILIARY_FILES|CONTRACT_AUXILIARY_MAX_FILES) \}/u,
+    );
     expect(routeSource).toContain("fileSize: 30 * 1024 * 1024");
     expect(routeSource).toMatch(
       /files:\s*(?:MAX_AUXILIARY_FILES|CONTRACT_AUXILIARY_MAX_FILES)/u,
     );
-    expect(routeSource).toMatch(/if \(contractFiles\.length === 0\)/u);
-    expect(routeSource).toContain("必须上传辅助合同文件");
+    expect(routeSource).not.toMatch(/if \(contractFiles\.length === 0\)/u);
+    expect(routeSource).toContain("请至少选择一份需要归档的辅助材料");
     expect(serviceSource).toContain("CONTRACT_AUXILIARY_FILE_COUNT_EXCEEDED");
     expect(componentSource).toContain(':disabled="!canArchiveSelection"');
     expect(componentSource).toContain("appendTargetPackage");
@@ -138,6 +154,7 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(componentSource).toContain("contract: []");
     expect(componentSource).toContain("invoice: []");
     expect(componentSource).toContain("receipt: []");
+    expect(componentSource).toContain("other: []");
     expect(componentSource).toContain("MAX_AUXILIARY_FILES = 20");
     expect(componentSource).not.toContain(
       ":multiple=\"option.kind !== 'contract'\"",
@@ -148,14 +165,16 @@ describe("辅助合同档案包全链路隔离", () => {
     );
     expect(apiSource).toContain("for (const invoice of payload.invoice || [])");
     expect(apiSource).toContain("for (const receipt of payload.receipt || [])");
+    expect(apiSource).toContain("for (const other of payload.other || [])");
     expect(componentSource).toContain('label: "发票"');
     expect(componentSource).toContain('label: "银行回单"');
+    expect(componentSource).toContain('label: "其他材料"');
     expect(componentSource).not.toContain("（如有）");
     expect(componentSource).toContain('class="create-panel"');
     expect(componentSource).not.toContain("<el-drawer");
   });
 
-  it("前端接口把多份合同、发票和回单分别追加到表单", async () => {
+  it("前端接口把四类多份材料分别追加到表单", async () => {
     (api.post as jest.Mock).mockResolvedValueOnce({
       data: {
         success: true,
@@ -178,27 +197,34 @@ describe("辅助合同档案包全链路隔离", () => {
       new File(["receipt-1"], "回单-1.png", { type: "image/png" }),
       new File(["receipt-2"], "回单-2.png", { type: "image/png" }),
     ];
+    const others = [
+      new File(["other"], "工作量确认单.xlsx", {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      }),
+    ];
 
     await createContractAuxiliaryPackage("contract-1", {
       contract: contracts,
       invoice: invoices,
       receipt: receipts,
+      other: others,
     } as never);
 
     const formData = (api.post as jest.Mock).mock.calls[0][1] as FormData;
     expect(formData.getAll("contract")).toEqual(contracts);
     expect(formData.getAll("invoice")).toEqual(invoices);
     expect(formData.getAll("receipt")).toEqual(receipts);
+    expect(formData.getAll("other")).toEqual(others);
   });
 
-  it("已有档案包可通过独立接口只追加发票和回单", async () => {
+  it("已有档案包可通过独立接口追加非合同材料", async () => {
     (api.post as jest.Mock).mockResolvedValueOnce({
       data: {
         success: true,
         data: {
           packageId: "package-1",
           version: 2,
-          appendedFileCount: 2,
+          appendedFileCount: 3,
         },
       },
     });
@@ -208,10 +234,14 @@ describe("辅助合同档案包全链路隔离", () => {
     const receipt = new File(["receipt"], "回单.png", {
       type: "image/png",
     });
+    const other = new File(["other"], "评审材料.zip", {
+      type: "application/zip",
+    });
 
     await appendContractAuxiliaryFiles("contract-1", "package-1", 1, {
       invoice: [invoice],
       receipt: [receipt],
+      other: [other],
     });
 
     const [requestUrl, requestBody, requestConfig] = (
@@ -225,6 +255,7 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(formData.getAll("contract")).toEqual([]);
     expect(formData.getAll("invoice")).toEqual([invoice]);
     expect(formData.getAll("receipt")).toEqual([receipt]);
+    expect(formData.getAll("other")).toEqual([other]);
     expect(formData.get("expectedVersion")).toBe("1");
   });
 
@@ -252,8 +283,12 @@ describe("辅助合同档案包全链路隔离", () => {
     );
     expect(deleteRoute).toContain("requireFinance");
     expect(deleteRoute).toContain("deleteContractAuxiliaryPackage");
-    expect(deleteRoute).toContain("validateFilePath(storedPath)");
-    expect(deleteRoute).toContain("fs.unlinkSync(absolutePath)");
+    expect(deleteRoute).toContain("removeStoredAuxiliaryFile(storedPath)");
+    expect(routeSource).toContain("validateFilePath(storedPath)");
+    expect(routeSource).toContain(
+      'normalizedPath.startsWith("uploads/contract-auxiliary/")',
+    );
+    expect(routeSource).toContain("fs.unlinkSync(absolutePath)");
 
     const deleteService = serviceSource.slice(
       serviceSource.indexOf(
@@ -267,6 +302,30 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(deleteService).toContain('action: "auxiliary_package_deleted"');
     expect(deleteService).toContain("DELETE FROM contract_auxiliary_packages");
     expect(deleteService).toContain("storedFilePaths");
+  });
+
+  it("历史导入与新上传的每份辅助材料都可按版本单独删除", async () => {
+    (api.delete as jest.Mock).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: { deleted: true, packageDeleted: false, version: 5 },
+      },
+    });
+
+    await deleteContractAuxiliaryFile("contract-1", "package-1", "file-1", 4);
+
+    expect((api.delete as jest.Mock).mock.calls.at(-1)).toEqual([
+      "/api/contracts/contract-1/auxiliary-packages/package-1/files/file-1",
+      { params: { expectedVersion: 4 } },
+    ]);
+    expect(componentSource).toContain("removeArchivedFile(item, file)");
+    expect(componentSource).toContain("删除辅助材料");
+    expect(routeSource).toContain("deleteContractAuxiliaryFile({");
+    expect(serviceSource).toContain('action: "auxiliary_package_file_deleted"');
+    expect(serviceSource).toContain("DELETE FROM contract_auxiliary_files");
+    expect(serviceSource).toContain("packageDeleted");
+    expect(serviceSource).toContain("canRemoveStoredAuxiliaryFile");
+    expect(serviceSource).toContain("contract_files WHERE file_path = $1");
   });
 
   it("辅助材料安全校验后直接归档且不调度内容识别", () => {
@@ -308,6 +367,20 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(routeSource).toContain(
       "expectedExtensions[kind].includes(extension)",
     );
+    expect(routeSource).toContain("assertAuxiliaryArchiveStructure");
+    expect(routeSource).toContain("MAX_AUXILIARY_UNCOMPRESSED_BYTES");
+    for (const extension of [
+      ".pdf",
+      ".doc",
+      ".docx",
+      ".xlsx",
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".zip",
+    ]) {
+      expect(componentSource).toContain(extension);
+    }
     expect(routeSource).toContain("validateFilePath(storedPath)");
     expect(routeSource).toContain('crypto.createHash("sha256")');
     expect(routeSource).toContain("normalizeUploadFileName(file.originalname)");
@@ -398,6 +471,9 @@ describe("辅助合同档案包全链路隔离", () => {
     expect(componentSource).toContain('v-if="canManage"');
     expect(routeSource).toMatch(
       /router\.delete\([\s\S]*?"\/:id\/auxiliary-packages\/:packageId"[\s\S]*?requireFinance/,
+    );
+    expect(routeSource).toMatch(
+      /router\.delete\([\s\S]*?"\/:id\/auxiliary-packages\/:packageId\/files\/:fileId"[\s\S]*?requireFinance/,
     );
     expect(serviceSource).toContain("requires_auxiliary_materials");
     expect(serviceSource).toContain("CONTRACT_AUXILIARY_NOT_REQUIRED");

@@ -27,7 +27,11 @@ export const CONTRACT_AUXILIARY_MAX_FILES = 20;
 const MAX_AUXILIARY_NOTE_LENGTH = 1000;
 const AUXILIARY_FIELD_CODES = ["party_a", "party_b", "amount"] as const;
 
-export type ContractAuxiliaryFileKind = "contract" | "invoice" | "receipt";
+export type ContractAuxiliaryFileKind =
+  | "contract"
+  | "invoice"
+  | "receipt"
+  | "other";
 export type ContractAuxiliaryStatus =
   | "processing"
   | "succeeded"
@@ -45,11 +49,13 @@ export interface ContractAuxiliaryStoredFile {
 
 export interface ContractAuxiliaryFileSet {
   /** 兼容旧调用方的单文件输入，同时支持同一档案包上传多份合同。 */
-  contract: ContractAuxiliaryStoredFile | ContractAuxiliaryStoredFile[];
+  contract?: ContractAuxiliaryStoredFile | ContractAuxiliaryStoredFile[] | null;
   /** 兼容旧调用方的单文件输入，同时支持同一档案包上传多份发票。 */
   invoice?: ContractAuxiliaryStoredFile | ContractAuxiliaryStoredFile[] | null;
   /** 兼容旧调用方的单文件输入，同时支持同一档案包上传多份回单。 */
   receipt?: ContractAuxiliaryStoredFile | ContractAuxiliaryStoredFile[] | null;
+  /** 报价单、工作量确认单等其他只读归档材料。 */
+  other?: ContractAuxiliaryStoredFile | ContractAuxiliaryStoredFile[] | null;
 }
 
 export interface ContractAuxiliaryActor {
@@ -139,6 +145,11 @@ export interface UpdateContractAuxiliaryNoteInput extends ContractAuxiliaryMutat
 }
 
 export interface DeleteContractAuxiliaryPackageInput extends ContractAuxiliaryMutationIdentity {
+  expectedVersion: number;
+}
+
+export interface DeleteContractAuxiliaryFileInput extends ContractAuxiliaryMutationIdentity {
+  fileId: string;
   expectedVersion: number;
 }
 
@@ -249,17 +260,24 @@ function assertAccountingScopeCannotBeOverridden(input: unknown): void {
   }
 }
 
+const AUXILIARY_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/zip",
+  "image/jpeg",
+  "image/png",
+]);
+
 const MIME_TYPES_BY_KIND: Record<
   ContractAuxiliaryFileKind,
   ReadonlySet<string>
 > = {
-  contract: new Set([
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  ]),
-  invoice: new Set(["application/pdf", "image/jpeg", "image/png"]),
-  receipt: new Set(["application/pdf", "image/jpeg", "image/png"]),
+  contract: AUXILIARY_MIME_TYPES,
+  invoice: AUXILIARY_MIME_TYPES,
+  receipt: AUXILIARY_MIME_TYPES,
+  other: AUXILIARY_MIME_TYPES,
 };
 
 function validateStoredFile(
@@ -269,7 +287,7 @@ function validateStoredFile(
   if (!value || typeof value !== "object") {
     throw new ContractDomainError(
       400,
-      kind === "contract" ? "必须上传辅助合同文件" : "辅助资料文件不完整",
+      "辅助资料文件不完整",
       "CONTRACT_AUXILIARY_FILE_REQUIRED",
     );
   }
@@ -296,9 +314,7 @@ function validateStoredFile(
   if (!MIME_TYPES_BY_KIND[kind].has(mimeType)) {
     throw new ContractDomainError(
       400,
-      kind === "contract"
-        ? "辅助合同仅支持 PDF、DOC 或 DOCX 文件"
-        : "辅助发票和回单仅支持 PDF、JPEG 或 PNG 文件",
+      "辅助材料仅支持 PDF、DOC、DOCX、XLSX、JPG、JPEG、PNG 或 ZIP 文件",
       "CONTRACT_AUXILIARY_FILE_TYPE_INVALID",
     );
   }
@@ -309,35 +325,38 @@ function normalizeFileSet(files: ContractAuxiliaryFileSet): Array<{
   kind: ContractAuxiliaryFileKind;
   file: ContractAuxiliaryStoredFile;
 }> {
-  if (!files || !files.contract) {
-    throw new ContractDomainError(
-      400,
-      "必须上传辅助合同文件",
-      "CONTRACT_AUXILIARY_CONTRACT_FILE_REQUIRED",
-    );
-  }
-  const contracts = Array.isArray(files.contract)
+  const contracts = Array.isArray(files?.contract)
     ? files.contract
-    : [files.contract];
-  if (contracts.length === 0) {
-    throw new ContractDomainError(
-      400,
-      "至少上传 1 份辅助合同文件",
-      "CONTRACT_AUXILIARY_CONTRACT_FILE_REQUIRED",
-    );
-  }
-  const invoices = Array.isArray(files.invoice)
+    : files?.contract
+      ? [files.contract]
+      : [];
+  const invoices = Array.isArray(files?.invoice)
     ? files.invoice
-    : files.invoice
+    : files?.invoice
       ? [files.invoice]
       : [];
-  const receipts = Array.isArray(files.receipt)
+  const receipts = Array.isArray(files?.receipt)
     ? files.receipt
-    : files.receipt
+    : files?.receipt
       ? [files.receipt]
       : [];
+  const others = Array.isArray(files?.other)
+    ? files.other
+    : files?.other
+      ? [files.other]
+      : [];
   if (
-    contracts.length + invoices.length + receipts.length >
+    contracts.length + invoices.length + receipts.length + others.length ===
+    0
+  ) {
+    throw new ContractDomainError(
+      400,
+      "请至少选择一份需要归档的辅助材料",
+      "CONTRACT_AUXILIARY_FILE_REQUIRED",
+    );
+  }
+  if (
+    contracts.length + invoices.length + receipts.length + others.length >
     CONTRACT_AUXILIARY_MAX_FILES
   ) {
     throw new ContractDomainError(
@@ -358,6 +377,10 @@ function normalizeFileSet(files: ContractAuxiliaryFileSet): Array<{
     ...receipts.map((file) => ({
       kind: "receipt" as const,
       file: validateStoredFile("receipt", file),
+    })),
+    ...others.map((file) => ({
+      kind: "other" as const,
+      file: validateStoredFile("other", file),
     })),
   ];
   const hashes = new Set<string>();
@@ -395,7 +418,15 @@ function normalizeAppendFileSet(
     : files.receipt
       ? [files.receipt]
       : [];
-  if (contracts.length + invoices.length + receipts.length === 0) {
+  const others = Array.isArray(files.other)
+    ? files.other
+    : files.other
+      ? [files.other]
+      : [];
+  if (
+    contracts.length + invoices.length + receipts.length + others.length ===
+    0
+  ) {
     throw new ContractDomainError(
       400,
       "请至少选择一份需要追加的辅助材料",
@@ -403,7 +434,7 @@ function normalizeAppendFileSet(
     );
   }
   if (
-    contracts.length + invoices.length + receipts.length >
+    contracts.length + invoices.length + receipts.length + others.length >
     CONTRACT_AUXILIARY_MAX_FILES
   ) {
     throw new ContractDomainError(
@@ -424,6 +455,10 @@ function normalizeAppendFileSet(
     ...receipts.map((file) => ({
       kind: "receipt" as const,
       file: validateStoredFile("receipt", file),
+    })),
+    ...others.map((file) => ({
+      kind: "other" as const,
+      file: validateStoredFile("other", file),
     })),
   ];
   const hashes = new Set<string>();
@@ -667,6 +702,21 @@ async function insertAuxiliaryAudit(
   );
 }
 
+async function canRemoveStoredAuxiliaryFile(
+  client: PoolClient,
+  storedPath: string,
+): Promise<boolean> {
+  const referenced = await client.query<{ has_reference: boolean }>(
+    `SELECT EXISTS(
+       SELECT 1 FROM contract_auxiliary_files WHERE file_path = $1
+       UNION ALL
+       SELECT 1 FROM contract_files WHERE file_path = $1
+     ) AS has_reference`,
+    [storedPath],
+  );
+  return referenced.rows[0]?.has_reference !== true;
+}
+
 function mapFileRow(row: ContractAuxiliaryFileRow): ContractAuxiliaryFileView {
   return {
     id: row.id,
@@ -888,16 +938,6 @@ export async function appendContractAuxiliaryFiles(
         "CONTRACT_AUXILIARY_FILE_COUNT_EXCEEDED",
       );
     }
-    if (
-      !existing.rows.some((file) => file.file_kind === "contract") &&
-      !files.some((file) => file.kind === "contract")
-    ) {
-      throw new ContractDomainError(
-        409,
-        "辅助档案缺少辅助合同，请先追加辅助合同",
-        "CONTRACT_AUXILIARY_CONTRACT_FILE_REQUIRED",
-      );
-    }
     const existingHashes = new Set(existing.rows.map((file) => file.file_hash));
     if (files.some((file) => existingHashes.has(file.file.fileHash))) {
       throw new ContractDomainError(
@@ -1011,7 +1051,8 @@ export async function getContractAuxiliaryPackage(
     `SELECT * FROM contract_auxiliary_files
       WHERE package_id = ? AND is_current = TRUE
       ORDER BY CASE file_kind
-        WHEN 'contract' THEN 0 WHEN 'invoice' THEN 1 ELSE 2 END,
+        WHEN 'contract' THEN 0 WHEN 'invoice' THEN 1
+        WHEN 'receipt' THEN 2 ELSE 3 END,
         file_kind ASC, created_at ASC, id ASC`,
     packageId,
   );
@@ -1039,7 +1080,8 @@ export async function listContractAuxiliaryPackages(
       JOIN contract_auxiliary_packages package ON package.id = file.package_id
       WHERE package.parent_contract_id = ? AND file.is_current = TRUE
       ORDER BY CASE file.file_kind
-        WHEN 'contract' THEN 0 WHEN 'invoice' THEN 1 ELSE 2 END,
+        WHEN 'contract' THEN 0 WHEN 'invoice' THEN 1
+        WHEN 'receipt' THEN 2 ELSE 3 END,
         file.file_kind ASC, file.created_at ASC, file.id ASC`,
     parentContractId,
   );
@@ -1269,6 +1311,149 @@ export async function updateContractAuxiliaryPackageNote(
   return { packageId, note, version };
 }
 
+export async function deleteContractAuxiliaryFile(
+  input: DeleteContractAuxiliaryFileInput,
+): Promise<{
+  packageId: string;
+  fileId: string;
+  deleted: true;
+  packageDeleted: boolean;
+  version: number | null;
+  storedFilePath: string | null;
+}> {
+  assertAccountingScopeCannotBeOverridden(input);
+  const parentContractId = requiredIdentifier(
+    input.parentContractId,
+    "关联主合同",
+  );
+  const packageId = requiredIdentifier(input.packageId, "辅助档案包");
+  const fileId = requiredIdentifier(input.fileId, "辅助材料文件");
+  const expectedVersion = parseExpectedVersion(input.expectedVersion);
+  const actor = {
+    id: requiredIdentifier(input.actor?.id, "操作人"),
+    role: requiredIdentifier(input.actor?.role, "操作角色"),
+  };
+  return db.transaction(async (client) => {
+    const current = await client.query<{ version: number }>(
+      `SELECT version FROM contract_auxiliary_packages
+        WHERE id = $1 AND parent_contract_id = $2 FOR UPDATE`,
+      [packageId, parentContractId],
+    );
+    if (!current.rows[0]) {
+      throw new ContractDomainError(
+        404,
+        "辅助合同档案不存在",
+        "CONTRACT_AUXILIARY_PACKAGE_NOT_FOUND",
+      );
+    }
+    if (Number(current.rows[0].version) !== expectedVersion) {
+      throw new ContractDomainError(
+        409,
+        "辅助合同已被其他人修改，请刷新后重试",
+        "CONTRACT_AUXILIARY_VERSION_CONFLICT",
+      );
+    }
+    const fileResult = await client.query<{
+      file_kind: ContractAuxiliaryFileKind;
+      file_name: string;
+      file_path: string;
+      file_size: number;
+      file_hash: string;
+    }>(
+      `SELECT file_kind, file_name, file_path, file_size, file_hash
+         FROM contract_auxiliary_files
+        WHERE id = $1 AND package_id = $2 AND is_current = TRUE FOR UPDATE`,
+      [fileId, packageId],
+    );
+    const file = fileResult.rows[0];
+    if (!file) {
+      throw new ContractDomainError(
+        404,
+        "辅助资料文件不存在",
+        "CONTRACT_AUXILIARY_FILE_NOT_FOUND",
+      );
+    }
+    const fileCountResult = await client.query<{ file_count: number | string }>(
+      `SELECT COUNT(*) AS file_count FROM contract_auxiliary_files
+        WHERE package_id = $1 AND is_current = TRUE`,
+      [packageId],
+    );
+    const packageDeleted =
+      Number(fileCountResult.rows[0]?.file_count || 0) <= 1;
+    const now = new Date().toISOString();
+    await insertAuxiliaryAudit(client, {
+      parentContractId,
+      packageId,
+      action: "auxiliary_package_file_deleted",
+      actor,
+      changes: {
+        fileId,
+        fileKind: file.file_kind,
+        fileName: file.file_name,
+        fileSize: Number(file.file_size),
+        fileHash: file.file_hash,
+        packageDeleted,
+        accountingIncluded: false,
+      },
+      now,
+    });
+    if (packageDeleted) {
+      const deleted = await client.query(
+        `DELETE FROM contract_auxiliary_packages
+          WHERE id = $1 AND parent_contract_id = $2 AND version = $3`,
+        [packageId, parentContractId, expectedVersion],
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ContractDomainError(
+          409,
+          "辅助合同删除状态已变化，请刷新后重试",
+          "CONTRACT_AUXILIARY_VERSION_CONFLICT",
+        );
+      }
+    } else {
+      const deleted = await client.query(
+        `DELETE FROM contract_auxiliary_files
+          WHERE id = $1 AND package_id = $2 AND is_current = TRUE`,
+        [fileId, packageId],
+      );
+      if (deleted.rowCount !== 1) {
+        throw new ContractDomainError(
+          409,
+          "辅助材料删除状态已变化，请刷新后重试",
+          "CONTRACT_AUXILIARY_FILE_STATE_CHANGED",
+        );
+      }
+      const updated = await client.query(
+        `UPDATE contract_auxiliary_packages
+            SET updated_by = $3, updated_at = $4, version = version + 1
+          WHERE id = $1 AND parent_contract_id = $2 AND version = $5`,
+        [packageId, parentContractId, actor.id, now, expectedVersion],
+      );
+      if (updated.rowCount !== 1) {
+        throw new ContractDomainError(
+          409,
+          "辅助合同已被其他人修改，请刷新后重试",
+          "CONTRACT_AUXILIARY_VERSION_CONFLICT",
+        );
+      }
+    }
+    const storedFilePath = (await canRemoveStoredAuxiliaryFile(
+      client,
+      file.file_path,
+    ))
+      ? file.file_path
+      : null;
+    return {
+      packageId,
+      fileId,
+      deleted: true as const,
+      packageDeleted,
+      version: packageDeleted ? null : expectedVersion + 1,
+      storedFilePath,
+    };
+  });
+}
+
 export async function deleteContractAuxiliaryPackage(
   input: DeleteContractAuxiliaryPackageInput,
 ): Promise<{
@@ -1307,8 +1492,15 @@ export async function deleteContractAuxiliaryPackage(
         "CONTRACT_AUXILIARY_VERSION_CONFLICT",
       );
     }
-    const files = await client.query<{ file_path: string }>(
-      `SELECT file_path FROM contract_auxiliary_files
+    const files = await client.query<{
+      file_kind: ContractAuxiliaryFileKind;
+      file_name: string;
+      file_path: string;
+      file_size: number;
+      file_hash: string;
+    }>(
+      `SELECT file_kind, file_name, file_path, file_size, file_hash
+         FROM contract_auxiliary_files
         WHERE package_id = $1 ORDER BY created_at ASC`,
       [packageId],
     );
@@ -1318,7 +1510,16 @@ export async function deleteContractAuxiliaryPackage(
       packageId,
       action: "auxiliary_package_deleted",
       actor,
-      changes: { fileCount: files.rows.length, accountingIncluded: false },
+      changes: {
+        fileCount: files.rows.length,
+        files: files.rows.map((file) => ({
+          fileKind: file.file_kind,
+          fileName: file.file_name,
+          fileSize: Number(file.file_size),
+          fileHash: file.file_hash,
+        })),
+        accountingIncluded: false,
+      },
       now,
     });
     const deleted = await client.query(
@@ -1333,10 +1534,16 @@ export async function deleteContractAuxiliaryPackage(
         "CONTRACT_AUXILIARY_VERSION_CONFLICT",
       );
     }
+    const storedFilePaths: string[] = [];
+    for (const file of files.rows) {
+      if (await canRemoveStoredAuxiliaryFile(client, file.file_path)) {
+        storedFilePaths.push(file.file_path);
+      }
+    }
     return {
       packageId,
       deleted: true as const,
-      storedFilePaths: files.rows.map((file) => file.file_path),
+      storedFilePaths,
     };
   });
 }

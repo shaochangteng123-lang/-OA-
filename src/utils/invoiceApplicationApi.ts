@@ -490,6 +490,16 @@ export async function deleteInvoiceApplicationMaterial(
   );
 }
 
+export async function deleteInvoiceApplicationDraft(
+  id: string,
+  expectedVersion: number,
+): Promise<void> {
+  await api.delete<ApiEnvelope<{ id: string; deleted: true }>>(
+    `/api/invoice-applications/${id}`,
+    { params: { expectedVersion } },
+  );
+}
+
 export async function submitInvoiceApplication(
   id: string,
   expectedVersion: number,

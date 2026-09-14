@@ -6,7 +6,7 @@ import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
 import { nanoid } from 'nanoid'
-import { requireAuth, requireAdmin } from '../middleware/auth.js'
+import { requireAuth, requireAdmin, requireExactRole } from '../middleware/auth.js'
 import { recognizeInvoiceLocally } from '../services/localOcr.js'
 import {
   assertReimbursementCompanyInvoice,
@@ -44,6 +44,57 @@ import {
 } from '../utils/payment-proof-identity.js'
 
 const router = Router()
+const REIMBURSEMENT_TYPES = [
+  'basic',
+  'large',
+  'business',
+  'welfare_one',
+  'welfare_two',
+] as const
+type ReimbursementType = (typeof REIMBURSEMENT_TYPES)[number]
+type WelfareReimbursementType = 'welfare_one' | 'welfare_two'
+const requirePaymentAdmin = requireExactRole(['super_admin', 'admin'])
+
+function isReimbursementType(value: unknown): value is ReimbursementType {
+  return REIMBURSEMENT_TYPES.includes(value as ReimbursementType)
+}
+
+function reimbursementApprovalType(type: ReimbursementType): string {
+  return `reimbursement_${type}`
+}
+
+function isWelfareReimbursementType(
+  type: ReimbursementType,
+): type is WelfareReimbursementType {
+  return type === 'welfare_one' || type === 'welfare_two'
+}
+
+async function loadActiveWelfareCategory(
+  client: PoolClient,
+  type: WelfareReimbursementType,
+  categoryId: string,
+): Promise<{ id: string; name: string } | undefined> {
+  const table =
+    type === 'welfare_one'
+      ? 'welfare_one_expense_categories'
+      : 'welfare_two_expense_categories'
+  return txGet<{ id: string; name: string }>(
+    client,
+    `SELECT id, name FROM ${table}
+     WHERE id = ? AND is_active = TRUE FOR SHARE`,
+    categoryId,
+  )
+}
+
+function reimbursementDeductionAmount(
+  invoices: Array<{ isDeduction?: unknown; deductedAmount?: unknown }>,
+): number {
+  const cents = invoices.reduce((total, invoice) => {
+    if (invoice.isDeduction) return total
+    return total + Math.round(Number(invoice.deductedAmount || 0) * 100)
+  }, 0)
+  return cents / 100
+}
 
 function buildTransportFuelCategoryCondition(alias: string): string {
   const categoryField = `LOWER(${alias}.category)`
@@ -113,10 +164,10 @@ function formatDateTime(isoString: string | null): string {
   return `${y}-${m}-${d} ${h}:${min}`
 }
 
-// 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
+// 标准化报销事由标题格式。
 function normalizeReimbursementTitle(title: string): string {
   const match = title.match(
-    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/,
+    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销|福利1报销|福利2报销)$/,
   )
   if (match) {
     return `${match[1]}-${match[2]}`
@@ -2328,6 +2379,10 @@ router.get('/records', requireAuth, async (req, res) => {
         r.id, r.type, r.title, r.total_amount as amount, r.status,
         r.applicant_name as applicant,
         r.reimbursement_scope as reimbursementScope,
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_id
+          ELSE r.welfare_category_id END as welfareCategoryId,
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_name_snapshot
+          ELSE r.welfare_category_name_snapshot END as welfareCategoryName,
         r.submit_time as submitTime,
         r.approve_time as approveTime,
         r.approver,
@@ -2414,9 +2469,11 @@ router.post('/create', requireAuth, async (req, res) => {
       status = 'pending',
       reimbursementScope,
       serviceTarget,
+      welfareCategoryId,
     } = req.body
     const userId = req.session.user?.id
     const userName = req.session.user?.name
+    const userRole = req.session.user?.role
 
     // 调试日志：查看提交的发票数据
     console.log('📋 创建报销单 - 发票数量:', invoices?.length)
@@ -2445,6 +2502,22 @@ router.post('/create', requireAuth, async (req, res) => {
         success: false,
         message: '缺少必要参数',
       })
+    }
+
+    if (!isReimbursementType(type)) {
+      return res.status(400).json({ success: false, message: '无效的报销类型' })
+    }
+    if (isWelfareReimbursementType(type) && userRole !== 'chairman') {
+      return res.status(403).json({
+        success: false,
+        message: '福利报销仅限董事长账号使用',
+      })
+    }
+    if (isWelfareReimbursementType(type) && !String(welfareCategoryId || '').trim()) {
+      return res.status(400).json({ success: false, message: '请选择福利报销范围' })
+    }
+    if (!isWelfareReimbursementType(type) && welfareCategoryId) {
+      return res.status(400).json({ success: false, message: '当前报销类型不能设置福利报销范围' })
     }
 
     // 验证状态值：普通用户只能创建草稿或提交审批
@@ -2563,6 +2636,9 @@ router.post('/create', requireAuth, async (req, res) => {
       0,
     )
     const totalAmount = totalAmountCents / 100
+    const totalDeduction = reimbursementDeductionAmount(processedInvoices)
+    const approvalSkipped = status === 'pending' && userRole === 'chairman'
+    const persistedStatus = approvalSkipped ? 'approved' : status
 
     // 如果状态是 pending（提交审批），提前进行业务规则校验
     if (status === 'pending') {
@@ -2571,6 +2647,12 @@ router.post('/create', requireAuth, async (req, res) => {
         return res.status(400).json({
           success: false,
           message: '大额报销适用于发票总金额超过 1000 元的报销申请',
+        })
+      }
+      if (approvalSkipped && totalAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: '核减后报销金额必须大于零才能进入待付款',
         })
       }
     }
@@ -2616,6 +2698,17 @@ router.post('/create', requireAuth, async (req, res) => {
 
     // 使用 PostgreSQL 事务校验唯一性并写入主表和发票明细
     await db.transaction(async (client) => {
+      const welfareCategory = isWelfareReimbursementType(type)
+        ? await loadActiveWelfareCategory(
+            client,
+            type,
+            String(welfareCategoryId).trim(),
+          )
+        : undefined
+      if (isWelfareReimbursementType(type) && !welfareCategory) {
+        throw new RouteError(400, '福利报销范围不存在或已停用')
+      }
+
       await assertInvoicesNotUsedInContractFinancial(
         client,
         reimbursementInvoiceNumbersForCrossModule(processedInvoices),
@@ -2675,24 +2768,36 @@ router.post('/create', requireAuth, async (req, res) => {
         INSERT INTO reimbursements (
           id, type, category, title, total_amount, status, description,
           business_type, client, user_id, applicant_name,
-          submit_time, reimbursement_month, reimbursement_scope, service_target, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          submit_time, approve_time, approver, completed_time, deduction_amount,
+          reimbursement_month, reimbursement_scope, service_target,
+          welfare_category_id, welfare_category_name_snapshot,
+          welfare_two_category_id, welfare_two_category_name_snapshot,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         reimbursementId,
         type,
         category || null,
         title,
         totalAmount,
-        status,
+        persistedStatus,
         description || null,
         businessType || null,
         clientName || serviceTarget || null,
         userId,
         userName,
         status === 'pending' ? timestamp : null,
+        approvalSkipped ? timestamp : null,
+        approvalSkipped ? '系统免审批' : null,
+        null,
+        approvalSkipped ? totalDeduction : 0,
         reimbursementMonth,
-        reimbursementScope || null,
+        isWelfareReimbursementType(type) ? null : reimbursementScope || null,
         serviceTarget || null,
+        type === 'welfare_one' ? welfareCategory?.id || null : null,
+        type === 'welfare_one' ? welfareCategory?.name || null : null,
+        type === 'welfare_two' ? welfareCategory?.id || null : null,
+        type === 'welfare_two' ? welfareCategory?.name || null : null,
         timestamp,
         timestamp,
       )
@@ -2726,38 +2831,50 @@ router.post('/create', requireAuth, async (req, res) => {
         )
       }
 
-      // 如果状态是 pending（提交审批），创建审批实例
+      // 提交时创建审批实例；董事长报销记录免审批事实并直接进入待付款。
       if (status === 'pending') {
         const approvalInstanceId = nanoid()
-
-        const approvalType =
-          type === 'basic'
-            ? 'reimbursement_basic'
-            : type === 'large'
-              ? 'reimbursement_large'
-              : 'reimbursement_business'
+        const approvalType = reimbursementApprovalType(type)
+        const approvalStatus = approvalSkipped ? 'approved' : 'pending'
 
         await txRun(
           client,
           `
           INSERT INTO approval_instances (
             id, flow_id, type, target_id, target_type, applicant_id,
-            current_step, status, submit_time, created_at, updated_at
-          ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
+            current_step, status, submit_time, complete_time, created_at, updated_at
+          ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, ?, ?, ?, ?, ?)
         `,
           approvalInstanceId,
           approvalType,
           reimbursementId,
           userId,
+          approvalStatus,
           timestamp,
+          approvalSkipped ? timestamp : null,
           timestamp,
           timestamp,
         )
+
+        if (approvalSkipped) {
+          await txRun(
+            client,
+            `INSERT INTO approval_records
+               (id, instance_id, step, approver_id, action, comment, action_time)
+             VALUES (?, ?, 1, ?, 'auto_approved', ?, ?)`,
+            nanoid(),
+            approvalInstanceId,
+            userId,
+            '董事长报销按规则免审批，提交后直达待付款',
+            timestamp,
+          )
+        }
 
         console.log('✅ 创建审批实例:', {
           approvalInstanceId,
           reimbursementId,
           type: approvalType,
+          approvalSkipped,
         })
       }
     })
@@ -2774,8 +2891,14 @@ router.post('/create', requireAuth, async (req, res) => {
       success: true,
       data: {
         id: reimbursementId,
+        approvalSkipped,
       },
-      message: status === 'draft' ? '草稿保存成功' : '报销单提交成功',
+      message:
+        status === 'draft'
+          ? '草稿保存成功'
+          : approvalSkipped
+            ? '报销单已提交并直达待付款'
+            : '报销单提交成功',
     })
   } catch (error) {
     if (isRouteError(error)) {
@@ -2894,6 +3017,10 @@ router.get('/list', requireAuth, async (req, res) => {
         r.status,
         r.business_type as businessType, r.client,
         r.reimbursement_scope as reimbursementScope,
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_id
+          ELSE r.welfare_category_id END as welfareCategoryId,
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_name_snapshot
+          ELSE r.welfare_category_name_snapshot END as welfareCategoryName,
         r.submit_time as submitTime, r.created_at as createTime,
         COALESCE(r.is_deleted, FALSE) as isDeleted,
         (SELECT STRING_AGG(DISTINCT category, ',') FROM reimbursement_invoices WHERE reimbursement_id = r.id AND category IS NOT NULL) as invoiceCategories
@@ -3010,6 +3137,10 @@ router.get('/pending-list', requireAdmin, async (req, res) => {
         id, type, category, title, total_amount as amount, status,
         business_type as businessType, client,
         reimbursement_scope as reimbursementScope,
+        CASE WHEN type = 'welfare_two' THEN welfare_two_category_id
+          ELSE welfare_category_id END as welfareCategoryId,
+        CASE WHEN type = 'welfare_two' THEN welfare_two_category_name_snapshot
+          ELSE welfare_category_name_snapshot END as welfareCategoryName,
         applicant_name as applicant, user_id as userId,
         submit_time as submitTime, created_at as createTime
       FROM reimbursements
@@ -3087,7 +3218,7 @@ router.post('/:id/approve', requireAuth, async (_req, res) => {
  */
 router.post(
   '/:id/verify-proof',
-  requireAdmin,
+  requirePaymentAdmin,
   uploadPaymentProof.single('paymentProof'),
   async (req, res) => {
     try {
@@ -3403,7 +3534,7 @@ router.post(
  * 管理员确认付款（待付款 → 待上传回单）
  * POST /api/reimbursement/:id/confirm-payment
  */
-router.post('/:id/confirm-payment', requireAdmin, async (req, res) => {
+router.post('/:id/confirm-payment', requirePaymentAdmin, async (req, res) => {
   try {
     const { id } = req.params
     const currentUserId = req.session.userId!
@@ -3482,7 +3613,7 @@ router.post('/:id/confirm-payment', requireAdmin, async (req, res) => {
 /**
  * POST /api/reimbursement/:id/complete-with-proof
  */
-router.post('/:id/complete-with-proof', requireAdmin, async (req, res) => {
+router.post('/:id/complete-with-proof', requirePaymentAdmin, async (req, res) => {
   console.log('🔵 收到付款回单提交请求')
   const movedPaymentProofPaths: string[] = []
   let paymentProofCommitted = false
@@ -3968,6 +4099,10 @@ router.get('/:id', requireAuth, async (req, res) => {
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
           reimbursement_scope as reimbursementScope,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_id
+            ELSE welfare_category_id END as welfareCategoryId,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_name_snapshot
+            ELSE welfare_category_name_snapshot END as welfareCategoryName,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
           created_at as createTime, updated_at as updateTime,
@@ -3997,6 +4132,10 @@ router.get('/:id', requireAuth, async (req, res) => {
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
           reimbursement_scope as reimbursementScope,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_id
+            ELSE welfare_category_id END as welfareCategoryId,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_name_snapshot
+            ELSE welfare_category_name_snapshot END as welfareCategoryName,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
           created_at as createTime, updated_at as updateTime,
@@ -4026,6 +4165,10 @@ router.get('/:id', requireAuth, async (req, res) => {
           receipt_confirmed_by as receiptConfirmedBy,
           reject_reason as rejectReason,
           reimbursement_scope as reimbursementScope,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_id
+            ELSE welfare_category_id END as welfareCategoryId,
+          CASE WHEN type = 'welfare_two' THEN welfare_two_category_name_snapshot
+            ELSE welfare_category_name_snapshot END as welfareCategoryName,
           reimbursement_month as reimbursementMonth,
           service_target as serviceTarget,
           created_at as createTime, updated_at as updateTime,
@@ -4088,6 +4231,9 @@ router.get('/:id', requireAuth, async (req, res) => {
       ...record,
       actionTime: formatDateTime(record.actionTime),
     }))
+    const approvalSkipped = approvalHistory.some(
+      (record: any) => record.action === 'auto_approved',
+    )
 
     console.log('📋 返回报销单详情:', {
       id,
@@ -4144,6 +4290,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       success: true,
       data: {
         ...formattedReimbursement,
+        approvalSkipped,
         approvalInstanceId: currentApprovalInstance?.id || null,
         invoices,
         approvalHistory: formattedApprovalHistory,
@@ -4174,11 +4321,14 @@ router.put('/:id', requireAuth, async (req, res) => {
       invoices,
       businessType,
       client: clientName,
+      reimbursementScope,
       serviceTarget,
       status = 'pending',
+      welfareCategoryId,
     } = req.body
     const userId = req.session.user?.id
     const userName = req.session.user?.name
+    const userRole = req.session.user?.role
 
     if (!userId || !userName) {
       return res.status(401).json({
@@ -4206,6 +4356,31 @@ router.put('/:id', requireAuth, async (req, res) => {
         success: false,
         message: '报销单不存在或无权修改',
       })
+    }
+
+    if (!isReimbursementType(existingReimbursement.type)) {
+      return res.status(409).json({ success: false, message: '报销单类型无效' })
+    }
+    if (
+      isWelfareReimbursementType(existingReimbursement.type)
+      && userRole !== 'chairman'
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: '福利报销仅限董事长账号使用',
+      })
+    }
+    if (
+      isWelfareReimbursementType(existingReimbursement.type)
+      && !String(
+        welfareCategoryId
+          || (existingReimbursement.type === 'welfare_one'
+            ? existingReimbursement.welfare_category_id
+            : existingReimbursement.welfare_two_category_id)
+          || '',
+      ).trim()
+    ) {
+      return res.status(400).json({ success: false, message: '请选择福利报销范围' })
     }
 
     // 验证状态值：只能修改草稿或已驳回的单据
@@ -4334,6 +4509,9 @@ router.put('/:id', requireAuth, async (req, res) => {
       0,
     )
     const totalAmount = totalAmountCents / 100
+    const totalDeduction = reimbursementDeductionAmount(processedInvoices)
+    const approvalSkipped = status === 'pending' && userRole === 'chairman'
+    const persistedStatus = approvalSkipped ? 'approved' : status
 
     // 如果是提交审批（status 变为 pending），提前进行业务规则校验
     if (status === 'pending') {
@@ -4342,6 +4520,12 @@ router.put('/:id', requireAuth, async (req, res) => {
         return res.status(400).json({
           success: false,
           message: '大额报销适用于发票总金额超过 1000 元的报销申请',
+        })
+      }
+      if (approvalSkipped && totalAmount <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: '核减后报销金额必须大于零才能进入待付款',
         })
       }
     }
@@ -4378,6 +4562,25 @@ router.put('/:id', requireAuth, async (req, res) => {
 
     // 使用 PostgreSQL 事务校验唯一性并更新主表和发票明细
     await db.transaction(async (client) => {
+      const existingWelfareCategoryId = existingReimbursement.type === 'welfare_one'
+        ? existingReimbursement.welfare_category_id
+        : existingReimbursement.type === 'welfare_two'
+          ? existingReimbursement.welfare_two_category_id
+          : null
+      const selectedWelfareCategoryId = String(
+        welfareCategoryId || existingWelfareCategoryId || '',
+      ).trim()
+      const welfareCategory = isWelfareReimbursementType(existingReimbursement.type)
+        ? await loadActiveWelfareCategory(
+            client,
+            existingReimbursement.type,
+            selectedWelfareCategoryId,
+          )
+        : undefined
+      if (isWelfareReimbursementType(existingReimbursement.type) && !welfareCategory) {
+        throw new RouteError(400, '福利报销范围不存在或已停用')
+      }
+
       await assertInvoicesNotUsedInContractFinancial(
         client,
         reimbursementInvoiceNumbersForCrossModule(processedInvoices),
@@ -4438,18 +4641,29 @@ router.put('/:id', requireAuth, async (req, res) => {
         `
         UPDATE reimbursements
         SET category = ?, title = ?, total_amount = ?, status = ?,
-            description = ?, business_type = ?, client = ?, service_target = ?, reimbursement_month = ?, updated_at = ?
+            description = ?, business_type = ?, client = ?, service_target = ?,
+            reimbursement_month = ?, reimbursement_scope = ?,
+            welfare_category_id = ?, welfare_category_name_snapshot = ?,
+            welfare_two_category_id = ?, welfare_two_category_name_snapshot = ?,
+            updated_at = ?
         WHERE id = ? AND user_id = ?
       `,
         category || null,
         title,
         totalAmount,
-        status,
+        persistedStatus,
         description || null,
         businessType || null,
         clientName || null,
         serviceTarget || clientName || null,
         reimbursementMonth,
+        isWelfareReimbursementType(existingReimbursement.type)
+          ? null
+          : reimbursementScope || existingReimbursement.reimbursement_scope || null,
+        existingReimbursement.type === 'welfare_one' ? welfareCategory?.id || null : null,
+        existingReimbursement.type === 'welfare_one' ? welfareCategory?.name || null : null,
+        existingReimbursement.type === 'welfare_two' ? welfareCategory?.id || null : null,
+        existingReimbursement.type === 'welfare_two' ? welfareCategory?.name || null : null,
         timestamp,
         id,
         userId,
@@ -4498,11 +4712,21 @@ router.put('/:id', requireAuth, async (req, res) => {
           oldReimbursement.status === 'rejected') &&
         status === 'pending'
       ) {
-        // 更新提交时间，清除驳回原因
+        // 更新提交时间，清除驳回原因；董事长报销同时记录免审批直达事实。
         await txRun(
           client,
-          'UPDATE reimbursements SET submit_time = ?, reject_reason = NULL WHERE id = ?',
+          `UPDATE reimbursements
+           SET submit_time = ?, reject_reason = NULL,
+               approve_time = CASE WHEN ? THEN ? ELSE approve_time END,
+               approver = CASE WHEN ? THEN '系统免审批' ELSE approver END,
+               deduction_amount = CASE WHEN ? THEN ? ELSE deduction_amount END
+           WHERE id = ?`,
           timestamp,
+          approvalSkipped,
+          timestamp,
+          approvalSkipped,
+          approvalSkipped,
+          totalDeduction,
           id,
         )
 
@@ -4518,28 +4742,26 @@ router.put('/:id', requireAuth, async (req, res) => {
 
         if (!existingApproval) {
           const approvalInstanceId = nanoid()
-
-          // 确定审批类型
-          const approvalType =
-            existingReimbursement.type === 'basic'
-              ? 'reimbursement_basic'
-              : existingReimbursement.type === 'large'
-                ? 'reimbursement_large'
-                : 'reimbursement_business'
+          const approvalType = reimbursementApprovalType(
+            existingReimbursement.type as ReimbursementType,
+          )
+          const approvalStatus = approvalSkipped ? 'approved' : 'pending'
 
           await txRun(
             client,
             `
             INSERT INTO approval_instances (
               id, flow_id, type, target_id, target_type, applicant_id,
-              current_step, status, submit_time, created_at, updated_at
-            ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, 'pending', ?, ?, ?)
+              current_step, status, submit_time, complete_time, created_at, updated_at
+            ) VALUES (?, NULL, ?, ?, 'reimbursement', ?, 1, ?, ?, ?, ?, ?)
           `,
             approvalInstanceId,
             approvalType,
             id,
             userId,
+            approvalStatus,
             timestamp,
+            approvalSkipped ? timestamp : null,
             timestamp,
             timestamp,
           )
@@ -4574,6 +4796,26 @@ router.put('/:id', requireAuth, async (req, res) => {
               approvalInstanceId,
             })
           }
+
+          if (approvalSkipped) {
+            await txRun(
+              client,
+              `INSERT INTO approval_records
+                 (id, instance_id, step, approver_id, action, comment, action_time)
+               VALUES (?, ?, 1, ?, 'auto_approved', ?, ?)`,
+              nanoid(),
+              approvalInstanceId,
+              userId,
+              '董事长报销按规则免审批，提交后直达待付款',
+              timestamp,
+            )
+          }
+
+          console.log('✅ 报销单提交状态:', {
+            approvalInstanceId,
+            approvalSkipped,
+            status: persistedStatus,
+          })
         }
       }
     })
@@ -4590,8 +4832,14 @@ router.put('/:id', requireAuth, async (req, res) => {
       success: true,
       data: {
         id,
+        approvalSkipped,
       },
-      message: status === 'draft' ? '草稿保存成功' : '报销单更新成功',
+      message:
+        status === 'draft'
+          ? '草稿保存成功'
+          : approvalSkipped
+            ? '报销单已提交并直达待付款'
+            : '报销单更新成功',
     })
   } catch (error) {
     if (isRouteError(error)) {
@@ -4879,7 +5127,7 @@ function generateBatchNo(): string {
  * 创建批量付款批次
  * POST /api/reimbursement/payment-batch/create
  */
-router.post('/payment-batch/create', requireAdmin, async (req, res) => {
+router.post('/payment-batch/create', requirePaymentAdmin, async (req, res) => {
   try {
     const currentUserId = req.session.userId!
 
@@ -5162,7 +5410,7 @@ router.post('/payment-batch/create', requireAdmin, async (req, res) => {
  */
 router.post(
   '/payment-batch/:batchId/verify-proof',
-  requireAdmin,
+  requirePaymentAdmin,
   uploadPaymentProof.single('paymentProof'),
   async (req, res) => {
     try {
@@ -5482,7 +5730,7 @@ router.post(
  */
 router.post(
   '/payment-batch/:batchId/complete',
-  requireAdmin,
+  requirePaymentAdmin,
   async (req, res) => {
     const movedPaymentProofPaths: string[] = []
     let paymentProofCommitted = false

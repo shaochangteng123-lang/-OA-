@@ -126,7 +126,7 @@ def resolve_v6_medium_model_directories(config):
 
 def resolve_ocr_model(model_version=None):
     """解析并校验本次请求使用的 OCR 模型。"""
-    resolved = str(model_version or os.environ.get("OCR_MODEL") or "v4_mobile").strip()
+    resolved = str(model_version or os.environ.get("OCR_MODEL") or "v6_medium").strip()
     if resolved not in SUPPORTED_OCR_MODELS:
         supported = ", ".join(sorted(SUPPORTED_OCR_MODELS))
         raise RuntimeError(

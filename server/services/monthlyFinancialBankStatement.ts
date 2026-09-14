@@ -186,6 +186,32 @@ function extractStructuredAccount(text: string, label: string): string {
   return normalizeMonthlyBankAccount(account);
 }
 
+export function extractMonthlyBankStructuredPartyNames(text: string): {
+  payer: string;
+  payee: string;
+} {
+  return {
+    payer:
+      extractStructuredValue(
+        text,
+        /付款名称\s*[：:]\s*(.+?)(?=\s+(?:收款名称|付款账号|收款账号|付款银行|收款银行)\s*[：:]|$)/mu,
+      ) ||
+      extractStructuredValue(
+        text,
+        /付款银行\s*[：:]\s*(.+?)(?=\s+(?:收款银行|付款账号|收款账号)\s*[：:]|$)/mu,
+      ),
+    payee:
+      extractStructuredValue(
+        text,
+        /收款名称\s*[：:]\s*(.+?)(?=\s+(?:付款名称|付款账号|收款账号|付款银行|收款银行)\s*[：:]|$)/mu,
+      ) ||
+      extractStructuredValue(
+        text,
+        /收款单位\s*[：:]\s*(.+?)(?=\s+(?:付款单位|付款账号|收款账号|付款银行|收款银行)\s*[：:]|$)/mu,
+      ),
+  };
+}
+
 function inferReceiptSourceSide(text: string): ReceiptEvidence["sourceSide"] {
   const compactText = String(text || "")
     .normalize("NFKC")
@@ -242,17 +268,14 @@ function parseStructuredReceipt(
   const purpose = extractStructuredValue(text, /用途\s*[：:]\s*([^\n\r]+)/u);
   const note = extractStructuredValue(text, /附注\s*[：:]\s*([^\n\r]+)/u);
   const rawDate = extractStructuredTransactionDate(text);
+  const partyNames = extractMonthlyBankStructuredPartyNames(text);
   return {
     pageNo,
     position,
     previewPath,
-    payer:
-      extractStructuredValue(text, /付款名称\s*[：:]\s*([^\n\r]+)/u) ||
-      extractStructuredValue(text, /付款银行\s*[：:]\s*([^\n\r]+)/u),
+    payer: partyNames.payer,
     payerAccount,
-    payee:
-      extractStructuredValue(text, /收款名称\s*[：:]\s*([^\n\r]+)/u) ||
-      extractStructuredValue(text, /收款单位\s*[：:]\s*([^\n\r]+)/u),
+    payee: partyNames.payee,
     payeeAccount,
     amount: Number(amountText.replace(/[,，]/g, "")) || 0,
     remark: [purpose, note].filter(Boolean).join("；"),

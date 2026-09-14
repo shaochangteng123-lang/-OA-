@@ -29,6 +29,7 @@ export interface ContractSealApplicationContractSnapshot {
   contractTitle: string | null;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   projectName: string | null;
   amount: string | null;
   categoryLabel: string;
@@ -205,6 +206,7 @@ function normalizeContractSnapshot(
       optionalText(contract?.contractTitle, "合同名称", 300) || null,
     partyA: requiredText(contract?.partyA, "甲方单位", 300),
     partyB: requiredText(contract?.partyB, "乙方单位", 300),
+    partyC: optionalText(contract?.partyC, "丙方单位", 300) || null,
     projectName: optionalText(contract?.projectName, "项目名称", 500) || null,
     amount: optionalText(contract?.amount, "合同金额", 100) || null,
     categoryLabel: requiredText(contract?.categoryLabel, "合同分类", 100),
@@ -513,8 +515,14 @@ async function renderApplicationPdf(
     color: "#134e4a",
     maximumLines: 1,
   });
-  drawField(context, "甲方单位", contract.partyA, 42, 169, 248, 67);
-  drawField(context, "乙方单位", contract.partyB, 305, 169, 248, 67);
+  if (contract.partyC) {
+    drawField(context, "甲方单位", contract.partyA, 42, 169, 160, 67);
+    drawField(context, "乙方单位", contract.partyB, 217, 169, 160, 67);
+    drawField(context, "丙方单位", contract.partyC, 392, 169, 161, 67);
+  } else {
+    drawField(context, "甲方单位", contract.partyA, 42, 169, 248, 67);
+    drawField(context, "乙方单位", contract.partyB, 305, 169, 248, 67);
+  }
   drawField(
     context,
     "项目 / 合同名称",

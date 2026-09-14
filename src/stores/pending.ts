@@ -20,10 +20,14 @@ export interface PendingCounts {
   myReimbursementBasic: number
   myReimbursementLarge: number
   myReimbursementBusiness: number
+  myReimbursementWelfareOne: number
+  myReimbursementWelfareTwo: number
   // 用户: 报销已驳回（按类型）
   myReimbursementBasicRejected: number
   myReimbursementLargeRejected: number
   myReimbursementBusinessRejected: number
+  myReimbursementWelfareOneRejected: number
+  myReimbursementWelfareTwoRejected: number
   // 用户: 转正待提交
   myProbationPending: boolean
   // 用户: 离职待办
@@ -58,9 +62,13 @@ export const usePendingStore = defineStore('pending', () => {
     myReimbursementBasic: 0,
     myReimbursementLarge: 0,
     myReimbursementBusiness: 0,
+    myReimbursementWelfareOne: 0,
+    myReimbursementWelfareTwo: 0,
     myReimbursementBasicRejected: 0,
     myReimbursementLargeRejected: 0,
     myReimbursementBusinessRejected: 0,
+    myReimbursementWelfareOneRejected: 0,
+    myReimbursementWelfareTwoRejected: 0,
     myProbationPending: false,
     myResignationPending: 0,
     myHandoverPending: 0,

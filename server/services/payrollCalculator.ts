@@ -38,13 +38,15 @@ export type PayrollAmountField =
   | "withheld_housing_fund"
   | "withheld_tax"
   | "withheld_total"
+  | "withheld_actual_amount"
   | "personal_pension"
   | "personal_medical"
   | "personal_unemployment"
   | "personal_social_total"
   | "personal_housing_fund"
   | "individual_income_tax"
-  | "net_salary";
+  | "net_salary"
+  | "net_salary_actual_amount";
 
 export type PayrollTotals = Record<PayrollAmountField, string> & {
   cost_total: string;
@@ -65,6 +67,7 @@ export const PAYROLL_AMOUNT_FIELDS: PayrollAmountField[] = [
   "withheld_housing_fund",
   "withheld_tax",
   "withheld_total",
+  "withheld_actual_amount",
   "personal_pension",
   "personal_medical",
   "personal_unemployment",
@@ -72,6 +75,7 @@ export const PAYROLL_AMOUNT_FIELDS: PayrollAmountField[] = [
   "personal_housing_fund",
   "individual_income_tax",
   "net_salary",
+  "net_salary_actual_amount",
 ];
 
 const INPUT_AMOUNT_PATTERN = /^(?:0|[1-9]\d{0,11})(?:\.\d{1,8})?$/;
@@ -424,8 +428,8 @@ export function calculatePayrollTotals(
   }
   totals.cost_total = formatMoney(
     addDecimals(
-      parseDecimal(totals.withheld_total),
-      parseDecimal(totals.net_salary),
+      parseDecimal(totals.withheld_actual_amount),
+      parseDecimal(totals.net_salary_actual_amount),
     ),
   );
   return totals;

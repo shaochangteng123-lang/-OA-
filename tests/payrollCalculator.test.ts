@@ -53,18 +53,23 @@ describe("工资精确计算", () => {
       housingFundBase: string,
       socialInsuranceBase: string,
       tax: string,
-    ) => ({
-      monthly_salary: salary,
-      housing_fund_base: housingFundBase,
-      contribution_base: socialInsuranceBase,
-      individual_income_tax: tax,
-      ...calculatePayrollBreakdown(
+    ) => {
+      const breakdown = calculatePayrollBreakdown(
         salary,
         housingFundBase,
         socialInsuranceBase,
         tax,
-      ),
-    });
+      );
+      return {
+        monthly_salary: salary,
+        housing_fund_base: housingFundBase,
+        contribution_base: socialInsuranceBase,
+        individual_income_tax: tax,
+        ...breakdown,
+        withheld_actual_amount: breakdown.withheld_total,
+        net_salary_actual_amount: breakdown.net_salary,
+      };
+    };
     const totals = calculatePayrollTotals([
       createRow("8000", "8000", "8000", "50.31"),
       createRow("7000", "6000", "7162", "26.55"),
@@ -88,6 +93,23 @@ describe("工资精确计算", () => {
     expect(totals.personal_housing_fund).toBe("3060.00");
     expect(totals.net_salary).toBe("44132.00");
     expect(totals.cost_total).toBe("69987.26");
+  });
+
+  it("成本合计使用代扣和工资的实际发生额", () => {
+    const breakdown = calculatePayrollBreakdown("8000", "8000", "8000", "0");
+    const totals = calculatePayrollTotals([
+      {
+        monthly_salary: "8000",
+        housing_fund_base: "8000",
+        contribution_base: "8000",
+        individual_income_tax: "0",
+        ...breakdown,
+        withheld_actual_amount: "4100.25",
+        net_salary_actual_amount: "6500.75",
+      },
+    ]);
+
+    expect(totals.cost_total).toBe("10601.00");
   });
 });
 

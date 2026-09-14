@@ -18,8 +18,10 @@ import {
   toStoredUploadPath,
 } from "../utils/upload-date.js";
 import { normalizeUploadFileName } from "../utils/upload-file-name.js";
+import { canReadMonthlyFinancialReport } from "../utils/monthly-financial-permissions.js";
 import { validateFilePath } from "../utils/file-validation.js";
 import { isValidBankBusinessDate } from "../utils/bank-business-date.js";
+import { CONTRACT_LEDGER_ROOT_AREA_FILTER_SQL } from "../services/contractLedgerFilter.js";
 import {
   calculateContractAmountChange,
   calculateMainBusinessIncome,
@@ -128,6 +130,10 @@ import {
   isContractDomainError,
   isBeijingContractArea,
   inferAssetFundingMode,
+  allowsDirectAssetPaymentFirst,
+  refreshPendingAssetFundingMode,
+  financialDirectionFromContractCategory,
+  listContractTargetAmountChanges,
   normalizeAutomaticContractConfidence,
   postContractFinancialSettlements,
   recalculateContractExecutionStatus,
@@ -142,6 +148,7 @@ import {
   supplementSubjectMatchesParent,
   syncProjectContractTotal,
   updateContractDraft,
+  updateContractTargetAmount,
   validateNewContractUploadContext,
   withdrawContractApproval,
   type ContractAssetCategory,
@@ -200,6 +207,7 @@ const ASSET_CATEGORIES = [
   "vehicle_rental",
   "parking_space",
   "office_asset",
+  "notary_fee",
   "other",
 ] as const;
 const DECLARED_SUBTYPE_OPTIONS = {
@@ -210,7 +218,7 @@ const DECLARED_SUBTYPE_OPTIONS = {
   ],
   non_main: [
     { value: "non_main_income", label: "非主营业务收入合同" },
-    { value: "other_service", label: "其他服务合同" },
+    { value: "non_main_expense", label: "非主营业务支出合同" },
   ],
   asset: [
     { value: "procurement", label: "采购合同" },
@@ -220,8 +228,17 @@ const DECLARED_SUBTYPE_OPTIONS = {
     { value: "vehicle_rental", label: "汽车租赁" },
     { value: "parking_space", label: "车位租赁" },
     { value: "office_asset", label: "办公资产合同" },
+    { value: "notary_fee", label: "公证费" },
   ],
 } as const;
+const DASHBOARD_NON_MAIN_SUBTYPES = [
+  "non_main_income",
+  "non_main_expense",
+] as const;
+const DASHBOARD_DECLARED_SUBTYPE_FILTER = `AND (filters.declared_subtype IS NULL
+    OR (filters.declared_subtype = 'non_main_income'
+      AND root.declared_subtype IN ('non_main_income', 'other_service'))
+    OR root.declared_subtype = filters.declared_subtype)`;
 const EXPENSE_CATEGORIES = [
   "rent",
   "electricity",
@@ -356,8 +373,12 @@ function currentFixedContractAmountExpression(alias: string): string {
 
 function contractCategoryDirectionExpression(alias: string): string {
   return `CASE
-    WHEN ${alias}.category = 'asset' THEN 'cost'
-    WHEN ${alias}.category IN ('main_business', 'non_main') THEN 'income'
+    WHEN COALESCE(${alias}.category, ${alias}.declared_category) = 'asset'
+      THEN 'cost'
+    WHEN COALESCE(${alias}.category, ${alias}.declared_category) = 'non_main'
+      AND ${alias}.declared_subtype = 'non_main_expense' THEN 'cost'
+    WHEN COALESCE(${alias}.category, ${alias}.declared_category)
+      IN ('main_business', 'non_main') THEN 'income'
     ELSE NULL
   END`;
 }
@@ -723,6 +744,27 @@ function normalizeFinancialDisplayValue(value: unknown): string | null {
   return text ? text.normalize("NFKC") : null;
 }
 
+function requireCnyContractBankCurrency(
+  value: unknown,
+  evidence: unknown,
+): "CNY" {
+  const currency = normalizeFinancialDisplayValue(value)?.toUpperCase();
+  const currencyEvidence = normalizeFinancialDisplayValue(evidence);
+  if (
+    currency !== "CNY" ||
+    !["currency_label", "renminbi_text", "currency_symbol"].includes(
+      currencyEvidence || "",
+    )
+  ) {
+    throw new ContractDomainError(
+      422,
+      "银行回单未识别到明确人民币币种，不能生成财务草稿",
+      "FINANCIAL_OCR_SNAPSHOT_INVALID",
+    );
+  }
+  return "CNY";
+}
+
 function isVehicleRentalContract(
   contract: Pick<
     ContractRow,
@@ -833,7 +875,7 @@ function assertAssetPaymentParties(
   if (!fundingMode || fundingMode === "pending_review") {
     throw new ContractDomainError(
       409,
-      "请先确认资产合同资金承担方式",
+      "系统尚未识别出我方付款主体，请核对合同主体信息后刷新页面",
       "ASSET_FUNDING_MODE_REQUIRED",
     );
   }
@@ -1195,6 +1237,7 @@ function validateDashboardFilters(query: Request["query"]): {
   startMonth: string;
   endMonth: string;
   category: ContractCategory | null;
+  declaredSubtype: (typeof DASHBOARD_NON_MAIN_SUBTYPES)[number] | null;
   projectId: string | null;
 } {
   const businessDate = currentShanghaiDate();
@@ -1226,6 +1269,24 @@ function validateDashboardFilters(query: Request["query"]): {
   ) {
     throw new ContractDomainError(400, "合同分类不正确");
   }
+  const declaredSubtypeValue = optionalQueryScalar(
+    query.declaredSubtype,
+    "非主营收支类型",
+  );
+  if (
+    declaredSubtypeValue &&
+    !(DASHBOARD_NON_MAIN_SUBTYPES as readonly string[]).includes(
+      declaredSubtypeValue,
+    )
+  ) {
+    throw new ContractDomainError(400, "非主营收支类型不正确");
+  }
+  if (declaredSubtypeValue && categoryValue !== "non_main") {
+    throw new ContractDomainError(
+      400,
+      "筛选非主营收支类型时合同分类必须选择非主营项目合同",
+    );
+  }
   const projectId = optionalQueryScalar(query.projectId, "项目编号");
   if (projectId && projectId.length > 128) {
     throw new ContractDomainError(400, "项目编号长度不能超过 128 个字符");
@@ -1234,6 +1295,9 @@ function validateDashboardFilters(query: Request["query"]): {
     startMonth,
     endMonth,
     category: categoryValue as ContractCategory | null,
+    declaredSubtype: declaredSubtypeValue as
+      | (typeof DASHBOARD_NON_MAIN_SUBTYPES)[number]
+      | null,
     projectId,
   };
 }
@@ -1275,6 +1339,7 @@ function toContractApi(row: Record<string, any>) {
   const contractCompanySubject = resolveContractFinancialCompanySubject([
     row.party_a,
     row.party_b,
+    row.party_c,
   ]);
   return {
     id: row.id,
@@ -1303,6 +1368,7 @@ function toContractApi(row: Record<string, any>) {
     renewalContractName: row.renewal_contract_name || null,
     partyA: row.party_a,
     partyB: row.party_b,
+    partyC: row.party_c,
     contractCompanySubjectName: contractCompanySubject?.name || null,
     amountDelta: row.amount_delta,
     originalContractAmount: row.original_contract_amount,
@@ -1323,6 +1389,13 @@ function toContractApi(row: Record<string, any>) {
         ? Number(row.amount_after_change)
         : null,
     currentEffectiveAmount: row.current_effective_amount,
+    pricingMode: row.pricing_mode || "fixed",
+    targetAmount: row.target_amount,
+    targetQuantity: row.target_quantity,
+    unitPrice: row.unit_price,
+    confirmedQuantity: row.confirmed_quantity,
+    confirmedContractAmount: row.confirmed_contract_amount,
+    quantityUnit: row.quantity_unit,
     supplementChangeType: row.supplement_change_type,
     supplementSequence:
       row.supplement_sequence == null ? null : Number(row.supplement_sequence),
@@ -1454,6 +1527,9 @@ function canonicalOcrField(field: string): string {
     partyb: "party_b",
     party_b_name: "party_b",
     乙方: "party_b",
+    partyc: "party_c",
+    party_c_name: "party_c",
+    丙方: "party_c",
     project: "project_name",
     projectname: "project_name",
     项目名称: "project_name",
@@ -1527,7 +1603,9 @@ function normalizeAssetCategory(
     车位合同: "parking_space",
     车位租赁: "parking_space",
     office_asset: "office_asset",
+    notary_fee: "notary_fee",
     办公资产合同: "office_asset",
+    公证费: "notary_fee",
     other: "other",
     其他: "other",
   };
@@ -1547,6 +1625,10 @@ async function clearDraftAutomaticRecognitionValues(
        END,
        party_b = CASE
          WHEN relation_type IN ('supplement', 'termination') THEN party_b
+         ELSE NULL
+       END,
+       party_c = CASE
+         WHEN relation_type IN ('supplement', 'termination') THEN party_c
          ELSE NULL
        END,
        project_name = CASE
@@ -1758,6 +1840,30 @@ export async function runRecognitionJob(
   try {
     if (!validateFilePath(job.file_path)) throw new Error("合同文件路径不安全");
     const absolutePath = path.resolve(process.cwd(), job.file_path);
+    if (
+      job.declared_category === "asset" &&
+      job.declared_subtype === "notary_fee"
+    ) {
+      const { recognizeNotaryPaymentNotice, activateNotaryPaymentNotice } =
+        await import("../services/notaryPaymentNotice.js");
+      const notice = await recognizeNotaryPaymentNotice(
+        absolutePath,
+        job.mime_type,
+      );
+      await db.transaction((client) =>
+        activateNotaryPaymentNotice(
+          client,
+          {
+            contractId: job.contract_id,
+            jobId,
+            fileId: job.file_id,
+            workerToken,
+          },
+          notice,
+        ),
+      );
+      return;
+    }
     const result = await recognitionRunner(absolutePath, job.mime_type, {
       expectedCategory: job.declared_category || undefined,
       expectedDeclaredSubtype: job.declared_subtype || undefined,
@@ -1932,6 +2038,7 @@ export async function runRecognitionJob(
         fields: (result.fields || []).map((field) => ({
           field: canonicalOcrField(field.field),
           normalizedValue: field.normalizedValue,
+          warnings: field.warnings || [],
         })),
         amountContext: getContractAmountAutomaticAdoptionContext(result),
         safetyContext,
@@ -2438,6 +2545,37 @@ export async function runRecognitionJob(
             throw new Error(`合同识别字段最终值写入失败：${fieldCode}`);
           }
         }
+        const adoptedPartyC = ["supplement", "termination"].includes(
+          contractLock.rows[0].relation_type,
+        )
+          ? relationParent?.party_c || automaticDecision.partyC
+          : automaticDecision.partyC;
+        if (adoptedPartyC) {
+          const adoptedPartyCField = await client.query(
+            `UPDATE contract_ocr_fields SET
+               final_value = $2,
+               manually_confirmed = FALSE,
+               confirmed_by = NULL,
+               confirmed_at = NULL,
+               updated_at = $3
+             WHERE job_id = $1 AND field_code = 'party_c'`,
+            [jobId, adoptedPartyC, finishedAt],
+          );
+          if (adoptedPartyCField.rowCount === 0) {
+            await client.query(
+              `INSERT INTO contract_ocr_fields (
+                 id, job_id, contract_id, field_code, original_value,
+                 normalized_value, final_value, confidence, source,
+                 page_number, evidence, manually_confirmed, created_at,
+                 updated_at
+               ) VALUES (
+                 $1,$2,$3,'party_c',NULL,$4,$4,100,'system_inherited',NULL,
+                 '系统从主合同继承丙方单位',FALSE,$5,$5
+               )`,
+              [nanoid(), jobId, job.contract_id, adoptedPartyC, finishedAt],
+            );
+          }
+        }
         const recognizedAmount = parseOptionalAmount(
           automaticDecision.values.amount,
         );
@@ -2459,6 +2597,9 @@ export async function runRecognitionJob(
                THEN NULLIF($19, '') ELSE NULLIF($2, '') END,
              party_b = CASE WHEN $18::text IN ('supplement', 'termination')
                THEN NULLIF($20, '') ELSE NULLIF($3, '') END,
+             party_c = CASE WHEN $18::text IN ('supplement', 'termination')
+               THEN COALESCE(NULLIF($28, ''), NULLIF($29, ''))
+               ELSE NULLIF($29, '') END,
              project_name = NULLIF($4, ''),
              amount_delta = $5,
              original_contract_amount = CASE WHEN $18::text = 'main'
@@ -2514,6 +2655,8 @@ export async function runRecognitionJob(
             supplementAmountSnapshot?.changeType ?? null,
             terminationAmountSnapshot?.currentEffectiveAmount ?? null,
             terminationAmountSnapshot?.settledAmount ?? null,
+            relationParent?.party_c || "",
+            automaticDecision.partyC || "",
           ],
         );
         if (updatedContract.rowCount !== 1) {
@@ -2524,6 +2667,7 @@ export async function runRecognitionJob(
             category,
             automaticDecision.values.party_a,
             automaticDecision.values.party_b,
+            automaticDecision.partyC,
           );
           if (inferredFundingMode) {
             await client.query(
@@ -3256,6 +3400,7 @@ router.get("/meta", requireContractLedgerRead, async (_req, res) => {
           { value: "vehicle_rental", label: "汽车租赁" },
           { value: "parking_space", label: "车位租赁" },
           { value: "office_asset", label: "办公资产合同" },
+          { value: "notary_fee", label: "公证费" },
           { value: "other", label: "其他" },
         ],
         expenseCategories: [...EXPENSE_CATEGORIES],
@@ -3553,11 +3698,31 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       CONTRACT_STATUSES,
       "合同状态",
     );
+    const declaredSubtypes = validateQueryEnumList(
+      req.query.declaredSubtype,
+      ["non_main_income", "non_main_expense"] as const,
+      "非主营二级分类",
+    );
     if (categories.length > 0) {
       addFilter(
         "COALESCE(c.category, c.declared_category) = ANY(?::text[])",
         categories,
       );
+    }
+    if (declaredSubtypes.length > 0) {
+      // 历史 other_service（其他服务）与非主营收入使用同一收入闭环；台账统一归入
+      // “非主营业务收入合同”，避免旧记录在收入筛选中遗漏。
+      where.push("COALESCE(c.category, c.declared_category) = 'non_main'");
+      const storedDeclaredSubtypes = [
+        ...new Set(
+          declaredSubtypes.flatMap((subtype) =>
+            subtype === "non_main_income"
+              ? ["non_main_income", "other_service"]
+              : [subtype],
+          ),
+        ),
+      ];
+      addFilter("c.declared_subtype = ANY(?::text[])", storedDeclaredSubtypes);
     }
     if (statuses.length > 0) {
       addFilter("c.status = ANY(?::text[])", statuses);
@@ -3601,7 +3766,10 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
                   AND settlement_payment_contract.is_deleted = FALSE
                   AND settlement_payment_contract.status <> 'rejected'
                   AND ${confirmedFinancialPredicate("settlement_payment")}
-              ), 0) WHEN settlement_root.category = 'asset' THEN COALESCE((
+              ), 0) WHEN COALESCE(
+                settlement_root.financial_direction,
+                ${contractCategoryDirectionExpression("settlement_root")}
+              ) = 'cost' THEN COALESCE((
                 SELECT SUM(settlement_payment.amount)
                 FROM contract_payments settlement_payment
                 JOIN contracts settlement_payment_contract
@@ -3639,7 +3807,12 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
     const projectId = optionalQueryScalar(req.query.projectId, "项目编号");
     if (projectId) addFilter("c.project_id = ?", projectId);
     const area = optionalQueryScalar(req.query.area, "所属区域");
-    if (area) addFilter("c.area = ?", area);
+    if (area) {
+      if (!CONTRACT_AREA_SET.has(area)) {
+        throw new ContractDomainError(400, "合同所属区域不正确");
+      }
+      addFilter(CONTRACT_LEDGER_ROOT_AREA_FILTER_SQL, area);
+    }
     const relationType = optionalQueryScalar(
       req.query.relationType,
       "合同关系",
@@ -3656,7 +3829,7 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
     );
     if (counterparty) {
       const value = `%${counterparty}%`;
-      params.push(value, value, value, value);
+      params.push(value, value, value, value, value);
       where.push(
         `EXISTS (
           SELECT 1 FROM contracts counterparty_contract
@@ -3668,6 +3841,7 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
             AND (
               counterparty_contract.party_a ILIKE ?
               OR counterparty_contract.party_b ILIKE ?
+              OR counterparty_contract.party_c ILIKE ?
               OR counterparty_contract.title ILIKE ?
               OR counterparty_contract.project_name ILIKE ?
             )
@@ -3708,10 +3882,10 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
     if (keyword) {
       params.push(`%${keyword}%`);
       where.push(
-        `(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)`,
+        `(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.party_c ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)`,
       );
       const value = params[params.length - 1];
-      params.push(value, value, value, value, value);
+      params.push(value, value, value, value, value, value);
     }
     const count = await db.get<{ count: number }>(
       `SELECT COUNT(DISTINCT COALESCE(c.root_contract_id, c.id))::int AS count
@@ -3747,7 +3921,10 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          SELECT root.id AS root_id,
            COALESCE(root.category, root.declared_category) AS category,
            root.status AS root_status,
-           root.financial_direction,
+           COALESCE(
+             root.financial_direction,
+             ${contractCategoryDirectionExpression("root")}
+           ) AS financial_direction,
            ${contributesToCurrentAmount("root")} AS is_effective,
            ${pendingSignatureContractPredicate("root")} AS is_pending_signature,
            CASE WHEN ${contributesToCurrentAmount("root")}
@@ -3801,20 +3978,20 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          COALESCE(SUM(root_metrics.pending_signature_amount), 0)
            AS pending_signature_amount,
          COALESCE(SUM(root_metrics.current_amount) FILTER (
-           WHERE root_metrics.category IN ('main_business', 'non_main')
+           WHERE root_metrics.financial_direction = 'income'
          ), 0) AS effective_income_contract_amount,
          COALESCE(SUM(root_metrics.current_amount) FILTER (
-           WHERE root_metrics.category = 'asset'
+           WHERE root_metrics.financial_direction = 'cost'
          ), 0) AS effective_expense_contract_amount,
          COUNT(*) FILTER (WHERE root_metrics.is_effective)::int
            AS effective_contract_count,
          COUNT(*) FILTER (
            WHERE root_metrics.is_effective
-             AND root_metrics.category IN ('main_business', 'non_main')
+             AND root_metrics.financial_direction = 'income'
          )::int AS effective_income_contract_count,
          COUNT(*) FILTER (
            WHERE root_metrics.is_effective
-             AND root_metrics.category = 'asset'
+             AND root_metrics.financial_direction = 'cost'
          )::int AS effective_expense_contract_count,
          COUNT(*) FILTER (WHERE root_metrics.is_pending_signature)::int
            AS pending_signature_contract_count,
@@ -3865,6 +4042,7 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       `WITH root_metrics AS (
          SELECT root.id AS root_id,
            root.status AS root_status,
+           COALESCE(root.category, root.declared_category) AS category,
            root.financial_direction,
            root.asset_funding_mode,
            root.declared_subtype,
@@ -4326,7 +4504,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
     )
       ? "AND root.area <> '全部'"
       : "";
-    const { startMonth, endMonth, category, projectId } =
+    const { startMonth, endMonth, category, declaredSubtype, projectId } =
       validateDashboardFilters(req.query);
     const [startYear, startMonthNumber] = startMonth.split("-").map(Number);
     const [endYear, endMonthNumber] = endMonth.split("-").map(Number);
@@ -4365,11 +4543,16 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         period_contract_amount: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id,
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id,
              ?::text AS start_month, ?::text AS end_month
          ), root_groups AS (
            SELECT root.id,
              COALESCE(root.category, root.declared_category) AS category,
+             COALESCE(
+               root.financial_direction,
+               ${contractCategoryDirectionExpression("root")}
+             ) AS financial_direction,
              LEFT(root.contract_date, 7) AS contract_month,
              ${currentFixedContractAmountExpression("root")} AS current_amount,
              ${contributesToCurrentAmount("root")} AS is_effective,
@@ -4390,6 +4573,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                filters.category IS NULL
                OR COALESCE(root.category, root.declared_category) = filters.category
              )
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          )
          SELECT COUNT(*)::int AS all_contract_count,
@@ -4397,10 +4581,10 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AS effective_contract_count,
            COUNT(*) FILTER (
              WHERE roots.is_effective
-               AND roots.category IN ('main_business', 'non_main')
+               AND roots.financial_direction = 'income'
            )::int AS effective_income_contract_count,
            COUNT(*) FILTER (
-             WHERE roots.is_effective AND roots.category = 'asset'
+             WHERE roots.is_effective AND roots.financial_direction = 'cost'
            )::int AS effective_expense_contract_count,
            COUNT(*) FILTER (WHERE roots.is_pending_signature)::int
              AS pending_signature_contract_count,
@@ -4413,10 +4597,10 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AS effective_contract_amount,
            COALESCE(SUM(roots.current_amount) FILTER (
              WHERE roots.is_effective
-               AND roots.category IN ('main_business', 'non_main')
+               AND roots.financial_direction = 'income'
            ), 0) AS effective_income_contract_amount,
            COALESCE(SUM(roots.current_amount) FILTER (
-             WHERE roots.is_effective AND roots.category = 'asset'
+             WHERE roots.is_effective AND roots.financial_direction = 'cost'
            ), 0) AS effective_expense_contract_amount,
            COALESCE(SUM(roots.current_amount) FILTER (WHERE roots.is_pending_signature), 0)
              AS pending_signature_amount,
@@ -4426,6 +4610,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            ), 0) AS period_contract_amount
          FROM root_groups roots CROSS JOIN filter_parameters filters`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -4433,20 +4618,35 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
       db.all<{
         category: ContractCategory;
         contract_count: number;
+        income_contract_count: number;
+        expense_contract_count: number;
         fixed_amount_contract_count: number;
         unfixed_amount_contract_count: number;
         total_amount: number;
+        income_contract_amount: number;
+        expense_contract_amount: number;
         period_settled_amount: number;
         cumulative_settled_amount: number;
         fixed_settled_amount: number;
         outstanding_amount: number;
+        period_received_amount: number;
+        period_paid_amount: number;
+        cumulative_received_amount: number;
+        cumulative_paid_amount: number;
+        unreceived_amount: number;
+        unpaid_amount: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id,
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id,
              ?::text AS start_month, ?::text AS end_month
          ), root_groups AS (
            SELECT root.id, root.category, root.asset_funding_mode,
              root.declared_subtype,
+             COALESCE(
+               root.financial_direction,
+               ${contractCategoryDirectionExpression("root")}
+             ) AS financial_direction,
              ${currentFixedContractAmountExpression("root")} AS current_amount
            FROM contracts root
            CROSS JOIN filter_parameters filters
@@ -4456,6 +4656,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND ${contributesToCurrentAmount("root")}
              AND root.category IN ('main_business', 'non_main', 'asset')
              AND (filters.category IS NULL OR root.category = filters.category)
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          ), financial_metrics AS (
            SELECT roots.id,
@@ -4527,32 +4728,65 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
          )
          SELECT roots.category,
            COUNT(*)::int AS contract_count,
+           COUNT(*) FILTER (
+             WHERE roots.financial_direction = 'income'
+           )::int AS income_contract_count,
+           COUNT(*) FILTER (
+             WHERE roots.financial_direction = 'cost'
+           )::int AS expense_contract_count,
            COUNT(*) FILTER (WHERE roots.current_amount IS NOT NULL)::int
              AS fixed_amount_contract_count,
            COUNT(*) FILTER (WHERE roots.current_amount IS NULL)::int
              AS unfixed_amount_contract_count,
            COALESCE(SUM(roots.current_amount), 0) AS total_amount,
-           COALESCE(SUM(CASE WHEN roots.category = 'asset'
+           COALESCE(SUM(roots.current_amount) FILTER (
+             WHERE roots.financial_direction = 'income'
+           ), 0) AS income_contract_amount,
+           COALESCE(SUM(roots.current_amount) FILTER (
+             WHERE roots.financial_direction = 'cost'
+           ), 0) AS expense_contract_amount,
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
              THEN financial.period_cost_settled_amount
              ELSE financial.period_received_amount END), 0)
              AS period_settled_amount,
-           COALESCE(SUM(CASE WHEN roots.category = 'asset'
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
              THEN financial.cost_settled_amount ELSE financial.received_amount END), 0)
              AS cumulative_settled_amount,
            COALESCE(SUM(CASE WHEN roots.current_amount IS NULL THEN 0
-             WHEN roots.category = 'asset' THEN financial.cost_settled_amount
+             WHEN roots.financial_direction = 'cost' THEN financial.cost_settled_amount
              ELSE financial.received_amount END), 0) AS fixed_settled_amount,
            COALESCE(SUM(CASE WHEN roots.current_amount IS NULL THEN 0
-             WHEN roots.category = 'asset'
+             WHEN roots.financial_direction = 'cost'
                THEN GREATEST(roots.current_amount - financial.cost_settled_amount, 0)
              ELSE GREATEST(
                roots.current_amount - financial.received_amount,
                0
-             ) END), 0) AS outstanding_amount
+             ) END), 0) AS outstanding_amount,
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'income'
+             THEN financial.period_received_amount ELSE 0 END), 0)
+             AS period_received_amount,
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
+             THEN financial.period_cost_settled_amount ELSE 0 END), 0)
+             AS period_paid_amount,
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'income'
+             THEN financial.received_amount ELSE 0 END), 0)
+             AS cumulative_received_amount,
+           COALESCE(SUM(CASE WHEN roots.financial_direction = 'cost'
+             THEN financial.cost_settled_amount ELSE 0 END), 0)
+             AS cumulative_paid_amount,
+           COALESCE(SUM(CASE WHEN roots.current_amount IS NOT NULL
+               AND roots.financial_direction = 'income'
+             THEN GREATEST(roots.current_amount - financial.received_amount, 0)
+             ELSE 0 END), 0) AS unreceived_amount,
+           COALESCE(SUM(CASE WHEN roots.current_amount IS NOT NULL
+               AND roots.financial_direction = 'cost'
+             THEN GREATEST(roots.current_amount - financial.cost_settled_amount, 0)
+             ELSE 0 END), 0) AS unpaid_amount
          FROM root_groups roots
          LEFT JOIN financial_metrics financial ON financial.id = roots.id
          GROUP BY roots.category`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -4570,7 +4804,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         other: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id,
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id,
              ?::text AS start_month, ?::text AS end_month
          )
          SELECT
@@ -4587,6 +4822,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(r.receipt_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS main_receipts,
            COALESCE((SELECT SUM(r.amount) FROM contract_receipts r
              JOIN contracts c ON c.id = r.contract_id
@@ -4594,6 +4830,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              CROSS JOIN filter_parameters filters
              WHERE ${confirmedFinancialPredicate("r")}
                AND root.category = 'non_main'
+               AND ${contractCategoryDirectionExpression("root")} = 'income'
                AND c.is_deleted = FALSE AND c.status <> 'rejected'
                AND root.is_deleted = FALSE
                ${dashboardAreaVisibility}
@@ -4601,13 +4838,14 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(r.receipt_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS non_main_receipts,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
              JOIN contracts root ON root.id = COALESCE(c.root_contract_id, c.id)
              CROSS JOIN filter_parameters filters
              WHERE ${confirmedFinancialPredicate("p")}
-               AND root.category = 'asset'
+               AND ${contractCategoryDirectionExpression("root")} = 'cost'
                AND c.is_deleted = FALSE AND c.status <> 'rejected'
                AND root.is_deleted = FALSE
                ${dashboardAreaVisibility}
@@ -4615,6 +4853,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS asset_payments,
            COALESCE((SELECT SUM(i.amount) FROM contract_invoices i
              JOIN contracts c ON c.id = i.contract_id
@@ -4629,6 +4868,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(i.invoice_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS invoices,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4644,6 +4884,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS rent,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4659,6 +4900,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS electricity,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4674,6 +4916,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS parking,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4689,6 +4932,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS car_rental,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4704,6 +4948,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS internet,
            COALESCE((SELECT SUM(p.amount) FROM contract_payments p
              JOIN contracts c ON c.id = p.contract_id
@@ -4719,8 +4964,10 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(p.payment_date, 7)
                  BETWEEN filters.start_month AND filters.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)), 0) AS other`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -4733,7 +4980,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         }
       >(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id
          )
          SELECT root.id AS root_id, root.project_id, root.category,
            r.amount, r.receipt_date AS "occurredAt",
@@ -4748,11 +4996,13 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            AND root.is_deleted = FALSE
            ${dashboardAreaVisibility}
            AND root.status <> 'rejected'
-           AND root.category IN ('main_business', 'non_main')
+           AND ${contractCategoryDirectionExpression("root")} = 'income'
            AND (filters.category IS NULL OR root.category = filters.category)
+           ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
            AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          ORDER BY r.receipt_date ASC, r.created_at ASC`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -4774,7 +5024,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         unpaid_amount: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id,
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id,
              ?::text AS start_month, ?::text AS end_month
          ), root_metrics AS (
            SELECT root.id AS root_id, root.project_id, root.category,
@@ -4792,6 +5043,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND LEFT(root.contract_date, 7)
                BETWEEN filters.start_month AND filters.end_month
              AND (filters.category IS NULL OR root.category = filters.category)
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          ), financial_metrics AS (
            SELECT roots.root_id,
@@ -4848,6 +5100,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
          GROUP BY roots.project_id, project.name
          ORDER BY contract_amount DESC, project_name ASC`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -4862,12 +5115,17 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         settled_amount: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id
          ), root_groups AS (
            SELECT root.id AS root_id, root.title, root.project_id,
              COALESCE(project.name, root.project_name, '未关联项目')
                AS project_name,
              root.category,
+             COALESCE(
+               root.financial_direction,
+               ${contractCategoryDirectionExpression("root")}
+             ) AS financial_direction,
              root.asset_funding_mode,
              root.declared_subtype,
              ${currentFixedContractAmountExpression("root")} AS current_amount
@@ -4880,10 +5138,11 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND root.status IN ('effective', 'executing', 'completed')
              AND root.category IN ('main_business', 'non_main', 'asset')
              AND (filters.category IS NULL OR root.category = filters.category)
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
          )
          SELECT roots.*,
-           CASE WHEN roots.category = 'asset' THEN
+           CASE WHEN roots.financial_direction = 'cost' THEN
              ${contractCostSettlementAmountSql({
                rootAlias: "roots",
                rootIdExpression: "roots.root_id",
@@ -4904,6 +5163,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
          FROM root_groups roots
          ORDER BY roots.project_name ASC, roots.title ASC, roots.root_id ASC`,
         category,
+        declaredSubtype,
         projectId,
       ),
       db.all<{
@@ -4914,7 +5174,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         expense_amount: number;
       }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id
          ), comparison_periods(start_month, end_month, sort_order) AS (
            VALUES
              (?::text, ?::text, 1),
@@ -4930,9 +5191,9 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                ON root.id = COALESCE(
                  receipt_contract.root_contract_id,
                  receipt_contract.id
-               )
+             )
              WHERE ${confirmedFinancialPredicate("receipt")}
-               AND root.category IN ('main_business', 'non_main')
+               AND ${contractCategoryDirectionExpression("root")} = 'income'
                AND receipt_contract.is_deleted = FALSE
                AND receipt_contract.status <> 'rejected'
                AND root.is_deleted = FALSE
@@ -4941,6 +5202,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(receipt.receipt_date, 7)
                  BETWEEN periods.start_month AND periods.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
            ), 0) AS income_amount,
            COALESCE((SELECT SUM(payment.amount)
@@ -4951,9 +5213,9 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                ON root.id = COALESCE(
                  payment_contract.root_contract_id,
                  payment_contract.id
-               )
+             )
              WHERE ${confirmedFinancialPredicate("payment")}
-               AND root.category = 'asset'
+               AND ${contractCategoryDirectionExpression("root")} = 'cost'
                AND payment_contract.is_deleted = FALSE
                AND payment_contract.status <> 'rejected'
                AND root.is_deleted = FALSE
@@ -4962,12 +5224,14 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
                AND LEFT(payment.payment_date, 7)
                  BETWEEN periods.start_month AND periods.end_month
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
            ), 0) AS expense_amount
          FROM comparison_periods periods
          CROSS JOIN filter_parameters filters
          ORDER BY periods.sort_order`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
@@ -5018,7 +5282,8 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
     const [monthlyTrend, riskRows] = await Promise.all([
       db.all<{ month: string; received_amount: number; paid_amount: number }>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id
          ), months AS (
            SELECT TO_CHAR(value, 'YYYY-MM') AS month
            FROM generate_series(
@@ -5032,40 +5297,47 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              JOIN contracts c ON c.id = receipt.contract_id
              JOIN contracts root ON root.id = COALESCE(c.root_contract_id, c.id)
              WHERE ${confirmedFinancialPredicate("receipt")}
-               AND root.category IN ('main_business', 'non_main')
+               AND ${contractCategoryDirectionExpression("root")} = 'income'
                AND c.is_deleted = FALSE AND c.status <> 'rejected'
                AND root.is_deleted = FALSE
                ${dashboardAreaVisibility}
                AND root.status <> 'rejected'
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
                AND LEFT(receipt.receipt_date, 7) = m.month), 0) AS received_amount,
            COALESCE((SELECT SUM(payment.amount) FROM contract_payments payment
              JOIN contracts c ON c.id = payment.contract_id
              JOIN contracts root ON root.id = COALESCE(c.root_contract_id, c.id)
              WHERE ${confirmedFinancialPredicate("payment")}
-               AND root.category = 'asset'
+               AND ${contractCategoryDirectionExpression("root")} = 'cost'
                AND c.is_deleted = FALSE AND c.status <> 'rejected'
                AND root.is_deleted = FALSE
                ${dashboardAreaVisibility}
                AND root.status <> 'rejected'
                AND (filters.category IS NULL OR root.category = filters.category)
+               ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
                AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
                AND LEFT(payment.payment_date, 7) = m.month), 0) AS paid_amount
          FROM months m CROSS JOIN filter_parameters filters
          ORDER BY m.month`,
         category,
+        declaredSubtype,
         projectId,
         startMonth,
         endMonth,
       ),
       db.all<Record<string, any>>(
         `WITH filter_parameters AS (
-           SELECT ?::text AS category, ?::text AS project_id
+           SELECT ?::text AS category, ?::text AS declared_subtype,
+             ?::text AS project_id
          ), root_groups AS (
            SELECT root.id, root.title, root.project_name, root.project_id,
              root.category, root.status, root.updated_at,
-             root.financial_direction,
+             COALESCE(
+               root.financial_direction,
+               ${contractCategoryDirectionExpression("root")}
+             ) AS financial_direction,
              root.asset_funding_mode, root.declared_subtype,
              ${currentFixedContractAmountExpression("root")} AS current_amount
            FROM contracts root
@@ -5078,6 +5350,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              AND COALESCE(root.root_contract_id, root.id) = root.id
              AND ${contributesToCurrentAmount("root")}
              AND (filters.category IS NULL OR root.category = filters.category)
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
            GROUP BY root.id, root.title, root.project_name, root.project_id,
              root.category, root.status, root.updated_at,
@@ -5109,7 +5382,11 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
            FROM root_groups root
          ), risks AS (
            SELECT c.id, c.title, c.project_name, c.project_id, c.category,
-             c.status, c.updated_at, root.financial_direction
+             c.status, c.updated_at,
+             COALESCE(
+               root.financial_direction,
+               ${contractCategoryDirectionExpression("root")}
+             ) AS financial_direction
            FROM contracts c
            JOIN contracts root ON root.id = COALESCE(c.root_contract_id, c.id)
            CROSS JOIN filter_parameters filters
@@ -5117,6 +5394,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
              ${dashboardAreaVisibility}
              AND c.status = 'approving'
              AND (filters.category IS NULL OR root.category = filters.category)
+             ${DASHBOARD_DECLARED_SUBTYPE_FILTER}
              AND (filters.project_id IS NULL OR root.project_id = filters.project_id)
            UNION
            SELECT root.id, root.title, root.project_name, root.project_id,
@@ -5136,6 +5414,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
          )
          SELECT * FROM risks ORDER BY updated_at DESC LIMIT 20`,
         category,
+        declaredSubtype,
         projectId,
       ),
     ]);
@@ -5160,6 +5439,38 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         row.outstanding_amount,
         "分类未结算金额",
       );
+      const incomeContractAmount = safeContractOutputAmount(
+        row.income_contract_amount,
+        "分类收入合同金额",
+      );
+      const expenseContractAmount = safeContractOutputAmount(
+        row.expense_contract_amount,
+        "分类支出合同金额",
+      );
+      const periodReceiptAmount = safeContractOutputAmount(
+        row.period_received_amount,
+        "分类期间回款",
+      );
+      const periodPaymentAmount = safeContractOutputAmount(
+        row.period_paid_amount,
+        "分类期间付款",
+      );
+      const cumulativeReceiptAmount = safeContractOutputAmount(
+        row.cumulative_received_amount,
+        "分类累计回款",
+      );
+      const cumulativePaymentAmount = safeContractOutputAmount(
+        row.cumulative_paid_amount,
+        "分类累计付款",
+      );
+      const unreceivedAmount = safeContractOutputAmount(
+        row.unreceived_amount,
+        "分类未回款金额",
+      );
+      const unpaidAmount = safeContractOutputAmount(
+        row.unpaid_amount,
+        "分类未付款金额",
+      );
       const fixedAmountContractCount = Number(
         row.fixed_amount_contract_count || 0,
       );
@@ -5169,12 +5480,13 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
               (toCents(fixedSettledAmount) / toCents(totalAmount)) * 10000,
             ) / 100
           : null;
-      const isAsset = row.category === "asset";
       return {
         category: row.category,
         count: Number(row.contract_count || 0),
         amount: totalAmount,
         contractCount: Number(row.contract_count || 0),
+        incomeContractCount: Number(row.income_contract_count || 0),
+        expenseContractCount: Number(row.expense_contract_count || 0),
         fixedAmountContractCount,
         noFixedAmountCount: Number(row.unfixed_amount_contract_count || 0),
         totalAmount,
@@ -5186,16 +5498,18 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         cumulativeSettledAmount,
         settledAmount: cumulativeSettledAmount,
         outstandingAmount,
+        incomeContractAmount,
+        expenseContractAmount,
         completionRate,
         progress: completionRate,
-        periodReceiptAmount: isAsset ? null : periodSettledAmount,
-        monthReceiptAmount: isAsset ? null : periodSettledAmount,
-        cumulativeReceiptAmount: isAsset ? null : cumulativeSettledAmount,
-        unreceivedAmount: isAsset ? null : outstandingAmount,
-        periodPaymentAmount: isAsset ? periodSettledAmount : null,
-        monthPaymentAmount: isAsset ? periodSettledAmount : null,
-        cumulativePaymentAmount: isAsset ? cumulativeSettledAmount : null,
-        unpaidAmount: isAsset ? outstandingAmount : null,
+        periodReceiptAmount,
+        monthReceiptAmount: periodReceiptAmount,
+        cumulativeReceiptAmount,
+        unreceivedAmount,
+        periodPaymentAmount,
+        monthPaymentAmount: periodPaymentAmount,
+        cumulativePaymentAmount,
+        unpaidAmount,
       };
     });
     const categorizedEffectiveContractAmount = sumSafeContractOutputAmounts(
@@ -5247,9 +5561,7 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
       throw new ContractDomainError(500, "有效收入与支出合同额汇总不一致");
     }
     const unreceivedAmount = sumSafeContractOutputAmounts(
-      safeCategorySummary
-        .filter((row) => row.category !== "asset")
-        .map((row) => row.outstandingAmount),
+      safeCategorySummary.map((row) => row.unreceivedAmount),
       "未回款金额",
     );
     const periodAccountingIncome = centsToAmount(periodAccountingIncomeCents);
@@ -5315,9 +5627,9 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
       financialSummary?.non_main_receipts,
       "非主营期间回款",
     );
-    const assetPayments = safeContractOutputAmount(
+    const expensePayments = safeContractOutputAmount(
       financialSummary?.asset_payments,
-      "资产期间付款",
+      "支出合同期间付款",
     );
     const invoiceAmount = safeContractOutputAmount(
       financialSummary?.invoices,
@@ -5474,6 +5786,10 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
     const mainCategorySummary = categorySummaryByCategory.get("main_business");
     const nonMainCategorySummary = categorySummaryByCategory.get("non_main");
     const assetCategorySummary = categorySummaryByCategory.get("asset");
+    const assetPayments = safeContractOutputAmount(
+      assetCategorySummary?.periodPaymentAmount,
+      "资产期间付款",
+    );
     const mainBusinessAccounting = Object.fromEntries(
       Object.entries(main).map(([key, value]) => [
         key.replace(/Cents$/, ""),
@@ -5524,18 +5840,21 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
           pendingSignatureAmount,
           periodContractAmount,
           receivedAmount: periodIncome,
-          paidAmount: assetPayments,
+          paidAmount: expensePayments,
           invoiceAmount,
           periodIncome,
-          periodExpense: assetPayments,
+          periodExpense: expensePayments,
           periodInvoiceAmount: invoiceAmount,
           monthIncome: periodIncome,
-          monthExpense: assetPayments,
+          monthExpense: expensePayments,
           periodAccountingIncome,
           yearIncome: periodAccountingIncome,
           yearAccountingIncome: periodAccountingIncome,
           unreceivedAmount,
-          unpaidAmount: assetCategorySummary?.outstandingAmount || 0,
+          unpaidAmount: sumSafeContractOutputAmounts(
+            safeCategorySummary.map((row) => Number(row.unpaidAmount || 0)),
+            "全部支出合同未付款金额",
+          ),
         },
         categories: safeCategorySummary,
         settlementStatuses,
@@ -5576,11 +5895,20 @@ router.get("/dashboard", requireContractRead, async (req, res) => {
         nonMain: {
           ...nonMainAccounting,
           totalContractAmount: nonMainCategorySummary?.totalAmount || 0,
+          incomeContractAmount:
+            nonMainCategorySummary?.incomeContractAmount || 0,
+          expenseContractAmount:
+            nonMainCategorySummary?.expenseContractAmount || 0,
           periodReceiptAmount: nonMainReceipts,
           monthReceiptAmount: nonMainReceipts,
           cumulativeReceiptAmount:
-            nonMainCategorySummary?.cumulativeSettledAmount || 0,
-          unreceivedAmount: nonMainCategorySummary?.outstandingAmount || 0,
+            nonMainCategorySummary?.cumulativeReceiptAmount || 0,
+          unreceivedAmount: nonMainCategorySummary?.unreceivedAmount || 0,
+          periodPaymentAmount: nonMainCategorySummary?.periodPaymentAmount || 0,
+          monthPaymentAmount: nonMainCategorySummary?.monthPaymentAmount || 0,
+          cumulativePaymentAmount:
+            nonMainCategorySummary?.cumulativePaymentAmount || 0,
+          unpaidAmount: nonMainCategorySummary?.unpaidAmount || 0,
         },
         asset: {
           paymentAmount: assetPayments,
@@ -5677,9 +6005,10 @@ router.get("/approvals/pending", requireContractApprover, async (req, res) => {
     if (keyword) {
       const keywordValue = `%${keyword}%`;
       where.push(
-        "(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)",
+        "(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.party_c ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)",
       );
       params.push(
+        keywordValue,
         keywordValue,
         keywordValue,
         keywordValue,
@@ -5798,9 +6127,10 @@ router.get(
       if (keyword) {
         const keywordValue = `%${keyword}%`;
         where.push(
-          "(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)",
+          "(c.project_name ILIKE ? OR c.party_a ILIKE ? OR c.party_b ILIKE ? OR c.party_c ILIKE ? OR c.contract_no ILIKE ? OR c.business_contract_no ILIKE ? OR c.title ILIKE ?)",
         );
         params.push(
+          keywordValue,
           keywordValue,
           keywordValue,
           keywordValue,
@@ -6203,6 +6533,7 @@ router.get(
           projectName: root.project_name,
           partyA: root.party_a,
           partyB: root.party_b,
+          partyC: root.party_c,
           parentContractName:
             root.project_name || root.title || root.contract_no,
           supplementSequence,
@@ -6282,6 +6613,7 @@ router.get("/:id/renewal-upload-context", requireFinance, async (req, res) => {
         projectName: source.project_name,
         partyA: source.party_a,
         partyB: source.party_b,
+        partyC: source.party_c,
         currentLeaseEndDate: source.lease_end_date,
         canUpload: blockingReasons.length === 0,
         blockingReason: blockingReasons.join("；") || null,
@@ -6373,13 +6705,13 @@ async function handleSupplementRecognition(
              id, contract_no, title, declared_category, declared_subtype,
              category, asset_category, relation_type, status, area,
              project_id, parent_contract_id, root_contract_id, party_a,
-             party_b, project_name, amount_delta, supplement_sequence,
+             party_b, party_c, project_name, amount_delta, supplement_sequence,
              financial_direction, financial_direction_source,
              financial_direction_version, version, created_by, updated_by,
              created_at, updated_at
            ) VALUES (
              $1,$2,$3,$4,$5,NULL,$6,'supplement','draft',$7,$8,$9,$9,
-             $10,$11,$3,NULL,$12,
+             $10,$11,$15,$3,NULL,$12,
              CASE WHEN $4 = 'asset' THEN 'cost' ELSE 'income' END,
              'contract_category',1,1,$13,$13,$14,$14
            )`,
@@ -6398,6 +6730,7 @@ async function handleSupplementRecognition(
           supplementSequence,
           currentActor.id,
           now,
+          parent.party_c,
         ],
       );
       await insertContractFile(
@@ -6439,6 +6772,7 @@ async function handleSupplementRecognition(
               projectId: parent.project_id,
               partyA: parent.party_a,
               partyB: parent.party_b,
+              partyC: parent.party_c,
               contractName: supplementSubjectName,
             },
           }),
@@ -6726,6 +7060,7 @@ router.get(
           projectId: root.category === "asset" ? null : root.project_id,
           partyA: root.party_a,
           partyB: root.party_b,
+          partyC: root.party_c,
           currentEffectiveAmount: snapshot.currentEffectiveAmount,
           settledAmount: snapshot.settledAmount,
           fulfilledAmount: snapshot.settledAmount,
@@ -6873,14 +7208,15 @@ router.post(
              id, contract_no, title, declared_category, declared_subtype,
              category, asset_category, relation_type, status, area,
              project_id, parent_contract_id, root_contract_id,
-             termination_target_contract_id, party_a, party_b, project_name,
+             termination_target_contract_id, party_a, party_b, party_c,
+             project_name,
              amount_delta, amount_before_change, amount_after_change,
              financial_direction, financial_direction_source,
              financial_direction_version, version, created_by, updated_by,
              created_at, updated_at
            ) VALUES (
              $1,$2,$3,$4,$5,NULL,$6,'termination','draft',$7,$8,$9,$9,$10,
-             $11,$12,$3,$13,$14,$15,
+             $11,$12,$18,$3,$13,$14,$15,
              CASE WHEN $4 = 'asset' THEN 'cost' ELSE 'income' END,
              'contract_category',1,1,$16,$16,$17,$17
            )`,
@@ -6902,6 +7238,7 @@ router.post(
             snapshot.settledAmount,
             currentActor.id,
             now,
+            root.party_c,
           ],
         );
         await insertContractFile(
@@ -6997,6 +7334,7 @@ router.post(
         "business_contract_no",
         "partyA",
         "partyB",
+        "partyC",
         "projectName",
         "amount",
         "amountDelta",
@@ -7009,8 +7347,19 @@ router.post(
       if (forbiddenRecognitionFields.length > 0) {
         throw new ContractDomainError(
           400,
-          "新增合同的甲乙方、项目名称、金额、合同类型和合同日期仅允许由自动识别任务写入",
+          "新增合同的甲乙丙方、项目名称、金额、合同类型和合同日期仅允许由自动识别任务写入",
           "OCR_FIELDS_READ_ONLY",
+        );
+      }
+      if (
+        uploadContext.declaredSubtype === "notary_fee" &&
+        (relationType !== "main" ||
+          req.file?.mimetype !== "application/pdf" ||
+          req.body.parentContractId)
+      ) {
+        throw new ContractDomainError(
+          400,
+          "公证费仅接受独立的已盖章付款通知PDF（便携式文档格式），不支持补充或解除协议",
         );
       }
       validatedFile = await validateUploadedFile(req.file, [
@@ -7048,6 +7397,7 @@ router.post(
         let supplementSequence: number | null = null;
         let inheritedPartyA: string | null = null;
         let inheritedPartyB: string | null = null;
+        let inheritedPartyC: string | null = null;
         if (relationType === "supplement") {
           if (!parentContractId) {
             throw new ContractDomainError(
@@ -7107,6 +7457,7 @@ router.post(
           projectId = declaredCategory === "asset" ? null : parent.project_id;
           inheritedPartyA = parent.party_a;
           inheritedPartyB = parent.party_b;
+          inheritedPartyC = parent.party_c;
           if (relationType === "supplement") {
             supplementSequence = await allocateSupplementSequence(
               client,
@@ -7152,7 +7503,8 @@ router.post(
            id, contract_no, title, description, declared_category,
            declared_subtype, category, asset_category, relation_type,
            status, area, project_id, parent_contract_id, root_contract_id,
-           party_a, party_b, project_name, amount_delta, supplement_sequence,
+           party_a, party_b, party_c, project_name, amount_delta,
+           supplement_sequence,
            requires_auxiliary_materials,
            financial_direction, financial_direction_source,
            financial_direction_version, contract_date,
@@ -7160,8 +7512,12 @@ router.post(
            created_at, updated_at
          ) VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,'draft',$10,$11,$12,$13,
-           $17,$18,$16,NULL,$19,$20,
-           CASE WHEN $5 = 'asset' THEN 'cost' ELSE 'income' END,
+           $17,$18,$21,$16,NULL,$19,$20,
+           CASE
+             WHEN $5 = 'asset'
+               OR ($5 = 'non_main' AND $6 = 'non_main_expense')
+             THEN 'cost' ELSE 'income'
+           END,
            'contract_category',1,NULL,NULL,1,$14,$14,$15,$15
          )`,
           [
@@ -7185,6 +7541,7 @@ router.post(
             inheritedPartyB,
             supplementSequence,
             requiresAuxiliaryMaterials,
+            inheritedPartyC,
           ],
         );
         await insertContractFile(
@@ -7400,6 +7757,7 @@ router.patch("/:id/asset-funding-mode", requireFinance, async (req, res) => {
         "asset",
         row.party_a,
         row.party_b,
+        row.party_c,
       )!;
       const now = new Date().toISOString();
       const updated = await client.query<ContractRow>(
@@ -7440,8 +7798,17 @@ router.get("/:id", requireAuth, async (req, res) => {
   try {
     await assertContractReadScope(req, req.params.id);
     const currentActor = actor(req);
+    await db.transaction((client) =>
+      refreshPendingAssetFundingMode(
+        client,
+        req.params.id,
+        currentActor.id,
+        currentActor.role,
+      ),
+    );
     const contract = await db.get<Record<string, any>>(
       `SELECT c.*, p.name AS linked_project_name,
+         creator.name AS owner_name,
          root_contract.financial_direction AS group_financial_direction,
          root_contract.financial_direction_source AS group_financial_direction_source,
          root_contract.financial_direction_invoice_id AS group_financial_direction_invoice_id,
@@ -7465,6 +7832,7 @@ router.get("/:id", requireAuth, async (req, res) => {
        JOIN contracts root_contract
          ON root_contract.id = COALESCE(c.root_contract_id, c.id)
        LEFT JOIN worklog_projects p ON p.id = c.project_id
+       LEFT JOIN users creator ON creator.id = c.created_by
        LEFT JOIN LATERAL (
          SELECT approval_round.* FROM contract_approval_rounds approval_round
          WHERE approval_round.contract_id = c.id
@@ -7504,9 +7872,9 @@ router.get("/:id", requireAuth, async (req, res) => {
       contract.group_financial_direction_version;
     contract.asset_funding_mode = contract.group_asset_funding_mode;
     const rootId = contract.root_contract_id || contract.id;
-    const canReadRootFinancials = (READ_ROLES as readonly string[]).includes(
-      currentActor.role,
-    );
+    const canReadRootFinancials = (
+      CONTRACT_LEDGER_READ_ROLES as readonly string[]
+    ).includes(currentActor.role);
     const relationAreaVisibility = requiresRestrictedContractArea(
       currentActor.role,
     )
@@ -8191,9 +8559,8 @@ router.get("/:id", requireAuth, async (req, res) => {
       fileId: row.file_id,
       fileName: row.file_name,
       canonicalReceiptPreviewUrl:
-        ["admin", "general_manager"].includes(
-          String(req.session.user?.role || ""),
-        ) && row.canonical_bank_transaction_id
+        canReadMonthlyFinancialReport(req.session.user?.role) &&
+        row.canonical_bank_transaction_id
           ? `/api/monthly-financial-reports/bank-transactions/${row.canonical_bank_transaction_id}/preview`
           : null,
       status: row.status,
@@ -8265,6 +8632,7 @@ router.get("/:id", requireAuth, async (req, res) => {
       createdBy: row.created_by,
       createdAt: row.created_at,
     });
+    const targetAmountChanges = await listContractTargetAmountChanges(rootId);
     res.json({
       success: true,
       data: {
@@ -8344,6 +8712,22 @@ router.get("/:id", requireAuth, async (req, res) => {
             allocatedAmount: Number(match.allocated_amount),
           }),
         ),
+        targetAmountChanges: targetAmountChanges.map((history) => ({
+          id: history.id,
+          contractId: history.contract_id,
+          changeNo: Number(history.change_no),
+          changeType: history.change_type,
+          oldTargetAmount: history.old_target_amount,
+          newTargetAmount: history.new_target_amount,
+          oldTargetQuantity: history.old_target_quantity,
+          newTargetQuantity: history.new_target_quantity,
+          oldUnitPrice: history.old_unit_price,
+          newUnitPrice: history.new_unit_price,
+          reason: history.reason,
+          changedBy: history.changed_by,
+          changedByName: history.changed_by_name || null,
+          changedAt: history.changed_at,
+        })),
         relations: relations.map((relation) => ({
           id: relation.id,
           contractId: relation.id,
@@ -8433,6 +8817,75 @@ router.get("/:id", requireAuth, async (req, res) => {
   }
 });
 
+router.patch("/:id/target-amount", requireFinance, async (req, res) => {
+  try {
+    const currentActor = actor(req);
+    const optionalNumber = (value: unknown): number | null => {
+      if (
+        value === undefined ||
+        value === null ||
+        String(value).trim() === ""
+      ) {
+        return null;
+      }
+      return Number(value);
+    };
+    const targetAmount = optionalNumber(req.body?.targetAmount);
+    if (targetAmount == null) {
+      throw new ContractDomainError(400, "必须填写目标金额");
+    }
+    const contract = await db.transaction((client) =>
+      updateContractTargetAmount(
+        {
+          contractId: req.params.id,
+          expectedVersion: parseExpectedVersion(
+            req.body?.expectedVersion ?? req.body?.version,
+          ),
+          targetAmount,
+          targetQuantity: optionalNumber(req.body?.targetQuantity),
+          unitPrice: optionalNumber(req.body?.unitPrice),
+          confirmedQuantity: optionalNumber(req.body?.confirmedQuantity),
+          confirmedContractAmount: optionalNumber(
+            req.body?.confirmedContractAmount,
+          ),
+          quantityUnit: normalizeNullableText(req.body?.quantityUnit),
+          reason: normalizeNullableText(req.body?.reason),
+          actorId: currentActor.id,
+          actorRole: currentActor.role,
+        },
+        client,
+      ),
+    );
+    const targetAmountChanges = await listContractTargetAmountChanges(
+      contract.id,
+    );
+    res.json({
+      success: true,
+      data: {
+        contract: toContractApi(contract as any),
+        targetAmountChanges: targetAmountChanges.map((history) => ({
+          id: history.id,
+          contractId: history.contract_id,
+          changeNo: Number(history.change_no),
+          changeType: history.change_type,
+          oldTargetAmount: history.old_target_amount,
+          newTargetAmount: history.new_target_amount,
+          oldTargetQuantity: history.old_target_quantity,
+          newTargetQuantity: history.new_target_quantity,
+          oldUnitPrice: history.old_unit_price,
+          newUnitPrice: history.new_unit_price,
+          reason: history.reason,
+          changedBy: history.changed_by,
+          changedByName: history.changed_by_name || null,
+          changedAt: history.changed_at,
+        })),
+      },
+    });
+  } catch (error) {
+    sendError(res, error, "设置合同目标金额失败");
+  }
+});
+
 router.put("/:id", requireFinance, async (req, res) => {
   try {
     const currentActor = actor(req);
@@ -8446,6 +8899,7 @@ router.put("/:id", requireFinance, async (req, res) => {
     const recognitionFieldPayloadKeys = [
       "partyA",
       "partyB",
+      "partyC",
       "projectName",
       "amount",
       "amountDelta",
@@ -8461,7 +8915,7 @@ router.put("/:id", requireFinance, async (req, res) => {
     if (attemptedRecognitionFields.length > 0) {
       throw new ContractDomainError(
         400,
-        "甲乙方、项目名称、金额、合同类型和合同日期仅允许由自动识别或财务确认接口写入",
+        "甲乙丙方、项目名称、金额、合同类型和合同日期仅允许由自动识别或财务确认接口写入",
         "OCR_FIELDS_READ_ONLY",
       );
     }
@@ -9725,17 +10179,23 @@ function assertFinancialKindAllowed(
     );
   }
   if (kind === "invoice") return;
-  if (kind === "payment" && contract.category !== "asset") {
+  const financialDirection =
+    contract.financial_direction ||
+    financialDirectionFromContractCategory(
+      contract.category,
+      contract.declared_subtype,
+    );
+  if (kind === "payment" && financialDirection !== "cost") {
     throw new ContractDomainError(
       409,
-      "主营和非主营合同属于收入，只能登记回款回单",
+      "收入类合同只能登记回款回单",
       "FINANCIAL_DIRECTION_CONFLICT",
     );
   }
-  if (kind === "receipt" && contract.category === "asset") {
+  if (kind === "receipt" && financialDirection !== "income") {
     throw new ContractDomainError(
       409,
-      "资产类合同属于支出，只能登记付款凭证",
+      "支出类合同只能登记付款凭证",
       "FINANCIAL_DIRECTION_CONFLICT",
     );
   }
@@ -9760,6 +10220,7 @@ async function lockFinancialContract(
   let rootFinancialDirection = target.financial_direction;
   let rootPartyA = target.party_a;
   let rootPartyB = target.party_b;
+  let rootPartyC = target.party_c;
   let rootFundingMode = target.asset_funding_mode;
   if (rootId !== target.id) {
     const root = await client.query<{
@@ -9767,9 +10228,10 @@ async function lockFinancialContract(
       financial_direction: ContractRow["financial_direction"];
       party_a: string | null;
       party_b: string | null;
+      party_c: string | null;
       asset_funding_mode: ContractRow["asset_funding_mode"];
     }>(
-      `SELECT status, financial_direction, party_a, party_b,
+      `SELECT status, financial_direction, party_a, party_b, party_c,
          asset_funding_mode FROM contracts
        WHERE id = $1 AND is_deleted = FALSE
        FOR UPDATE`,
@@ -9780,13 +10242,20 @@ async function lockFinancialContract(
     rootFinancialDirection = root.rows[0].financial_direction;
     rootPartyA = root.rows[0].party_a;
     rootPartyB = root.rows[0].party_b;
+    rootPartyC = root.rows[0].party_c;
     rootFundingMode = root.rows[0].asset_funding_mode;
   }
   const allowsCompletedIncomeContinuation =
     allowCompletedOpenIncomeRegistration &&
-    kind !== "payment" &&
-    target.category === "main_business" &&
-    rootFinancialDirection === "income" &&
+    ((kind !== "payment" &&
+      target.category === "main_business" &&
+      rootFinancialDirection === "income") ||
+      (kind === "invoice" &&
+        rootFinancialDirection === "cost" &&
+        allowsDirectAssetPaymentFirst({
+          category: target.category,
+          asset_funding_mode: rootFundingMode,
+        }))) &&
     target.status === "completed" &&
     rootStatus === "completed";
   if (
@@ -9821,6 +10290,7 @@ async function lockFinancialContract(
     financial_direction: rootFinancialDirection,
     party_a: rootPartyA,
     party_b: rootPartyB,
+    party_c: rootPartyC,
     asset_funding_mode: rootFundingMode,
   };
   if (
@@ -9831,7 +10301,7 @@ async function lockFinancialContract(
   ) {
     throw new ContractDomainError(
       409,
-      "请先在合同详情确认资产合同资金承担方式",
+      "系统尚未识别出我方付款主体，请核对合同主体信息后刷新页面",
       "ASSET_FUNDING_MODE_REQUIRED",
     );
   }
@@ -9845,13 +10315,13 @@ function resolveContractCompanySubject(contract: ContractRow): {
   taxId: string;
 } {
   const matched = resolveContractFinancialCompanySubject(
-    [contract.party_a, contract.party_b],
+    [contract.party_a, contract.party_b, contract.party_c],
     CONTRACT_COMPANY_SUBJECTS,
   );
   if (!matched) {
     throw new ContractDomainError(
       409,
-      "合同双方未能唯一确认已配置公司主体，不能登记财务凭证",
+      "合同各方未能唯一确认已配置公司主体，不能登记财务凭证",
       "FINANCIAL_CONTRACT_SUBJECT_NOT_UNIQUE",
     );
   }
@@ -9860,6 +10330,36 @@ function resolveContractCompanySubject(contract: ContractRow): {
 
 function financialJobResponse(input: FinancialOcrJobView): FinancialOcrJobView {
   return input;
+}
+
+function assetPaymentContractParties(contract: ContractRow): {
+  buyer: string;
+  seller: string;
+} {
+  const buyer = resolveContractCompanySubject(contract).name;
+  const sellers = [contract.party_a, contract.party_b, contract.party_c]
+    .filter(
+      (name): name is string =>
+        typeof name === "string" &&
+        name.trim().length > 0 &&
+        normalizeFinancialIdentity(name) !== normalizeFinancialIdentity(buyer),
+    )
+    .filter(
+      (name, index, values) =>
+        values.findIndex(
+          (candidate) =>
+            normalizeFinancialIdentity(candidate) ===
+            normalizeFinancialIdentity(name),
+        ) === index,
+    );
+  if (sellers.length !== 1) {
+    throw new ContractDomainError(
+      422,
+      "未能唯一确认合同收款对方，不能先付款后补发票",
+      "FINANCIAL_REGISTRATION_PARTY_MISMATCH",
+    );
+  }
+  return { buyer, seller: sellers[0]! };
 }
 
 function financialOcrLeaseExpiresAt(now = Date.now()): string {
@@ -10762,14 +11262,17 @@ async function createFinancialDraftFromJob(
         );
       }
       const bankName = normalizeFinancialDisplayValue(fields.bankName);
-      const currency = normalizeFinancialDisplayValue(fields.currency);
+      const currency = requireCnyContractBankCurrency(
+        fields.currency,
+        fields.currencyEvidence,
+      );
       const payerAccount = normalizeFinancialDisplayValue(fields.payerAccount);
       const payeeAccount = normalizeFinancialDisplayValue(fields.payeeAccount);
       const rawBookingDate = normalizeFinancialDisplayValue(fields.bookingDate);
       const bookingDate = rawBookingDate
         ? normalizeDate(rawBookingDate, "记账日期")
         : null;
-      if (!bankName || !currency || !payerAccount || !payeeAccount) {
+      if (!bankName || !payerAccount || !payeeAccount) {
         throw new ContractDomainError(
           422,
           "银行回单识别快照缺少银行、币种或双方账号，不能生成草稿",
@@ -11074,7 +11577,7 @@ function assertVerifiedFinancialRegistrationJob(
   }
 }
 
-async function createFinancialRegistrationFromJobs(
+export async function createFinancialRegistrationFromJobs(
   contractId: string,
   invoiceJobIds: string[],
   bankJobIds: string[],
@@ -11140,15 +11643,19 @@ async function createFinancialRegistrationFromJobs(
       financialDirection =
         expectedInvoiceDirection === "output" ? "income" : "cost";
     } else {
-      if (target.category !== "main_business") {
+      if (
+        target.category !== "main_business" &&
+        !allowsDirectAssetPaymentFirst(target)
+      ) {
         throw new ContractDomainError(
           400,
-          "只有主营合同允许先保存回款、后补发票",
+          "仅主营回款或资金方式明确的资产直接付款支持先保存银行凭证、后补发票",
           "FINANCIAL_REGISTRATION_INVOICE_REQUIRED",
         );
       }
-      expectedInvoiceDirection = "output";
-      financialDirection = "income";
+      expectedInvoiceDirection =
+        target.category === "asset" ? "input" : "output";
+      financialDirection = target.category === "asset" ? "cost" : "income";
     }
     const settlementKind: "receipt" | "payment" =
       financialDirection === "income" ? "receipt" : "payment";
@@ -11236,6 +11743,10 @@ async function createFinancialRegistrationFromJobs(
       const paymentTime = normalizeFinancialPaymentTime(values?.paymentTime);
       const document = {
         job,
+        currency: requireCnyContractBankCurrency(
+          values?.currency,
+          values?.currencyEvidence,
+        ),
         payer: normalizeFinancialDisplayValue(values?.payer),
         payerAccount: normalizeFinancialDisplayValue(values?.payerAccount),
         payee: normalizeFinancialDisplayValue(values?.payee),
@@ -11261,6 +11772,7 @@ async function createFinancialRegistrationFromJobs(
         );
       }
       return document as typeof document & {
+        currency: "CNY";
         payer: string;
         payerAccount: string;
         payee: string;
@@ -11272,7 +11784,9 @@ async function createFinancialRegistrationFromJobs(
     const partyValidationInvoices =
       financialDirection === "income" && !invoiceDocuments.length
         ? [{ buyer: "", seller: resolveContractCompanySubject(target).name }]
-        : invoiceDocuments;
+        : !invoiceDocuments.length && allowsDirectAssetPaymentFirst(target)
+          ? [assetPaymentContractParties(target)]
+          : invoiceDocuments;
     for (const invoice of partyValidationInvoices) {
       for (const bank of bankDocuments) {
         if (financialDirection === "cost") {
@@ -11295,7 +11809,9 @@ async function createFinancialRegistrationFromJobs(
       0,
     );
     const allowsPendingInvoiceReceipt =
-      target.category === "main_business" && financialDirection === "income";
+      (target.category === "main_business" &&
+        financialDirection === "income") ||
+      (allowsDirectAssetPaymentFirst(target) && financialDirection === "cost");
     if (!allowsPendingInvoiceReceipt && bankTotalCents > invoiceTotalCents) {
       throw new ContractDomainError(
         422,
@@ -11443,10 +11959,10 @@ async function createFinancialRegistrationFromJobs(
         await client.query(
           `INSERT INTO contract_receipts (
            id, contract_id, file_id, receipt_date, payment_time, amount,
-           payer, payer_account, payee, payee_account, electronic_receipt_no,
+           payer, payer_account, payee, payee_account, currency, electronic_receipt_no,
            note, financial_ocr_job_id, status, created_by, created_at, updated_at
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'draft',$14,$15,$15
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',$15,$16,$16
          )`,
           [
             settlementRecordIds[index],
@@ -11459,6 +11975,7 @@ async function createFinancialRegistrationFromJobs(
             bank.payerAccount,
             bank.payee,
             bank.payeeAccount,
+            bank.currency,
             bank.electronicReceiptNo,
             note,
             bank.job.id,
@@ -11472,10 +11989,10 @@ async function createFinancialRegistrationFromJobs(
           `INSERT INTO contract_payments (
            id, contract_id, file_id, payment_date, payment_time, amount,
            expense_category, payer, payer_account, payee, payee_account,
-           electronic_receipt_no, note, financial_ocr_job_id, status,
+           currency, electronic_receipt_no, note, financial_ocr_job_id, status,
            created_by, created_at, updated_at
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',$15,$16,$16
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'draft',$16,$17,$17
          )`,
           [
             settlementRecordIds[index],
@@ -11489,6 +12006,7 @@ async function createFinancialRegistrationFromJobs(
             bank.payerAccount,
             bank.payee,
             bank.payeeAccount,
+            bank.currency,
             bank.electronicReceiptNo,
             note,
             bank.job.id,
@@ -11728,7 +12246,7 @@ async function createFinancialRegistrationFromJobs(
   });
 }
 
-async function appendFinancialRegistrationSettlementJobs(
+export async function appendFinancialRegistrationSettlementJobs(
   contractId: string,
   registrationId: string,
   invoiceJobIds: string[],
@@ -11792,8 +12310,10 @@ async function appendFinancialRegistrationSettlementJobs(
       client,
       contractId,
       "invoice",
-      registration.financial_direction === "income" &&
-        registration.settlement_kind === "receipt",
+      (registration.financial_direction === "income" &&
+        registration.settlement_kind === "receipt") ||
+        (registration.financial_direction === "cost" &&
+          registration.settlement_kind === "payment"),
     );
     const allowsAssetInvoiceBackfill =
       target.category === "asset" &&
@@ -11801,9 +12321,22 @@ async function appendFinancialRegistrationSettlementJobs(
       registration.financial_direction === "cost" &&
       uniqueInvoiceJobIds.length > 0;
     const allowsPendingInvoiceReceipt =
-      target.category === "main_business" &&
-      registration.financial_direction === "income" &&
-      registration.settlement_kind === "receipt";
+      (target.category === "main_business" &&
+        registration.financial_direction === "income" &&
+        registration.settlement_kind === "receipt") ||
+      (allowsDirectAssetPaymentFirst(target) &&
+        registration.financial_direction === "cost" &&
+        registration.settlement_kind === "payment");
+    if (
+      target.status === "completed" &&
+      allowsDirectAssetPaymentFirst(target) &&
+      uniqueBankJobIds.length
+    ) {
+      throw new ContractDomainError(
+        409,
+        "已付款完成的合同只能补充待补发票，不能追加付款回单",
+      );
+    }
     const allowsEngineeringInternalFundingAppend =
       target.category === "asset" &&
       target.asset_funding_mode === "engineering_to_technology" &&
@@ -11985,6 +12518,10 @@ async function appendFinancialRegistrationSettlementJobs(
       const paymentTime = normalizeFinancialPaymentTime(values?.paymentTime);
       const document = {
         job,
+        currency: requireCnyContractBankCurrency(
+          values?.currency,
+          values?.currencyEvidence,
+        ),
         payer: normalizeFinancialDisplayValue(values?.payer),
         payerAccount: normalizeFinancialDisplayValue(values?.payerAccount),
         payee: normalizeFinancialDisplayValue(values?.payee),
@@ -12009,6 +12546,7 @@ async function appendFinancialRegistrationSettlementJobs(
         );
       }
       return document as typeof document & {
+        currency: "CNY";
         payer: string;
         payerAccount: string;
         payee: string;
@@ -12062,7 +12600,9 @@ async function appendFinancialRegistrationSettlementJobs(
         ? [{ buyer: contractCompanySubjectName, seller: "" }]
         : registration.financial_direction === "income"
           ? [{ buyer: "", seller: contractCompanySubjectName }]
-          : []
+          : allowsDirectAssetPaymentFirst(target)
+            ? [assetPaymentContractParties(target)]
+            : []
       : allInvoiceRows;
     for (const invoice of allInvoicePartyRows) {
       for (const bank of allBankPartyRows) {
@@ -12294,9 +12834,9 @@ async function appendFinancialRegistrationSettlementJobs(
         await client.query(
           `INSERT INTO contract_receipts (
              id, contract_id, file_id, receipt_date, payment_time, amount,
-             payer, payer_account, payee, payee_account, electronic_receipt_no,
+             payer, payer_account, payee, payee_account, currency, electronic_receipt_no,
              note, financial_ocr_job_id, status, created_by, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'draft',$14,$15,$15)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',$15,$16,$16)`,
           [
             settlementRecordIds[index],
             contractId,
@@ -12308,6 +12848,7 @@ async function appendFinancialRegistrationSettlementJobs(
             bank.payerAccount,
             bank.payee,
             bank.payeeAccount,
+            bank.currency,
             bank.electronicReceiptNo,
             note,
             bank.job.id,
@@ -12321,9 +12862,9 @@ async function appendFinancialRegistrationSettlementJobs(
           `INSERT INTO contract_payments (
              id, contract_id, file_id, payment_date, payment_time, amount,
              expense_category, payer, payer_account, payee, payee_account,
-             electronic_receipt_no, note, financial_ocr_job_id, status,
+             currency, electronic_receipt_no, note, financial_ocr_job_id, status,
              created_by, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft',$15,$16,$16)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'draft',$16,$17,$17)`,
           [
             settlementRecordIds[index],
             contractId,
@@ -12336,6 +12877,7 @@ async function appendFinancialRegistrationSettlementJobs(
             bank.payerAccount,
             bank.payee,
             bank.payeeAccount,
+            bank.currency,
             bank.electronicReceiptNo,
             note,
             bank.job.id,
@@ -12388,7 +12930,8 @@ async function appendFinancialRegistrationSettlementJobs(
         await client.query(
           `UPDATE contract_financial_registrations
            SET bank_ocr_job_id = COALESCE(bank_ocr_job_id, $2),
-             receipt_record_id = COALESCE(receipt_record_id, $3),
+             receipt_record_id = CASE WHEN $6 = 'receipt' THEN COALESCE(receipt_record_id, $3) ELSE receipt_record_id END,
+             payment_record_id = CASE WHEN $6 = 'payment' THEN COALESCE(payment_record_id, $3) ELSE payment_record_id END,
              bank_business_key_hash = COALESCE(bank_business_key_hash, $4),
              updated_at = $5 WHERE id = $1`,
           [
@@ -12397,6 +12940,7 @@ async function appendFinancialRegistrationSettlementJobs(
             settlementRecordIds[0] || null,
             bankBusinessHashes[0],
             now,
+            settlementKind,
           ],
         );
       }
@@ -12556,19 +13100,18 @@ async function appendFinancialRegistrationSettlementJobs(
       );
     } else {
       if (invoiceDocuments.length) {
-        const externalItems = await client.query<{
-          item_id: string;
-          amount: string | number;
-        }>(
-          `SELECT item.id AS item_id, payment.amount
+        const externalItems = await client.query<{ record_id: string }>(
+          `SELECT item.record_id
            FROM contract_financial_registration_items item
            JOIN contract_external_payments payment ON payment.id = item.record_id
            WHERE item.registration_id = $1
+             AND item.contract_id = $2
              AND item.item_kind = 'external_payment'
              AND payment.status <> 'reversed'
            ORDER BY item.created_at, item.id
+           LIMIT 1
            FOR UPDATE OF item, payment`,
-          [registrationId],
+          [registrationId, contractId],
         );
         if (externalItems.rows.length) {
           await client.query(
@@ -12578,57 +13121,73 @@ async function appendFinancialRegistrationSettlementJobs(
              WHERE id = ANY($1::text[]) AND status = 'draft'`,
             [newInvoiceRecordIds, currentActor.id, now],
           );
-          await client.query(
-            `DELETE FROM contract_financial_registration_matches match
-             USING contract_financial_registration_items settlement
-             WHERE match.registration_id = $1
-               AND settlement.id = match.settlement_item_id
-               AND settlement.item_kind = 'external_payment'`,
-            [registrationId],
+          const externalTarget = await lockDepositPaymentTarget(
+            client,
+            contractId,
+            externalItems.rows[0]!.record_id,
           );
-          const externalAllocations =
-            allocateAdditionalContractFinancialAmounts(
-              allocationInvoiceRows.map((item) => Number(item.amount)),
-              allocationInvoiceRows.map(() => 0),
-              externalItems.rows.map((item) => Number(item.amount)),
-            );
-          for (const allocation of externalAllocations) {
-            await client.query(
-              `INSERT INTO contract_financial_registration_matches (
-                 id, registration_id, contract_id, invoice_item_id,
-                 settlement_item_id, allocated_amount, created_at
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-              [
-                nanoid(),
-                registrationId,
-                contractId,
-                allocationInvoiceRows[allocation.invoiceIndex]!.item_id,
-                externalItems.rows[allocation.settlementIndex]!.item_id,
-                allocation.allocatedAmount,
-                now,
-              ],
-            );
-          }
+          // 补票只匹配扣除押金后的付款金额，尚未覆盖的部分继续等待后续发票。
+          await rebuildDepositAffectedFinancialMatches(
+            client,
+            contractId,
+            externalTarget,
+            now,
+          );
+          const rebuiltMatches = await client.query<{
+            invoice_record_id: string;
+            settlement_record_id: string;
+            allocated_amount: string | number;
+          }>(
+            `SELECT invoice_item.record_id AS invoice_record_id,
+               settlement_item.record_id AS settlement_record_id,
+               match.allocated_amount
+             FROM contract_financial_registration_matches match
+             JOIN contract_financial_registration_items invoice_item
+               ON invoice_item.id = match.invoice_item_id
+             JOIN contract_financial_registration_items settlement_item
+               ON settlement_item.id = match.settlement_item_id
+             WHERE match.registration_id = $1 AND match.contract_id = $2
+             ORDER BY match.created_at, match.id`,
+            [registrationId, contractId],
+          );
+          cumulativeSettlementCents = rebuiltMatches.rows.reduce(
+            (sum, match) => sum + toCents(String(match.allocated_amount)),
+            0,
+          );
+          matches = rebuiltMatches.rows
+            .filter((match) =>
+              newInvoiceRecordIds.includes(match.invoice_record_id),
+            )
+            .map((match) => ({
+              registrationId,
+              invoiceRecordId: match.invoice_record_id,
+              settlementRecordId: match.settlement_record_id,
+              allocatedAmount: Number(match.allocated_amount),
+            }));
         }
       }
-      const allocations = allocateAdditionalContractFinancialAmounts(
-        allocationInvoiceRows.map((item) => Number(item.amount)),
-        allocationInvoiceRows.map((item) =>
-          item.item_id
-            ? centsToAmount(
-                existingAllocatedByInvoiceItemId.get(item.item_id) || 0,
-              )
-            : 0,
-        ),
-        bankDocuments.map((item) => item.amount),
+      const allocations = bankDocuments.length
+        ? allocateAdditionalContractFinancialAmounts(
+            allocationInvoiceRows.map((item) => Number(item.amount)),
+            allocationInvoiceRows.map((item) =>
+              item.item_id
+                ? centsToAmount(
+                    existingAllocatedByInvoiceItemId.get(item.item_id) || 0,
+                  )
+                : 0,
+            ),
+            bankDocuments.map((item) => item.amount),
+          )
+        : [];
+      matches.push(
+        ...allocations.map((allocation) => ({
+          registrationId,
+          invoiceRecordId:
+            allocationInvoiceRows[allocation.invoiceIndex]!.record_id,
+          settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
+          allocatedAmount: allocation.allocatedAmount,
+        })),
       );
-      matches = allocations.map((allocation) => ({
-        registrationId,
-        invoiceRecordId:
-          allocationInvoiceRows[allocation.invoiceIndex]!.record_id,
-        settlementRecordId: settlementRecordIds[allocation.settlementIndex]!,
-        allocatedAmount: allocation.allocatedAmount,
-      }));
       for (const allocation of allocations) {
         await client.query(
           `INSERT INTO contract_financial_registration_matches (
@@ -12826,6 +13385,10 @@ async function appendExternalPaymentJobs(
       const paymentTime = normalizeFinancialPaymentTime(values?.paymentTime);
       const document = {
         job,
+        currency: requireCnyContractBankCurrency(
+          values?.currency,
+          values?.currencyEvidence,
+        ),
         payer: normalizeFinancialDisplayValue(values?.payer),
         payerAccount: normalizeFinancialDisplayValue(values?.payerAccount),
         payee: normalizeFinancialDisplayValue(values?.payee),
@@ -12847,6 +13410,7 @@ async function appendExternalPaymentJobs(
         throw new ContractDomainError(422, "对外付款回单识别快照缺少必需字段");
       }
       return document as typeof document & {
+        currency: "CNY";
         payer: string;
         payerAccount: string;
         payee: string;
@@ -12856,7 +13420,11 @@ async function appendExternalPaymentJobs(
     });
     const contractSubject = resolveContractCompanySubject(target);
     const normalizedSubject = normalizeFinancialIdentity(contractSubject.name);
-    const contractCounterparty = [target.party_a, target.party_b]
+    const contractCounterparty = [
+      target.party_a,
+      target.party_b,
+      target.party_c,
+    ]
       .map((party) => normalizeFinancialDisplayValue(party))
       .find(
         (party) =>

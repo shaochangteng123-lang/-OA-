@@ -1,5 +1,7 @@
 import { api } from "@/utils/api";
 import type {
+  MonthlyFinancialBankContentCorrectionConfirmation,
+  MonthlyFinancialBankContentCorrectionReview,
   MonthlyFinancialBankReceiptDuplicateFile,
   MonthlyFinancialBankReceiptState,
   MonthlyFinancialClosePayload,
@@ -31,6 +33,11 @@ export interface MonthlyFinancialBankReceiptUploadResult {
   bankStatements: MonthlyFinancialBankReceiptState;
   duplicateFiles: MonthlyFinancialBankReceiptDuplicateFile[];
   affectedMonths: string[];
+  correctionReview?: {
+    reviewId: string;
+    status: "confirmed";
+    correctedTransactionIds: string[];
+  } | null;
   message?: string;
 }
 
@@ -39,6 +46,8 @@ export const MONTHLY_FINANCE_VERSION_CONFLICT =
   "MONTHLY_FINANCE_VERSION_CONFLICT";
 export const MONTHLY_BANK_MIXED_MONTH_CONFIRMATION_REQUIRED =
   "MONTHLY_BANK_MIXED_MONTH_CONFIRMATION_REQUIRED";
+export const MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED =
+  "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED";
 
 function unwrap<T>(response: { data: ApiEnvelope<T> }): T {
   if (!response.data.success) {
@@ -114,6 +123,46 @@ export async function uploadMonthlyFinancialBankReceipts(
     signal,
     headers: { "X-Silent-Error": "true" },
   });
+  return normalizeMonthlyFinancialBankReceiptUploadResult(response);
+}
+
+export async function confirmMonthlyFinancialBankContentCorrection(
+  month: string,
+  expectedVersion: number,
+  files: File[],
+  confirmation: MonthlyFinancialBankContentCorrectionConfirmation,
+  mixedMonthConfirmed = false,
+  signal?: AbortSignal,
+): Promise<MonthlyFinancialBankReceiptUploadResult> {
+  const formData = new FormData();
+  for (const file of files) formData.append("files", file, file.name);
+  formData.append("expectedVersion", String(expectedVersion));
+  formData.append("mixedMonthConfirmed", String(mixedMonthConfirmed));
+  formData.append("confirmationToken", confirmation.confirmationToken);
+  formData.append("batchDigest", confirmation.batchDigest);
+  formData.append("reason", confirmation.reason);
+  formData.append(
+    "acknowledgements",
+    JSON.stringify(confirmation.acknowledgements),
+  );
+
+  const response = await api.post<
+    ApiEnvelope<Omit<MonthlyFinancialBankReceiptUploadResult, "message">>
+  >(
+    `${monthPath(month)}/bank-receipt-corrections/${encodeURIComponent(confirmation.reviewId)}/confirm`,
+    formData,
+    {
+      timeout: 30 * 60 * 1000,
+      signal,
+      headers: { "X-Silent-Error": "true" },
+    },
+  );
+  return normalizeMonthlyFinancialBankReceiptUploadResult(response);
+}
+
+function normalizeMonthlyFinancialBankReceiptUploadResult(response: {
+  data: ApiEnvelope<Omit<MonthlyFinancialBankReceiptUploadResult, "message">>;
+}): MonthlyFinancialBankReceiptUploadResult {
   const data = unwrap(response);
   return {
     ...data,
@@ -287,6 +336,66 @@ export function isMonthlyFinancialReportVersionConflict(
 export function getMonthlyFinancialReportErrorCode(error: unknown): string {
   const candidate = error as { response?: { data?: { code?: unknown } } };
   return String(candidate.response?.data?.code || "");
+}
+
+export function getMonthlyFinancialBankContentCorrectionReview(
+  error: unknown,
+): MonthlyFinancialBankContentCorrectionReview | null {
+  const candidate = error as {
+    response?: {
+      status?: number;
+      data?: { code?: unknown; data?: unknown };
+    };
+  };
+  if (
+    candidate.response?.status !== 409 ||
+    candidate.response?.data?.code !==
+      MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED
+  ) {
+    return null;
+  }
+  const review = candidate.response.data.data as
+    | Partial<MonthlyFinancialBankContentCorrectionReview>
+    | undefined;
+  if (
+    !review ||
+    typeof review.reviewId !== "string" ||
+    !review.reviewId ||
+    !Number.isInteger(review.expectedVersion) ||
+    typeof review.batchDigest !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(review.batchDigest) ||
+    typeof review.confirmationToken !== "string" ||
+    review.confirmationToken.length < 32 ||
+    typeof review.expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(review.expiresAt)) ||
+    !Array.isArray(review.requiredFiles) ||
+    !review.requiredFiles.length ||
+    !review.requiredFiles.every(
+      (file) =>
+        file &&
+        typeof file.originalName === "string" &&
+        /^[0-9a-f]{64}$/u.test(String(file.fileHash || "")) &&
+        ["basic", "general", "business"].includes(
+          String(file.accountCode || ""),
+        ),
+    ) ||
+    !Array.isArray(review.conflicts) ||
+    !review.conflicts.length ||
+    !review.conflicts.every(
+      (conflict) =>
+        conflict &&
+        typeof conflict.transactionId === "string" &&
+        typeof conflict.receiptNo === "string" &&
+        typeof conflict.normalizedReceiptNo === "string" &&
+        /^[0-9a-f]{64}$/u.test(String(conflict.differenceDigest || "")) &&
+        Array.isArray(conflict.differences) &&
+        conflict.differences.length > 0 &&
+        conflict.correctable === true,
+    )
+  ) {
+    return null;
+  }
+  return review as MonthlyFinancialBankContentCorrectionReview;
 }
 
 export function isMonthlyFinancialBankMixedMonthConfirmationRequired(

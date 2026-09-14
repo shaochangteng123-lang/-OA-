@@ -141,6 +141,7 @@ describe("合同上传前业务选择与精确可信度展示", () => {
           ],
           non_main: [
             { value: "non_main_income", label: "非主营业务收入合同" },
+            { value: "non_main_expense", label: "非主营业务支出合同" },
             { value: "other_service", label: "其他服务合同" },
           ],
           asset: [
@@ -151,6 +152,7 @@ describe("合同上传前业务选择与精确可信度展示", () => {
             { value: "vehicle_rental", label: "汽车租赁" },
             { value: "parking_space", label: "车位租赁" },
             { value: "office_asset", label: "办公资产合同" },
+            { value: "notary_fee", label: "公证费" },
           ],
         },
       }),
@@ -159,8 +161,19 @@ describe("合同上传前业务选择与精确可信度展示", () => {
     const meta = await getContractMeta();
 
     expect(meta.declaredSubtypeOptions.main_business).toHaveLength(3);
-    expect(meta.declaredSubtypeOptions.non_main).toHaveLength(2);
-    expect(meta.declaredSubtypeOptions.asset).toHaveLength(7);
+    expect(meta.declaredSubtypeOptions.non_main).toEqual([
+      { value: "non_main_income", label: "非主营业务收入合同" },
+      { value: "non_main_expense", label: "非主营业务支出合同" },
+    ]);
+    expect(meta.declaredSubtypeOptions.non_main).toContainEqual({
+      value: "non_main_expense",
+      label: "非主营业务支出合同",
+    });
+    expect(meta.declaredSubtypeOptions.asset).toHaveLength(8);
+    expect(meta.declaredSubtypeOptions.asset).toContainEqual({
+      value: "notary_fee",
+      label: "公证费",
+    });
     expect(meta.declaredSubtypeOptions.asset).toContainEqual({
       value: "parking_space",
       label: "车位租赁",
@@ -185,8 +198,15 @@ describe("合同上传前业务选择与精确可信度展示", () => {
       "preliminary_procedures",
       "technical_consulting",
     ]);
-    expect(meta.declaredSubtypeOptions.non_main).toHaveLength(2);
-    expect(meta.declaredSubtypeOptions.asset).toHaveLength(7);
+    expect(meta.declaredSubtypeOptions.non_main).toEqual([
+      { value: "non_main_income", label: "非主营业务收入合同" },
+      { value: "non_main_expense", label: "非主营业务支出合同" },
+    ]);
+    expect(meta.declaredSubtypeOptions.asset).toHaveLength(8);
+    expect(meta.declaredSubtypeOptions.asset).toContainEqual({
+      value: "notary_fee",
+      label: "公证费",
+    });
   });
 
   it("上传资产类合同时携带行政区、预选分类和资产子类", async () => {
@@ -219,6 +239,29 @@ describe("合同上传前业务选择与精确可信度展示", () => {
       expect.any(FormData),
       { timeout: 120_000 },
     );
+  });
+
+  it("上传非主营支出合同时携带锁定的支出二级分类", async () => {
+    (api.post as jest.Mock).mockResolvedValueOnce(
+      envelope({ contractId: "contract-expense", jobId: "job-expense" }),
+    );
+    const file = new File(["contract"], "非主营支出合同.pdf", {
+      type: "application/pdf",
+    });
+
+    await recognizeContract(file, {
+      area: "全部",
+      declaredCategory: "non_main",
+      declaredSubtype: "non_main_expense",
+      relationType: "main",
+      assetCategory: null,
+      requiresAuxiliaryMaterials: false,
+    });
+
+    const formData = (api.post as jest.Mock).mock.calls.at(-1)?.[1] as FormData;
+    expect(formData.get("declaredCategory")).toBe("non_main");
+    expect(formData.get("declaredSubtype")).toBe("non_main_expense");
+    expect(formData.get("assetCategory")).toBeNull();
   });
 
   it("非资产类上传不携带资产子类", async () => {

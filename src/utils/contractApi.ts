@@ -29,6 +29,7 @@ import type {
   ContractDraftDeleteResult,
   ContractExpenseCategory,
   ContractFinancialBlockingReason,
+  ContractFinancialBankFields,
   ContractFinancialRegistrationPayload,
   ContractFinancialRegistrationResult,
   ContractFinancialOcrResult,
@@ -61,6 +62,8 @@ import type {
   ContractSupplementChangeType,
   ContractSupplementUploadContext,
   ContractTerminationUploadContext,
+  ContractTargetAmountPayload,
+  ContractTargetAmountUpdateResult,
   ContractUpdatePayload,
 } from "@/types/contract";
 import {
@@ -601,6 +604,7 @@ function normalizeOcrEvidenceText(value: unknown): string | null {
 const FIELD_LABELS: Record<ContractOcrFieldKey, string> = {
   party_a: "甲方单位",
   party_b: "乙方单位",
+  party_c: "丙方单位",
   project_name: "项目名称",
   amount: "合同金额",
   category: "合同类型",
@@ -608,6 +612,7 @@ const FIELD_LABELS: Record<ContractOcrFieldKey, string> = {
 };
 
 const FIELD_KEYS = Object.keys(FIELD_LABELS) as ContractOcrFieldKey[];
+const DEFAULT_FIELD_KEYS = FIELD_KEYS.filter((key) => key !== "party_c");
 
 export function normalizeOcrFields(input: unknown): ContractOcrField[] {
   const source = input as
@@ -618,7 +623,12 @@ export function normalizeOcrFields(input: unknown): ContractOcrField[] {
 
   const records: Array<Record<string, unknown>> = Array.isArray(source)
     ? source
-    : FIELD_KEYS.map<Record<string, unknown>>((key) => {
+    : [
+        ...DEFAULT_FIELD_KEYS,
+        ...(source && Object.prototype.hasOwnProperty.call(source, "party_c")
+          ? (["party_c"] as const)
+          : []),
+      ].map<Record<string, unknown>>((key) => {
         const value = source?.[key];
         return typeof value === "object" && value !== null
           ? { ...value, key }
@@ -656,7 +666,7 @@ export function normalizeOcrFields(input: unknown): ContractOcrField[] {
         record.pageNumber ?? record.page_number ?? record.page,
       ),
       required:
-        key === "contract_date" || key === "category"
+        key === "contract_date" || key === "category" || key === "party_c"
           ? false
           : record.required !== false,
       manuallyConfirmed: Boolean(
@@ -669,7 +679,11 @@ export function normalizeOcrFields(input: unknown): ContractOcrField[] {
     });
   }
 
-  return FIELD_KEYS.map(
+  const responseFieldKeys = [
+    ...DEFAULT_FIELD_KEYS,
+    ...(byKey.has("party_c") ? (["party_c"] as const) : []),
+  ];
+  return responseFieldKeys.map(
     (key) =>
       byKey.get(key) || {
         key,
@@ -679,7 +693,8 @@ export function normalizeOcrFields(input: unknown): ContractOcrField[] {
         evidenceText: null,
         confidence: null,
         pageNumber: null,
-        required: key !== "contract_date" && key !== "category",
+        required:
+          key !== "contract_date" && key !== "category" && key !== "party_c",
         manuallyConfirmed: false,
       },
   );
@@ -749,6 +764,7 @@ export async function getContractMeta(): Promise<ContractMeta> {
     "vehicle_rental",
     "parking_space",
     "office_asset",
+    "notary_fee",
     "other",
   ]);
   const assetCategories = (
@@ -772,7 +788,7 @@ export async function getContractMeta(): Promise<ContractMeta> {
       "preliminary_procedures",
       "technical_consulting",
     ]),
-    non_main: new Set(["non_main_income", "other_service"]),
+    non_main: new Set(["non_main_income", "non_main_expense"]),
     asset: new Set([
       "procurement",
       "software",
@@ -781,6 +797,7 @@ export async function getContractMeta(): Promise<ContractMeta> {
       "vehicle_rental",
       "parking_space",
       "office_asset",
+      "notary_fee",
     ]),
   };
   const declaredSubtypeOptions = Object.fromEntries(
@@ -878,6 +895,7 @@ export async function getContractMeta(): Promise<ContractMeta> {
           "vehicle_rental",
           "parking_space",
           "office_asset",
+          "notary_fee",
           "other",
         ],
     declaredSubtypeOptions,
@@ -897,6 +915,9 @@ export async function getContracts(
     category: Array.isArray(query.category)
       ? query.category.join(",")
       : query.category || undefined,
+    declaredSubtype: Array.isArray(query.declaredSubtype)
+      ? query.declaredSubtype.join(",")
+      : query.declaredSubtype || undefined,
     status: Array.isArray(query.status)
       ? query.status.join(",")
       : query.status || undefined,
@@ -922,6 +943,12 @@ export async function getContracts(
     };
     return {
       ...item,
+      partyC:
+        String(
+          source.partyC ??
+            (source as ContractListItem & { party_c?: unknown }).party_c ??
+            "",
+        ) || null,
       hasSealedContractFile: Boolean(
         source.hasSealedContractFile ?? source.has_sealed_contract_file,
       ),
@@ -1145,10 +1172,24 @@ export async function getContractDashboard(
       noFixedAmountCount: Number(
         category.noFixedAmountCount ?? category.no_fixed_amount_count ?? 0,
       ),
+      incomeContractCount: Number(
+        category.incomeContractCount ?? category.income_contract_count ?? 0,
+      ),
+      expenseContractCount: Number(
+        category.expenseContractCount ?? category.expense_contract_count ?? 0,
+      ),
       totalAmount: (category.totalAmount ??
         category.total_amount ??
         category.amount ??
         0) as string | number,
+      incomeContractAmount: dashboardMoney(category, [
+        "incomeContractAmount",
+        "income_contract_amount",
+      ]),
+      expenseContractAmount: dashboardMoney(category, [
+        "expenseContractAmount",
+        "expense_contract_amount",
+      ]),
       periodAmount: dashboardMoney(category, [
         "periodAmount",
         "period_amount",
@@ -1514,6 +1555,14 @@ export async function getContractDashboard(
           "totalContractAmount",
           "total_contract_amount",
         ]),
+        incomeContractAmount: dashboardMoney(rawNonMain, [
+          "incomeContractAmount",
+          "income_contract_amount",
+        ]),
+        expenseContractAmount: dashboardMoney(rawNonMain, [
+          "expenseContractAmount",
+          "expense_contract_amount",
+        ]),
         monthReceiptAmount: dashboardMoney(rawNonMain, [
           "monthReceiptAmount",
           "month_receipt_amount",
@@ -1535,6 +1584,24 @@ export async function getContractDashboard(
         unreceivedAmount: dashboardMoney(rawNonMain, [
           "unreceivedAmount",
           "unreceived_amount",
+        ]),
+        monthPaymentAmount: dashboardMoney(rawNonMain, [
+          "monthPaymentAmount",
+          "month_payment_amount",
+        ]),
+        periodPaymentAmount: dashboardMoney(rawNonMain, [
+          "periodPaymentAmount",
+          "period_payment_amount",
+          "monthPaymentAmount",
+          "month_payment_amount",
+        ]),
+        cumulativePaymentAmount: dashboardMoney(rawNonMain, [
+          "cumulativePaymentAmount",
+          "cumulative_payment_amount",
+        ]),
+        unpaidAmount: dashboardMoney(rawNonMain, [
+          "unpaidAmount",
+          "unpaid_amount",
         ]),
         financialCost: dashboardMoney(rawNonMain, [
           "financialCost",
@@ -1842,6 +1909,7 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
     ),
     partyA: String(source.partyA ?? source.party_a ?? ""),
     partyB: String(source.partyB ?? source.party_b ?? ""),
+    partyC: String(source.partyC ?? source.party_c ?? "") || null,
     projectName: String(source.projectName ?? source.project_name ?? ""),
     projectId: (source.projectId ?? source.project_id ?? null) as string | null,
     category: (source.category ?? null) as ContractCategory | null,
@@ -1935,6 +2003,29 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       source.currentAmount ??
       source.current_amount ??
       null) as string | number | null,
+    pricingMode: (source.pricingMode ??
+      source.pricing_mode ??
+      "fixed") as ContractDetailResponse["contract"]["pricingMode"],
+    targetAmount: (source.targetAmount ?? source.target_amount ?? null) as
+      | string
+      | number
+      | null,
+    targetQuantity: (source.targetQuantity ??
+      source.target_quantity ??
+      null) as string | number | null,
+    unitPrice: (source.unitPrice ?? source.unit_price ?? null) as
+      | string
+      | number
+      | null,
+    confirmedQuantity: (source.confirmedQuantity ??
+      source.confirmed_quantity ??
+      null) as string | number | null,
+    confirmedContractAmount: (source.confirmedContractAmount ??
+      source.confirmed_contract_amount ??
+      null) as string | number | null,
+    quantityUnit: (source.quantityUnit ?? source.quantity_unit ?? null) as
+      | string
+      | null,
     projectedAmount: (source.projectedAmount ??
       source.projected_amount ??
       null) as string | number | null,
@@ -2336,6 +2427,8 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
   const rawFinancialRegistrationMatches =
     raw.financialRegistrationMatches ?? raw.financial_registration_matches;
   const rawDepositReceipts = raw.depositReceipts ?? raw.deposit_receipts;
+  const rawTargetAmountChanges =
+    raw.targetAmountChanges ?? raw.target_amount_changes;
   return {
     contract,
     files,
@@ -2384,6 +2477,46 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
         allocatedAmount: Number(
           match.allocatedAmount ?? match.allocated_amount ?? 0,
         ),
+      };
+    }),
+    targetAmountChanges: (Array.isArray(rawTargetAmountChanges)
+      ? rawTargetAmountChanges
+      : []
+    ).map((item: unknown) => {
+      const history = item as Record<string, unknown>;
+      return {
+        id: String(history.id || ""),
+        contractId: String(
+          history.contractId ?? history.contract_id ?? contract.id,
+        ),
+        changeNo: Number(history.changeNo ?? history.change_no ?? 0),
+        changeType: String(
+          history.changeType ?? history.change_type ?? "initial",
+        ) as "initial" | "update",
+        oldTargetAmount: (history.oldTargetAmount ??
+          history.old_target_amount ??
+          null) as string | number | null,
+        newTargetAmount: (history.newTargetAmount ??
+          history.new_target_amount ??
+          0) as string | number,
+        oldTargetQuantity: (history.oldTargetQuantity ??
+          history.old_target_quantity ??
+          null) as string | number | null,
+        newTargetQuantity: (history.newTargetQuantity ??
+          history.new_target_quantity ??
+          null) as string | number | null,
+        oldUnitPrice: (history.oldUnitPrice ??
+          history.old_unit_price ??
+          null) as string | number | null,
+        newUnitPrice: (history.newUnitPrice ??
+          history.new_unit_price ??
+          null) as string | number | null,
+        reason: String(history.reason || ""),
+        changedBy: String(history.changedBy ?? history.changed_by ?? ""),
+        changedByName: (history.changedByName ??
+          history.changed_by_name ??
+          null) as string | null,
+        changedAt: String(history.changedAt ?? history.changed_at ?? ""),
       };
     }),
     relations: relations as ContractDetailResponse["relations"],
@@ -2468,6 +2601,7 @@ export async function getContractSupplementUploadContext(
     projectName: String(raw.projectName ?? raw.project_name ?? ""),
     partyA: String(raw.partyA ?? raw.party_a ?? ""),
     partyB: String(raw.partyB ?? raw.party_b ?? ""),
+    partyC: String(raw.partyC ?? raw.party_c ?? "") || null,
     parentContractName: String(
       raw.parentContractName ?? raw.parent_contract_name ?? "",
     ),
@@ -2533,6 +2667,7 @@ export async function getContractRentalRenewalUploadContext(
     projectName: String(raw.projectName ?? raw.project_name ?? ""),
     partyA: String(raw.partyA ?? raw.party_a ?? ""),
     partyB: String(raw.partyB ?? raw.party_b ?? ""),
+    partyC: String(raw.partyC ?? raw.party_c ?? "") || null,
     currentLeaseEndDate: String(
       raw.currentLeaseEndDate ?? raw.current_lease_end_date ?? "",
     ),
@@ -2603,6 +2738,7 @@ export async function getContractTerminationUploadContext(
     projectName: String(raw.projectName ?? raw.project_name ?? ""),
     partyA: String(raw.partyA ?? raw.party_a ?? ""),
     partyB: String(raw.partyB ?? raw.party_b ?? ""),
+    partyC: String(raw.partyC ?? raw.party_c ?? "") || null,
     currentEffectiveAmount: (raw.currentEffectiveAmount ??
       raw.current_effective_amount ??
       0) as string | number,
@@ -2677,6 +2813,18 @@ export async function updateContract(
   return unwrap(
     await api.put<ApiEnvelope<ContractDetailResponse["contract"]>>(
       `/api/contracts/${id}`,
+      payload,
+    ),
+  );
+}
+
+export async function updateContractTargetAmount(
+  id: string,
+  payload: ContractTargetAmountPayload,
+): Promise<ContractTargetAmountUpdateResult> {
+  return unwrap(
+    await api.patch<ApiEnvelope<ContractTargetAmountUpdateResult>>(
+      `/api/contracts/${id}/target-amount`,
       payload,
     ),
   );
@@ -2901,14 +3049,15 @@ export async function getContractAuxiliaryPackages(
 export async function createContractAuxiliaryPackage(
   id: string,
   payload: {
-    contract: File[];
+    contract?: File[];
     invoice?: File[];
     receipt?: File[];
+    other?: File[];
     note?: string;
   },
 ): Promise<{ packageId: string; status: "succeeded"; version: number }> {
   const formData = new FormData();
-  for (const contract of payload.contract) {
+  for (const contract of payload.contract || []) {
     formData.append("contract", contract);
   }
   for (const invoice of payload.invoice || []) {
@@ -2916,6 +3065,9 @@ export async function createContractAuxiliaryPackage(
   }
   for (const receipt of payload.receipt || []) {
     formData.append("receipt", receipt);
+  }
+  for (const other of payload.other || []) {
+    formData.append("other", other);
   }
   if (payload.note) formData.append("note", payload.note);
   return unwrap(
@@ -2935,6 +3087,7 @@ export async function appendContractAuxiliaryFiles(
     contract?: File[];
     invoice?: File[];
     receipt?: File[];
+    other?: File[];
     note?: string;
   },
 ): Promise<{
@@ -2951,6 +3104,9 @@ export async function appendContractAuxiliaryFiles(
   }
   for (const receipt of payload.receipt || []) {
     formData.append("receipt", receipt);
+  }
+  for (const other of payload.other || []) {
+    formData.append("other", other);
   }
   formData.append("expectedVersion", String(expectedVersion));
   if (payload.note) formData.append("note", payload.note);
@@ -2993,6 +3149,29 @@ export async function deleteContractAuxiliaryPackage(
       `/api/contracts/${id}/auxiliary-packages/${packageId}`,
       { params: { expectedVersion } },
     ),
+  );
+}
+
+export async function deleteContractAuxiliaryFile(
+  id: string,
+  packageId: string,
+  fileId: string,
+  expectedVersion: number,
+): Promise<{
+  deleted: true;
+  packageDeleted: boolean;
+  version: number | null;
+}> {
+  return unwrap(
+    await api.delete<
+      ApiEnvelope<{
+        deleted: true;
+        packageDeleted: boolean;
+        version: number | null;
+      }>
+    >(`/api/contracts/${id}/auxiliary-packages/${packageId}/files/${fileId}`, {
+      params: { expectedVersion },
+    }),
   );
 }
 
@@ -3327,6 +3506,10 @@ function normalizeCompletedInternalFundingRecognition(
     ),
     fields: {
       paymentTime: String(fields.paymentTime ?? fields.payment_time ?? ""),
+      currency: String(fields.currency ?? ""),
+      currencyEvidence: String(
+        fields.currencyEvidence ?? fields.currency_evidence ?? "",
+      ) as ContractFinancialBankFields["currencyEvidence"],
       amount: Number(fields.amount || 0),
       electronicReceiptNo: String(
         fields.electronicReceiptNo ?? fields.electronic_receipt_no ?? "",

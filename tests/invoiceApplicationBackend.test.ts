@@ -2,16 +2,19 @@
 
 import fs from "fs";
 import path from "path";
-import { pool } from "../server/db/index.js";
+import { db, pool } from "../server/db/index.js";
 import {
   allocateInvoiceApplicationFacts,
   approvedInvoiceApplicationStatus,
   assertInvoiceApplicationMaterialPolicy,
+  calculateInvoiceApplicationCommittedAmount,
   calculateInvoiceApplicationCapacity,
   createInvoiceApplication,
+  deleteInvoiceApplicationDraft,
   generateMainBusinessTriplicate,
   getInvoiceApplicationAdminPendingCounts,
   getInvoiceApplicationPendingCounts,
+  isInvoiceApplicationSealedArchiveReady,
   listInvoiceApplications,
   markInvoiceApplicationIssued,
   normalizeInvoiceApplicationType,
@@ -85,6 +88,91 @@ describe("开票申请服务端主流程", () => {
       pendingAmount: 140,
       remainingAmount: 240,
     });
+  });
+
+  test("三联单之前累计金额复用已开票与未覆盖申请占用且不重复累计", () => {
+    const screenshotCapacity = calculateInvoiceApplicationCapacity({
+      currentEffectiveAmount: 152000,
+      invoicedAmount: 104500,
+      activeReservations: [],
+    });
+    expect(calculateInvoiceApplicationCommittedAmount(screenshotCapacity)).toBe(
+      104500,
+    );
+    expect(
+      calculateInvoiceApplicationCommittedAmount(screenshotCapacity) +
+        screenshotCapacity.remainingAmount,
+    ).toBe(152000);
+    expect(
+      calculateInvoiceApplicationCommittedAmount({
+        invoicedAmount: 80000,
+        pendingAmount: 20000,
+      }),
+    ).toBe(100000);
+    expect(
+      calculateInvoiceApplicationCommittedAmount({
+        invoicedAmount: 0.1,
+        pendingAmount: 0.2,
+      }),
+    ).toBe(0.3);
+  });
+
+  test("已完成盖章核验归档的合同保持可申请开票", () => {
+    expect(
+      isInvoiceApplicationSealedArchiveReady({
+        status: "effective",
+        hasArchivedSealed: true,
+        hasCurrentSealed: false,
+        historicalImported: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("普通上传合同仅存在当前盖章文件时仍须完成核验归档", () => {
+    expect(
+      isInvoiceApplicationSealedArchiveReady({
+        status: "effective",
+        hasArchivedSealed: false,
+        hasCurrentSealed: true,
+        historicalImported: false,
+      }),
+    ).toBe(false);
+  });
+
+  test.each(["effective", "executing", "completed"])(
+    "历史导入合同存在当前盖章文件且状态为 %s 时视为已归档",
+    (status) => {
+      expect(
+        isInvoiceApplicationSealedArchiveReady({
+          status,
+          hasArchivedSealed: false,
+          hasCurrentSealed: true,
+          historicalImported: true,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  test("历史导入合同缺少当前盖章文件时不能申请开票", () => {
+    expect(
+      isInvoiceApplicationSealedArchiveReady({
+        status: "effective",
+        hasArchivedSealed: false,
+        hasCurrentSealed: false,
+        historicalImported: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("历史导入合同处于非生效状态时不能以导入兼容规则申请开票", () => {
+    expect(
+      isInvoiceApplicationSealedArchiveReady({
+        status: "terminated",
+        hasArchivedSealed: false,
+        hasCurrentSealed: true,
+        historicalImported: true,
+      }),
+    ).toBe(false);
   });
 
   test("用户明确清空历史开票可选字段时不恢复旧值", () => {
@@ -683,6 +771,76 @@ describe("开票申请服务端主流程", () => {
     expect(schema).toContain("'material_deleted', 'submit', 'withdraw'");
   });
 
+  test("开票申请草稿仅允许申请人按版本硬删除并在提交后关闭入口", () => {
+    const routes = repositoryFile("server/routes/invoice-applications.ts");
+    const service = repositoryFile("server/services/invoiceApplication.ts");
+    expect(routes).toContain('router.delete("/:id"');
+    expect(routes).toContain("deleteInvoiceApplicationDraft(");
+    expect(service).toContain(
+      "export async function deleteInvoiceApplicationDraft",
+    );
+    expect(service).toContain('application.status !== "draft"');
+    expect(service).toContain("application.applicant_id !== actor.id");
+    expect(service).toContain("application.version !== expectedVersion");
+    expect(service).toContain("invoice_application_invoice_allocations");
+    expect(service).toContain(
+      "DELETE FROM invoice_application_audit_logs WHERE application_id=$1",
+    );
+    expect(service).toContain(
+      "DELETE FROM invoice_applications\n        WHERE id=$1 AND status='draft' RETURNING id",
+    );
+    expect(service).toContain("new Set(removablePaths)");
+  });
+
+  test("本人草稿删除在根合同锁内清理审计并返回删除结果", async () => {
+    const application = {
+      id: "draft-application",
+      contract_id: "contract-1",
+      applicant_id: "employee-1",
+      status: "draft",
+      version: 3,
+      applicant_signature_snapshot_path: null,
+      approver_signature_snapshot_path: null,
+    };
+    const query = jest.fn(async (sql: string) => {
+      if (sql.includes("SELECT * FROM invoice_applications"))
+        return { rows: [application] };
+      if (sql.includes("SELECT COALESCE(root_contract_id, id) AS root_id"))
+        return { rows: [{ root_id: "contract-1" }] };
+      if (sql.includes("invoice_application_invoice_allocations"))
+        return { rows: [{ count: 0 }] };
+      if (sql.includes("SELECT file_path FROM invoice_application_"))
+        return { rows: [] };
+      if (sql.includes("DELETE FROM invoice_applications"))
+        return { rows: [{ id: application.id }] };
+      return { rows: [] };
+    });
+    const mutableDb = db as unknown as {
+      transaction?: (
+        callback: (client: { query: typeof query }) => Promise<unknown>,
+      ) => Promise<unknown>;
+    };
+    const previousTransaction = mutableDb.transaction;
+    mutableDb.transaction = async (callback) => callback({ query });
+    try {
+      await expect(
+        deleteInvoiceApplicationDraft(
+          { id: "employee-1", role: "user" },
+          application.id,
+          3,
+        ),
+      ).resolves.toEqual({ id: application.id, deleted: true });
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "DELETE FROM invoice_application_audit_logs WHERE application_id=$1",
+        ),
+        [application.id],
+      );
+    } finally {
+      mutableDb.transaction = previousTransaction;
+    }
+  });
+
   test("系统生成三联单PDF直接内联预览打印且历史Excel继续转换", () => {
     const routes = repositoryFile("server/routes/invoice-applications.ts");
     expect(routes).toContain('material.mimeType !== "application/pdf"');
@@ -733,6 +891,15 @@ describe("开票申请服务端主流程", () => {
     expect(routes).toContain("getInvoiceApplicationEligibilityBatch(");
     expect(routes).toContain("invoiceApplicationEligibility:");
     expect(routes).toContain('currentActor.role === "user"');
+  });
+
+  test("非主营支出合同不能绕过台账入口直接申请开票", () => {
+    const service = repositoryFile("server/services/invoiceApplication.ts");
+    expect(service).toContain('contract.financial_direction === "cost"');
+    expect(service).toContain(
+      'contract.declared_subtype === "non_main_expense"',
+    );
+    expect(service).toContain("支出类合同不允许申请开票");
   });
 
   test("服务模块依赖保持单向，不反向导入合同服务", () => {

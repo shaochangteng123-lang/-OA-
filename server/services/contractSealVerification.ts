@@ -11,6 +11,7 @@ const FIELD_RISK_WARNING_PATTERN =
 export type SealedVerificationField =
   | "party_a"
   | "party_b"
+  | "party_c"
   | "amount"
   | "contract_date";
 
@@ -22,12 +23,14 @@ type SealedCoreVerificationField = Exclude<
 const FIELD_WARNING_LABELS: Record<SealedCoreVerificationField, RegExp> = {
   party_a: /(?:甲方单位|甲方|委托方)/u,
   party_b: /(?:乙方单位|乙方|受托方)/u,
+  party_c: /(?:丙方单位|丙方)/u,
   amount: /(?:合同金额|金额)/u,
 };
 
 export interface ApprovedContractSnapshot {
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   amount: string | number;
   amountVerificationRequired?: boolean;
   contractDate?: string | null;
@@ -58,6 +61,7 @@ export interface SealedContractVerificationResult {
 const LABELS: Record<SealedVerificationField, string> = {
   party_a: "甲方单位",
   party_b: "乙方单位",
+  party_c: "丙方单位",
   amount: "合同金额",
   contract_date: "合同签订日期",
 };
@@ -101,7 +105,7 @@ function isValidContractDate(value: string): boolean {
 
 function normalizeLooseContractDate(value: string): string | null {
   const match = value.match(
-    /(?<!\d)(2\d{3})\s*(?:年|[.．/\-])\s*(\d{1,2})\s*(?:月|[.．/\-])\s*(\d{1,2})\s*(?:日)?(?!\d)/u,
+    /(?<!\d)(2\d{3})\s*(?:年|[.．/-])\s*(\d{1,2})\s*(?:月|[.．/-])\s*(\d{1,2})\s*(?:日)?(?!\d)/u,
   );
   if (!match) return null;
   const normalized = `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
@@ -248,6 +252,14 @@ export function findSealedContractMismatches(
         sealedVerificationValuesEqual("party_b", left, right),
     },
   ];
+  if (approved.partyC) {
+    comparisons.push({
+      field: "party_c",
+      approvedValue: approved.partyC,
+      equal: (left, right) =>
+        sealedVerificationValuesEqual("party_c", left, right),
+    });
+  }
   if (approved.amountVerificationRequired !== false) {
     comparisons.push({
       field: "amount",
@@ -289,79 +301,89 @@ export function compareSealedContract(
     recognition,
     uploadDate,
   );
-  const values = (
-    ["party_a", "party_b", "amount", "contract_date"] as const
-  ).map((fieldName): SealedVerificationValue => {
-    if (
-      fieldName === "amount" &&
-      approved.amountVerificationRequired === false
-    ) {
+  const verificationFields: SealedVerificationField[] = [
+    "party_a",
+    "party_b",
+    ...(approved.partyC ? (["party_c"] as const) : []),
+    "amount",
+    "contract_date",
+  ];
+  const values = verificationFields.map(
+    (fieldName): SealedVerificationValue => {
+      if (
+        fieldName === "amount" &&
+        approved.amountVerificationRequired === false
+      ) {
+        return {
+          field: fieldName,
+          value: null,
+          confidence: 0,
+          source: "not_applicable",
+          requiresRecognitionRetry: false,
+        };
+      }
+      const field = fieldByName(recognition, fieldName);
+      const rawRecognizedValue = normalizedFieldValue(field);
+      const parsedRecognizedValue = rawRecognizedValue
+        ? fieldName === "contract_date"
+          ? isValidContractDate(rawRecognizedValue)
+            ? rawRecognizedValue
+            : null
+          : fieldName === "amount" &&
+              !isValidRecognizedAmount(rawRecognizedValue)
+            ? null
+            : rawRecognizedValue
+        : null;
+      const recognizedValue =
+        fieldName === "contract_date" && !parsedRecognizedValue
+          ? approvedDateEvidence?.value || null
+          : parsedRecognizedValue;
+      const value =
+        fieldName === "contract_date" && !recognizedValue
+          ? uploadDate
+          : recognizedValue;
+      const coreField = fieldName === "contract_date" ? null : fieldName;
+      const relevantWarnings = coreField
+        ? sealedRecognitionWarningsForField(
+            coreField,
+            field?.warnings,
+            recognition.warnings,
+          )
+        : [];
       return {
         field: fieldName,
-        value: null,
-        confidence: 0,
-        source: "not_applicable",
-        requiresRecognitionRetry: false,
+        value,
+        confidence:
+          fieldName === "contract_date" && approvedDateEvidence
+            ? approvedDateEvidence.confidence
+            : Number(field?.confidence || 0),
+        source:
+          fieldName === "contract_date" && !recognizedValue
+            ? "upload_date"
+            : fieldName === "contract_date" && approvedDateEvidence
+              ? approvedDateEvidence.source
+              : field?.source || "unknown",
+        requiresRecognitionRetry:
+          fieldName !== "contract_date" &&
+          (recognitionFailure ||
+            sealedCoreFieldRequiresRecognitionRetry({
+              field: fieldName,
+              approvedValue:
+                fieldName === "party_a"
+                  ? approved.partyA
+                  : fieldName === "party_b"
+                    ? approved.partyB
+                    : fieldName === "party_c"
+                      ? approved.partyC || ""
+                      : approved.amount,
+              recognizedValue,
+              fieldScore: field?.fieldScore ?? field?.confidence,
+              source: field?.source,
+              warnings: relevantWarnings,
+            })),
       };
-    }
-    const field = fieldByName(recognition, fieldName);
-    const rawRecognizedValue = normalizedFieldValue(field);
-    const parsedRecognizedValue = rawRecognizedValue
-      ? fieldName === "contract_date"
-        ? isValidContractDate(rawRecognizedValue)
-          ? rawRecognizedValue
-          : null
-        : fieldName === "amount" && !isValidRecognizedAmount(rawRecognizedValue)
-          ? null
-          : rawRecognizedValue
-      : null;
-    const recognizedValue =
-      fieldName === "contract_date" && !parsedRecognizedValue
-        ? approvedDateEvidence?.value || null
-        : parsedRecognizedValue;
-    const value =
-      fieldName === "contract_date" && !recognizedValue
-        ? uploadDate
-        : recognizedValue;
-    const coreField = fieldName === "contract_date" ? null : fieldName;
-    const relevantWarnings = coreField
-      ? sealedRecognitionWarningsForField(
-          coreField,
-          field?.warnings,
-          recognition.warnings,
-        )
-      : [];
-    return {
-      field: fieldName,
-      value,
-      confidence:
-        fieldName === "contract_date" && approvedDateEvidence
-          ? approvedDateEvidence.confidence
-          : Number(field?.confidence || 0),
-      source:
-        fieldName === "contract_date" && !recognizedValue
-          ? "upload_date"
-          : fieldName === "contract_date" && approvedDateEvidence
-            ? approvedDateEvidence.source
-            : field?.source || "unknown",
-      requiresRecognitionRetry:
-        fieldName !== "contract_date" &&
-        (recognitionFailure ||
-          sealedCoreFieldRequiresRecognitionRetry({
-            field: fieldName,
-            approvedValue:
-              fieldName === "party_a"
-                ? approved.partyA
-                : fieldName === "party_b"
-                  ? approved.partyB
-                  : approved.amount,
-            recognizedValue,
-            fieldScore: field?.fieldScore ?? field?.confidence,
-            source: field?.source,
-            warnings: relevantWarnings,
-          })),
-    };
-  });
+    },
+  );
   const requiresRecognitionRetry =
     recognitionFailure ||
     values.some((value) => value.requiresRecognitionRetry);

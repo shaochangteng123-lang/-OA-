@@ -26,6 +26,8 @@ export interface BossHumanCostTrend {
   companyHousingFund: number | null;
   personalHousingFund: number | null;
   individualIncomeTax: number | null;
+  withheldActualAmount: number | null;
+  netSalaryActualAmount: number | null;
   total: number | null;
   available: boolean;
 }

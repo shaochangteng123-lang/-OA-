@@ -7,6 +7,18 @@ import type {
 const UNSIGNED_AMOUNT_PATTERN = /^(?:0|[1-9]\d{0,17})(?:\.\d{1,12})?$/;
 const SIGNED_AMOUNT_PATTERN = /^-?(?:0|[1-9]\d{0,17})(?:\.\d{1,12})?$/;
 
+export function formatMonthlyFinancialAmount(
+  value: string | number | null | undefined,
+): string {
+  if (value === null || value === undefined || value === "") return "—";
+  const text = String(value).trim();
+  const match = text.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return text;
+  const integer = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const fraction = (match[3] || "").padEnd(2, "0");
+  return `¥${match[1]}${integer}.${fraction}`;
+}
+
 export function isMonthlyFinancialAmountText(
   value: string,
   allowNegative = false,

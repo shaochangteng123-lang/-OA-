@@ -34,10 +34,22 @@ interface WorkbookManualItem {
   amount: string;
   description?: string | null;
   voucherReference?: string | null;
-  sourceType?: "manual" | "monthly_bank_transaction";
+  sourceType?: "manual" | "monthly_bank_transaction" | "reimbursement";
   readOnly?: boolean;
   effective?: boolean;
   previewUrl?: string | null;
+}
+
+interface WorkbookWelfareExpenseCategory {
+  id: string;
+  code: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  automaticAmount: string;
+  manualAmount: string;
+  totalAmount: string;
+  isFixed: boolean;
 }
 
 export interface MonthlyFinancialWorkbookReport {
@@ -48,6 +60,8 @@ export interface MonthlyFinancialWorkbookReport {
   income: Record<string, string>;
   expenses: Record<string, string>;
   manualItems: WorkbookManualItem[];
+  welfareOneExpenseCategories?: WorkbookWelfareExpenseCategory[];
+  welfareTwoExpenseCategories?: WorkbookWelfareExpenseCategory[];
   validations: {
     blockers: Array<{ code: string; message: string }>;
     warnings: Array<{ code: string; message: string }>;
@@ -64,6 +78,17 @@ interface PersonAmounts {
 interface XmlCellValue {
   type: "text" | "amount";
   value: string;
+}
+
+function spreadsheetColumn(index: number): string {
+  let value = index;
+  let output = "";
+  while (value > 0) {
+    value -= 1;
+    output = String.fromCharCode(65 + (value % 26)) + output;
+    value = Math.floor(value / 26);
+  }
+  return output;
 }
 
 function locateTemplate(): string {
@@ -110,7 +135,7 @@ function roundCurrencyAmount(value: string): string {
 
 function cellPattern(address: string): RegExp {
   return new RegExp(
-    `<(?:[A-Za-z0-9_]+:)?c\\b[^>]*\\br="${address}"[^>]*>[\\s\\S]*?<\\/(?:[A-Za-z0-9_]+:)?c>`,
+    `<(?:[A-Za-z0-9_]+:)?c\\b(?=[^>]*\\br="${address}")(?:[^>]*\\/>|[^>]*>[\\s\\S]*?<\\/(?:[A-Za-z0-9_]+:)?c>)`,
   );
 }
 
@@ -125,7 +150,9 @@ function replaceCell(
   const opening = current.match(/^<([A-Za-z0-9_]+:)?c\b([^>]*)>/);
   if (!opening) throw new Error(`月度财务报表模板单元格 ${address} 无效`);
   const prefix = opening[1] || "";
-  const attributes = opening[2].replace(/\s+t="[^"]*"/g, "");
+  const attributes = opening[2]
+    .replace(/\s+t="[^"]*"/g, "")
+    .replace(/\/\s*$/, "");
   return xml.replace(
     pattern,
     `<${prefix}c${attributes}${content(prefix)}</${prefix}c>`,
@@ -167,6 +194,73 @@ function setFormula(
   );
 }
 
+function setTextWithStyle(
+  xml: string,
+  address: string,
+  value: unknown,
+  styleId: string,
+): string {
+  if (cellPattern(address).test(xml)) return setText(xml, address, value);
+  const rowNumber = address.match(/\d+$/)?.[0];
+  if (!rowNumber) throw new Error(`月度财务报表单元格地址无效：${address}`);
+  const prefix = worksheetPrefix(xml);
+  const rowStart = new RegExp(
+    `<${prefix}row\\b[^>]*\\br="${rowNumber}"[^>]*>`,
+  ).exec(xml);
+  const rowEnd = rowStart
+    ? xml.indexOf(`</${prefix}row>`, rowStart.index + rowStart[0].length)
+    : -1;
+  if (!rowStart || rowEnd < 0)
+    throw new Error(`月度财务报表模板缺少第 ${rowNumber} 行`);
+  const cell = `<${prefix}c r="${address}" s="${styleId}" t="inlineStr"><${prefix}is><${prefix}t xml:space="preserve">${escapeXml(value)}</${prefix}t></${prefix}is></${prefix}c>`;
+  return `${xml.slice(0, rowEnd)}${cell}${xml.slice(rowEnd)}`;
+}
+
+function setAmountWithStyle(
+  xml: string,
+  address: string,
+  value: string,
+  styleId: string,
+): string {
+  if (cellPattern(address).test(xml)) return setAmount(xml, address, value);
+  const rowNumber = address.match(/\d+$/)?.[0];
+  if (!rowNumber) throw new Error(`月度财务报表单元格地址无效：${address}`);
+  const prefix = worksheetPrefix(xml);
+  const rowStart = new RegExp(
+    `<${prefix}row\\b[^>]*\\br="${rowNumber}"[^>]*>`,
+  ).exec(xml);
+  const rowEnd = rowStart
+    ? xml.indexOf(`</${prefix}row>`, rowStart.index + rowStart[0].length)
+    : -1;
+  if (!rowStart || rowEnd < 0)
+    throw new Error(`月度财务报表模板缺少第 ${rowNumber} 行`);
+  const cell = `<${prefix}c r="${address}" s="${styleId}" t="n"><${prefix}v>${amountXmlValue(value)}</${prefix}v></${prefix}c>`;
+  return `${xml.slice(0, rowEnd)}${cell}${xml.slice(rowEnd)}`;
+}
+
+function extendSummarySheetWidth(xml: string, lastColumnIndex: number): string {
+  if (lastColumnIndex <= 8) return xml;
+  const prefix = worksheetPrefix(xml);
+  const extraColumns = Array.from(
+    { length: lastColumnIndex - 8 },
+    (_, index) => {
+      const columnIndex = index + 9;
+      return `<${prefix}col min="${columnIndex}" max="${columnIndex}" width="18" hidden="0" customWidth="1"/>`;
+    },
+  ).join("");
+  xml = xml.replace(`</${prefix}cols>`, `${extraColumns}</${prefix}cols>`);
+  const lastColumn = spreadsheetColumn(lastColumnIndex);
+  for (const row of [1, 2, 4, 9, 13, 21, 27]) {
+    xml = xml.replace(
+      `ref="A${row}:H${row}"`,
+      `ref="A${row}:${lastColumn}${row}"`,
+    );
+  }
+  xml = xml.replace('ref="C5:H5"', `ref="C5:${lastColumn}5"`);
+  xml = xml.replace('ref="C28:H28"', `ref="C28:${lastColumn}28"`);
+  return xml;
+}
+
 function accountByCode(
   report: MonthlyFinancialWorkbookReport,
   code: FinancialAccountCode,
@@ -190,7 +284,11 @@ function buildPersonAmounts(
   ]);
   const people = new Map<string, PersonAmounts>();
   for (const detail of details) {
-    if (!relevantMetrics.has(detail.metric)) continue;
+    if (
+      !relevantMetrics.has(detail.metric) ||
+      (detail.accountCode !== "general" && detail.accountCode !== "business")
+    )
+      continue;
     const name =
       String(detail.personName || "未归属人员").trim() || "未归属人员";
     const key = detail.personId
@@ -232,6 +330,110 @@ function compactPersonAmounts(people: PersonAmounts[]): PersonAmounts[] {
   return visible;
 }
 
+function visibleWelfareCategories(
+  categories: WorkbookWelfareExpenseCategory[],
+): WorkbookWelfareExpenseCategory[] {
+  return categories
+    .filter(
+      (category) =>
+        category.isFixed ||
+        category.isActive ||
+        category.automaticAmount !== "0" ||
+        category.manualAmount !== "0",
+    )
+    .sort(
+      (left, right) =>
+        left.sortOrder - right.sortOrder ||
+        left.name.localeCompare(right.name, "zh-CN") ||
+        left.id.localeCompare(right.id),
+    );
+}
+
+function fallbackWelfareOneCategories(
+  report: MonthlyFinancialWorkbookReport,
+): WorkbookWelfareExpenseCategory[] {
+  const rows: Array<[string, string, string, string | undefined]> = [
+    [
+      "welfare_one_drinking_water",
+      "drinking_water",
+      "饮用水",
+      report.expenses.welfareOneDrinkingWater,
+    ],
+    ["welfare_one_office", "office", "办公", report.expenses.welfareOneOffice],
+    [
+      "welfare_one_electricity",
+      "electricity",
+      "电费",
+      report.expenses.welfareOneElectricity,
+    ],
+    ["welfare_one_407_ai", "407_ai", "407-AI", report.expenses.welfareOne407Ai],
+    ["welfare_one_8h_ai", "8h_ai", "8H-AI", report.expenses.welfareOne8hAi],
+  ];
+  return rows.map(([id, code, name, amount], index) => ({
+    id,
+    code,
+    name,
+    sortOrder: index + 1,
+    isActive: true,
+    automaticAmount: "0",
+    manualAmount: amount || "0",
+    totalAmount: amount || "0",
+    isFixed: true,
+  }));
+}
+
+function fallbackWelfareTwoCategories(
+  report: MonthlyFinancialWorkbookReport,
+): WorkbookWelfareExpenseCategory[] {
+  const rows: Array<[string, string, string, string | undefined]> = [
+    [
+      "welfare_two_refreshment",
+      "refreshment",
+      "茶歇",
+      report.expenses.welfareTwoRefreshment,
+    ],
+    [
+      "welfare_two_team_building",
+      "team_building",
+      "团建",
+      report.expenses.welfareTwoTeamBuilding,
+    ],
+    [
+      "welfare_two_physical_exam",
+      "physical_exam",
+      "体检",
+      report.expenses.welfareTwoPhysicalExam,
+    ],
+  ];
+  return rows.map(([id, code, name, amount], index) => ({
+    id,
+    code,
+    name,
+    sortOrder: index + 1,
+    isActive: true,
+    automaticAmount: "0",
+    manualAmount: amount || "0",
+    totalAmount: amount || "0",
+    isFixed: true,
+  }));
+}
+
+function workbookWelfareCategories(
+  report: MonthlyFinancialWorkbookReport,
+  account: "one" | "two",
+): WorkbookWelfareExpenseCategory[] {
+  const categories =
+    account === "one"
+      ? report.welfareOneExpenseCategories
+      : report.welfareTwoExpenseCategories;
+  return visibleWelfareCategories(
+    categories ||
+      (account === "one"
+        ? fallbackWelfareOneCategories(report)
+        : fallbackWelfareTwoCategories(report)),
+  );
+}
+
 function populateSummaryXml(
   originalXml: string,
   report: MonthlyFinancialWorkbookReport,
@@ -245,6 +447,23 @@ function populateSummaryXml(
   const business = accountByCode(report, "business");
   const welfareOne = accountByCode(report, "welfare_one");
   const welfareTwo = accountByCode(report, "welfare_two");
+  const welfareOneCategories = workbookWelfareCategories(report, "one");
+  const welfareTwoCategories = workbookWelfareCategories(report, "two");
+  const lastWelfareOneColumnIndex = Math.max(
+    2,
+    2 + welfareOneCategories.length,
+  );
+  const lastWelfareTwoColumnIndex = Math.max(
+    2,
+    2 + welfareTwoCategories.length,
+  );
+  const lastWelfareOneColumn = spreadsheetColumn(lastWelfareOneColumnIndex);
+  const lastWelfareTwoColumn = spreadsheetColumn(lastWelfareTwoColumnIndex);
+  const lastSheetColumnIndex = Math.max(
+    8,
+    lastWelfareOneColumnIndex,
+    lastWelfareTwoColumnIndex,
+  );
   const openingTotal = addFinancialAmounts(
     general.opening,
     business.opening,
@@ -271,22 +490,20 @@ function populateSummaryXml(
     report.expenses.largeReimbursement || "0",
     report.expenses.generalBankFee || "0",
     report.expenses.generalOther || "0",
+    report.expenses.generalTaxPayment || "0",
   );
   const administrativeReimbursement = addFinancialAmounts(
     report.expenses.basicReimbursement || "0",
     report.expenses.largeReimbursement || "0",
   );
+  const hasTaxPayment =
+    addFinancialAmounts(report.expenses.generalTaxPayment || "0") !== "0";
+  const taxPaymentFormula = `SUMIF('手工项目明细'!$B$2:$B$501,"一般账户实际税费支出",'手工项目明细'!$E$2:$E$501)`;
   const welfareOneExpense = addFinancialAmounts(
-    report.expenses.welfareOneDrinkingWater || "0",
-    report.expenses.welfareOneOffice || "0",
-    report.expenses.welfareOneElectricity || "0",
-    report.expenses.welfareOne407Ai || "0",
-    report.expenses.welfareOne8hAi || "0",
+    ...welfareOneCategories.map((category) => category.totalAmount),
   );
   const welfareTwoExpense = addFinancialAmounts(
-    report.expenses.welfareTwoRefreshment || "0",
-    report.expenses.welfareTwoTeamBuilding || "0",
-    report.expenses.welfareTwoPhysicalExam || "0",
+    ...welfareTwoCategories.map((category) => category.totalAmount),
   );
   const welfareExpense = addFinancialAmounts(
     welfareOneExpense,
@@ -322,16 +539,50 @@ function populateSummaryXml(
     ["F15", report.expenses.generalBankFee],
     ["G15", report.expenses.businessBankFee],
     ["H15", report.expenses.assetAdministration],
-    ["C23", report.expenses.welfareOneDrinkingWater],
-    ["D23", report.expenses.welfareOneOffice],
-    ["E23", report.expenses.welfareOneElectricity],
-    ["F23", report.expenses.welfareOne407Ai],
-    ["G23", report.expenses.welfareOne8hAi],
-    ["C25", report.expenses.welfareTwoRefreshment],
-    ["D25", report.expenses.welfareTwoTeamBuilding],
-    ["E25", report.expenses.welfareTwoPhysicalExam],
   ] as Array<[string, string | undefined]>) {
     xml = setAmount(xml, address, value);
+  }
+
+  const welfareOneHeaderStyleId = extractStyleId(xml, "G22");
+  const welfareOneAmountStyleId = extractStyleId(xml, "G23");
+  const welfareTwoHeaderStyleId = extractStyleId(xml, "E24");
+  const welfareTwoAmountStyleId = extractStyleId(xml, "E25");
+  for (
+    let columnIndex = 3;
+    columnIndex <= lastSheetColumnIndex;
+    columnIndex += 1
+  ) {
+    const column = spreadsheetColumn(columnIndex);
+    const welfareOneCategory = welfareOneCategories[columnIndex - 3];
+    const welfareTwoCategory = welfareTwoCategories[columnIndex - 3];
+    xml = setTextWithStyle(
+      xml,
+      `${column}22`,
+      welfareOneCategory?.name || "",
+      welfareOneHeaderStyleId,
+    );
+    xml = welfareOneCategory
+      ? setAmountWithStyle(
+          xml,
+          `${column}23`,
+          welfareOneCategory.totalAmount,
+          welfareOneAmountStyleId,
+        )
+      : setTextWithStyle(xml, `${column}23`, "", welfareOneAmountStyleId);
+    xml = setTextWithStyle(
+      xml,
+      `${column}24`,
+      welfareTwoCategory?.name || "",
+      welfareTwoHeaderStyleId,
+    );
+    xml = welfareTwoCategory
+      ? setAmountWithStyle(
+          xml,
+          `${column}25`,
+          welfareTwoCategory.totalAmount,
+          welfareTwoAmountStyleId,
+        )
+      : setTextWithStyle(xml, `${column}25`, "", welfareTwoAmountStyleId);
   }
 
   const people = compactPersonAmounts(buildPersonAmounts(automatic.details));
@@ -353,20 +604,44 @@ function populateSummaryXml(
       "ROUND(SUM(B19:H19),2)",
       report.expenses.businessReimbursement || "0",
     ],
-    ["B14", "ROUND(D15+E15+F15+A17,2)", administrativeExpense],
-    ["A23", "ROUND(B23+B25,2)", welfareExpense],
-    ["B23", "ROUND(SUM(C23:G23),2)", welfareOneExpense],
-    ["B25", "ROUND(SUM(C25:E25),2)", welfareTwoExpense],
-    ["B29", "ROUND(A7+F11+G11-D15-E15-F15-H15-A17,2)", general.closing],
+    [
+      "B14",
+      hasTaxPayment
+        ? `ROUND(D15+E15+F15+A17+${taxPaymentFormula},2)`
+        : "ROUND(D15+E15+F15+A17,2)",
+      administrativeExpense,
+    ],
+    ["A24", "ROUND(B23+B25,2)", welfareExpense],
+    [
+      "B23",
+      welfareOneCategories.length
+        ? `ROUND(SUM(C23:${lastWelfareOneColumn}23),2)`
+        : "ROUND(0,2)",
+      welfareOneExpense,
+    ],
+    [
+      "B25",
+      welfareTwoCategories.length
+        ? `ROUND(SUM(C25:${lastWelfareTwoColumn}25),2)`
+        : "ROUND(0,2)",
+      welfareTwoExpense,
+    ],
+    [
+      "B29",
+      hasTaxPayment
+        ? `ROUND(A7+F11+G11-D15-E15-F15-H15-A17-${taxPaymentFormula},2)`
+        : "ROUND(A7+F11+G11-D15-E15-F15-H15-A17,2)",
+      general.closing,
+    ],
     ["D29", "ROUND(C7+D11+E11+H11-G15-A19,2)", business.closing],
     [
       "H29",
-      `ROUND(G7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户一补充收入",'手工项目明细'!$E$2:$E$501)-SUM(C23:G23),2)`,
+      `ROUND(G7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户一补充收入",'手工项目明细'!$E$2:$E$501)-${welfareOneCategories.length ? `SUM(C23:${lastWelfareOneColumn}23)` : "0"},2)`,
       welfareOne.closing,
     ],
     [
       "H30",
-      `ROUND(H7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户二补充收入",'手工项目明细'!$E$2:$E$501)-SUM(C25:E25),2)`,
+      `ROUND(H7+SUMIF('手工项目明细'!$B$2:$B$501,"福利账户二补充收入",'手工项目明细'!$E$2:$E$501)-${welfareTwoCategories.length ? `SUM(C25:${lastWelfareTwoColumn}25)` : "0"},2)`,
       welfareTwo.closing,
     ],
     ["F29", "ROUND(H29+H30,2)", welfareClosing],
@@ -381,7 +656,7 @@ function populateSummaryXml(
       '$1<x:pageSetup paperSize="9" orientation="portrait" fitToWidth="1" fitToHeight="1"/>',
     );
   }
-  return xml;
+  return extendSummarySheetWidth(xml, lastSheetColumnIndex);
 }
 
 function extractStyleId(xml: string, address: string): string {
@@ -476,14 +751,24 @@ function amountCell(value: string): XmlCellValue {
   return { type: "amount", value: amountXmlValue(value) };
 }
 
-function populateWorkbookMetadata(originalXml: string): string {
+function populateWorkbookMetadata(
+  originalXml: string,
+  lastColumn: string,
+): string {
   let xml = originalXml;
   const prefix = xml.match(/<([A-Za-z0-9_]+:)?workbook\b/)?.[1] || "";
+  const printArea = `&apos;月度结算&apos;!$A$1:$${lastColumn}$30`;
+  const printAreaPattern = new RegExp(
+    `(<${prefix}definedName\\b[^>]*name="_xlnm\\.Print_Area"[^>]*localSheetId="0"[^>]*>)[\\s\\S]*?(</${prefix}definedName>)`,
+  );
+  if (printAreaPattern.test(xml)) {
+    xml = xml.replace(printAreaPattern, `$1${printArea}$2`);
+  }
   if (!/<(?:[A-Za-z0-9_]+:)?definedNames\b/.test(xml)) {
     xml = xml.replace(
       /(<\/(?:[A-Za-z0-9_]+:)?workbook>)/,
       (closingTag) =>
-        `<${prefix}definedNames><${prefix}definedName name="_xlnm.Print_Area" localSheetId="0">&apos;月度结算&apos;!$A$1:$H$30</${prefix}definedName></${prefix}definedNames><${prefix}calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>${closingTag}`,
+        `<${prefix}definedNames><${prefix}definedName name="_xlnm.Print_Area" localSheetId="0">${printArea}</${prefix}definedName></${prefix}definedNames><${prefix}calcPr calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>${closingTag}`,
     );
   }
   return xml;
@@ -501,8 +786,15 @@ export async function buildMonthlyFinancialWorkbook(
 ): Promise<Buffer> {
   const zip = await JSZip.loadAsync(fs.readFileSync(locateTemplate()));
   const summaryXml = await readZipText(zip, SUMMARY_SHEET_PATH);
-  const textStyleId = extractStyleId(summaryXml, "A17");
+  const textStyleId = extractStyleId(summaryXml, "A11");
   const amountStyleId = extractStyleId(summaryXml, "B17");
+  const lastSummaryColumn = spreadsheetColumn(
+    Math.max(
+      8,
+      2 + workbookWelfareCategories(report, "one").length,
+      2 + workbookWelfareCategories(report, "two").length,
+    ),
+  );
 
   zip.file(
     SUMMARY_SHEET_PATH,
@@ -575,7 +867,10 @@ export async function buildMonthlyFinancialWorkbook(
 
   zip.file(
     "xl/workbook.xml",
-    populateWorkbookMetadata(await readZipText(zip, "xl/workbook.xml")),
+    populateWorkbookMetadata(
+      await readZipText(zip, "xl/workbook.xml"),
+      lastSummaryColumn,
+    ),
   );
   return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
 }

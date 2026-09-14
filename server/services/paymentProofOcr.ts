@@ -11,30 +11,32 @@
  *   金额(大写) 人民币壹仟伍佰元整
  */
 
-import fs from 'fs'
-import { callPaddleOcr } from './ocrDaemon.js'
+import fs from "fs";
+import { callPaddleOcr } from "./ocrDaemon.js";
 
 export interface PaymentProofOcrResult {
-  payer: string // 付款人
-  payee: string // 收款人姓名
-  payeeAccount: string // 收款账号
-  amount: number // 金额
-  electronicReceiptNo: string // 电子回单号或凭证号
-  transactionSerialNo: string // 交易流水号或业务流水号
-  transactionDate: string // 银行回单标明的实际交易日期（YYYY-MM-DD）
-  transactionDateCandidates: string[] // 同一回单内识别到的交易日期候选
+  payer: string; // 付款人
+  payee: string; // 收款人姓名
+  payeeAccount: string; // 收款账号
+  amount: number; // 金额
+  electronicReceiptNo: string; // 电子回单号或凭证号
+  transactionSerialNo: string; // 交易流水号或业务流水号
+  transactionDate: string; // 银行回单标明的实际交易日期（YYYY-MM-DD）
+  transactionDateCandidates: string[]; // 同一回单内识别到的交易日期候选
   /** 旧流程兼容字段；新合同流程不得用它混合两类号码。 */
-  proofNo: string
-  rawText?: string // 原始识别文本
+  proofNo: string;
+  rawText?: string; // 原始识别文本
 }
 export interface PaymentProofValidationOptions {
   /**
    * 仅供已由业务层确认用途的实发工资回单使用。账号漏识别时仍保留收款人，
    * 后续可按姓名关联员工；银行、回单、金额和交易凭证等真实性校验保持不变。
    */
-  allowMissingPayeeAccount?: boolean
+  allowMissingPayeeAccount?: boolean;
+  /** 仅人力成本个税、社保入口启用：国库缴款遮挡账号须通过专门证据校验。 */
+  allowMaskedTaxPayeeAccount?: boolean;
   /** 报销付款必须有可靠的回单交易日期；其他旧流程默认保持兼容。 */
-  requireTransactionDate?: boolean
+  requireTransactionDate?: boolean;
 }
 
 // ==================== 中文大写金额解析 ====================
@@ -65,7 +67,7 @@ function parseChineseAmount(text: string): number {
     武: 1, // OCR 把 "壹" 识别成类似字形
     肄: 4, // OCR 把 "肆" 识别成类似字形
     标: 7, // OCR 把 "柒" 识别成类似字形
-  }
+  };
   const unitMap: Record<string, number> = {
     拾: 10,
     佰: 100,
@@ -79,58 +81,58 @@ function parseChineseAmount(text: string): number {
     什: 1000, // "仟"的误识别
     件: 100, // "佰"的误识别
     河: 10, // "拾"的误识别
-  }
+  };
 
   const parseIntegerSection = (value: string): number => {
-    let total = 0
-    let section = 0
-    let digit = 0
+    let total = 0;
+    let section = 0;
+    let digit = 0;
     for (const char of value) {
       if (digitMap[char] !== undefined) {
-        digit = digitMap[char]
-        continue
+        digit = digitMap[char];
+        continue;
       }
-      const unit = unitMap[char]
-      if (!unit) continue
+      const unit = unitMap[char];
+      if (!unit) continue;
       if (unit < 10000) {
-        section += (digit || 1) * unit
-        digit = 0
+        section += (digit || 1) * unit;
+        digit = 0;
       } else if (unit === 10000) {
-        section += digit
-        total += section * unit
-        section = 0
-        digit = 0
+        section += digit;
+        total += section * unit;
+        section = 0;
+        digit = 0;
       } else {
-        section += digit
-        total = (total + section) * unit
-        section = 0
-        digit = 0
+        section += digit;
+        total = (total + section) * unit;
+        section = 0;
+        digit = 0;
       }
     }
-    return total + section + digit
-  }
+    return total + section + digit;
+  };
 
-  const yuanIndex = Math.max(text.indexOf('元'), text.indexOf('圆'))
-  const hasFractionUnit = text.includes('角') || text.includes('分')
+  const yuanIndex = Math.max(text.indexOf("元"), text.indexOf("圆"));
+  const hasFractionUnit = text.includes("角") || text.includes("分");
   const integerText =
-    yuanIndex >= 0 ? text.slice(0, yuanIndex) : hasFractionUnit ? '' : text
-  const digitPattern = Object.keys(digitMap).join('')
-  const jiaoMatch = text.match(new RegExp(`([${digitPattern}])角`))
-  const fenMatch = text.match(new RegExp(`([${digitPattern}])分`))
+    yuanIndex >= 0 ? text.slice(0, yuanIndex) : hasFractionUnit ? "" : text;
+  const digitPattern = Object.keys(digitMap).join("");
+  const jiaoMatch = text.match(new RegExp(`([${digitPattern}])角`));
+  const fenMatch = text.match(new RegExp(`([${digitPattern}])分`));
   const result =
     parseIntegerSection(integerText) +
     (jiaoMatch ? digitMap[jiaoMatch[1]] * 0.1 : 0) +
-    (fenMatch ? digitMap[fenMatch[1]] * 0.01 : 0)
-  return Math.round(result * 100) / 100
+    (fenMatch ? digitMap[fenMatch[1]] * 0.01 : 0);
+  return Math.round(result * 100) / 100;
 }
 
 // ==================== 文本解析 ====================
 
 function isPaymentProofFieldLabel(value: string): boolean {
-  const compact = value.normalize('NFKC').replace(/\s+/g, '')
+  const compact = value.normalize("NFKC").replace(/\s+/g, "");
   return /^(?:(?:付款|收款)(?:人|方|户名|账号|账户|开户行|开户银行)|开户行|开户银行|交易金额(?:\(小写\)|（小写）)?|金额|摘要|用途|业务编号|交易流水|客户编号|相关编号)(?:[：:].*)?$/u.test(
     compact,
-  )
+  );
 }
 
 /**
@@ -144,26 +146,26 @@ function extractPayer(text: string, textNoSpace: string): string {
     /付款方[：:][ \t]*([^\n\r|]+)/,
     /付款账户[：:][ \t]*([^\n\r|]+)/,
     /转出账户[：:][ \t]*([^\n\r|]+)/,
-  ]
+  ];
   for (const p of standardPatterns) {
-    const m = text.match(p)
-    const value = m?.[1]?.trim() || ''
-    if (value && !isPaymentProofFieldLabel(value)) return value
+    const m = text.match(p);
+    const value = m?.[1]?.trim() || "";
+    if (value && !isPaymentProofFieldLabel(value)) return value;
   }
 
   // 2. 银行回单表格格式：第一个"户名"后面的内容为付款方
   // 兼容OCR将"户名"识别为"户：\n名"的情况（工行回单常见）
-  const tableMatch = text.match(/户\s*[：:"]?\s*名\s*\|?\s*([^|户\n]+)/i)
+  const tableMatch = text.match(/户\s*[：:"]?\s*名\s*\|?\s*([^|户\n]+)/i);
   if (tableMatch?.[1]?.trim()) {
-    const name = tableMatch[1].replace(/[|"]/g, '').trim()
-    if (name.length >= 2) return name
+    const name = tableMatch[1].replace(/[|"]/g, "").trim();
+    if (name.length >= 2) return name;
   }
 
   // 3. 从去空格文本中匹配
-  const noSpaceMatch = textNoSpace.match(/户[：:]?名[|]?([^|户账]{2,20})/)
-  if (noSpaceMatch?.[1]) return noSpaceMatch[1]
+  const noSpaceMatch = textNoSpace.match(/户[：:]?名[|]?([^|户账]{2,20})/);
+  if (noSpaceMatch?.[1]) return noSpaceMatch[1];
 
-  return ''
+  return "";
 }
 
 /**
@@ -177,11 +179,11 @@ function extractPayee(text: string, textNoSpace: string): string {
     /收款人[：:][ \t]*([^\n\r|]+)/,
     /收款方[：:][ \t]*([^\n\r|]+)/,
     /收款户名[：:][ \t]*([^\n\r|]+)/,
-  ]
+  ];
   for (const p of standardPatterns) {
-    const m = text.match(p)
-    const value = m?.[1]?.trim() || ''
-    if (value && !isPaymentProofFieldLabel(value)) return value
+    const m = text.match(p);
+    const value = m?.[1]?.trim() || "";
+    if (value && !isPaymentProofFieldLabel(value)) return value;
   }
 
   // 2. 银行回单表格格式：第二个"户名"后面的内容为收款方
@@ -189,37 +191,37 @@ function extractPayee(text: string, textNoSpace: string): string {
   // 兼容工行印章噪声导致"户名"被识别为"户\n中名"的情况（印章压在表格右侧）
   const allNameMatches = [
     ...text.matchAll(/户\s*[：:"]?\s*[一-鿿]?\s*名\s*\|?\s*([^|户\n]*)/gi),
-  ]
+  ];
   if (allNameMatches.length >= 2) {
-    const name = allNameMatches[1][1].replace(/[|"]/g, '').trim()
-    if (name.length >= 2 && name !== '付款' && name !== '收款') return name
+    const name = allNameMatches[1][1].replace(/[|"]/g, "").trim();
+    if (name.length >= 2 && name !== "付款" && name !== "收款") return name;
   }
 
   // 3. 工商银行双栏格式：公司名和个人名在"户名"标签之前出现
   // 格式：[公司名]\n[个人名]\n户\n名\n户\n名\n付款\n收款
   // 找到第一个"户"字之前的行，提取2-4个汉字的人名（排除公司名）
   const lines = text
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter(Boolean);
   const firstHuIdx = lines.findIndex(
-    (l) => l === '户' || l === '户名' || /^户\s*名$/.test(l),
-  )
+    (l) => l === "户" || l === "户名" || /^户\s*名$/.test(l),
+  );
   if (firstHuIdx >= 2) {
     // 在"户名"之前的行中，找最后一个2-4个汉字的人名（排除带"公司""集团""银行"等机构词的行）
-    const candidateLines = lines.slice(0, firstHuIdx)
+    const candidateLines = lines.slice(0, firstHuIdx);
     for (let i = candidateLines.length - 1; i >= 0; i--) {
-      const line = candidateLines[i]
+      const line = candidateLines[i];
       if (
         /^[\u4e00-\u9fff]{2,4}$/.test(line) &&
-        !line.includes('公司') &&
-        !line.includes('集团') &&
-        !line.includes('银行') &&
-        !line.includes('回单') &&
-        !line.includes('付款') &&
-        !line.includes('收款')
+        !line.includes("公司") &&
+        !line.includes("集团") &&
+        !line.includes("银行") &&
+        !line.includes("回单") &&
+        !line.includes("付款") &&
+        !line.includes("收款")
       ) {
-        return line
+        return line;
       }
     }
   }
@@ -227,13 +229,13 @@ function extractPayee(text: string, textNoSpace: string): string {
   // 4. 从去空格文本中匹配第二个户名（兼容"户：名"格式）
   const noSpaceMatches = [
     ...textNoSpace.matchAll(/户[：:]?名[|]?([^|户账]{2,20})/g),
-  ]
+  ];
   if (noSpaceMatches.length >= 2 && noSpaceMatches[1][1]) {
-    const name = noSpaceMatches[1][1]
-    if (name !== '付款' && name !== '收款') return name
+    const name = noSpaceMatches[1][1];
+    if (name !== "付款" && name !== "收款") return name;
   }
 
-  return ''
+  return "";
 }
 
 /**
@@ -242,129 +244,250 @@ function extractPayee(text: string, textNoSpace: string): string {
  * 标签时，仍可根据机构全称确认收款人，避免被 2-4 个汉字的人名兜底规则遗漏。
  */
 function extractInstitutionPayee(text: string, payer: string): string {
-  const normalizedPayer = payer.replace(/[\s|｜"“”]/g, '')
+  const normalizedPayer = payer.replace(/[\s|｜"“”]/g, "");
   const institutionPattern =
-    /(?:住房)?公积金管理(?:中心|部)|社会保险(?:事业)?管理中心|待报解预算收入/
+    /(?:住房)?公积金管理(?:中心|部)|社会保险(?:事业)?管理中心|待报解预算收入/;
   const lines = text
-    .split('\n')
+    .split("\n")
     .map((line) =>
       line
-        .replace(/^(?:收款人|收款方|收款户名|户名)[：:]?\s*/, '')
-        .replace(/[|｜"“”]/g, '')
+        .replace(/^(?:收款人|收款方|收款户名|户名)[：:]?\s*/, "")
+        .replace(/[|｜"“”]/g, "")
         .trim(),
     )
-    .filter(Boolean)
+    .filter(Boolean);
 
   for (const line of lines) {
-    const normalizedLine = line.replace(/\s+/g, '')
+    const normalizedLine = line.replace(/\s+/g, "");
     if (
       normalizedLine.length >= 4 &&
       normalizedLine.length <= 40 &&
       normalizedLine !== normalizedPayer &&
       institutionPattern.test(normalizedLine)
     ) {
-      return normalizedLine
+      return normalizedLine;
     }
   }
-  return ''
+  return "";
 }
 
 export interface PaymentProofPartyAccounts {
-  payerAccount: string
-  payeeAccount: string
+  payerAccount: string;
+  payeeAccount: string;
 }
 
 function normalizeAccountCandidate(value: string): string {
-  const compact = value.normalize('NFKC').replace(/[ \t]/g, '')
-  const match = compact.match(/(?<!\d)(\d{12,25})(?!\d)/)
-  return match?.[1] || ''
+  const compact = value.normalize("NFKC").replace(/[ \t]/g, "");
+  const match = compact.match(/(?<!\d)(\d{12,25})(?!\d)/);
+  return match?.[1] || "";
 }
 
 function extractLabeledPartyAccount(
   text: string,
   labels: readonly string[],
 ): string {
+  const normalized = text.normalize("NFKC");
   for (const label of labels) {
-    const line = text.match(
-      new RegExp(`${label}[：:]?[ \\t]*([^\\n\\r]+)`, 'u'),
-    )?.[1]
-    const account = line ? normalizeAccountCandidate(line) : ''
-    if (account) return account
+    const candidate = normalized.match(
+      new RegExp(
+        `${label}[：:]?[ \\t]*(?:\\r?\\n[ \\t]*){0,2}([0-9][0-9 \\t]{11,30})`,
+        "u",
+      ),
+    )?.[1];
+    const account = candidate ? normalizeAccountCandidate(candidate) : "";
+    if (account) return account;
   }
-  return ''
+  return "";
+}
+
+interface PaymentProofPartyRoleLayout {
+  lines: string[];
+  payerRoleIndex: number;
+  payeeRoleIndex: number;
+}
+
+function resolvePaymentProofPartyRoleLayout(
+  text: string,
+): PaymentProofPartyRoleLayout | null {
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.normalize("NFKC").trim())
+    .filter(Boolean);
+  const payerRoleIndex = lines.findIndex((line) =>
+    /^(?:付款|付款人)$/u.test(line),
+  );
+  const payeeRoleIndex = lines.findIndex((line) =>
+    /^(?:收款|收款人)$/u.test(line),
+  );
+  if (
+    payerRoleIndex < 0 ||
+    payeeRoleIndex < 0 ||
+    Math.abs(payerRoleIndex - payeeRoleIndex) > 3
+  ) {
+    return null;
+  }
+  return { lines, payerRoleIndex, payeeRoleIndex };
+}
+
+function extractPaymentProofSingleRoleAccount(
+  text: string,
+  role: "付款" | "收款",
+): string {
+  const lines = text
+    .split(/\r?\n/u)
+    .map((line) => line.normalize("NFKC").trim())
+    .filter(Boolean);
+  const roleIndex = lines.findIndex(
+    (line) => line === role || line === `${role}人`,
+  );
+  if (roleIndex < 0) return "";
+  const otherRole = role === "付款" ? "收款" : "付款";
+  for (
+    let index = roleIndex + 1;
+    index < Math.min(lines.length, roleIndex + 8);
+    index += 1
+  ) {
+    const line = lines[index]!;
+    if (line === otherRole || line === `${otherRole}人`) break;
+    const account = normalizeAccountCandidate(line);
+    if (account) return account;
+  }
+  return "";
+}
+
+export function hasPaymentProofPartyAccountStructure(text: string): boolean {
+  const normalized = text.normalize("NFKC");
+  return (
+    /(?:付款|收款|转出|转入)[ \t]*(?:账[ \t]*号|账户)[ \t]*[：:]?/u.test(
+      normalized,
+    ) ||
+    Boolean(resolvePaymentProofPartyRoleLayout(normalized)) ||
+    Boolean(extractPaymentProofSingleRoleAccount(normalized, "付款")) ||
+    Boolean(extractPaymentProofSingleRoleAccount(normalized, "收款"))
+  );
 }
 
 /**
- * 解析回单双方账号。工商银行双列表格经 OCR 后常按视觉行展开为：
- * “付款、收款、账号、付款账号、账号、收款账号”。此时不能把“收款”
- * 后遇到的首个数字直接当作收款账号，必须按两个“账号”字段的左右顺序配对。
+ * 解析回单双方账号。工商银行双列表格经 OCR 后可能按视觉行展开为
+ * “付款、付款账号、收款、账号、账号、收款账号”，也可能把两个角色标题
+ * 都放在账号之前。此时必须从首个角色标题起按完整账号的票面顺序配对，
+ * 不能跳过位于两个角色标题之间的付款账号，也不能把单个账号复制给双方。
  */
 export function extractPaymentProofPartyAccounts(
   text: string,
 ): PaymentProofPartyAccounts {
   let payerAccount = extractLabeledPartyAccount(text, [
-    '付款账号',
-    '付款账户',
-    '转出账号',
-    '转出账户',
-  ])
+    "付款账号",
+    "付款账户",
+    "转出账号",
+    "转出账户",
+  ]);
   let payeeAccount = extractLabeledPartyAccount(text, [
-    '收款账号',
-    '收款账户',
-    '转入账号',
-    '转入账户',
-  ])
-  if (payerAccount && payeeAccount) return { payerAccount, payeeAccount }
-
-  const lines = text
-    .split(/\r?\n/u)
-    .map((line) => line.normalize('NFKC').trim())
-    .filter(Boolean)
-  const payerRoleIndex = lines.findIndex((line) =>
-    /^(?:付款|付款人)$/u.test(line),
-  )
-  const payeeRoleIndex = lines.findIndex((line) =>
-    /^(?:收款|收款人)$/u.test(line),
-  )
-  const hasPairedRoles =
-    payerRoleIndex >= 0 &&
-    payeeRoleIndex >= 0 &&
-    Math.abs(payerRoleIndex - payeeRoleIndex) <= 3
-
-  if (hasPairedRoles) {
-    const startIndex = Math.max(payerRoleIndex, payeeRoleIndex) + 1
-    const orderedAccounts: string[] = []
-    for (
-      let index = startIndex;
-      index < Math.min(lines.length, startIndex + 16);
-      index += 1
-    ) {
-      const line = lines[index]!
-      if (/^(?:金额|开户银行|摘要|用途)$/u.test(line)) break
-      if (!/^账\s*号(?:[：:]|\s|$)/u.test(line)) continue
-
-      let account = normalizeAccountCandidate(
-        line.replace(/^账\s*号[：:]?/u, ''),
-      )
-      for (
-        let nextIndex = index + 1;
-        !account && nextIndex < Math.min(lines.length, index + 4);
-        nextIndex += 1
-      ) {
-        const nextLine = lines[nextIndex]!
-        if (/^账\s*号(?:[：:]|\s|$)/u.test(nextLine)) break
-        account = normalizeAccountCandidate(nextLine)
-      }
-      if (account && !orderedAccounts.includes(account)) {
-        orderedAccounts.push(account)
-      }
-      if (orderedAccounts.length >= 2) break
+    "收款账号",
+    "收款账户",
+    "转入账号",
+    "转入账户",
+  ]);
+  if (payerAccount && payeeAccount) {
+    if (payerAccount === payeeAccount) {
+      return { payerAccount: "", payeeAccount: "" };
     }
-    if (!payerAccount) payerAccount = orderedAccounts[0] || ''
-    if (!payeeAccount) payeeAccount = orderedAccounts[1] || ''
+    return {
+      payerAccount,
+      payeeAccount,
+    };
   }
 
-  return { payerAccount, payeeAccount }
+  const roleLayout = resolvePaymentProofPartyRoleLayout(text);
+  if (roleLayout) {
+    const { lines, payerRoleIndex, payeeRoleIndex } = roleLayout;
+    const firstRoleIndex = Math.min(payerRoleIndex, payeeRoleIndex);
+    const accountCandidates: Array<{ account: string; index: number }> = [];
+    for (
+      let index = firstRoleIndex + 1;
+      index < Math.min(lines.length, firstRoleIndex + 18);
+      index += 1
+    ) {
+      const line = lines[index]!;
+      if (/^(?:金额|开户银行|摘要|用途)$/u.test(line)) break;
+      const account = normalizeAccountCandidate(
+        line.replace(/^(?:付|收)?款?账\s*号[：:]?/u, ""),
+      );
+      if (
+        account &&
+        !accountCandidates.some((candidate) => candidate.account === account)
+      ) {
+        accountCandidates.push({ account, index });
+      }
+      if (accountCandidates.length >= 2) break;
+    }
+
+    const orderedAccounts = accountCandidates.map(
+      (candidate) => candidate.account,
+    );
+    if (orderedAccounts.length >= 2) {
+      if (!payerAccount && !payeeAccount) {
+        if (payerRoleIndex < payeeRoleIndex) {
+          payerAccount = orderedAccounts[0] || "";
+          payeeAccount = orderedAccounts[1] || "";
+        } else {
+          payeeAccount = orderedAccounts[0] || "";
+          payerAccount = orderedAccounts[1] || "";
+        }
+      } else {
+        if (!payerAccount) {
+          payerAccount =
+            orderedAccounts.find((account) => account !== payeeAccount) || "";
+        }
+        if (!payeeAccount) {
+          payeeAccount =
+            orderedAccounts.find((account) => account !== payerAccount) || "";
+        }
+      }
+    } else if (orderedAccounts.length === 1) {
+      const onlyCandidate = accountCandidates[0]!;
+      if (payerAccount && !payeeAccount) {
+        if (onlyCandidate.account !== payerAccount) {
+          payeeAccount = onlyCandidate.account;
+        }
+      } else if (payeeAccount && !payerAccount) {
+        if (onlyCandidate.account !== payeeAccount) {
+          payerAccount = onlyCandidate.account;
+        }
+      } else if (!payerAccount && !payeeAccount) {
+        // 双栏 OCR 可能先输出付款账号，再输出“收款”列标题。只有账号位于
+        // 两个角色标题之间时，列归属才是明确的；其余单账号场景保持为空，
+        // 交由上层安全门禁复核，不能把同一个账号填到交易双方。
+        if (
+          payerRoleIndex < payeeRoleIndex &&
+          onlyCandidate.index > payerRoleIndex &&
+          onlyCandidate.index < payeeRoleIndex
+        ) {
+          payerAccount = onlyCandidate.account;
+        } else if (
+          payeeRoleIndex < payerRoleIndex &&
+          onlyCandidate.index > payeeRoleIndex &&
+          onlyCandidate.index < payerRoleIndex
+        ) {
+          payeeAccount = onlyCandidate.account;
+        }
+      }
+    }
+  } else {
+    if (!payerAccount) {
+      payerAccount = extractPaymentProofSingleRoleAccount(text, "付款");
+    }
+    if (!payeeAccount) {
+      payeeAccount = extractPaymentProofSingleRoleAccount(text, "收款");
+    }
+  }
+
+  if (payerAccount && payerAccount === payeeAccount) {
+    payerAccount = "";
+    payeeAccount = "";
+  }
+
+  return { payerAccount, payeeAccount };
 }
 
 /**
@@ -373,41 +496,64 @@ export function extractPaymentProofPartyAccounts(
  * 收款账号通常是个人银行卡号（16-19位，以62开头）
  */
 function extractPayeeAccount(text: string): string {
-  const structuredAccounts = extractPaymentProofPartyAccounts(text)
-  if (structuredAccounts.payeeAccount) return structuredAccounts.payeeAccount
+  // 账号栏存在遮挡时，不能从备注编号或另一方完整账号推测收款账号。
+  if (hasMaskedPaymentProofAccount(text)) return "";
+  const structuredAccounts = extractPaymentProofPartyAccounts(text);
+  if (structuredAccounts.payeeAccount) return structuredAccounts.payeeAccount;
+
+  // 双角色版式已经由结构化逻辑分析过；仍为空表示账号缺失或归属不唯一，
+  // 此时不得再用全文唯一长数字兜底猜成收款账号。
+  if (hasPaymentProofPartyAccountStructure(text)) return "";
 
   // 1. 标准格式
   const standardPatterns = [
     /收款账号[：:]\s*([0-9\s]+)/,
     /收款账户[：:]\s*([0-9\s]+)/,
-  ]
+  ];
   for (const p of standardPatterns) {
-    const m = text.match(p)
-    if (m?.[1]) return m[1].replace(/\s+/g, '').trim()
+    const m = text.match(p);
+    const account = m?.[1]
+      ? normalizeAccountCandidate(m[1].replace(/\s+/g, ""))
+      : "";
+    if (account && account !== structuredAccounts.payerAccount) return account;
   }
 
   // 2. 提取所有长数字串（13位以上），优先选择个人银行卡号（62开头，16-19位）
-  const allNumbers = [...text.matchAll(/\b(\d[\d\s]{12,25})\b/g)]
-    .map((m) => m[1].replace(/\s+/g, ''))
-    .filter((n) => n.length >= 13 && n.length <= 25)
+  // 备注、验证码和提示区不属于账号栏，长编号不得参与账号兜底。
+  const accountText = text.split(/(?:备注|验证码|重要提示)[：:]?/u)[0] || "";
+  const allNumbers = [...accountText.matchAll(/\b(\d[\d\s]{12,25})\b/g)]
+    .map((m) => m[1].replace(/\s+/g, ""))
+    .filter((n) => n.length >= 13 && n.length <= 25);
 
   // 优先选择 62 开头的个人银行卡号
   const personalCard = allNumbers.find(
-    (n) => n.startsWith('62') && n.length >= 16 && n.length <= 19,
-  )
-  if (personalCard) return personalCard
+    (n) =>
+      n !== structuredAccounts.payerAccount &&
+      n.startsWith("62") &&
+      n.length >= 16 &&
+      n.length <= 19,
+  );
+  if (personalCard) return personalCard;
 
   // 如果有多个账号，取第二个（第一个通常是付款方公司账号）
-  if (allNumbers.length >= 2) return allNumbers[1]
+  if (allNumbers.length >= 2) {
+    const secondAccount = allNumbers[1]!;
+    if (secondAccount !== structuredAccounts.payerAccount) return secondAccount;
+    return (
+      allNumbers.find(
+        (account) => account !== structuredAccounts.payerAccount,
+      ) || ""
+    );
+  }
   if (allNumbers.length === 1) {
     // 唯一长账号已经由明确付款标签占用时，不能再复制为收款账号。缺少
     // 收款侧文字必须保持为空并由上层阻断，不能用同一账号伪造交易双方。
     return allNumbers[0] === structuredAccounts.payerAccount
-      ? ''
-      : allNumbers[0]
+      ? ""
+      : allNumbers[0];
   }
 
-  return ''
+  return "";
 }
 
 /**
@@ -425,16 +571,16 @@ function extractAmount(text: string, textNoSpace: string): number {
     /实付金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
     /(?<!应收)(?<!实收)金[额颜][：:][¥￥YK]?([\d,，]+\.?\d*)/,
     /金[额颜][|｜]?[¥￥YK]?([\d,，]+\.?\d*)/,
-  ]
+  ];
 
   for (const p of numericPatterns) {
-    const m = textNoSpace.match(p)
+    const m = textNoSpace.match(p);
     if (m?.[1]) {
       // 同时处理英文逗号和中文逗号（，）
-      const amount = parseFloat(m[1].replace(/[,，]/g, ''))
+      const amount = parseFloat(m[1].replace(/[,，]/g, ""));
       if (!isNaN(amount) && amount > 0) {
-        console.log('✅ 已识别票面数字金额（精确标签）')
-        return amount
+        console.log("✅ 已识别票面数字金额（精确标签）");
+        return amount;
       }
     }
   }
@@ -443,15 +589,15 @@ function extractAmount(text: string, textNoSpace: string): number {
   const loosePatterns = [
     /金\s*[额颜]\s*[（(]?\s*小\s*写\s*[）)]?\s*[：:]?\s*[¥￥YK]?\s*([\d,，]+\.?\d*)/,
     /金\s*[额颜]\s*[|｜]?\s*[¥￥YK]?\s*([\d,，]+\.?\d*)/,
-  ]
+  ];
   for (const p of loosePatterns) {
-    const m = text.match(p)
+    const m = text.match(p);
     if (m?.[1]) {
       // 同时处理英文逗号和中文逗号（，）
-      const amount = parseFloat(m[1].replace(/[,，]/g, ''))
+      const amount = parseFloat(m[1].replace(/[,，]/g, ""));
       if (!isNaN(amount) && amount > 0) {
-        console.log('✅ 已识别票面数字金额（宽松标签）')
-        return amount
+        console.log("✅ 已识别票面数字金额（宽松标签）");
+        return amount;
       }
     }
   }
@@ -459,36 +605,36 @@ function extractAmount(text: string, textNoSpace: string): number {
   // 2. 兜底：从"金额"字段后面提取数字（支持中英文逗号）
   const labelAmount = textNoSpace.match(
     /金额[^0-9]{0,12}([0-9]{1,3}(?:[,，\uFF0C][0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,8}(?:\.[0-9]{1,2})?)/,
-  )
+  );
   if (labelAmount?.[1]) {
-    const amount = parseFloat(labelAmount[1].replace(/[,，\uFF0C]/g, ''))
+    const amount = parseFloat(labelAmount[1].replace(/[,，\uFF0C]/g, ""));
     if (!isNaN(amount) && amount > 0) {
-      console.log('✅ 已识别票面数字金额（标签兜底）')
-      return amount
+      console.log("✅ 已识别票面数字金额（标签兜底）");
+      return amount;
     }
   }
 
   // 工行双列表格可能把“金额”“金额（大写）”、大写金额和小写金额拆成多行。
   // 当票面只有一个带货币符号且以“元”结尾的金额时，它比残缺的大写金额可靠。
-  const normalizedText = text.normalize('NFKC')
+  const normalizedText = text.normalize("NFKC");
   const hasStandaloneAmountColumn =
     /(?:^|[\r\n])\s*金额(?:\s*[（(]大写[）)])?\s*(?:[\r\n]|$)/mu.test(
       normalizedText,
-    )
+    );
   const currencyAmounts = [
     ...normalizedText.matchAll(
       /[¥￥]\s*((?:\d{1,3}(?:[,，]\d{3})+|\d+)\.\d{2})\s*元/gu,
     ),
-  ]
+  ];
   if (
     hasStandaloneAmountColumn &&
     currencyAmounts.length === 1 &&
     currencyAmounts[0]?.[1]
   ) {
-    const amount = parseFloat(currencyAmounts[0][1].replace(/[,，]/g, ''))
+    const amount = parseFloat(currencyAmounts[0][1].replace(/[,，]/g, ""));
     if (!isNaN(amount) && amount > 0) {
-      console.log('✅ 已从唯一票面货币金额识别数值')
-      return amount
+      console.log("✅ 已从唯一票面货币金额识别数值");
+      return amount;
     }
   }
 
@@ -496,16 +642,16 @@ function extractAmount(text: string, textNoSpace: string): number {
   // 利率或手续费误当票面金额；数字标签和大写金额都缺失时交由业务层复核。
   const chineseMatch = textNoSpace.match(
     /人民币([零壹贰叁肆伍陆柒捌玖吉弍参挫壶壷武肄标拾佰仟万亿百千十什件河元圆角分整正]+)/,
-  )
+  );
   if (chineseMatch?.[1]) {
-    const amount = parseChineseAmount(chineseMatch[1])
+    const amount = parseChineseAmount(chineseMatch[1]);
     if (amount > 0) {
-      console.log('⚠️ 已从中文大写金额识别数值')
-      return amount
+      console.log("⚠️ 已从中文大写金额识别数值");
+      return amount;
     }
   }
 
-  return 0
+  return 0;
 }
 
 /**
@@ -521,44 +667,44 @@ function extractLabeledBankIdentifier(
   labels: readonly string[],
 ): string {
   // 短流水号只能在明确标签后提取，不对全文裸数字猜测。
-  const idPattern = '[A-Za-z0-9][A-Za-z0-9\\-]{3,39}'
+  const idPattern = "[A-Za-z0-9][A-Za-z0-9\\-]{3,39}";
   const patterns = labels.map(
     (label) => new RegExp(`${label}[：:\\s]*(${idPattern})(?![A-Za-z0-9-])`),
-  )
+  );
 
   for (const p of patterns) {
-    const m = text.match(p) || textNoSpace.match(p)
+    const m = text.match(p) || textNoSpace.match(p);
     if (m?.[1]) {
-      const no = m[1].trim().replace(/[-\s]+$/, '') // 去掉末尾多余的连字符或空格
+      const no = m[1].trim().replace(/[-\s]+$/, ""); // 去掉末尾多余的连字符或空格
       // 排除银行卡号（纯数字且长度 16-19 位）
       if (/^\d{16,19}$/.test(no)) {
-        console.log('⚠️  识别字段疑似银行卡号，已跳过')
-        continue
+        console.log("⚠️  识别字段疑似银行卡号，已跳过");
+        continue;
       }
-      return no
+      return no;
     }
   }
 
-  console.log('⚠️  未识别到电子回单号码')
-  return ''
+  console.log("⚠️  未识别到电子回单号码");
+  return "";
 }
 
 function extractElectronicReceiptNo(text: string, textNoSpace: string): string {
   return extractLabeledBankIdentifier(text, textNoSpace, [
-    '电子回单号码',
-    '电子回单号',
-    '回单号码',
-    '回单编号',
-    '凭证号码',
-    '凭证编号',
-  ])
+    "电子回单号码",
+    "电子回单号",
+    "回单号码",
+    "回单编号",
+    "凭证号码",
+    "凭证编号",
+  ]);
 }
 
 function extractTransactionSerialNo(text: string, textNoSpace: string): string {
   return extractLabeledBankIdentifier(text, textNoSpace, [
-    '交易流水号',
-    '业务流水号',
-  ])
+    "交易流水号",
+    "业务流水号",
+  ]);
 }
 
 function normalizeTransactionDate(
@@ -566,18 +712,18 @@ function normalizeTransactionDate(
   monthText: string,
   dayText: string,
 ): string | null {
-  const year = Number.parseInt(yearText, 10)
-  const month = Number.parseInt(monthText, 10)
-  const day = Number.parseInt(dayText, 10)
-  const date = new Date(Date.UTC(year, month - 1, day))
+  const year = Number.parseInt(yearText, 10);
+  const month = Number.parseInt(monthText, 10);
+  const day = Number.parseInt(dayText, 10);
+  const date = new Date(Date.UTC(year, month - 1, day));
   if (
     date.getUTCFullYear() !== year ||
     date.getUTCMonth() + 1 !== month ||
     date.getUTCDate() !== day
   ) {
-    return null
+    return null;
   }
-  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 /**
@@ -586,23 +732,23 @@ function normalizeTransactionDate(
  */
 function extractTransactionDateCandidates(text: string): string[] {
   const label =
-    '(?:(?:交\\s*易|记\\s*账|付\\s*款|转\\s*账)\\s*(?:日\\s*期\\s*(?:(?:和|及|/)\\s*时\\s*间)?|时\\s*间|日)|时\\s*间\\s*戳)'
+    "(?:(?:交\\s*易|记\\s*账|付\\s*款|转\\s*账)\\s*(?:日\\s*期\\s*(?:(?:和|及|/)\\s*时\\s*间)?|时\\s*间|日)|时\\s*间\\s*戳)";
   const separatedPattern = new RegExp(
     `${label}\\s*[：:]?\\s*((?:19|20)\\d{2})\\s*(?:年|[-/.])\\s*(\\d{1,2})\\s*(?:月|[-/.])\\s*(\\d{1,2})(?:\\s*日)?`,
-    'gu',
-  )
+    "gu",
+  );
   const compactPattern = new RegExp(
     `${label}\\s*[：:]?\\s*((?:19|20)\\d{2})(\\d{2})(\\d{2})(?:\\d{6})?(?!\\d)`,
-    'gu',
-  )
-  const candidates = new Set<string>()
+    "gu",
+  );
+  const candidates = new Set<string>();
   for (const pattern of [separatedPattern, compactPattern]) {
     for (const match of text.matchAll(pattern)) {
-      const normalized = normalizeTransactionDate(match[1], match[2], match[3])
-      if (normalized) candidates.add(normalized)
+      const normalized = normalizeTransactionDate(match[1], match[2], match[3]);
+      if (normalized) candidates.add(normalized);
     }
   }
-  return [...candidates].sort()
+  return [...candidates].sort();
 }
 
 export function resolveConsistentPaymentProofTransactionDate(
@@ -610,18 +756,18 @@ export function resolveConsistentPaymentProofTransactionDate(
 ): string {
   const normalizedDates = [
     ...new Set(dates.filter((date): date is string => Boolean(date))),
-  ]
+  ];
   if (normalizedDates.length === 0) {
     throw new Error(
-      '无法识别回单实际交易日期，请上传包含交易时间或记账日期的银行电子回单',
-    )
+      "无法识别回单实际交易日期，请上传包含交易时间或记账日期的银行电子回单",
+    );
   }
   if (normalizedDates.length > 1) {
     throw new Error(
-      `同一笔报销的多张回单交易日期不一致（${normalizedDates.join('、')}），不能确定唯一归属月份，请分开处理`,
-    )
+      `同一笔报销的多张回单交易日期不一致（${normalizedDates.join("、")}），不能确定唯一归属月份，请分开处理`,
+    );
   }
-  return normalizedDates[0]
+  return normalizedDates[0];
 }
 
 /**
@@ -634,69 +780,69 @@ function extractPayeeNameNearAccount(
   payeeAccount: string,
 ): string {
   const lines = text
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter(Boolean);
   const excludeWords = [
-    '公司',
-    '集团',
-    '银行',
-    '回单',
-    '付款',
-    '收款',
-    '户名',
-    '账号',
-    '金额',
-    '开户',
-    '支行',
-    '摘要',
-    '用途',
-    '业务',
-    '产品',
-    '种类',
-    '汇划',
-    '时间',
-    '流水',
-    '营业',
-    '电子',
-    '网上',
-    '补打',
-    '其他',
-    '款项',
-    '发报',
-    '人民币',
-    '记账',
-    '交易',
-    '柜员',
-    '网点',
-    '重要',
-    '提示',
-    '如果',
-    '请到',
-    '本回',
-    '验证',
-  ]
-  const namePattern = /^[一-鿿]{2,4}$/
+    "公司",
+    "集团",
+    "银行",
+    "回单",
+    "付款",
+    "收款",
+    "户名",
+    "账号",
+    "金额",
+    "开户",
+    "支行",
+    "摘要",
+    "用途",
+    "业务",
+    "产品",
+    "种类",
+    "汇划",
+    "时间",
+    "流水",
+    "营业",
+    "电子",
+    "网上",
+    "补打",
+    "其他",
+    "款项",
+    "发报",
+    "人民币",
+    "记账",
+    "交易",
+    "柜员",
+    "网点",
+    "重要",
+    "提示",
+    "如果",
+    "请到",
+    "本回",
+    "验证",
+  ];
+  const namePattern = /^[一-鿿]{2,4}$/;
 
   // 找到含有收款账号的行号（账号可能带空格，做去空格比较）
-  const accountNoSpace = payeeAccount.replace(/\s+/g, '')
+  const accountNoSpace = payeeAccount.replace(/\s+/g, "");
   const accountLineIdx = lines.findIndex((l) =>
-    l.replace(/\s+/g, '').includes(accountNoSpace),
-  )
-  if (accountLineIdx === -1) return ''
+    l.replace(/\s+/g, "").includes(accountNoSpace),
+  );
+  if (accountLineIdx === -1) return "";
 
   // 在账号行前后各8行内查找人名（工行回单中名字和账号之间可能隔较多行）
-  const start = Math.max(0, accountLineIdx - 8)
-  const end = Math.min(lines.length - 1, accountLineIdx + 3)
+  const start = Math.max(0, accountLineIdx - 8);
+  const end = Math.min(lines.length - 1, accountLineIdx + 3);
   for (let i = start; i <= end; i++) {
-    if (i === accountLineIdx) continue
-    const line = lines[i]
+    if (i === accountLineIdx) continue;
+    const line = lines[i];
     if (namePattern.test(line) && !excludeWords.some((w) => line.includes(w))) {
-      console.log('✅ 在收款账号附近识别到收款人姓名字段')
-      return line
+      console.log("✅ 在收款账号附近识别到收款人姓名字段");
+      return line;
     }
   }
-  return ''
+  return "";
 }
 
 /**
@@ -706,39 +852,121 @@ function populatePaymentProofText(
   text: string,
   result: PaymentProofOcrResult,
 ): void {
-  const textNoSpace = text.replace(/\s+/g, '')
+  const textNoSpace = text.replace(/\s+/g, "");
 
-  result.payer = extractPayer(text, textNoSpace)
-  result.payee = extractPayee(text, textNoSpace)
-  result.payeeAccount = extractPayeeAccount(text)
-  result.amount = extractAmount(text, textNoSpace)
-  result.electronicReceiptNo = extractElectronicReceiptNo(text, textNoSpace)
-  result.transactionSerialNo = extractTransactionSerialNo(text, textNoSpace)
-  result.transactionDateCandidates = extractTransactionDateCandidates(text)
-  result.transactionDate = result.transactionDateCandidates[0] || ''
-  result.proofNo = result.electronicReceiptNo || result.transactionSerialNo
+  result.payer = extractPayer(text, textNoSpace);
+  result.payee = extractPayee(text, textNoSpace);
+  result.payeeAccount = extractPayeeAccount(text);
+  result.amount = extractAmount(text, textNoSpace);
+  result.electronicReceiptNo = extractElectronicReceiptNo(text, textNoSpace);
+  result.transactionSerialNo = extractTransactionSerialNo(text, textNoSpace);
+  result.transactionDateCandidates = extractTransactionDateCandidates(text);
+  result.transactionDate = result.transactionDateCandidates[0] || "";
+  result.proofNo = result.electronicReceiptNo || result.transactionSerialNo;
 
   // 公积金、社保和税务回单允许机构全称作为收款人。
   if (!result.payee) {
-    result.payee = extractInstitutionPayee(text, result.payer)
+    result.payee = extractInstitutionPayee(text, result.payer);
   }
 
   // 如果前面步骤都未找到收款人姓名，但账号已识别，在账号附近行里二次查找
   if (!result.payee && result.payeeAccount) {
-    result.payee = extractPayeeNameNearAccount(text, result.payeeAccount)
+    result.payee = extractPayeeNameNearAccount(text, result.payeeAccount);
   }
 
-  console.log('📋 付款回单字段解析完成:', {
+  console.log("📋 付款回单字段解析完成:", {
     payerRecognized: Boolean(result.payer),
     payeeRecognized: Boolean(result.payee),
     payeeAccountRecognized: Boolean(result.payeeAccount),
     amountRecognized: result.amount > 0,
     electronicReceiptNoRecognized: Boolean(result.electronicReceiptNo),
     transactionDateRecognized: Boolean(result.transactionDate),
-  })
+  });
 }
 
 // ==================== 验证函数 ====================
+
+function hasMaskedPaymentProofAccount(text: string): boolean {
+  const header = text.normalize("NFKC").split(/金\s*额/u)[0] || "";
+  return /账\s*号/u.test(header) && /\d[\d \t]*[*＊×✱﹡]{2,}/u.test(header);
+}
+
+/** 仅兼容可明确归属到国库收款栏的工行税款回单，绝不补全遮挡数字。 */
+function validateMaskedTaxPaymentProof(
+  text: string,
+  result: PaymentProofOcrResult,
+): void {
+  const compact = text.normalize("NFKC").replace(/\s+/gu, "");
+  // 账号之间的换行是字段边界，不能去掉后把付款、收款数字拼成一个账号。
+  const header =
+    text
+      .normalize("NFKC")
+      .replace(/[ \t]/gu, "")
+      .split(/金\s*额/u)[0] || "";
+  const payeeIndex = header.indexOf("待报解预算收入");
+  const accountEnd = header.indexOf("开户银行", payeeIndex);
+  const accountArea =
+    payeeIndex >= 0 && accountEnd > payeeIndex
+      ? header.slice(payeeIndex + "待报解预算收入".length, accountEnd)
+      : "";
+  const accounts = [...accountArea.matchAll(/\d[\d*×✱﹡]*/gu)].map(
+    (match) => match[0],
+  );
+  const maskedAccounts = accounts.filter((account) =>
+    /^\d{6,19}[*×✱﹡]{2,}(?:\d{1,4})?$/u.test(account),
+  );
+  if (
+    !header.includes("中国工商银行") ||
+    result.payee.replace(/\s+/gu, "") !== "待报解预算收入" ||
+    !/账号/u.test(accountArea) ||
+    maskedAccounts.length !== 1 ||
+    accounts.length > 2 ||
+    accounts[accounts.length - 1] !== maskedAccounts[0] ||
+    !/(?:摘要|用途)[：:]?代理国库税收收缴/u.test(compact) ||
+    !/业务(?:\(产品\))?种类[：:]?银税业务/u.test(compact) ||
+    !result.electronicReceiptNo ||
+    !result.transactionSerialNo ||
+    !result.transactionDate ||
+    result.transactionDateCandidates.length !== 1
+  ) {
+    throw new Error(
+      "税款回单收款账号已遮挡，但收款栏归属、国库用途或交易凭证信息不完整，请上传清晰的银行原始回单",
+    );
+  }
+  // 双栏文字识别可能把“大写”标签插入换行的大写金额中。只在金额栏内
+  // 移除字段标签再连接文字，不能从摘要、备注或其他区域借用金额。
+  const amountStart = compact.search(/金额|人民币/u);
+  const amountArea = compact
+    .slice(amountStart)
+    .split(/摘要|用途|交易流水号/u)[0]
+    .replace(/金额(?:\(大写\))?[：:]?/gu, "");
+  const numericAmounts = [
+    ...amountArea.matchAll(/[¥￥]([0-9,]+\.[0-9]{2})元/gu),
+  ];
+  // 小写金额也可能插入大写金额与末尾“分”之间，先独立提取并校验其唯一性。
+  const capitalArea = amountArea.replace(/[¥￥][0-9,]+\.[0-9]{2}元/gu, "");
+  const capitalAmounts = [
+    ...capitalArea.matchAll(
+      /人民币([零壹贰叁肆伍陆柒捌玖拾佰仟万亿元圆角分整正]+)/gu,
+    ),
+  ];
+  const numericAmount = numericAmounts[0]?.[1];
+  const capitalAmount = capitalAmounts[0]?.[1];
+  if (
+    numericAmounts.length !== 1 ||
+    capitalAmounts.length !== 1 ||
+    !numericAmount ||
+    !capitalAmount ||
+    Math.round(Number(numericAmount.replace(/,/g, "")) * 100) !==
+      Math.round(result.amount * 100) ||
+    Math.round(parseChineseAmount(capitalAmount) * 100) !==
+      Math.round(result.amount * 100)
+  ) {
+    throw new Error(
+      "税款回单大小写金额缺失或不一致，请上传金额清晰的银行原始回单",
+    );
+  }
+}
 
 /**
  * 验证是否为付款回单
@@ -754,28 +982,28 @@ function validatePaymentProof(
   result: PaymentProofOcrResult,
   options: PaymentProofValidationOptions = {},
 ): {
-  isValid: boolean
-  reason?: string
+  isValid: boolean;
+  reason?: string;
 } {
-  const textNoSpace = rawText.replace(/\s+/g, '')
+  const textNoSpace = rawText.replace(/\s+/g, "");
 
   // 1. 基础关键字：必须同时包含"银行"和"回单"
-  const missingFields: string[] = []
-  if (!textNoSpace.includes('银行')) missingFields.push('银行')
-  if (!textNoSpace.includes('回单')) missingFields.push('回单')
+  const missingFields: string[] = [];
+  if (!textNoSpace.includes("银行")) missingFields.push("银行");
+  if (!textNoSpace.includes("回单")) missingFields.push("回单");
   if (missingFields.length > 0) {
     return {
       isValid: false,
-      reason: `此不是付款回单，缺少必要信息：${missingFields.join('、')}`,
-    }
+      reason: `此不是付款回单，缺少必要信息：${missingFields.join("、")}`,
+    };
   }
 
   // 2. 必须识别到金额
   if (!result.amount || result.amount <= 0) {
     return {
       isValid: false,
-      reason: '无法识别回单金额，请确认上传的是真实的银行付款回单',
-    }
+      reason: "无法识别回单金额，请确认上传的是真实的银行付款回单",
+    };
   }
 
   // 3. 通用回单要求收款人和账号同时识别；明确的实发工资回单允许账号漏识别，
@@ -784,13 +1012,13 @@ function validatePaymentProof(
     !result.payee ||
     (!result.payeeAccount && !options.allowMissingPayeeAccount)
   ) {
-    const missing: string[] = []
-    if (!result.payee) missing.push('收款人姓名')
-    if (!result.payeeAccount) missing.push('收款账号')
+    const missing: string[] = [];
+    if (!result.payee) missing.push("收款人姓名");
+    if (!result.payeeAccount) missing.push("收款账号");
     return {
       isValid: false,
-      reason: `无法识别${missing.join('和')}，请确认上传的是真实的银行付款回单`,
-    }
+      reason: `无法识别${missing.join("和")}，请确认上传的是真实的银行付款回单`,
+    };
   }
 
   // 4. 必须包含银行特有关键字（至少一个）
@@ -798,85 +1026,96 @@ function validatePaymentProof(
   // 交易流水号 / 业务流水号：其他银行
   // 交易时间 / 记账时间：通用
   const bankSpecificKeywords = [
-    '电子回单号码',
-    '电子回单号',
-    '交易流水号',
-    '业务流水号',
-    '交易时间',
-    '交易日期',
-    '记账时间',
-    '记账日期',
-    '付款时间',
-    '付款日期',
-    '转账时间',
-    '转账日期',
-    '时间戳',
-  ]
+    "电子回单号码",
+    "电子回单号",
+    "交易流水号",
+    "业务流水号",
+    "交易时间",
+    "交易日期",
+    "记账时间",
+    "记账日期",
+    "付款时间",
+    "付款日期",
+    "转账时间",
+    "转账日期",
+    "时间戳",
+  ];
   const hasSpecificKeyword = bankSpecificKeywords.some((k) =>
     textNoSpace.includes(k),
-  )
+  );
   if (!hasSpecificKeyword) {
     return {
       isValid: false,
       reason:
-        '此不是真实的银行付款回单，请上传包含电子回单号码或交易时间的银行电子回单',
-    }
+        "此不是真实的银行付款回单，请上传包含电子回单号码或交易时间的银行电子回单",
+    };
   }
 
   if (options.requireTransactionDate) {
     if (result.transactionDateCandidates.length > 1) {
       return {
         isValid: false,
-        reason: `回单中识别到多个不一致的交易日期（${result.transactionDateCandidates.join('、')}），请上传交易信息清晰的银行电子回单`,
-      }
+        reason: `回单中识别到多个不一致的交易日期（${result.transactionDateCandidates.join("、")}），请上传交易信息清晰的银行电子回单`,
+      };
     }
     if (!result.transactionDate) {
       return {
         isValid: false,
         reason:
-          '无法识别回单实际交易日期，请上传包含交易时间或记账日期的银行电子回单',
-      }
+          "无法识别回单实际交易日期，请上传包含交易时间或记账日期的银行电子回单",
+      };
     }
   }
 
   // 5. 排除系统界面特征
   const systemInterfaceKeywords = [
-    '上传付款回单',
-    '将文件拖到此处',
-    '点击上传',
-    '报销单号',
-    '报销标题',
-    '申请人',
-    '审批时间',
-    '收款人信息',
-    '开户行',
-    '银行卡号',
-  ]
+    "上传付款回单",
+    "将文件拖到此处",
+    "点击上传",
+    "报销单号",
+    "报销标题",
+    "申请人",
+    "审批时间",
+    "收款人信息",
+    "开户行",
+    "银行卡号",
+  ];
   const hasSystemKeyword = systemInterfaceKeywords.some((k) =>
     textNoSpace.includes(k),
-  )
+  );
   if (hasSystemKeyword) {
     return {
       isValid: false,
       reason:
-        '检测到系统界面特征，请上传真实的银行付款回单，而不是系统页面截图',
-    }
+        "检测到系统界面特征，请上传真实的银行付款回单，而不是系统页面截图",
+    };
   }
 
-  return { isValid: true }
+  return { isValid: true };
 }
 
 export function parseAndValidatePaymentProofText(
   text: string,
   options: PaymentProofValidationOptions = {},
 ): PaymentProofOcrResult {
-  const result = parsePaymentProofText(text)
-
-  const validation = validatePaymentProof(text, result, options)
-  if (!validation.isValid) {
-    throw new Error(validation.reason || '此不是付款回单')
+  const result = parsePaymentProofText(text);
+  let validationOptions = options;
+  if (
+    options.allowMaskedTaxPayeeAccount &&
+    hasMaskedPaymentProofAccount(text)
+  ) {
+    validateMaskedTaxPaymentProof(text, result);
+    validationOptions = {
+      ...options,
+      allowMissingPayeeAccount: true,
+      requireTransactionDate: true,
+    };
   }
-  return result
+  const validation = validatePaymentProof(text, result, validationOptions);
+  if (!validation.isValid) {
+    throw new Error(validation.reason || "此不是付款回单");
+  }
+  return result;
 }
 
 /**
@@ -888,20 +1127,20 @@ export function parseAndValidatePaymentProofText(
  */
 export function parsePaymentProofText(text: string): PaymentProofOcrResult {
   const result: PaymentProofOcrResult = {
-    payer: '',
-    payee: '',
-    payeeAccount: '',
+    payer: "",
+    payee: "",
+    payeeAccount: "",
     amount: 0,
-    electronicReceiptNo: '',
-    transactionSerialNo: '',
-    transactionDate: '',
+    electronicReceiptNo: "",
+    transactionSerialNo: "",
+    transactionDate: "",
     transactionDateCandidates: [],
-    proofNo: '',
+    proofNo: "",
     rawText: text,
-  }
+  };
 
-  populatePaymentProofText(text, result)
-  return result
+  populatePaymentProofText(text, result);
+  return result;
 }
 
 // ==================== 主识别函数 ====================
@@ -913,46 +1152,46 @@ export function parsePaymentProofText(text: string): PaymentProofOcrResult {
  */
 export interface PaymentProofOcrOptions {
   // 用于参考的期望金额（从业务侧获得）
-  expectedAmount?: number
+  expectedAmount?: number;
   /** 报销付款归月时要求回单提供实际交易日期。 */
-  requireTransactionDate?: boolean
+  requireTransactionDate?: boolean;
 }
 
 export async function recognizePaymentProof(
   filePath: string,
   options: PaymentProofOcrOptions = {},
 ): Promise<PaymentProofOcrResult> {
-  console.log('🔍 开始识别付款回单（PaddleOCR）...')
+  console.log("🔍 开始识别付款回单（PaddleOCR）...");
 
   if (!fs.existsSync(filePath)) {
-    throw new Error('付款回单文件不存在: ' + filePath)
+    throw new Error("付款回单文件不存在: " + filePath);
   }
 
   try {
-    console.log('📄 开始读取付款回单图片')
+    console.log("📄 开始读取付款回单图片");
 
     // 调用 PaddleOCR 识别全图
-    const text = await callPaddleOcr(filePath)
+    const text = await callPaddleOcr(filePath);
 
-    console.log('📄 识别文本成功，长度:', text.length, '字符')
+    console.log("📄 识别文本成功，长度:", text.length, "字符");
 
     // 和其他付款回单入口复用同一解析及真实性校验。
     const result = parseAndValidatePaymentProofText(text, {
       requireTransactionDate: options.requireTransactionDate,
-    })
+    });
 
-    console.log('📋 付款回单识别结果:', {
+    console.log("📋 付款回单识别结果:", {
       payerRecognized: Boolean(result.payer),
       payeeRecognized: Boolean(result.payee),
       payeeAccountRecognized: Boolean(result.payeeAccount),
       amountRecognized: result.amount > 0,
       transactionDateRecognized: Boolean(result.transactionDate),
-    })
+    });
 
-    console.log('✅ 付款回单识别成功')
-    return result
+    console.log("✅ 付款回单识别成功");
+    return result;
   } catch (error) {
-    console.error('❌ 付款回单识别失败:', error)
-    throw error
+    console.error("❌ 付款回单识别失败:", error);
+    throw error;
   }
 }

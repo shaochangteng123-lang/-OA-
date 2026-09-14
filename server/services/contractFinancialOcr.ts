@@ -126,6 +126,10 @@ export interface ContractBankReceiptOcrFields {
    * 原件上的付款日期，统一规范化为 YYYY-MM-DD，不保存时分秒。
    */
   paymentTime: string;
+  /** 仅在原件明确出现人民币、CNY、RMB 或人民币货币符号时返回 CNY。 */
+  currency: string;
+  /** 记录币种取自明确标签、人民币金额文本或人民币货币符号。 */
+  currencyEvidence: "currency_label" | "renminbi_text" | "currency_symbol" | "";
   amount: number;
   electronicReceiptNo: string;
   payer: string;
@@ -311,6 +315,8 @@ function normalizeStructuredInvoiceLineItems(
 function emptyBankFields(): ContractBankReceiptOcrFields {
   return {
     paymentTime: "",
+    currency: "",
+    currencyEvidence: "",
     amount: 0,
     electronicReceiptNo: "",
     payer: "",
@@ -1161,10 +1167,13 @@ function parseBankRecognitionChannel(
     normalizeAccount(parsed.payeeAccount) ||
     accounts.find((account) => account !== rolePayerAccount) ||
     "";
+  const currency = extractBankCurrency(text);
 
   return {
     fields: {
       paymentTime: extractPaymentTime(text),
+      currency: currency.currency,
+      currencyEvidence: currency.evidence,
       amount: toMoney(parsed.amount),
       electronicReceiptNo: normalizeNumber(parsed.electronicReceiptNo),
       // 银行电子回单通常是左右并列表格。坐标定位已经明确付款／收款列时，
@@ -1559,6 +1568,37 @@ function extractPaymentTime(text: string): string {
     return date;
   }
   return "";
+}
+
+/**
+ * 合同财务登记当前只支持人民币。币种必须来自回单正文的明确标记，不能根据
+ * 银行、交易双方、文件名或系统默认值推断；出现明确外币标记时直接保持为空，
+ * 交由上层安全门禁阻断。
+ */
+function extractBankCurrency(text: string): {
+  currency: string;
+  evidence: ContractBankReceiptOcrFields["currencyEvidence"];
+} {
+  const normalized = text.normalize("NFKC").toUpperCase();
+  const hasForeignCurrency =
+    /(?:币种|货币(?:名称|代码)?)[：:\s]*(?:USD|EUR|JPY|HKD|GBP|美元|欧元|日元|港币|英镑)/u.test(
+      normalized,
+    ) || /(?:USD|EUR|JPY|HKD|GBP)\s*[0-9]/u.test(normalized);
+  if (hasForeignCurrency) return { currency: "", evidence: "" };
+  if (/(?:币种|货币(?:名称|代码)?)[：:\s]*(?:人民币|CNY|RMB)/u.test(normalized))
+    return { currency: "CNY", evidence: "currency_label" };
+  if (
+    /人民币\s*(?:金额|大写|小写|[0-9零壹贰叁肆伍陆柒捌玖拾佰仟万亿])/u.test(
+      normalized,
+    ) ||
+    /(?:金额(?:\s*[（(](?:小写|大写)[）)])?|(?:小写|大写)金额)[：:\s]*(?:CNY|RMB)\s*[0-9]/u.test(
+      normalized,
+    )
+  )
+    return { currency: "CNY", evidence: "renminbi_text" };
+  if (/[¥￥]\s*(?:[0-9]|[零壹贰叁肆伍陆柒捌玖])/u.test(normalized))
+    return { currency: "CNY", evidence: "currency_symbol" };
+  return { currency: "", evidence: "" };
 }
 
 function companyIdentitySet(context: ContractFinancialOcrContext): Set<string> {
@@ -2567,6 +2607,13 @@ async function recognizePreparedBankReceiptDocument(
     "BANK_AMOUNT_MISSING",
     "amount",
     "回单金额",
+  );
+  addMissingReason(
+    reasons,
+    fields.currency === "CNY" && Boolean(fields.currencyEvidence),
+    "BANK_CNY_CURRENCY_MISSING",
+    "currency",
+    "明确的人民币币种标记",
   );
   addMissingReason(
     reasons,

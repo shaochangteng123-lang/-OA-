@@ -216,10 +216,22 @@
                   </div>
                 </el-timeline-item>
 
+                <el-timeline-item
+                  v-if="approvalSkipped"
+                  :timestamp="currentApprovalRecord.approveTime || currentApprovalRecord.submitTime"
+                  placement="top"
+                  type="success"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">免审批</div>
+                    <div class="timeline-desc">董事长账号免审批，提交后直接进入待付款</div>
+                  </div>
+                </el-timeline-item>
+
                 <!-- 2. 审批历史记录 -->
                 <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
                   <el-timeline-item
-                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
+                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => !['payment_uploaded', 'payment_confirmed', 'auto_approved', 'auto_approve', 'approval_skipped'].includes(r.action))"
                     :key="record.id"
                     :timestamp="record.actionTime"
                     placement="top"
@@ -242,7 +254,7 @@
                 </template>
 
                 <!-- 如果没有审批历史，显示当前状态 -->
-                <template v-else>
+                <template v-else-if="!approvalSkipped">
                   <el-timeline-item
                     v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                     :timestamp="currentApprovalRecord.approveTime"
@@ -469,6 +481,7 @@ import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue
 import { usePendingStore } from '@/stores/pending'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 import { toFileUrl } from '@/utils/file'
+import { isApprovalSkipped } from '@/utils/reimbursement/typeConfig'
 
 const router = useRouter()
 const pendingStore = usePendingStore()
@@ -551,6 +564,9 @@ const reimbursementList = ref<any[]>([])
 // 审批过程弹窗
 const approvalDialogVisible = ref(false)
 const currentApprovalRecord = ref<any>(null)
+const approvalSkipped = computed(() =>
+  isApprovalSkipped(currentApprovalRecord.value),
+)
 
 // 确认收款状态
 const confirmingReceipt = ref(false)

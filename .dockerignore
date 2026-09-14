@@ -1,0 +1,58 @@
+# Git
+.git
+.gitignore
+
+# Dependencies
+node_modules
+
+# Build output
+dist
+.vite
+artifacts
+output
+outputs
+
+# Local backups and generated evidence
+backup
+-.jpg
+-.png
+/chi_sim.traineddata
+/eng.traineddata
+
+# Environment
+.env
+.env.*
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Test
+coverage
+.nyc_output
+
+# Temp
+tmp
+temp
+*.tmp
+
+# Database
+*.db
+*.sqlite
+
+# Uploads (will be mounted)
+uploads/*
+debug/*

@@ -71,6 +71,36 @@
           </div>
         </div>
       </el-card>
+
+      <el-card class="stat-card welfare-one-card" shadow="hover">
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><Present /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.welfareOneStats.count }}</div>
+            <div class="stat-label">福利1报销</div>
+            <div class="stat-amount" v-if="statistics.welfareOneStats.amount > 0">
+              ¥{{ statistics.welfareOneStats.amount.toFixed(2) }}
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card class="stat-card welfare-two-card" shadow="hover">
+        <div class="stat-content">
+          <div class="stat-icon">
+            <el-icon :size="32"><Present /></el-icon>
+          </div>
+          <div class="stat-info">
+            <div class="stat-value">{{ statistics.welfareTwoStats.count }}</div>
+            <div class="stat-label">福利2报销</div>
+            <div class="stat-amount" v-if="statistics.welfareTwoStats.amount > 0">
+              ¥{{ statistics.welfareTwoStats.amount.toFixed(2) }}
+            </div>
+          </div>
+        </div>
+      </el-card>
     </div>
 
     <el-tabs v-model="activeTab" @tab-change="handleTabChange" class="no-transition-tabs">
@@ -106,17 +136,14 @@
                   collapse-tags-tooltip
                   style="width: 160px"
                 >
-                  <el-option value="basic" label="基础报销">
-                    <el-checkbox :model-value="pendingFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
-                    基础报销
-                  </el-option>
-                  <el-option value="large" label="大额报销">
-                    <el-checkbox :model-value="pendingFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
-                    大额报销
-                  </el-option>
-                  <el-option value="business" label="商务报销">
-                    <el-checkbox :model-value="pendingFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
-                    商务报销
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  >
+                    <el-checkbox :model-value="pendingFilterForm.type.includes(option.type)" style="pointer-events: none; margin-right: 8px;" />
+                    {{ option.label }}
                   </el-option>
                 </el-select>
               </el-form-item>
@@ -189,7 +216,7 @@
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
-                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+                {{ getReimbursementScopeText(row) }}
               </template>
             </el-table-column>
             <el-table-column label="状态" min-width="80" align="center">
@@ -231,7 +258,7 @@
                     审批流程
                   </el-button>
                   <!-- 只有待审批状态才显示通过和驳回按钮 -->
-                  <template v-if="row.status === 'pending'">
+                  <template v-if="canHandleApproval && row.status === 'pending'">
                     <el-button type="success" size="small" :icon="Check" @click="handleApprove(row)">
                       通过
                     </el-button>
@@ -240,13 +267,13 @@
                     </el-button>
                   </template>
                   <!-- 已通过待付款状态显示确认付款按钮 -->
-                  <template v-else-if="row.status === 'approved' && row.reimbursementStatus === 'approved'">
+                  <template v-else-if="canHandlePayment && row.status === 'approved' && row.reimbursementStatus === 'approved'">
                     <el-button type="success" size="small" :icon="Money" @click="handleConfirmPaymentFromPending(row)">
                       确认付款
                     </el-button>
                   </template>
                   <!-- 待上传回单状态显示上传回单按钮 -->
-                  <template v-else-if="row.reimbursementStatus === 'paid'">
+                  <template v-else-if="canHandlePayment && row.reimbursementStatus === 'paid'">
                     <el-button type="primary" size="small" :icon="Upload" @click="handleUploadReceiptFromPending(row)">
                       上传回单
                     </el-button>
@@ -292,9 +319,12 @@
                   clearable
                   style="width: 140px"
                 >
-                  <el-option value="basic" label="基础报销" />
-                  <el-option value="large" label="大额报销" />
-                  <el-option value="business" label="商务报销" />
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  />
                 </el-select>
               </el-form-item>
               <el-form-item label="状态">
@@ -328,7 +358,7 @@
           </div>
 
           <el-table :data="unpaidList" border stripe empty-text="暂无待付款记录" ref="unpaidTableRef" @selection-change="handleUnpaidSelectionChange" v-loading="unpaidListLoading">
-            <el-table-column type="selection" width="55" align="center" />
+            <el-table-column v-if="canHandlePayment" type="selection" width="55" align="center" />
             <el-table-column label="序号" width="60" align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
@@ -360,7 +390,7 @@
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
-                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+                {{ getReimbursementScopeText(row) }}
               </template>
             </el-table-column>
             <el-table-column label="通过时间" min-width="130" align="center">
@@ -388,7 +418,7 @@
                     审批流程
                   </el-button>
                   <el-button
-                    v-if="row.status === 'approved'"
+                    v-if="canHandlePayment && row.status === 'approved'"
                     type="success"
                     size="small"
                     :icon="Money"
@@ -402,7 +432,7 @@
           </el-table>
 
           <!-- 批量确认付款操作栏 -->
-          <div class="batch-action-bar" :class="{ 'has-selection': selectedUnpaidItems.length > 0 }">
+          <div v-if="canHandlePayment" class="batch-action-bar" :class="{ 'has-selection': selectedUnpaidItems.length > 0 }">
             <div class="batch-info" v-if="selectedUnpaidItems.length > 0">
               <span>已选 <strong>{{ selectedUnpaidItems.length }}</strong> 笔</span>
               <span class="batch-amount">合计 <strong>¥{{ selectedUnpaidTotalAmount.toFixed(2) }}</strong></span>
@@ -525,9 +555,12 @@
                   clearable
                   style="width: 140px"
                 >
-                  <el-option value="basic" label="基础报销" />
-                  <el-option value="large" label="大额报销" />
-                  <el-option value="business" label="商务报销" />
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  />
                 </el-select>
               </el-form-item>
               <el-form-item label="日期">
@@ -582,7 +615,7 @@
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
-                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+                {{ getReimbursementScopeText(row) }}
               </template>
             </el-table-column>
             <el-table-column label="确认付款时间" min-width="130" align="center">
@@ -610,6 +643,7 @@
                     审批流程
                   </el-button>
                   <el-button
+                    v-if="canHandlePayment"
                     type="success"
                     size="small"
                     :icon="Upload"
@@ -624,13 +658,13 @@
 
           <!-- 工行回单上传操作栏 -->
           <div style="margin-top: 12px; display: flex; justify-content: flex-end;">
-            <el-button type="primary" :icon="Upload" :disabled="uploadReceiptList.length === 0" @click="bankReceiptUploadVisible = true">
+            <el-button v-if="canHandlePayment" type="primary" :icon="Upload" :disabled="uploadReceiptList.length === 0" @click="bankReceiptUploadVisible = true">
               上传工行回单PDF
             </el-button>
           </div>
 
           <!-- 未认领回单区域 -->
-          <div v-if="unmatchedReceipts.length > 0" class="unmatched-receipts-section">
+          <div v-if="canHandlePayment && unmatchedReceipts.length > 0" class="unmatched-receipts-section">
             <div class="unmatched-header">
               <el-icon color="#e6a23c"><WarningFilled /></el-icon>
               <span>待认领回单（{{ unmatchedReceipts.length }} 笔）</span>
@@ -685,17 +719,14 @@
                   collapse-tags-tooltip
                   style="width: 160px"
                 >
-                  <el-option value="basic" label="基础报销">
-                    <el-checkbox :model-value="paidFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
-                    基础报销
-                  </el-option>
-                  <el-option value="large" label="大额报销">
-                    <el-checkbox :model-value="paidFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
-                    大额报销
-                  </el-option>
-                  <el-option value="business" label="商务报销">
-                    <el-checkbox :model-value="paidFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
-                    商务报销
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  >
+                    <el-checkbox :model-value="paidFilterForm.type.includes(option.type)" style="pointer-events: none; margin-right: 8px;" />
+                    {{ option.label }}
                   </el-option>
                 </el-select>
               </el-form-item>
@@ -762,7 +793,7 @@
             </el-table-column>
             <el-table-column label="报销范围/区域" min-width="120" align="center">
               <template #default="{ row }">
-                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+                {{ getReimbursementScopeText(row) }}
               </template>
             </el-table-column>
             <el-table-column label="付款时间" min-width="130" align="center">
@@ -842,24 +873,21 @@
                   popper-class="type-select-popper"
                   style="width: 160px"
                 >
-                  <el-option value="basic" label="基础报销">
-                    <el-checkbox :model-value="allFilterForm.type.includes('basic')" style="pointer-events: none; margin-right: 8px;" />
-                    基础报销
-                  </el-option>
-                  <el-option value="large" label="大额报销">
-                    <el-checkbox :model-value="allFilterForm.type.includes('large')" style="pointer-events: none; margin-right: 8px;" />
-                    大额报销
-                  </el-option>
-                  <el-option value="business" label="商务报销">
-                    <el-checkbox :model-value="allFilterForm.type.includes('business')" style="pointer-events: none; margin-right: 8px;" />
-                    商务报销
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  >
+                    <el-checkbox :model-value="allFilterForm.type.includes(option.type)" style="pointer-events: none; margin-right: 8px;" />
+                    {{ option.label }}
                   </el-option>
                 </el-select>
               </el-form-item>
-              <el-form-item label="所属区域">
+              <el-form-item :label="selectedWelfareScopeOnly ? '福利分类' : '所属区域'">
                 <el-cascader
                   v-model="allFilterForm.reimbursementScope"
-                  :options="scopeList"
+                  :options="activeScopeList"
                   :props="{
                     value: 'value',
                     label: 'name',
@@ -871,9 +899,9 @@
                   collapse-tags
                   collapse-tags-tooltip
                   :max-collapse-tags="1"
-                  :disabled="isBasicReimbursementSelected"
+                  :disabled="scopeFilterDisabled"
                   clearable
-                  placeholder="全部"
+                  :placeholder="scopeFilterPlaceholder"
                   class="scope-cascader"
                   style="width: 200px"
                 />
@@ -962,7 +990,12 @@
             </el-table-column>
             <el-table-column label="类型" min-width="80" align="center">
               <template #default="{ row }">
-                <el-tag :type="getTypeTagType(row.type)" size="small">
+                <el-tag
+                  :type="getTypeTagType(row.type)"
+                  :color="getTypeTagColor(row.type)"
+                  :style="getTypeTagColor(row.type) ? { color: '#fff' } : {}"
+                  size="small"
+                >
                   {{ row.typeName }}
                 </el-tag>
               </template>
@@ -984,7 +1017,7 @@
             </el-table-column>
             <el-table-column label="所属区域" min-width="120" align="center">
               <template #default="{ row }">
-                {{ row.reimbursementScope ? (scopeMap[row.reimbursementScope] || row.reimbursementScope) : '-' }}
+                {{ getReimbursementScopeText(row) }}
               </template>
             </el-table-column>
             <el-table-column label="状态" min-width="80" align="center">
@@ -1055,9 +1088,12 @@
                   collapse-tags-tooltip
                   style="width: 130px"
                 >
-                  <el-option value="basic" label="基础报销" />
-                  <el-option value="large" label="大额报销" />
-                  <el-option value="business" label="商务报销" />
+                  <el-option
+                    v-for="option in reimbursementTypeOptions"
+                    :key="option.type"
+                    :value="option.type"
+                    :label="option.label"
+                  />
                 </el-select>
               </el-form-item>
               <el-form-item label="文件类型">
@@ -1178,7 +1214,13 @@
                 <el-tag v-if="row.isDeduction" type="danger" size="small">
                   核减发票
                 </el-tag>
-                <el-tag v-else :type="getTypeTagType(row.reimbursementType)" size="small">
+                <el-tag
+                  v-else
+                  :type="getTypeTagType(row.reimbursementType)"
+                  :color="getTypeTagColor(row.reimbursementType)"
+                  :style="getTypeTagColor(row.reimbursementType) ? { color: '#fff' } : {}"
+                  size="small"
+                >
                   {{ row.reimbursementTypeName }}
                 </el-tag>
               </template>
@@ -1292,10 +1334,22 @@
               </div>
             </el-timeline-item>
 
+            <el-timeline-item
+              v-if="currentApprovalSkipped"
+              :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
+              placement="top"
+              type="success"
+            >
+              <div class="timeline-content">
+                <div class="timeline-title">免审批</div>
+                <div class="timeline-desc">董事长账号免审批，提交后直接进入待付款</div>
+              </div>
+            </el-timeline-item>
+
             <!-- 2. 管理员审批 -->\n            <!-- 如果有审批记录，显示详细记录 -->
             <template v-if="approvalRecords.length > 0">
               <el-timeline-item
-                v-for="record in approvalRecords.filter(r => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
+                v-for="record in approvalRecords.filter(r => !['payment_uploaded', 'payment_confirmed', 'auto_approved', 'auto_approve', 'approval_skipped'].includes(r.action))"
                 :key="record.id"
                 :timestamp="formatDate(record.actionTime)"
                 placement="top"
@@ -1317,7 +1371,7 @@
               </el-timeline-item>
             </template>
             <!-- 如果没有审批记录，显示简化版本 -->
-            <template v-else>
+            <template v-else-if="!currentApprovalSkipped">
               <el-timeline-item
                 v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                 :timestamp="currentApprovalRecord.approveTime ? formatDate(currentApprovalRecord.approveTime) : ''"
@@ -1742,17 +1796,33 @@ import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled, Upload, UploadFilled, Loading } from '@element-plus/icons-vue'
+import { User, Check, Close, View, Clock, Wallet, Money, SuccessFilled, Search, Download, Document, ZoomIn, List, Printer, WarningFilled, Upload, UploadFilled, Loading, Present } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
 import { toFileUrl, isImageFile } from '@/utils/file'
 import { usePendingStore } from '@/stores/pending'
+import { useAuthStore } from '@/stores/auth'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
+import {
+  REIMBURSEMENT_FILTER_OPTIONS,
+  getReimbursementTypeAccentColor,
+  getReimbursementTypeLabel,
+  getReimbursementTypeRoute,
+  getReimbursementTypeTagType,
+  normalizeReimbursementType,
+  isApprovalSkipped,
+} from '@/utils/reimbursement/typeConfig'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
 
 const router = useRouter()
 const route = useRoute()
 const pendingStore = usePendingStore()
+const authStore = useAuthStore()
+const reimbursementTypeOptions = REIMBURSEMENT_FILTER_OPTIONS
+const canHandleApproval = computed(() =>
+  ['super_admin', 'admin'].includes(authStore.user?.role || ''),
+)
+const canHandlePayment = computed(() => authStore.user?.role !== 'chairman')
 
 interface ApprovalItem {
   id: string
@@ -1773,6 +1843,9 @@ interface ApprovalItem {
     amount: number
   }
   reimbursementUserId?: string
+  reimbursementScope?: string
+  welfareCategoryId?: string
+  welfareCategoryName?: string
 }
 
 interface ReimbursementItem {
@@ -1797,6 +1870,8 @@ interface ReimbursementItem {
   userId: string
   invoiceCategories?: string
   reimbursementScope?: string
+  welfareCategoryId?: string
+  welfareCategoryName?: string
   submitTime?: string
 }
 
@@ -1811,6 +1886,8 @@ interface Statistics {
   basicStats: { count: number; amount: number }
   largeStats: { count: number; amount: number }
   businessStats: { count: number; amount: number }
+  welfareOneStats: { count: number; amount: number }
+  welfareTwoStats: { count: number; amount: number }
 }
 
 // 使用 computed 直接绑定 URL 参数，确保标签页状态始终与 URL 同步
@@ -2016,6 +2093,7 @@ function handleUnpaidSelectionChange(selection: ReimbursementItem[]) {
 
 // 批量确认付款
 async function handleBatchConfirmPayment() {
+  if (!canHandlePayment.value) return
   if (selectedUnpaidItems.value.length === 0) return
   try {
     await ElMessageBox.confirm(`确认将选中的 ${selectedUnpaidItems.value.length} 笔报销单标记为已付款？`, '确认付款', {
@@ -2044,6 +2122,7 @@ async function handleBatchConfirmPayment() {
 
 // 确认付款（单笔，从待付款列表）
 async function handleConfirmPayment(item: ReimbursementItem) {
+  if (!canHandlePayment.value) return
   try {
     await ElMessageBox.confirm('确认已完成付款？', '确认付款', {
       confirmButtonText: '确认',
@@ -2066,6 +2145,7 @@ async function handleConfirmPayment(item: ReimbursementItem) {
 
 // 确认付款（从待办列表）
 async function handleConfirmPaymentFromPending(item: ApprovalItem) {
+  if (!canHandlePayment.value) return
   try {
     await ElMessageBox.confirm('确认已完成付款？', '确认付款', {
       confirmButtonText: '确认',
@@ -2087,22 +2167,19 @@ async function handleConfirmPaymentFromPending(item: ApprovalItem) {
 
 // 从待办列表进入上传回单页面
 function handleUploadReceiptFromPending(item: ApprovalItem) {
+  if (!canHandlePayment.value) return
   router.push(`/approval/payment/${item.targetId}?from=/approval&tab=pending`)
 }
 
 // 进入上传回单页面（从待上传回单列表）
 function handleUploadReceipt(item: ReimbursementItem) {
+  if (!canHandlePayment.value) return
   router.push(`/approval/payment/${item.id}?from=/approval&tab=upload_receipt`)
 }
 
 // 查看待上传回单报销单详情
 function handleViewUploadReceiptReimbursement(item: ReimbursementItem) {
-  const typeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    large: '/large-reimbursement',
-    business: '/business-reimbursement',
-  }
-  const routePath = typeMap[item.type]
+  const routePath = getReimbursementTypeRoute(item.type)
   if (routePath) {
     router.push(`${routePath}/${item.id}?mode=view&from=/approval&tab=upload_receipt`)
   }
@@ -2142,6 +2219,8 @@ const statistics = ref<Statistics>({
   basicStats: { count: 0, amount: 0 },
   largeStats: { count: 0, amount: 0 },
   businessStats: { count: 0, amount: 0 },
+  welfareOneStats: { count: 0, amount: 0 },
+  welfareTwoStats: { count: 0, amount: 0 },
 })
 
 // 驳回对话框
@@ -2172,12 +2251,40 @@ const employeeList = ref<Employee[]>([])
 
 // 报销范围/区域数据
 interface ScopeOption {
+  id?: string
+  code?: string
   value: string
   name: string
   children?: ScopeOption[]
 }
 const scopeList = ref<ScopeOption[]>([])
+const welfareOneScopeList = ref<ScopeOption[]>([])
+const welfareTwoScopeList = ref<ScopeOption[]>([])
 const scopeMap = ref<Record<string, string>>({}) // value -> 完整路径名称映射
+const selectedWelfareType = computed(() => {
+  if (allFilterForm.type.length !== 1) return ''
+  const type = allFilterForm.type[0]
+  return ['welfare_one', 'welfare_two'].includes(type) ? type : ''
+})
+const selectedWelfareScopeOnly = computed(() => Boolean(selectedWelfareType.value))
+const activeScopeList = computed(() => {
+  if (selectedWelfareType.value === 'welfare_one') return welfareOneScopeList.value
+  if (selectedWelfareType.value === 'welfare_two') return welfareTwoScopeList.value
+  return scopeList.value
+})
+const scopeFilterDisabled = computed(() => {
+  const selected = allFilterForm.type
+  if (selected.includes('basic')) return true
+  const catalogs = new Set<string>()
+  if (selected.some(type => ['large', 'business'].includes(type))) catalogs.add('general')
+  if (selected.includes('welfare_one')) catalogs.add('welfare_one')
+  if (selected.includes('welfare_two')) catalogs.add('welfare_two')
+  return catalogs.size > 1
+})
+const scopeFilterPlaceholder = computed(() => {
+  if (scopeFilterDisabled.value) return '请按同类范围筛选'
+  return selectedWelfareScopeOnly.value ? '全部福利分类' : '全部'
+})
 
 // 递归收集某个节点下所有子孙的 value
 function collectDescendantValues(items: ScopeOption[]): string[] {
@@ -2193,7 +2300,7 @@ function collectDescendantValues(items: ScopeOption[]): string[] {
 
 // 展开选中的 scope：如果选中了父级，自动包含其所有子级 value
 function expandScopeSelection(selectedValues: string[]): string[] {
-  if (!selectedValues.length || !scopeList.value.length) return selectedValues
+  if (!selectedValues.length || !activeScopeList.value.length) return selectedValues
 
   const expanded = new Set<string>()
 
@@ -2215,7 +2322,7 @@ function expandScopeSelection(selectedValues: string[]): string[] {
   }
 
   for (const val of selectedValues) {
-    findAndExpand(scopeList.value, val)
+    findAndExpand(activeScopeList.value, val)
   }
 
   return Array.from(expanded)
@@ -2245,6 +2352,8 @@ interface AllReimbursementItem {
   paymentProofPath?: string
   receiptConfirmedBy?: string
   reimbursementScope?: string // 报销范围/区域
+  welfareCategoryId?: string
+  welfareCategoryName?: string
   createdAt: string
   userId: string
 }
@@ -2316,26 +2425,15 @@ const allListTotalAmount = computed(() => {
   return allList.value.reduce((sum, item) => sum + (item.amount || 0), 0)
 })
 
-// 判断是否选择了基础报销（用于禁用所属区域）
-const isBasicReimbursementSelected = computed(() => {
-  return allFilterForm.type.includes('basic')
-})
-
 // 计算全部列表按类型汇总
 const allSummary = computed(() => {
-  const typeMap: Record<string, string> = {
-    basic: '基础报销',
-    large: '大额报销',
-    business: '商务报销',
-  }
-
   const byTypeMap: Record<string, { type: string; typeName: string; count: number; amount: number }> = {}
 
   allList.value.forEach(item => {
     if (!byTypeMap[item.type]) {
       byTypeMap[item.type] = {
         type: item.type,
-        typeName: typeMap[item.type] || item.type,
+        typeName: getReimbursementTypeLabel(item.type),
         count: 0,
         amount: 0,
       }
@@ -2344,8 +2442,8 @@ const allSummary = computed(() => {
     byTypeMap[item.type].amount += item.amount || 0
   })
 
-  // 固定排序：基础报销、大额报销、商务报销
-  const typeOrder = ['basic', 'large', 'business']
+  // 固定排序跟随集中类型配置。
+  const typeOrder = reimbursementTypeOptions.map(item => item.type)
   const sortedByType = typeOrder
     .filter(t => byTypeMap[t])
     .map(t => byTypeMap[t])
@@ -2393,13 +2491,23 @@ interface ApprovalRecordItem {
   approverId: string
   approverName: string
   approverAvatar: string | null
-  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'payment_confirmed' | 'upload_receipt' | 'resubmit'
+  action: 'approve' | 'reject' | 'comment' | 'payment_uploaded' | 'payment_confirmed' | 'upload_receipt' | 'resubmit' | 'auto_approved' | 'auto_approve' | 'approval_skipped'
   comment: string | null
   actionTime: string
 }
 
 const approvalProcessDialogVisible = ref(false)
 const currentApprovalRecord = ref<ApprovalProcessRecord | null>(null)
+const currentApprovalSkipped = computed(() =>
+  isApprovalSkipped(
+    currentApprovalRecord.value
+      ? {
+          ...currentApprovalRecord.value,
+          approvalHistory: approvalRecords.value,
+        }
+      : null,
+  ),
+)
 const approvalRecords = ref<ApprovalRecordItem[]>([])
 const approvalBatchInfo = ref<{ totalAmount: number; reimbursementCount: number; reimbursements: any[] } | null>(null)
 
@@ -2719,32 +2827,20 @@ const previewInvoiceIsImage = computed(() => {
 
 // 获取类型标签
 function getTypeTagType(type: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
-  const typeMap: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
-    worklog: 'info',
-    basic: 'success',
-    large: 'warning',
-    business: 'danger',
-    reimbursement_basic: 'success',
-    reimbursement_large: 'warning',
-    reimbursement_business: 'danger',
-    leave: 'info',
-  }
-  return typeMap[type] || 'info'
+  return getReimbursementTypeTagType(type)
+}
+
+function getTypeTagColor(type: string): string {
+  return normalizeReimbursementType(type).startsWith('welfare_')
+    ? getReimbursementTypeAccentColor(type)
+    : ''
 }
 
 // 获取类型文字
 function getTypeLabel(type: string): string {
-  const typeMap: Record<string, string> = {
-    worklog: '工作日志',
-    basic: '基础报销',
-    large: '大额报销',
-    business: '商务报销',
-    reimbursement_basic: '基础报销',
-    reimbursement_large: '大额报销',
-    reimbursement_business: '商务报销',
-    leave: '请假',
-  }
-  return typeMap[type] || type
+  if (type === 'worklog') return '工作日志'
+  if (type === 'leave') return '请假'
+  return getReimbursementTypeLabel(type)
 }
 
 // 格式化日期
@@ -2766,7 +2862,11 @@ async function loadStatistics() {
   try {
     const res = await api.get('/api/approval/statistics')
     if (res.data.success) {
-      statistics.value = res.data.data
+      statistics.value = {
+        ...res.data.data,
+        welfareOneStats: res.data.data.welfareOneStats || { count: 0, amount: 0 },
+        welfareTwoStats: res.data.data.welfareTwoStats || { count: 0, amount: 0 },
+      }
     }
   } catch {
     console.error('加载统计数据失败')
@@ -3019,12 +3119,7 @@ async function confirmReject() {
 
 // 查看报销单详情（待审批/本月已通过）
 function handleViewReimbursement(item: ApprovalItem) {
-  const typeMap: Record<string, string> = {
-    reimbursement_basic: '/basic-reimbursement',
-    reimbursement_large: '/large-reimbursement',
-    reimbursement_business: '/business-reimbursement',
-  }
-  const routePath = typeMap[item.type]
+  const routePath = getReimbursementTypeRoute(item.type)
   if (routePath) {
     router.push(`${routePath}/${item.targetId}?mode=view&from=/approval&tab=${activeTab.value}`)
   }
@@ -3092,12 +3187,7 @@ async function handleViewApprovalProcessFromUnpaid(item: ReimbursementItem) {
 
 // 查看未付款报销单详情
 function handleViewUnpaidReimbursement(item: ReimbursementItem) {
-  const typeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    large: '/large-reimbursement',
-    business: '/business-reimbursement',
-  }
-  const routePath = typeMap[item.type]
+  const routePath = getReimbursementTypeRoute(item.type)
   if (routePath) {
     router.push(`${routePath}/${item.id}?mode=view&from=/approval&tab=unpaid`)
   }
@@ -3105,12 +3195,7 @@ function handleViewUnpaidReimbursement(item: ReimbursementItem) {
 
 // 查看已付款报销单详情
 function handleViewPaidReimbursement(item: ReimbursementItem) {
-  const typeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    large: '/large-reimbursement',
-    business: '/business-reimbursement',
-  }
-  const routePath = typeMap[item.type]
+  const routePath = getReimbursementTypeRoute(item.type)
   if (routePath) {
     router.push(`${routePath}/${item.id}?mode=view&from=/approval&tab=paid`)
   }
@@ -3131,26 +3216,68 @@ async function loadEmployeeList() {
 // 加载报销范围列表
 async function loadScopeList() {
   try {
-    const res = await api.get('/api/reimbursement-scope/list')
-    if (res.data.success) {
-      scopeList.value = res.data.data
-      // 递归构建 value -> 完整路径名称 映射
-      const buildMap = (items: ScopeOption[], parentName = '') => {
-        for (const item of items) {
-          if (item.value) {
-            const fullName = parentName ? `${parentName} / ${item.name}` : item.name
-            scopeMap.value[item.value] = fullName
-          }
-          if (item.children?.length) {
-            buildMap(item.children, item.name)
-          }
+    const [generalResponse, welfareOneResponse, welfareTwoResponse] = await Promise.all([
+      api.get('/api/reimbursement-scope/list'),
+      api.get('/api/reimbursement-scope/welfare-one/list'),
+      api.get('/api/reimbursement-scope/welfare-two/list'),
+    ])
+    scopeMap.value = {}
+    if (generalResponse.data.success) {
+      scopeList.value = generalResponse.data.data
+    }
+    if (welfareOneResponse.data.success) {
+      const items = Array.isArray(welfareOneResponse.data.data)
+        ? welfareOneResponse.data.data
+        : []
+      welfareOneScopeList.value = items.map((item: Record<string, unknown>) => ({
+        ...item,
+        value: String(item.id || item.code || ''),
+        name: String(item.name || item.code || ''),
+      })) as ScopeOption[]
+    }
+    if (welfareTwoResponse.data.success) {
+      const items = Array.isArray(welfareTwoResponse.data.data)
+        ? welfareTwoResponse.data.data
+        : []
+      welfareTwoScopeList.value = items.map((item: Record<string, unknown>) => ({
+        ...item,
+        value: String(item.id || item.code || ''),
+        name: String(item.name || item.code || ''),
+      })) as ScopeOption[]
+    }
+
+    const buildMap = (items: ScopeOption[], parentName = '') => {
+      for (const item of items) {
+        if (item.value) {
+          const fullName = parentName ? `${parentName} / ${item.name}` : item.name
+          scopeMap.value[item.value] = fullName
+        }
+        if (item.children?.length) {
+          buildMap(item.children, item.name)
         }
       }
-      buildMap(scopeList.value)
     }
+    buildMap(scopeList.value)
+    buildMap(welfareOneScopeList.value)
+    buildMap(welfareTwoScopeList.value)
   } catch {
     console.error('加载报销范围列表失败')
   }
+}
+
+function getReimbursementScopeText(
+  item: AllReimbursementItem | ReimbursementItem | ApprovalItem,
+) {
+  if (normalizeReimbursementType(item.type).startsWith('welfare_')) {
+    return item.welfareCategoryName
+      || scopeMap.value[item.welfareCategoryId || item.reimbursementScope || '']
+      || item.welfareCategoryId
+      || item.reimbursementScope
+      || '-'
+  }
+  return item.reimbursementScope
+    ? scopeMap.value[item.reimbursementScope] || item.reimbursementScope
+    : '-'
 }
 
 // 查看审批流程（从全部查询tab）
@@ -3285,15 +3412,7 @@ function handlePreviewPaymentProof(url?: string) {
 function handleGoToReimbursementDetail() {
   if (!currentApprovalRecord.value) return
 
-  const typeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    large: '/large-reimbursement',
-    business: '/business-reimbursement',
-    reimbursement_basic: '/basic-reimbursement',
-    reimbursement_large: '/large-reimbursement',
-    reimbursement_business: '/business-reimbursement',
-  }
-  const routePath = typeMap[currentApprovalRecord.value.type]
+  const routePath = getReimbursementTypeRoute(currentApprovalRecord.value.type)
   if (routePath) {
     approvalProcessDialogVisible.value = false
     router.push(`${routePath}/${currentApprovalRecord.value.targetId}?mode=view&from=/approval&tab=${activeTab.value}`)
@@ -3807,24 +3926,17 @@ function handleExportDeduction() {
 
 // 查看全部列表详情
 function handleViewAllDetail(row: AllReimbursementItem) {
-  const typeMap: Record<string, string> = {
-    basic: '/basic-reimbursement',
-    large: '/large-reimbursement',
-    business: '/business-reimbursement',
-  }
-  const routePath = typeMap[row.type]
+  const routePath = getReimbursementTypeRoute(row.type)
   if (routePath) {
     router.push(`${routePath}/${row.id}?mode=view&from=/approval&tab=all`)
   }
 }
 
-// 监听类型选择变化，如果选择了基础报销，清空所属区域
+// 类型变化时清空范围，避免通用范围与福利分类交叉复用。
 watch(
   () => allFilterForm.type,
-  (newType) => {
-    if (newType.includes('basic')) {
-      allFilterForm.reimbursementScope = []
-    }
+  () => {
+    allFilterForm.reimbursementScope = []
   }
 )
 
@@ -4062,7 +4174,7 @@ onMounted(() => {
 .statistics-section {
   margin-bottom: 24px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 20px;
 }
 
@@ -4122,6 +4234,16 @@ onMounted(() => {
 .business-card .stat-icon {
   background-color: rgba(103, 194, 58, 0.1);
   color: #67C23A;
+}
+
+.welfare-one-card .stat-icon {
+  background-color: rgba(139, 92, 246, 0.1);
+  color: #8b5cf6;
+}
+
+.welfare-two-card .stat-icon {
+  background-color: rgba(199, 125, 154, 0.12);
+  color: #c77d9a;
 }
 
 .stat-info {

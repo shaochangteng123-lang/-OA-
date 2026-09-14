@@ -93,6 +93,7 @@ describe("资产合同履约结算统一口径", () => {
     });
 
     expect(sql).toContain("contract_financial_registration_matches");
+    expect(sql).toContain("root.category = 'asset' AND EXISTS");
     expect(sql).toContain("financial_match.allocated_amount");
     expect(sql).toContain("contract_invoice_line_items");
     expect(sql).toContain("line.include_in_contract_accounting = TRUE");
@@ -102,6 +103,9 @@ describe("资产合同履约结算统一口径", () => {
     expect(sql).toContain("accounting_invoice.status <> 'reversed'");
     expect(sql).toContain("root.declared_subtype = 'house_rental'");
     expect(sql).toContain("settlement_item.item_kind = 'external_payment'");
+    expect(sql).toContain(
+      "asset_funding_mode IS DISTINCT FROM 'engineering_to_technology'",
+    );
     expect(sql.indexOf("WHEN EXISTS (")).toBeLessThan(
       sql.lastIndexOf(
         "WHEN root.asset_funding_mode = 'engineering_to_technology'",
@@ -116,11 +120,15 @@ describe("资产合同履约结算统一口径", () => {
     });
 
     expect(sql).toContain("MAX(settlement_payment.payment_date)");
+    expect(sql).toContain("root.category = 'asset' AND EXISTS");
     expect(sql).toContain(
       "accounting_line.include_in_contract_accounting = TRUE",
     );
     expect(sql).toContain("contract_external_payments settlement_payment");
     expect(sql).toContain("root.declared_subtype = 'house_rental'");
+    expect(sql).toContain(
+      "asset_funding_mode IS DISTINCT FROM 'engineering_to_technology'",
+    );
   });
 
   it("房租现金付款虽已满额，核算分配额未满时状态仍为执行中", async () => {

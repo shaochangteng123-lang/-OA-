@@ -8,7 +8,7 @@ import fs from 'fs'
 import path from 'path'
 import { db } from '../db/index.js'
 import { nanoid } from 'nanoid'
-import { requireAuth, requireAdmin, requireRole } from '../middleware/auth.js'
+import { requireAuth, requireAdmin, requireExactRole, requireRole } from '../middleware/auth.js'
 import { validateFilePath } from '../utils/file-validation.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 import type { PoolClient } from 'pg'
@@ -52,10 +52,10 @@ function formatDateTime(isoString: string | null): string {
   return `${y}-${m}-${d} ${h}:${min}`
 }
 
-// 标准化报销事由标题格式：统一为 YYYY年MM月-基础报销/大额报销/商务报销
+// 标准化报销事由标题格式。
 function normalizeReimbursementTitle(title: string): string {
   const match = title.match(
-    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销)$/,
+    /^(\d{4}年\d{2}月).*?-(基础报销|大额报销|商务报销|福利1报销|福利2报销)$/,
   )
   if (match) {
     return `${match[1]}-${match[2]}`
@@ -101,6 +101,8 @@ router.get('/statistics', requireAdmin, async (req, res) => {
         ? `AND (
           ai.type IN ('reimbursement_basic', 'reimbursement_large')
           OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+          OR (ai.type = 'reimbursement_welfare_one' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+          OR (ai.type = 'reimbursement_welfare_two' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
         )`
         : `AND ai.target_type = 'reimbursement'`
 
@@ -110,6 +112,8 @@ router.get('/statistics', requireAdmin, async (req, res) => {
         ? `AND (
           r.type IN ('basic', 'large')
           OR (r.type = 'business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+          OR (r.type = 'welfare_one' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+          OR (r.type = 'welfare_two' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
         )`
         : ''
 
@@ -202,6 +206,8 @@ router.get('/statistics', requireAdmin, async (req, res) => {
         basicStats: typeStatsMap['basic'] || { count: 0, amount: 0 },
         largeStats: typeStatsMap['large'] || { count: 0, amount: 0 },
         businessStats: typeStatsMap['business'] || { count: 0, amount: 0 },
+        welfareOneStats: typeStatsMap['welfare_one'] || { count: 0, amount: 0 },
+        welfareTwoStats: typeStatsMap['welfare_two'] || { count: 0, amount: 0 },
       },
     })
   } catch (error) {
@@ -268,7 +274,14 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
         r.*,
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
-        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories,
+        EXISTS(
+          SELECT 1 FROM approval_records skipped
+          JOIN approval_instances skipped_instance ON skipped_instance.id = skipped.instance_id
+          WHERE skipped_instance.target_id = r.id
+            AND skipped_instance.target_type = 'reimbursement'
+            AND skipped.action = 'auto_approved'
+        ) as approval_skipped
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE ${conditions.join(' AND ')}
@@ -297,6 +310,13 @@ router.get('/approved-unpaid', requireAdmin, async (req, res) => {
         paymentProofPath: r.payment_proof_path,
         userId: r.user_id,
         reimbursementScope: r.reimbursement_scope,
+        welfareCategoryId:
+          r.type === 'welfare_two' ? r.welfare_two_category_id : r.welfare_category_id,
+        welfareCategoryName:
+          r.type === 'welfare_two'
+            ? r.welfare_two_category_name_snapshot
+            : r.welfare_category_name_snapshot,
+        approvalSkipped: r.approval_skipped,
         invoiceCategories: formatInvoiceCategories(r.invoice_categories),
         paymentBatchId: r.payment_batch_id,
       })),
@@ -401,6 +421,12 @@ router.get('/paid-this-month', requireAdmin, async (req, res) => {
         receiptConfirmedBy: r.receipt_confirmed_by,
         userId: r.user_id,
         reimbursementScope: r.reimbursement_scope,
+        welfareCategoryId:
+          r.type === 'welfare_two' ? r.welfare_two_category_id : r.welfare_category_id,
+        welfareCategoryName:
+          r.type === 'welfare_two'
+            ? r.welfare_two_category_name_snapshot
+            : r.welfare_category_name_snapshot,
         invoiceCategories: formatInvoiceCategories(r.invoice_categories),
       })),
     })
@@ -480,7 +506,7 @@ router.get('/completed-this-month', requireAdmin, async (req, res) => {
 })
 
 // 获取收款人信息（从入职信息 employee_profiles 表获取）
-router.get('/payee-info/:userId', requireAdmin, async (req, res) => {
+router.get('/payee-info/:userId', requireExactRole(['super_admin', 'admin']), async (req, res) => {
   try {
     const { userId } = req.params
 
@@ -728,6 +754,7 @@ router.get('/by-target', requireAuth, async (req, res) => {
           submitTime: formatDateTime(instance.submit_time),
           completeTime: formatDateTime(instance.complete_time),
         },
+        approvalSkipped: records.some((record) => record.action === 'auto_approved'),
         records: records.map((record) => ({
           id: record.id,
           step: record.step,
@@ -801,6 +828,8 @@ router.get('/pending', requireAdmin, async (req, res) => {
         ai.target_type != 'reimbursement'
         OR r.type IN ('basic', 'large')
         OR (r.type = 'business' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+        OR (r.type = 'welfare_one' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
+        OR (r.type = 'welfare_two' AND r.status IN ('approved', 'paid', 'payment_uploaded', 'completed'))
       )`)
     }
 
@@ -864,7 +893,15 @@ router.get('/pending', requireAdmin, async (req, res) => {
         r.user_id as reimbursement_user_id,
         r.type as reimbursement_type,
         r.reimbursement_scope as reimbursement_scope,
-        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_id
+          ELSE r.welfare_category_id END as welfare_category_id,
+        CASE WHEN r.type = 'welfare_two' THEN r.welfare_two_category_name_snapshot
+          ELSE r.welfare_category_name_snapshot END as welfare_category_name,
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories,
+        EXISTS(
+          SELECT 1 FROM approval_records skipped
+          WHERE skipped.instance_id = ai.id AND skipped.action = 'auto_approved'
+        ) as approval_skipped
       FROM approval_instances ai
       LEFT JOIN users u ON ai.applicant_id = u.id
       LEFT JOIN reimbursements r ON ai.target_type = 'reimbursement' AND ai.target_id = r.id
@@ -881,7 +918,9 @@ router.get('/pending', requireAdmin, async (req, res) => {
           WHEN 'basic' THEN 1
           WHEN 'large' THEN 2
           WHEN 'business' THEN 3
-          ELSE 4
+          WHEN 'welfare_one' THEN 4
+          WHEN 'welfare_two' THEN 5
+          ELSE 6
         END,
         ai.submit_time ASC
     `,
@@ -897,7 +936,10 @@ router.get('/pending', requireAdmin, async (req, res) => {
         reimbursement_user_id: string | null
         reimbursement_type: string | null
         reimbursement_scope: string | null
+        welfare_category_id: string | null
+        welfare_category_name: string | null
         invoice_categories: string | null
+        approval_skipped: boolean
       }
     >
 
@@ -929,6 +971,9 @@ router.get('/pending', requireAdmin, async (req, res) => {
         reimbursementUserId: instance.reimbursement_user_id,
         reimbursementType: instance.reimbursement_type,
         reimbursementScope: instance.reimbursement_scope,
+        welfareCategoryId: instance.welfare_category_id,
+        welfareCategoryName: instance.welfare_category_name,
+        approvalSkipped: instance.approval_skipped,
         invoiceCategories: formatInvoiceCategories(instance.invoice_categories),
       })),
     })
@@ -1174,6 +1219,8 @@ router.get('/employee-summary', requireAdmin, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 状态映射
@@ -1300,7 +1347,14 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
         u.name as applicant_name,
         u.avatar_url as applicant_avatar,
         u.department as applicant_department,
-        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories
+        (SELECT STRING_AGG(DISTINCT ri.category, ',') FROM reimbursement_invoices ri WHERE ri.reimbursement_id = r.id AND ri.category IS NOT NULL) as invoice_categories,
+        EXISTS(
+          SELECT 1 FROM approval_records skipped
+          JOIN approval_instances skipped_instance ON skipped_instance.id = skipped.instance_id
+          WHERE skipped_instance.target_id = r.id
+            AND skipped_instance.target_type = 'reimbursement'
+            AND skipped.action = 'auto_approved'
+        ) as approval_skipped
       FROM reimbursements r
       LEFT JOIN users u ON r.user_id = u.id
       ${whereClause}
@@ -1314,6 +1368,8 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 状态映射
@@ -1360,6 +1416,13 @@ router.get('/all-reimbursements', requireAdmin, async (req, res) => {
           receiptConfirmedBy: r.receipt_confirmed_by,
           reimbursementMonth: r.reimbursement_month,
           reimbursementScope: r.reimbursement_scope,
+          welfareCategoryId:
+            r.type === 'welfare_two' ? r.welfare_two_category_id : r.welfare_category_id,
+          welfareCategoryName:
+            r.type === 'welfare_two'
+              ? r.welfare_two_category_name_snapshot
+              : r.welfare_category_name_snapshot,
+          approvalSkipped: r.approval_skipped,
           invoiceCategories: formatInvoiceCategories(r.invoice_categories),
           createdAt: formatDateTime(r.created_at),
           userId: r.user_id,
@@ -1415,6 +1478,8 @@ router.get('/export-monthly', requireAdmin, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 状态映射
@@ -1607,6 +1672,8 @@ router.get('/deduction-query', requireAdmin, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 按员工分组统计
@@ -2108,6 +2175,8 @@ router.get('/gm-all', requireAuth, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 状态映射
@@ -2274,6 +2343,8 @@ router.get('/invoice-management', requireAdmin, async (req, res) => {
       basic: '基础报销',
       large: '大额报销',
       business: '商务报销',
+      welfare_one: '福利1报销',
+      welfare_two: '福利2报销',
     }
 
     // 判断文件类型（发票 PDF 或收据图片）
@@ -2567,6 +2638,8 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
           ? `AND (
             ai.type IN ('reimbursement_basic', 'reimbursement_large')
             OR (ai.type = 'reimbursement_business' AND r.status IN ('approved', 'paid', 'payment_uploaded'))
+            OR (ai.type = 'reimbursement_welfare_one' AND r.status IN ('approved', 'paid', 'payment_uploaded'))
+            OR (ai.type = 'reimbursement_welfare_two' AND r.status IN ('approved', 'paid', 'payment_uploaded'))
           )`
           : `AND ai.target_type = 'reimbursement'`
       const approvalPending = (await db
@@ -2740,6 +2813,8 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myReimbursementBasic = reimbursementMap['basic'] || 0
     data.myReimbursementLarge = reimbursementMap['large'] || 0
     data.myReimbursementBusiness = reimbursementMap['business'] || 0
+    data.myReimbursementWelfareOne = reimbursementMap['welfare_one'] || 0
+    data.myReimbursementWelfareTwo = reimbursementMap['welfare_two'] || 0
 
     // 所有用户: 自己的报销已驳回（按类型分）
     const myReimbursementRejected = (await db
@@ -2759,6 +2834,8 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
     data.myReimbursementBasicRejected = rejectedMap['basic'] || 0
     data.myReimbursementLargeRejected = rejectedMap['large'] || 0
     data.myReimbursementBusinessRejected = rejectedMap['business'] || 0
+    data.myReimbursementWelfareOneRejected = rejectedMap['welfare_one'] || 0
+    data.myReimbursementWelfareTwoRejected = rejectedMap['welfare_two'] || 0
 
     // 离职改为管理员专属操作，不再向员工或审批人生成待办。
     data.myResignationPending = 0
@@ -2974,6 +3051,7 @@ router.get('/:id', requireAuth, async (req, res) => {
         applicantAvatar: instance.applicant_avatar,
         currentStep: instance.current_step,
         status: instance.status,
+        approvalSkipped: records.some((record) => record.action === 'auto_approved'),
         submitTime: formatDateTime(instance.submit_time),
         completeTime: formatDateTime(instance.complete_time),
         createdAt: formatDateTime(instance.created_at),
@@ -3003,7 +3081,7 @@ router.get('/:id', requireAuth, async (req, res) => {
 // 通过审批（管理员和总经理均可操作）
 router.post(
   '/:id/approve',
-  requireRole(['super_admin', 'admin', 'general_manager']),
+  requireExactRole(['super_admin', 'admin', 'general_manager']),
   async (req, res) => {
     try {
       const { id } = req.params
@@ -3028,6 +3106,16 @@ router.post(
         return res.status(400).json({
           success: false,
           message: '该审批已处理',
+        })
+      }
+
+      if (
+        instance.type === 'reimbursement_welfare_one'
+        || instance.type === 'reimbursement_welfare_two'
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: '福利报销按规则免审批，不能执行人工审批',
         })
       }
 
@@ -3182,7 +3270,7 @@ router.post(
 // 驳回审批（管理员和总经理均可操作）
 router.post(
   '/:id/reject',
-  requireRole(['super_admin', 'admin', 'general_manager']),
+  requireExactRole(['super_admin', 'admin', 'general_manager']),
   async (req, res) => {
     try {
       const { id } = req.params
@@ -3213,6 +3301,16 @@ router.post(
         return res.status(400).json({
           success: false,
           message: '该审批已处理',
+        })
+      }
+
+      if (
+        instance.type === 'reimbursement_welfare_one'
+        || instance.type === 'reimbursement_welfare_two'
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: '福利报销按规则免审批，不能执行人工驳回',
         })
       }
 

@@ -10,6 +10,7 @@ import {
   addInvoiceApplicationMaterials,
   createInvoiceApplication,
   decideInvoiceApplication,
+  deleteInvoiceApplicationDraft,
   deleteInvoiceApplicationMaterial,
   deliverInvoiceApplicationMaterials,
   getInvoiceApplication,
@@ -254,6 +255,19 @@ router.patch("/:id", async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     sendError(res, error, "更新开票申请草稿失败");
+  }
+});
+
+router.delete("/:id", async (req, res) => {
+  try {
+    const data = await deleteInvoiceApplicationDraft(
+      actor(req),
+      req.params.id,
+      Number(req.query.expectedVersion || req.body?.expectedVersion),
+    );
+    res.json({ success: true, data });
+  } catch (error) {
+    sendError(res, error, "删除开票申请草稿失败");
   }
 });
 

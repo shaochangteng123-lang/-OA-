@@ -12,6 +12,7 @@ export const MONTHLY_FINANCIAL_MANUAL_CATEGORIES = [
   "business_interest",
   "general_bank_fee",
   "business_bank_fee",
+  "general_tax_payment",
   "general_other",
   "welfare_one_supplement",
   "welfare_two_supplement",
@@ -24,6 +25,8 @@ export const MONTHLY_FINANCIAL_MANUAL_CATEGORIES = [
   "welfare_two_refreshment",
   "welfare_two_team_building",
   "welfare_two_physical_exam",
+  "welfare_one_expense",
+  "welfare_two_expense",
 ] as const;
 
 export type MonthlyFinancialManualCategory =
@@ -41,9 +44,50 @@ export interface MonthlyFinancialManualItemInput {
   occurredOn: string;
   description?: string | null;
   voucherReference?: string | null;
+  welfareCategoryId?: string | null;
+  welfareCategoryNameSnapshot?: string | null;
 }
 
+export interface MonthlyFinancialWelfareOneExpenseCategory {
+  id: string;
+  code: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  automaticAmount: string;
+  manualAmount: string;
+  totalAmount: string;
+  isFixed: boolean;
+}
+
+export type MonthlyFinancialWelfareTwoExpenseCategory =
+  MonthlyFinancialWelfareOneExpenseCategory;
+
 export type FinancialAccountAmounts = Record<FinancialAccountCode, string>;
+
+export interface MonthlyFinancialAnalysisMetadata {
+  schemaVersion: 1;
+  payrollParts?: {
+    salary: string;
+    social: string;
+    housing: string;
+    adjustment: string;
+  };
+  canonicalPersonId?: string | null;
+  reimbursementCategory?: string | null;
+  reimbursementScope?: string | null;
+  reimbursementScopeValue?: string | null;
+  reimbursementScopePath?: string | null;
+  reimbursementRegion?: string | null;
+  reimbursementRegionSource?: string | null;
+  reimbursementServiceTarget?: string | null;
+  welfareCategoryId?: string | null;
+  welfareCategoryCode?: string | null;
+  welfareCategoryName?: string | null;
+  contractRootId?: string | null;
+  partyA?: string | null;
+  contractRegion?: string | null;
+}
 
 export interface MonthlyFinancialAutomaticSnapshot {
   income: {
@@ -79,10 +123,27 @@ export interface MonthlyFinancialAutomaticSnapshot {
     description: string;
     personId?: string | null;
     personName?: string | null;
+    analysis?: MonthlyFinancialAnalysisMetadata;
     bankAccountCode?: "basic" | "general" | "business" | null;
     electronicReceiptNo?: string | null;
     previewUrl?: string | null;
     linkStatus?: "matched" | "conflict" | "unmatched" | null;
+  }>;
+  welfareOneExpenseCategories?: Array<{
+    id: string;
+    code: string;
+    name: string;
+    sortOrder: number;
+    isActive: boolean;
+    amount: string;
+  }>;
+  welfareTwoExpenseCategories?: Array<{
+    id: string;
+    code: string;
+    name: string;
+    sortOrder: number;
+    isActive: boolean;
+    amount: string;
   }>;
   bank?: {
     activeAccounts: Array<"basic" | "general" | "business">;
@@ -128,6 +189,7 @@ export interface MonthlyFinancialReportView {
     generalBankFee: string;
     businessBankFee: string;
     generalOtherExpense: string;
+    generalTaxPayment: string;
     welfareOne407: string;
     welfareOneDrinkingWater: string;
     welfareOneOffice: string;
@@ -139,6 +201,8 @@ export interface MonthlyFinancialReportView {
     welfareTwoHealthCheck: string;
   };
   manualItems: MonthlyFinancialManualItemInput[];
+  welfareOneExpenseCategories: MonthlyFinancialWelfareOneExpenseCategory[];
+  welfareTwoExpenseCategories: MonthlyFinancialWelfareTwoExpenseCategory[];
   sources: MonthlyFinancialAutomaticSnapshot["sources"];
   details: MonthlyFinancialAutomaticSnapshot["details"];
   warnings: Array<{ code: string; message: string; blocking: boolean }>;
@@ -154,6 +218,7 @@ export interface MonthlyFinancialTrendPoint {
   month: string;
   status: MonthlyFinancialReportStatus | null;
   valueState: "closed" | "current" | null;
+  actualReceiptState: "closed" | "current" | "confirmed_source" | null;
   actualReceipt: string | null;
   settlementInflow: string | null;
   totalOutflow: string | null;
@@ -168,10 +233,20 @@ export interface MonthlyFinancialTrendWarning {
   months: string[];
 }
 
+export interface MonthlyFinancialMainBusinessTrendPoint {
+  month: string;
+  region: string;
+  actualReceipt: string | null;
+  contractAmount: string | null;
+  contractCount: number | null;
+}
+
 export interface MonthlyFinancialTrendData {
   from: string;
   to: string;
   availableYears: number[];
   points: MonthlyFinancialTrendPoint[];
+  mainBusinessRegions: string[];
+  mainBusinessPoints: MonthlyFinancialMainBusinessTrendPoint[];
   warnings: MonthlyFinancialTrendWarning[];
 }

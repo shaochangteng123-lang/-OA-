@@ -45,6 +45,35 @@ type EmployeeNumberRow = {
   employee_no: string | null
 }
 
+function normalizedOptionalText(value: unknown): string | null {
+  const text = String(value ?? '').normalize('NFKC').trim()
+  return text || null
+}
+
+function parsePaymentProfile(input: Record<string, unknown>): {
+  bankAccountName: string
+  bankAccountPhone: string | null
+  bankName: string | null
+  bankAccountNumber: string
+} {
+  const bankAccountName = normalizedOptionalText(input.bankAccountName)
+  const bankAccountPhone = normalizedOptionalText(input.bankAccountPhone)
+  const bankName = normalizedOptionalText(input.bankName)
+  const bankAccountNumber = String(input.bankAccountNumber ?? '').replace(/\s+/g, '')
+
+  if (!bankAccountName) throw new UserOperationError('请填写收款人姓名')
+  if (bankAccountName.length > 100) throw new UserOperationError('收款人姓名不能超过100个字符')
+  if (bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    throw new UserOperationError('收款人手机号格式不正确')
+  }
+  if (bankName && bankName.length > 100) throw new UserOperationError('开户银行不能超过100个字符')
+  if (!/^\d{16,19}$/.test(bankAccountNumber)) {
+    throw new UserOperationError('银行卡号格式不正确（16-19位数字）')
+  }
+
+  return { bankAccountName, bankAccountPhone, bankName, bankAccountNumber }
+}
+
 async function getDepartmentPositionMap(): Promise<DepartmentPositionMap> {
   const config = await db.prepare(
     'SELECT config_json FROM department_position_configs WHERE id = ?',
@@ -90,6 +119,65 @@ async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise
   const result = await client.query(convertTxPlaceholders(sql), params)
   return { changes: result.rowCount ?? 0 }
 }
+
+router.get('/me/payment-profile', requireAuth, async (req, res) => {
+  try {
+    const user = await db.prepare(`
+      SELECT bank_account_name, bank_account_phone, bank_name, bank_account_number
+      FROM users WHERE id = ?
+    `).get(req.session.userId) as {
+      bank_account_name: string | null
+      bank_account_phone: string | null
+      bank_name: string | null
+      bank_account_number: string | null
+    } | undefined
+    if (!user) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    res.json({
+      success: true,
+      data: {
+        bankAccountName: user.bank_account_name,
+        bankAccountPhone: user.bank_account_phone,
+        bankName: user.bank_name,
+        bankAccountNumber: user.bank_account_number,
+      },
+    })
+  } catch (error) {
+    console.error('获取本人收款资料失败:', error)
+    res.status(500).json({ success: false, message: '获取本人收款资料失败' })
+  }
+})
+
+router.put('/me/payment-profile', requireAuth, async (req, res) => {
+  try {
+    const profile = parsePaymentProfile(req.body || {})
+    const now = new Date().toISOString()
+    const result = await db.prepare(`
+      UPDATE users
+      SET bank_account_name = ?, bank_account_phone = ?, bank_name = ?,
+          bank_account_number = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      profile.bankAccountName,
+      profile.bankAccountPhone,
+      profile.bankName,
+      profile.bankAccountNumber,
+      now,
+      req.session.userId,
+    )
+    if (result.changes !== 1) {
+      return res.status(404).json({ success: false, message: '用户不存在' })
+    }
+    res.json({ success: true, data: profile, message: '收款资料已保存' })
+  } catch (error) {
+    if (error instanceof UserOperationError) {
+      return res.status(error.statusCode).json({ success: false, message: error.message })
+    }
+    console.error('保存本人收款资料失败:', error)
+    res.status(500).json({ success: false, message: '保存本人收款资料失败' })
+  }
+})
 
 // 获取用户列表（简化版，用于日历用户选择器）
 router.get('/list', requireAuth, async (req, res) => {
@@ -279,6 +367,7 @@ router.post('/', requireAdmin, async (req, res) => {
 
     const clearsEmployeeFields = isBossRole(role) || isChairmanRole(role)
     const needsEmployeeProfile = requiresEmployeeProfile(role)
+    const storesPaymentProfile = needsEmployeeProfile || isChairmanRole(role)
     const normalizedEmployeeNo = needsEmployeeProfile
       ? normalizeEmployeeNumber(employeeNo ?? user.employee_no)
       : clearsEmployeeFields
@@ -409,14 +498,14 @@ router.post('/', requireAdmin, async (req, res) => {
     }
 
     // 验证银行卡信息格式（如果提供）
-    if (needsEmployeeProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    if (storesPaymentProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
         success: false,
         message: '收款人手机号格式不正确',
       })
     }
 
-    if (needsEmployeeProfile && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+    if (storesPaymentProfile && bankAccountNumber && !/^\d{16,19}$/.test(String(bankAccountNumber).replace(/\s+/g, ''))) {
       return res.status(400).json({
         success: false,
         message: '银行卡号格式不正确（16-19位数字）',
@@ -461,15 +550,15 @@ router.post('/', requireAdmin, async (req, res) => {
         organizationSelection.department,
         organizationSelection.position,
         normalizedEmployeeNo,
-        needsEmployeeProfile
+        storesPaymentProfile
           ? bankAccountName || user.bank_account_name || null
           : clearsEmployeeFields ? null : user.bank_account_name,
-        needsEmployeeProfile
+        storesPaymentProfile
           ? bankAccountPhone || user.bank_account_phone || null
           : clearsEmployeeFields ? null : user.bank_account_phone,
-        needsEmployeeProfile ? bankName || user.bank_name || null : clearsEmployeeFields ? null : user.bank_name,
-        needsEmployeeProfile
-          ? bankAccountNumber || user.bank_account_number || null
+        storesPaymentProfile ? bankName || user.bank_name || null : clearsEmployeeFields ? null : user.bank_name,
+        storesPaymentProfile
+          ? String(bankAccountNumber || user.bank_account_number || '').replace(/\s+/g, '') || null
           : clearsEmployeeFields ? null : user.bank_account_number,
         now,
         id,
@@ -687,6 +776,7 @@ router.post('/create', requireAdmin, async (req, res) => {
       })
     }
     const needsEmployeeProfile = requiresEmployeeProfile(role)
+    const storesPaymentProfile = needsEmployeeProfile || isChairmanRole(role)
 
     const usernameValidation = validateUsername(normalizedUsername)
     if (!usernameValidation.valid) {
@@ -711,7 +801,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证收款人手机号格式（如果提供）
-    if (needsEmployeeProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
+    if (storesPaymentProfile && bankAccountPhone && !/^1[3-9]\d{9}$/.test(bankAccountPhone)) {
       return res.status(400).json({
         success: false,
         message: '收款人手机号格式不正确',
@@ -719,7 +809,7 @@ router.post('/create', requireAdmin, async (req, res) => {
     }
 
     // 验证银行卡号格式（如果提供）
-    if (needsEmployeeProfile && bankAccountNumber && !/^\d{16,19}$/.test(bankAccountNumber)) {
+    if (storesPaymentProfile && bankAccountNumber && !/^\d{16,19}$/.test(String(bankAccountNumber).replace(/\s+/g, ''))) {
       return res.status(400).json({
         success: false,
         message: '银行卡号格式不正确（16-19位数字）',
@@ -825,10 +915,10 @@ router.post('/create', requireAdmin, async (req, res) => {
           needsEmployeeProfile ? normalizedEmail : null,
           needsEmployeeProfile ? normalizedMobile : null,
           role || 'user', organizationSelection.department,
-          organizationSelection.position, needsEmployeeProfile ? bankAccountName || null : null,
-          needsEmployeeProfile ? bankAccountPhone || null : null,
-          needsEmployeeProfile ? bankName || null : null,
-          needsEmployeeProfile ? bankAccountNumber || null : null,
+          organizationSelection.position, storesPaymentProfile ? bankAccountName || null : null,
+          storesPaymentProfile ? bankAccountPhone || null : null,
+          storesPaymentProfile ? bankName || null : null,
+          storesPaymentProfile ? String(bankAccountNumber || '').replace(/\s+/g, '') || null : null,
           generatedEmployeeNo,
           now, now,
         ]

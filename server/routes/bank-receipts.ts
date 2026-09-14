@@ -4,7 +4,7 @@ import path from 'path'
 import fs from 'fs'
 import { nanoid } from 'nanoid'
 import { PDFDocument } from 'pdf-lib'
-import { requireAdmin } from '../middleware/auth.js'
+import { requireAdmin, requireExactRole } from '../middleware/auth.js'
 import { db } from '../db/index.js'
 import {
   BankReceiptPersistenceError,
@@ -14,6 +14,7 @@ import {
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 
 const router = Router()
+const requirePaymentAdmin = requireExactRole(['super_admin', 'admin'])
 
 const uploadsDir = path.join(process.cwd(), 'uploads')
 const tempDir = path.join(uploadsDir, 'temp')
@@ -53,7 +54,7 @@ const uploadPdf = multer({
  * POST /api/bank-receipts/upload
  * 上传工行回单PDF（支持多个PDF，自动合并后处理）
  */
-router.post('/upload', requireAdmin, uploadPdf.array('pdfs', 20), async (req, res) => {
+router.post('/upload', requirePaymentAdmin, uploadPdf.array('pdfs', 20), async (req, res) => {
   const files = req.files as Express.Multer.File[]
   if (!files || files.length === 0) {
     res.status(400).json({ success: false, message: '请上传 PDF 文件' })
@@ -187,7 +188,7 @@ router.get('/batch/:batchId', requireAdmin, async (req, res) => {
  * DELETE /api/bank-receipts/unmatched/all
  * 一键删除所有待认领回单
  */
-router.delete('/unmatched/all', requireAdmin, async (req, res) => {
+router.delete('/unmatched/all', requirePaymentAdmin, async (req, res) => {
   await db.run(`UPDATE bank_receipts SET match_status = 'matched' WHERE match_status = 'unmatched'`)
   res.json({ success: true })
 })
@@ -208,7 +209,7 @@ router.get('/unmatched', requireAdmin, async (req, res) => {
  * POST /api/bank-receipts/:id/match
  * 人工指定匹配报销单
  */
-router.post('/:id/match', requireAdmin, async (req, res) => {
+router.post('/:id/match', requirePaymentAdmin, async (req, res) => {
   const receiptId = String(req.params.id || '').trim()
   const reimbursementId =
     typeof req.body?.reimbursementId === 'string'
@@ -274,7 +275,7 @@ router.post('/:id/match', requireAdmin, async (req, res) => {
  * POST /api/bank-receipts/:id/skip
  * 跳过/忽略该回单（非报销类付款，不需要匹配）
  */
-router.post('/:id/skip', requireAdmin, async (req, res) => {
+router.post('/:id/skip', requirePaymentAdmin, async (req, res) => {
   const { id } = req.params
   const receipt = await db.get(`SELECT * FROM bank_receipts WHERE id = ?`, id)
   if (!receipt) {

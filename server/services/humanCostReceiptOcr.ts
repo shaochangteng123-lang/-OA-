@@ -40,6 +40,7 @@ export interface RecognizedHumanCostReceiptItem {
   payeeAccount: string;
   amount: number;
   proofNo: string;
+  electronicReceiptNo: string;
 }
 
 export interface HumanCostReceiptProcessingResult extends HumanCostReceiptRecognition {
@@ -115,7 +116,17 @@ async function recognizeReceiptImages(
       }
       const result = parseAndValidatePaymentProofText(rawResult.rawText, {
         allowMissingPayeeAccount: category === "net_salary",
+        allowMaskedTaxPayeeAccount:
+          category === "income_tax" || category === "social_security",
       });
+      if (
+        (category === "social_security" || category === "housing_fund") &&
+        !result.electronicReceiptNo
+      ) {
+        throw new Error(
+          "未识别到电子回单号，无法查重，该笔回单不计入汇总，请上传清晰原件",
+        );
+      }
       amounts.push(result.amount);
       recognizedItems.push({
         pageNo: item.pageNo,
@@ -124,6 +135,7 @@ async function recognizeReceiptImages(
         payeeAccount: result.payeeAccount,
         amount: result.amount,
         proofNo: result.proofNo,
+        electronicReceiptNo: result.electronicReceiptNo,
       });
     } catch (error) {
       amounts.push(null);

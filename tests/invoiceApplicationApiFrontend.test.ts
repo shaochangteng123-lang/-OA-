@@ -9,6 +9,7 @@ jest.mock("@/utils/api", () => ({
 
 import { api } from "@/utils/api";
 import {
+  deleteInvoiceApplicationDraft,
   getInvoiceApplicationEligibility,
   getInvoiceApplicationMaterialPrintUrl,
   getInvoiceApplicationPendingCounts,
@@ -177,6 +178,22 @@ describe("开票申请前端 API 适配", () => {
         pageSize: 10,
       },
     });
+  });
+
+  it("员工删除开票草稿时传递申请版本", async () => {
+    (api.delete as jest.Mock).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: { id: "invoice-application-1", deleted: true },
+      },
+    });
+
+    await deleteInvoiceApplicationDraft("invoice-application-1", 3);
+
+    expect(api.delete).toHaveBeenCalledWith(
+      "/api/invoice-applications/invoice-application-1",
+      { params: { expectedVersion: 3 } },
+    );
   });
 
   it("总经理审批记录查询传递独立范围和服务端搜索词", async () => {

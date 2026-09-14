@@ -112,13 +112,13 @@
                 <el-input
                   v-model="form.amount"
                   inputmode="decimal"
-                  placeholder="请输入含税开票金额"
+                  placeholder="请输入本次实际申请开票金额"
                   @input="markChangedAfterSignature"
                 >
                   <template #prefix>¥</template>
                 </el-input>
                 <small class="field-tip"
-                  >请输入本次拟向客户开具发票的含税金额。</small
+                  >由申请人根据本次实际业务金额填写，系统校验不得超过剩余可申请额度。</small
                 >
               </el-form-item>
               <el-form-item v-if="!isMainBusiness" label="发票类型" required>
@@ -157,7 +157,7 @@
                   }}</strong
                   ><small>{{
                     isMainBusiness
-                      ? "在线填写本次付款，系统自动计算合同金额与累计付款"
+                      ? "填写本次实际付款，系统自动计算合同金额与累计付款"
                       : "选择材料是否需要盖章"
                   }}</small></span
                 >
@@ -170,7 +170,7 @@
               :closable="false"
               show-icon
               title="主营项目合同：这一步同时申请三联单用印"
-              description="工程项目名称可调整，本次付款由申请人在线填写；系统生成第一联、第二联、第三联三张A4三联单，总经理批准后由管理员打印并盖章。"
+              description="工程项目名称可调整，本次付款由申请人根据本次实际付款填写；系统生成第一联、第二联、第三联三张A4三联单，总经理批准后由管理员打印并盖章。"
             />
             <div v-if="isMainBusiness" class="online-triplicate">
               <div class="triplicate-form-grid">
@@ -189,12 +189,12 @@
                   <el-input
                     v-model="form.amount"
                     inputmode="decimal"
-                    placeholder="请输入本次付款金额，例如47500.00"
+                    placeholder="请输入本次实际付款金额"
                     @input="markTriplicateChanged"
                     @blur="normalizeTriplicatePayment"
                   />
                   <small class="field-tip"
-                    >三联单将按两位小数原值打印，不增加千位分隔符。</small
+                    >由申请人按本次实际付款填写；按两位小数原值打印，不增加千位分隔符。</small
                   >
                 </el-form-item>
                 <el-form-item label="发票类型" required>
@@ -216,6 +216,12 @@
                 <article>
                   <span>之前累计付款</span>
                   <strong>{{ plainAmount(triplicatePreviousPayment) }}</strong>
+                </article>
+                <article>
+                  <span>剩余可申请额度</span>
+                  <strong>{{
+                    plainAmount(eligibility.amounts.remainingAmount)
+                  }}</strong>
                 </article>
                 <article class="current">
                   <span>本次付款</span>
@@ -532,6 +538,14 @@
           <span>{{ submitHint }}</span>
           <div>
             <el-button
+              v-if="currentApplication?.status === 'draft'"
+              type="danger"
+              plain
+              :loading="deletingDraft"
+              @click="deleteCurrentDraft"
+              >删除草稿</el-button
+            >
+            <el-button
               :loading="saving"
               :disabled="!canSaveDraft"
               @click="saveDraft()"
@@ -568,6 +582,7 @@ import type {
 } from "@/types/invoiceApplication";
 import {
   createInvoiceApplication,
+  deleteInvoiceApplicationDraft,
   deleteInvoiceApplicationMaterial,
   generateMainBusinessTriplicate,
   getInvoiceApplication,
@@ -592,6 +607,7 @@ const currentApplication = ref<InvoiceApplication | null>(null);
 const loading = ref(false);
 const saving = ref(false);
 const submitting = ref(false);
+const deletingDraft = ref(false);
 const errorMessage = ref("");
 const uploadFiles = ref<UploadUserFile[]>([]);
 const pendingSealFileUids = ref(new Set<string>());
@@ -1202,6 +1218,37 @@ async function saveDraft(showSuccess = true) {
   }
 }
 
+async function deleteCurrentDraft() {
+  const application = currentApplication.value;
+  if (!application || application.status !== "draft") return;
+  try {
+    await ElMessageBox.confirm(
+      "删除后将同时清理该草稿的三联单和申请材料，且无法恢复。是否继续？",
+      "删除开票申请草稿",
+      {
+        type: "warning",
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消",
+      },
+    );
+  } catch {
+    return;
+  }
+  deletingDraft.value = true;
+  try {
+    await deleteInvoiceApplicationDraft(application.id, application.version);
+    ElMessage.success("开票申请草稿已删除");
+    requestContractDownloadBadgeRefresh();
+    await router.push("/contract-applications/mine?tab=invoice");
+  } catch (error) {
+    ElMessage.error(
+      getInvoiceApplicationErrorMessage(error, "删除开票申请草稿失败"),
+    );
+  } finally {
+    deletingDraft.value = false;
+  }
+}
+
 async function submitApplication() {
   if (!canSubmit.value) return;
   submitting.value = true;
@@ -1488,7 +1535,7 @@ onMounted(loadPage);
 }
 .triplicate-amount-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
   margin: 8px 0 16px;
 }
@@ -1615,7 +1662,8 @@ onMounted(loadPage);
   color: #75869a;
 }
 @media (max-width: 980px) {
-  .amount-grid {
+  .amount-grid,
+  .triplicate-amount-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .contract-summary {

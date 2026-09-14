@@ -11,7 +11,13 @@ import multer from "multer";
 import { nanoid } from "nanoid";
 import type { PoolClient } from "pg";
 import { db, pool } from "../db/index.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireExactRole } from "../middleware/auth.js";
+import {
+  MONTHLY_FINANCIAL_MAINTAIN_ROLES,
+  MONTHLY_FINANCIAL_READ_ROLES,
+  canMaintainMonthlyFinancialReport,
+  canReadMonthlyFinancialReport,
+} from "../utils/monthly-financial-permissions.js";
 import { normalizeUploadFileName } from "../utils/upload-file-name.js";
 import {
   calculateMainBusinessIncome,
@@ -20,16 +26,20 @@ import {
 import {
   calculatePayrollBreakdown,
   calculatePayrollTotals,
+  formatPayrollAmount,
   type PayrollAmountField,
 } from "../services/payrollCalculator.js";
 import {
   MANUAL_CATEGORY_RULES,
+  FIXED_WELFARE_ONE_EXPENSE_CATEGORIES,
+  FIXED_WELFARE_TWO_EXPENSE_CATEGORIES,
   addFinancialAmounts,
   assertFinancialMonth,
   buildMonthlyFinancialReportView,
   centsToFinancialAmount,
   emptyAccountAmounts,
   isNegativeFinancialAmount,
+  isValidFinancialAnalysisMetadata,
   normalizeFinancialAmount,
   normalizeOpeningBalances,
   previousFinancialMonth,
@@ -42,6 +52,30 @@ import {
   type MonthlyFinancialTrendReportInput,
 } from "../services/monthlyFinancialTrend.js";
 import { buildMonthlyFinancialWorkbook } from "../services/monthlyFinancialReportWorkbook.js";
+import { loadMonthlyFinancialAnalysis } from "../services/monthlyFinancialAnalysis.js";
+import {
+  prepareProjectReceiptPreview,
+  ProjectReceiptPreviewError,
+} from "../services/monthlyFinancialProjectReceiptPreview.js";
+import {
+  buildFinancialReimbursementScopeMap,
+  unknownFinancialReimbursementScope,
+  type FinancialReimbursementScopeNode,
+} from "../services/monthlyFinancialReimbursementScope.js";
+import {
+  protectMonthlyFinancialAnalysis,
+  protectMonthlyFinancialPayrollMetadata,
+} from "../services/monthlyFinancialAnalysisPermissions.js";
+import {
+  parseMonthlyFinancialAnalysisModule,
+  parseMonthlyFinancialAnalysisQuery,
+  parseMonthlyFinancialAnalysisVersion,
+} from "../services/monthlyFinancialAnalysisQuery.js";
+import {
+  buildMonthlyFinancialAnalysisWorkbook,
+  monthlyFinancialAnalysisVersion,
+} from "../services/monthlyFinancialAnalysisWorkbook.js";
+import type { FinancialAnalysisQuery } from "../types/monthly-financial-analysis.js";
 import {
   MONTHLY_BANK_ACCOUNTS,
   analyzeMonthlyFinancialBankFile,
@@ -56,6 +90,7 @@ import {
   reconcileMonthlyContractBankTransactions,
   type MonthlyContractReceiptReconciliationResult,
 } from "../services/monthlyFinancialBankLinker.js";
+import { cleanupMonthlyContractBridgeGroupFiles } from "../services/monthlyFinancialContractBridge.js";
 import {
   reconcileMonthlyReimbursementTransactions,
   type MonthlyReimbursementReconciliationResult,
@@ -64,6 +99,12 @@ import {
   reconcileMonthlySalaryReceiptMonth,
   type MonthlySalaryReceiptReconciliationResult,
 } from "../services/monthlyFinancialSalaryReceiptMatcher.js";
+import {
+  createMonthlyBankContentCorrectionChallengeToken,
+  fingerprintMonthlyBankContentCorrections,
+  hashMonthlyBankContentCorrectionSession,
+  verifyMonthlyBankContentCorrectionChallengeToken,
+} from "../services/monthlyFinancialBankContentCorrection.js";
 import {
   FINANCIAL_ACCOUNT_CODES,
   type FinancialAccountAmounts,
@@ -75,9 +116,13 @@ import {
 } from "../types/monthly-financial-report.js";
 
 const router = Router();
-const READ_ROLES = ["admin", "general_manager"];
-const WRITE_ROLES = ["admin"];
-const FORMULA_VERSION = "monthly-finance-v4-welfare-demand-layout";
+const READ_ROLES = [...MONTHLY_FINANCIAL_READ_ROLES];
+const WRITE_ROLES = [...MONTHLY_FINANCIAL_MAINTAIN_ROLES];
+const requireMonthlyReadRole = requireExactRole(READ_ROLES);
+const requireMonthlyWriteRole = requireExactRole(WRITE_ROLES);
+const FORMULA_VERSION = "monthly-finance-v6-dual-welfare-reimbursement-categories";
+const MONTHLY_BANK_RECOGNITION_VERSION =
+  "monthly-bank-parser-v6-party-coordinate-binding";
 const MONTHLY_BANK_UPLOAD_ROOT = path.join(
   process.cwd(),
   "uploads",
@@ -146,6 +191,7 @@ class MonthlyFinancialRouteError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = "MonthlyFinancialRouteError";
@@ -158,6 +204,14 @@ function badRequest(code: string, message: string): MonthlyFinancialRouteError {
 
 function conflict(code: string, message: string): MonthlyFinancialRouteError {
   return new MonthlyFinancialRouteError(409, code, message);
+}
+
+function conflictWithDetails(
+  code: string,
+  message: string,
+  details: unknown,
+): MonthlyFinancialRouteError {
+  return new MonthlyFinancialRouteError(409, code, message, details);
 }
 
 function dataIntegrity(message: string): MonthlyFinancialRouteError {
@@ -296,6 +350,8 @@ function summarizeManualItemChanges(
     occurredOn: item.occurredOn,
     description: item.description || null,
     voucherReference: item.voucherReference || null,
+    welfareCategoryId: item.welfareCategoryId || null,
+    welfareCategoryNameSnapshot: item.welfareCategoryNameSnapshot || null,
   });
   const addedIds = [...afterById.keys()].filter((id) => !beforeById.has(id));
   const removedIds = [...beforeById.keys()].filter((id) => !afterById.has(id));
@@ -323,6 +379,9 @@ interface ClientMonthlyReport {
   month: string;
   status: MonthlyFinancialReportStatus;
   version: number;
+  generatedAt: string;
+  savedAt: string | null;
+  closedAt: string | null;
   accounts: Array<{
     code: FinancialAccountCode;
     name: string;
@@ -331,7 +390,11 @@ interface ClientMonthlyReport {
     outflow: string;
     closing: string;
   }>;
-  income: { mainReceipt: string; [key: string]: string };
+  income: {
+    mainReceipt: string;
+    generalInterest: string;
+    [key: string]: string;
+  };
   expenses: Record<string, string>;
   automaticDetails: MonthlyFinancialAutomaticSnapshot["details"];
   bank?: MonthlyFinancialAutomaticSnapshot["bank"];
@@ -345,11 +408,15 @@ interface ClientMonthlyReport {
     amount: string;
     description?: string | null;
     voucherReference?: string | null;
-    sourceType?: "manual" | "monthly_bank_transaction";
+    sourceType?: "manual" | "monthly_bank_transaction" | "reimbursement";
     readOnly?: boolean;
     effective?: boolean;
     previewUrl?: string | null;
+    welfareCategoryId?: string | null;
+    welfareCategoryNameSnapshot?: string | null;
   }>;
+  welfareOneExpenseCategories: MonthlyFinancialReportView["welfareOneExpenseCategories"];
+  welfareTwoExpenseCategories: MonthlyFinancialReportView["welfareTwoExpenseCategories"];
   validations: {
     canClose: boolean;
     blockers: Array<{ code: string; message: string }>;
@@ -460,6 +527,35 @@ function asAutomaticSnapshot(
     ) {
       return null;
     }
+    for (const welfareCategories of [
+      snapshot.welfareOneExpenseCategories,
+      snapshot.welfareTwoExpenseCategories,
+    ]) {
+      if (
+        welfareCategories !== undefined &&
+        (!Array.isArray(welfareCategories) ||
+          !welfareCategories.every((category) => {
+          if (
+            !category ||
+            typeof category.id !== "string" ||
+            !category.id.trim() ||
+            typeof category.code !== "string" ||
+            !category.code.trim() ||
+            typeof category.name !== "string" ||
+            !category.name.trim() ||
+            !Number.isInteger(category.sortOrder) ||
+            category.sortOrder < 0 ||
+            typeof category.isActive !== "boolean"
+          ) {
+            return false;
+          }
+          normalizeFinancialAmount(category.amount);
+          return true;
+          }))
+      ) {
+        return null;
+      }
+    }
     if (snapshot.bank) {
       const validBankAccounts = ["basic", "general", "business"];
       const chargeAccounts = Array.isArray(snapshot.bank.chargeAccounts)
@@ -524,6 +620,14 @@ function asAutomaticSnapshot(
         return false;
       }
       normalizeFinancialAmount(detail.amount);
+      if (
+        !isValidFinancialAnalysisMetadata(
+          detail.analysis,
+          detail.sourceType,
+          detail.amount,
+        )
+      )
+        return false;
       if (!["payroll", "reimbursement"].includes(detail.sourceType)) {
         return true;
       }
@@ -663,6 +767,8 @@ export async function loadAutomaticSnapshot(
     bankRows,
     bankChargeAccountRows,
     bankIssueRows,
+    welfareCategoryRows,
+    welfareTwoCategoryRows,
   ] = await resolveMonthlyQueryBatch(
     [
       () =>
@@ -672,11 +778,14 @@ export async function loadAutomaticSnapshot(
           amount: string;
           rate_snapshot_json: unknown;
           title: string | null;
+          root_id: string | null;
+          party_a: string | null;
+          region: string | null;
           updated_at: string;
         }>(
           `SELECT receipt.id, receipt.receipt_date, receipt.amount::text AS amount,
               receipt.rate_snapshot_json, COALESCE(root.title, contract.title) AS title,
-              receipt.updated_at
+              receipt.updated_at, root.id AS root_id, root.party_a, root.area AS region
        FROM contract_receipts receipt
        JOIN contracts contract ON contract.id = receipt.contract_id
        JOIN contracts root ON root.id = COALESCE(contract.root_contract_id, contract.id)
@@ -698,6 +807,8 @@ export async function loadAutomaticSnapshot(
           housing_fund_base: string;
           contribution_base: string;
           individual_income_tax: string;
+          withheld_actual_amount: string | null;
+          net_salary_actual_amount: string | null;
           updated_at: string;
         }>(
           `SELECT payroll.id, employee.id AS employee_id, employee.name AS employee_name,
@@ -705,6 +816,8 @@ export async function loadAutomaticSnapshot(
               payroll.housing_fund_base::text AS housing_fund_base,
               payroll.contribution_base::text AS contribution_base,
               payroll.individual_income_tax::text AS individual_income_tax,
+              payroll.withheld_actual_amount::text AS withheld_actual_amount,
+              payroll.net_salary_actual_amount::text AS net_salary_actual_amount,
               payroll.updated_at
        FROM payroll_records payroll
        JOIN employee_profiles employee ON employee.id = payroll.employee_id
@@ -719,22 +832,46 @@ export async function loadAutomaticSnapshot(
         queryAll<{
           id: string;
           user_id: string;
-          type: "basic" | "large" | "business";
+          type: "basic" | "large" | "business" | "welfare_one" | "welfare_two";
           title: string;
           applicant_name: string;
           total_amount: string;
           occurred_at: string;
           updated_at: string;
+          category: string | null;
+          reimbursement_scope: string | null;
+          scope_label: string | null;
+          scope_name_count: number;
+          service_target: string | null;
+          employee_id: string | null;
+          welfare_category_id: string | null;
+          welfare_category_name_snapshot: string | null;
+          welfare_two_category_id: string | null;
+          welfare_two_category_name_snapshot: string | null;
         }>(
-          `SELECT id, user_id, type, title, applicant_name, total_amount::text AS total_amount,
-              payment_business_date::text AS occurred_at,
-              updated_at
-       FROM reimbursements
-       WHERE status IN ('paid', 'payment_uploaded', 'completed')
-         AND is_deleted = FALSE
-         AND payment_business_date >= ?::date
-         AND payment_business_date < (?::date + INTERVAL '1 month')
-       ORDER BY occurred_at, id`,
+          `SELECT reimbursement.id, reimbursement.user_id, reimbursement.type,
+              reimbursement.title, reimbursement.applicant_name, reimbursement.total_amount::text AS total_amount,
+              reimbursement.payment_business_date::text AS occurred_at, reimbursement.updated_at,
+              reimbursement.category, reimbursement.reimbursement_scope, reimbursement.service_target,
+              reimbursement.welfare_category_id,
+              reimbursement.welfare_category_name_snapshot,
+              reimbursement.welfare_two_category_id,
+              reimbursement.welfare_two_category_name_snapshot,
+              scope.name AS scope_label, scope.name_count AS scope_name_count,
+              employee.id AS employee_id
+       FROM reimbursements reimbursement
+       LEFT JOIN employee_profiles employee ON employee.user_id = reimbursement.user_id
+       LEFT JOIN LATERAL (
+         SELECT CASE WHEN COUNT(DISTINCT name) = 1 THEN MIN(name) ELSE NULL END AS name,
+                COUNT(DISTINCT name)::int AS name_count
+         FROM reimbursement_scopes
+         WHERE value = reimbursement.reimbursement_scope
+       ) scope ON TRUE
+       WHERE reimbursement.status IN ('paid', 'payment_uploaded', 'completed')
+         AND reimbursement.is_deleted = FALSE
+         AND reimbursement.payment_business_date >= ?::date
+         AND reimbursement.payment_business_date < (?::date + INTERVAL '1 month')
+       ORDER BY occurred_at, reimbursement.id`,
           [`${month}-01`, `${month}-01`],
           client,
         ),
@@ -921,10 +1058,54 @@ export async function loadAutomaticSnapshot(
           [month],
           client,
         ),
+      () =>
+        queryAll<{
+          id: string;
+          code: string;
+          name: string;
+          sort_order: number;
+          is_active: boolean;
+        }>(
+          `SELECT id, code, name, sort_order, is_active
+             FROM welfare_one_expense_categories
+            ORDER BY sort_order, id`,
+          [],
+          client,
+        ),
+      () =>
+        queryAll<{
+          id: string;
+          code: string;
+          name: string;
+          sort_order: number;
+          is_active: boolean;
+        }>(
+          `SELECT id, code, name, sort_order, is_active
+             FROM welfare_two_expense_categories
+            ORDER BY sort_order, id`,
+          [],
+          client,
+        ),
     ] as const,
     Boolean(client),
   );
 
+  if (
+    new Set(reimbursementRows.map((row) => row.id)).size !==
+    reimbursementRows.length
+  ) {
+    throw dataIntegrity("报销自动来源出现重复编号，已阻止重复计算金额");
+  }
+  // 独立读取维度表后按来源值唯一解析，绝不把一笔报销连接成多个行政区而重复累计。
+  const scopeNodes = reimbursementRows.length
+    ? await queryAll<FinancialReimbursementScopeNode>(
+        `SELECT id, parent_id AS "parentId", name, value
+           FROM reimbursement_scopes ORDER BY sort_order, id`,
+        [],
+        client,
+      )
+    : [];
+  const reimbursementScopes = buildFinancialReimbursementScopeMap(scopeNodes);
   let receiptCents = 0;
   let taxCents = 0;
   let marketingCents = 0;
@@ -961,22 +1142,37 @@ export async function loadAutomaticSnapshot(
         description: row.title || "主营合同回款",
         personId: null,
         personName: null,
+        analysis: {
+          schemaVersion: 1,
+          contractRootId: row.root_id || null,
+          partyA: row.party_a || null,
+          contractRegion: row.region || null,
+        },
       });
     }
   }
 
-  const payrollCalculatedRows = payrollRows.map((row) => ({
-    monthly_salary: row.monthly_salary,
-    housing_fund_base: row.housing_fund_base,
-    contribution_base: row.contribution_base,
-    individual_income_tax: row.individual_income_tax,
-    ...calculatePayrollBreakdown(
+  const payrollCalculatedRows = payrollRows.map((row) => {
+    const breakdown = calculatePayrollBreakdown(
       row.monthly_salary,
       row.housing_fund_base,
       row.contribution_base,
       row.individual_income_tax,
-    ),
-  })) as Array<Record<PayrollAmountField, string>>;
+    );
+    return {
+      monthly_salary: row.monthly_salary,
+      housing_fund_base: row.housing_fund_base,
+      contribution_base: row.contribution_base,
+      individual_income_tax: row.individual_income_tax,
+      ...breakdown,
+      withheld_actual_amount: formatPayrollAmount(
+        row.withheld_actual_amount ?? breakdown.withheld_total,
+      ),
+      net_salary_actual_amount: formatPayrollAmount(
+        row.net_salary_actual_amount ?? breakdown.net_salary,
+      ),
+    };
+  }) as Array<Record<PayrollAmountField, string>>;
   const humanCost = payrollCalculatedRows.length
     ? normalizeFinancialAmount(
         calculatePayrollTotals(payrollCalculatedRows).cost_total,
@@ -996,14 +1192,151 @@ export async function loadAutomaticSnapshot(
       description: "人力成本",
       personId: row.employee_id,
       personName: row.employee_name,
+      analysis: {
+        schemaVersion: 1,
+        canonicalPersonId: row.employee_id,
+        payrollParts: {
+          salary: normalizeFinancialAmount(row.monthly_salary),
+          social: normalizeFinancialAmount(
+            payrollCalculatedRows[index].company_social_total,
+          ),
+          housing: normalizeFinancialAmount(
+            payrollCalculatedRows[index].company_housing_fund,
+          ),
+          adjustment: subtractFinancialAmounts(
+            cost,
+            row.monthly_salary,
+            payrollCalculatedRows[index].company_social_total,
+            payrollCalculatedRows[index].company_housing_fund,
+          ),
+        },
+      },
     });
   });
 
   const reimbursementTotals = { basic: "0", large: "0", business: "0" };
+  const welfareCategoryById = new Map(
+    welfareCategoryRows.map((row) => [row.id, row]),
+  );
+  const welfareCategoryAmounts = new Map<string, string>();
+  const missingWelfareCategories = new Map<
+    string,
+    {
+      id: string;
+      code: string;
+      name: string;
+      sort_order: number;
+      is_active: boolean;
+    }
+  >();
+  const welfareTwoCategoryById = new Map(
+    welfareTwoCategoryRows.map((row) => [row.id, row]),
+  );
+  const welfareTwoCategoryAmounts = new Map<string, string>();
+  const missingWelfareTwoCategories = new Map<
+    string,
+    {
+      id: string;
+      code: string;
+      name: string;
+      sort_order: number;
+      is_active: boolean;
+    }
+  >();
   for (const row of reimbursementRows) {
+    const normalizedAmount = normalizeFinancialAmount(row.total_amount);
+    if (row.type === "welfare_one") {
+      const categoryId = row.welfare_category_id || "welfare_one_unknown";
+      const category = welfareCategoryById.get(categoryId) || {
+        id: categoryId,
+        code: `legacy_${categoryId}`,
+        name:
+          row.welfare_category_name_snapshot?.trim() || "历史福利分类",
+        sort_order: Number.MAX_SAFE_INTEGER,
+        is_active: false,
+      };
+      if (!welfareCategoryById.has(categoryId)) {
+        missingWelfareCategories.set(categoryId, category);
+      }
+      welfareCategoryAmounts.set(
+        categoryId,
+        addFinancialAmounts(
+          welfareCategoryAmounts.get(categoryId) || "0",
+          normalizedAmount,
+        ),
+      );
+      details.push({
+        sourceType: "reimbursement",
+        sourceId: row.id,
+        occurredOn: row.occurred_at.slice(0, 10),
+        accountCode: "welfare_one",
+        metric: "welfare_one_expense",
+        amount: normalizedAmount,
+        description: row.title,
+        personId: row.user_id,
+        personName: row.applicant_name,
+        analysis: {
+          schemaVersion: 1,
+          canonicalPersonId: row.employee_id || `user:${row.user_id}`,
+          reimbursementCategory: row.category || null,
+          reimbursementServiceTarget: row.service_target || null,
+          welfareCategoryId: category.id,
+          welfareCategoryCode: category.code,
+          welfareCategoryName:
+            row.welfare_category_name_snapshot?.trim() || category.name,
+        },
+      });
+      continue;
+    }
+    if (row.type === "welfare_two") {
+      const categoryId = row.welfare_two_category_id || "welfare_two_unknown";
+      const category = welfareTwoCategoryById.get(categoryId) || {
+        id: categoryId,
+        code: `legacy_${categoryId}`,
+        name:
+          row.welfare_two_category_name_snapshot?.trim() || "历史福利分类",
+        sort_order: Number.MAX_SAFE_INTEGER,
+        is_active: false,
+      };
+      if (!welfareTwoCategoryById.has(categoryId)) {
+        missingWelfareTwoCategories.set(categoryId, category);
+      }
+      welfareTwoCategoryAmounts.set(
+        categoryId,
+        addFinancialAmounts(
+          welfareTwoCategoryAmounts.get(categoryId) || "0",
+          normalizedAmount,
+        ),
+      );
+      details.push({
+        sourceType: "reimbursement",
+        sourceId: row.id,
+        occurredOn: row.occurred_at.slice(0, 10),
+        accountCode: "welfare_two",
+        metric: "welfare_two_expense",
+        amount: normalizedAmount,
+        description: row.title,
+        personId: row.user_id,
+        personName: row.applicant_name,
+        analysis: {
+          schemaVersion: 1,
+          canonicalPersonId: row.employee_id || `user:${row.user_id}`,
+          reimbursementCategory: row.category || null,
+          reimbursementServiceTarget: row.service_target || null,
+          welfareCategoryId: category.id,
+          welfareCategoryCode: category.code,
+          welfareCategoryName:
+            row.welfare_two_category_name_snapshot?.trim() || category.name,
+        },
+      });
+      continue;
+    }
+    const scope =
+      reimbursementScopes.get(row.reimbursement_scope || "") ||
+      unknownFinancialReimbursementScope(row.reimbursement_scope);
     reimbursementTotals[row.type] = addFinancialAmounts(
       reimbursementTotals[row.type],
-      normalizeFinancialAmount(row.total_amount),
+      normalizedAmount,
     );
     details.push({
       sourceType: "reimbursement",
@@ -1011,12 +1344,51 @@ export async function loadAutomaticSnapshot(
       occurredOn: row.occurred_at.slice(0, 10),
       accountCode: row.type === "business" ? "business" : "general",
       metric: `${row.type}_reimbursement`,
-      amount: normalizeFinancialAmount(row.total_amount),
+      amount: normalizedAmount,
       description: row.title,
       personId: row.user_id,
       personName: row.applicant_name,
+      analysis: {
+        schemaVersion: 1,
+        canonicalPersonId: row.employee_id || `user:${row.user_id}`,
+        reimbursementCategory: row.category || null,
+        reimbursementScope: scope.path || row.reimbursement_scope || null,
+        reimbursementScopeValue: row.reimbursement_scope || null,
+        reimbursementScopePath: scope.path,
+        reimbursementRegion: scope.region,
+        reimbursementRegionSource: `生成自动来源快照时核对；${scope.source}`,
+        reimbursementServiceTarget: row.service_target || null,
+      },
     });
   }
+  const welfareOneExpenseCategories = [
+    ...welfareCategoryRows,
+    ...missingWelfareCategories.values(),
+  ].map((category) => ({
+    id: category.id,
+    code: category.code,
+    name: category.name,
+    sortOrder: category.sort_order,
+    isActive: category.is_active,
+    amount: welfareCategoryAmounts.get(category.id) || "0",
+  }));
+  const welfareOneReimbursement = addFinancialAmounts(
+    ...welfareOneExpenseCategories.map((category) => category.amount),
+  );
+  const welfareTwoExpenseCategories = [
+    ...welfareTwoCategoryRows,
+    ...missingWelfareTwoCategories.values(),
+  ].map((category) => ({
+    id: category.id,
+    code: category.code,
+    name: category.name,
+    sortOrder: category.sort_order,
+    isActive: category.is_active,
+    amount: welfareTwoCategoryAmounts.get(category.id) || "0",
+  }));
+  const welfareTwoReimbursement = addFinancialAmounts(
+    ...welfareTwoExpenseCategories.map((category) => category.amount),
+  );
 
   let assetAdministration = "0";
   for (const row of assetRows) {
@@ -1141,6 +1513,8 @@ export async function loadAutomaticSnapshot(
     reimbursementTotals.basic,
     reimbursementTotals.large,
     reimbursementTotals.business,
+    welfareOneReimbursement,
+    welfareTwoReimbursement,
   );
   const generatedAt = new Date().toISOString();
   return {
@@ -1158,6 +1532,8 @@ export async function loadAutomaticSnapshot(
       businessReimbursement: reimbursementTotals.business,
       assetAdministration,
     },
+    welfareOneExpenseCategories,
+    welfareTwoExpenseCategories,
     sources: [
       {
         code: "contract_receipts",
@@ -1189,7 +1565,17 @@ export async function loadAutomaticSnapshot(
         updatedAt: maxUpdatedAt(reimbursementRows.map((row) => row.updated_at)),
         available: true,
         message: reimbursementRows.length
-          ? "统计金额以系统内已支付报销为准，银行回单仅作付款凭证"
+          ? "统计金额以系统内已支付报销为准，银行回单仅作付款凭证" +
+            (reimbursementRows.some((row) => row.scope_name_count > 1)
+              ? "；部分报销范围名称冲突，已冻结原范围值，金额未重复计算"
+              : "") +
+            (reimbursementRows.some(
+              (row) =>
+                row.type === "business" &&
+                !reimbursementScopes.get(row.reimbursement_scope || "")?.region,
+            )
+              ? "；部分商务报销范围父级行政区无法唯一核对，已冻结未知归属而非猜测"
+              : "")
           : "本月没有已支付报销",
       },
       {
@@ -1268,9 +1654,15 @@ async function loadManualItems(
     occurred_on: string;
     description: string | null;
     voucher_reference: string | null;
+    welfare_category_id: string | null;
+    welfare_category_name_snapshot: string | null;
+    welfare_two_category_id: string | null;
+    welfare_two_category_name_snapshot: string | null;
   }>(
     `SELECT id, category, account_code, direction, amount::text AS amount,
-            occurred_on, description, voucher_reference
+            occurred_on, description, voucher_reference,
+            welfare_category_id, welfare_category_name_snapshot,
+            welfare_two_category_id, welfare_two_category_name_snapshot
      FROM monthly_financial_manual_items
      WHERE report_id = ?
      ORDER BY occurred_on, created_at, id`,
@@ -1286,6 +1678,14 @@ async function loadManualItems(
     occurredOn: row.occurred_on,
     description: row.description,
     voucherReference: row.voucher_reference,
+    welfareCategoryId:
+      row.category === "welfare_two_expense"
+        ? row.welfare_two_category_id
+        : row.welfare_category_id,
+    welfareCategoryNameSnapshot:
+      row.category === "welfare_two_expense"
+        ? row.welfare_two_category_name_snapshot
+        : row.welfare_category_name_snapshot,
   }));
 }
 
@@ -1473,7 +1873,11 @@ function buildClientManualItems(
   const manualRows: ClientMonthlyReport["manualItems"] =
     internal.manualItems.map((item) => ({
       ...item,
-      categoryLabel: MANUAL_CATEGORY_RULES[item.category].label,
+      categoryLabel:
+        item.category === "welfare_one_expense" ||
+        item.category === "welfare_two_expense"
+          ? item.welfareCategoryNameSnapshot || MANUAL_CATEGORY_RULES[item.category].label
+          : MANUAL_CATEGORY_RULES[item.category].label,
       sourceType: "manual",
       readOnly: false,
       effective: !bankControlledCategories.has(item.category),
@@ -1507,7 +1911,109 @@ function buildClientManualItems(
         previewUrl: detail.previewUrl || null,
       };
     });
-  return [...manualRows, ...bankRows];
+  const welfareReimbursementRows: ClientMonthlyReport["manualItems"] =
+    automatic.details
+      .filter(
+        (detail) =>
+          detail.sourceType === "reimbursement" &&
+          detail.accountCode === "welfare_one" &&
+          detail.metric === "welfare_one_expense" &&
+          Boolean(detail.analysis?.welfareCategoryId),
+      )
+      .map((detail) => ({
+        id: `reimbursement:${detail.sourceId}`,
+        category: "welfare_one_expense",
+        categoryLabel:
+          detail.analysis?.welfareCategoryName || "福利账户一分类支出",
+        accountCode: "welfare_one",
+        direction: "expense",
+        occurredOn: detail.occurredOn,
+        amount: detail.amount,
+        description: detail.description,
+        voucherReference: detail.sourceId,
+        sourceType: "reimbursement" as const,
+        readOnly: true,
+        effective: true,
+        previewUrl: null,
+        welfareCategoryId: detail.analysis?.welfareCategoryId || null,
+        welfareCategoryNameSnapshot:
+          detail.analysis?.welfareCategoryName || null,
+      }));
+  const welfareTwoReimbursementRows: ClientMonthlyReport["manualItems"] =
+    automatic.details
+      .filter(
+        (detail) =>
+          detail.sourceType === "reimbursement" &&
+          detail.accountCode === "welfare_two" &&
+          detail.metric === "welfare_two_expense" &&
+          Boolean(detail.analysis?.welfareCategoryId),
+      )
+      .map((detail) => ({
+        id: `reimbursement:${detail.sourceId}`,
+        category: "welfare_two_expense",
+        categoryLabel:
+          detail.analysis?.welfareCategoryName || "福利账户二分类支出",
+        accountCode: "welfare_two",
+        direction: "expense",
+        occurredOn: detail.occurredOn,
+        amount: detail.amount,
+        description: detail.description,
+        voucherReference: detail.sourceId,
+        sourceType: "reimbursement" as const,
+        readOnly: true,
+        effective: true,
+        previewUrl: null,
+        welfareCategoryId: detail.analysis?.welfareCategoryId || null,
+        welfareCategoryNameSnapshot:
+          detail.analysis?.welfareCategoryName || null,
+      }));
+  return [
+    ...manualRows,
+    ...bankRows,
+    ...welfareReimbursementRows,
+    ...welfareTwoReimbursementRows,
+  ];
+}
+
+function legacyClosedWelfareOneCategories(
+  internal: MonthlyFinancialReportView,
+): MonthlyFinancialReportView["welfareOneExpenseCategories"] {
+  const amounts: Record<string, string> = {
+    drinking_water: internal.expenses.welfareOneDrinkingWater || "0",
+    office: addFinancialAmounts(
+      internal.expenses.welfareOneOffice || "0",
+      internal.expenses.welfareOne407 || "0",
+    ),
+    electricity: internal.expenses.welfareOneElectricity || "0",
+    "407_ai": internal.expenses.welfareOne407Ai || "0",
+    "8h_ai": internal.expenses.welfareOne8hAi || "0",
+  };
+  return FIXED_WELFARE_ONE_EXPENSE_CATEGORIES.map((category) => ({
+    ...category,
+    isActive: true,
+    automaticAmount: "0",
+    manualAmount: amounts[category.code] || "0",
+    totalAmount: amounts[category.code] || "0",
+    isFixed: true,
+  }));
+}
+
+function legacyClosedWelfareTwoCategories(
+  internal: MonthlyFinancialReportView,
+): MonthlyFinancialReportView["welfareTwoExpenseCategories"] {
+  const amounts: Record<string, string> = {
+    refreshment: internal.expenses.welfareTwoRefreshment || "0",
+    team_building: internal.expenses.welfareTwoTeamBuilding || "0",
+    physical_exam: internal.expenses.welfareTwoHealthCheck || "0",
+  };
+  return FIXED_WELFARE_TWO_EXPENSE_CATEGORIES.map((category) => ({
+    ...category,
+    isActive: true,
+    automaticAmount: "0",
+    manualAmount: amounts[category.code] || "0",
+    totalAmount: amounts[category.code] || "0",
+    isFixed: true,
+  }));
 }
 
 function toClientReport(input: {
@@ -1518,7 +2024,7 @@ function toClientReport(input: {
   role: string;
 }): ClientMonthlyReport {
   const { internal, automatic, previous, reportRow, role } = input;
-  const canMaintain = role === "admin";
+  const canMaintain = canMaintainMonthlyFinancialReport(role);
   const blockers: Array<{ code: string; message: string }> = [];
   if (!reportRow) {
     blockers.push({
@@ -1614,6 +2120,7 @@ function toClientReport(input: {
       assetAdministration: internal.expenses.assetAdministration,
       generalBankFee: internal.expenses.generalBankFee,
       generalOther: internal.expenses.generalOtherExpense,
+      generalTaxPayment: internal.expenses.generalTaxPayment,
       businessReimbursement: internal.expenses.businessReimbursement,
       businessBankFee: internal.expenses.businessBankFee,
       welfareOne407: internal.expenses.welfareOne407,
@@ -1629,7 +2136,10 @@ function toClientReport(input: {
       welfareTwoTeamBuilding: internal.expenses.welfareTwoTeamBuilding,
       welfareTwoPhysicalExam: internal.expenses.welfareTwoHealthCheck,
     },
-    automaticDetails: automatic.details,
+    automaticDetails: protectMonthlyFinancialPayrollMetadata(
+      automatic.details,
+      role,
+    ),
     bank: automatic.bank,
     totals: {
       opening,
@@ -1639,6 +2149,8 @@ function toClientReport(input: {
       netChange: subtractFinancialAmounts(closing, opening),
     },
     manualItems: buildClientManualItems(internal, automatic),
+    welfareOneExpenseCategories: internal.welfareOneExpenseCategories,
+    welfareTwoExpenseCategories: internal.welfareTwoExpenseCategories,
     sources: automatic.sources.map((source) => ({
       key: source.code,
       status: source.available
@@ -1678,16 +2190,18 @@ async function loadMonthlyReport(
   month: string,
   role: string,
   forceAutomatic = false,
+  client?: QueryClient,
 ): Promise<LoadedMonthlyReport> {
   assertFinancialMonth(month);
-  const reportRow = await loadReportRow(month);
-  const previous = await loadPreviousContext(month, reportRow);
+  const reportRow = await loadReportRow(month, client);
+  const previous = await loadPreviousContext(month, reportRow, client);
 
   if (reportRow?.status === "closed") {
     const snapshot = await queryOne<{ snapshot_json: Record<string, unknown> }>(
       `SELECT snapshot_json FROM monthly_financial_snapshots
        WHERE report_id = ? AND report_version = ?`,
       [reportRow.id, reportRow.version],
+      client,
     );
     if (!snapshot?.snapshot_json) {
       throw dataIntegrity(
@@ -1722,9 +2236,21 @@ async function loadMonthlyReport(
     return {
       report: {
         ...publicSnapshot,
-        automaticDetails:
-          publicSnapshot.automaticDetails || validatedAutomatic.details,
+        automaticDetails: protectMonthlyFinancialPayrollMetadata(
+          validatedAutomatic.details,
+          role,
+        ),
         manualItems: buildClientManualItems(__internal, validatedAutomatic),
+        welfareOneExpenseCategories: Array.isArray(
+          publicSnapshot.welfareOneExpenseCategories,
+        )
+          ? publicSnapshot.welfareOneExpenseCategories
+          : legacyClosedWelfareOneCategories(__internal),
+        welfareTwoExpenseCategories: Array.isArray(
+          publicSnapshot.welfareTwoExpenseCategories,
+        )
+          ? publicSnapshot.welfareTwoExpenseCategories
+          : legacyClosedWelfareTwoCategories(__internal),
         validations: {
           ...publicSnapshot.validations,
           canClose: false,
@@ -1734,7 +2260,7 @@ async function loadMonthlyReport(
           canRefresh: false,
           canSubmitReview: false,
           canClose: false,
-          canReopen: role === "admin",
+          canReopen: canMaintainMonthlyFinancialReport(role),
           canDownload: true,
         },
       },
@@ -1753,9 +2279,9 @@ async function loadMonthlyReport(
   const baseAutomatic =
     !forceAutomatic && storedAutomatic
       ? storedAutomatic
-      : await loadAutomaticSnapshot(month);
+      : await loadAutomaticSnapshot(month, client);
   const liveBankValidation = reportRow
-    ? await loadMonthlyBankValidationState(month)
+    ? await loadMonthlyBankValidationState(month, client)
     : null;
   const automatic = liveBankValidation
     ? {
@@ -1773,7 +2299,7 @@ async function loadMonthlyReport(
         },
       }
     : baseAutomatic;
-  const manualItems = await loadManualItems(reportRow?.id || null);
+  const manualItems = await loadManualItems(reportRow?.id || null, client);
   const internal = buildMonthlyFinancialReportView({
     id: reportRow?.id || null,
     month,
@@ -1785,7 +2311,7 @@ async function loadMonthlyReport(
     lastRefreshedAt: reportRow?.last_refreshed_at || null,
     closedAt: reportRow?.closed_at || null,
     updatedAt: reportRow?.updated_at || null,
-    canMaintain: role === "admin",
+    canMaintain: canMaintainMonthlyFinancialReport(role),
   });
   return {
     report: toClientReport({ internal, automatic, previous, reportRow, role }),
@@ -1800,6 +2326,668 @@ interface MonthlyBankUploadCandidate {
   file: Express.Multer.File;
   outputDir: string;
   analysis: MonthlyBankFileAnalysis;
+}
+
+type MonthlyBankCorrectionDifference =
+  | "transactionDate"
+  | "amount"
+  | "payerAccount"
+  | "payeeAccount";
+
+interface MonthlyBankCorrectionExistingRow {
+  id: string;
+  report_month: string;
+  account_code: MonthlyBankAccountCode;
+  electronic_receipt_no: string | null;
+  normalized_electronic_receipt_no: string;
+  transaction_date: string | null;
+  amount: string | null;
+  direction: string | null;
+  payer_account: string | null;
+  payee_account: string | null;
+  current_file_id: string;
+  current_file_version: number;
+  original_name: string | null;
+  recognition_version: string | null;
+  has_business_links: boolean;
+}
+
+interface MonthlyBankContentCorrectionAuditEntry {
+  transactionId: string;
+  normalizedReceiptNo: string;
+  receiptNo: string;
+  differenceDigest: string;
+  differences: MonthlyBankCorrectionDifference[];
+  previous: {
+    reportMonth: string;
+    accountCode: MonthlyBankAccountCode;
+    transactionDate: string | null;
+    amount: string;
+    direction: string | null;
+    payerAccount: string;
+    payeeAccount: string;
+    currentFileId: string;
+    currentFileVersion: number;
+    originalName: string | null;
+    recognitionVersion: string;
+  };
+  incoming: {
+    reportMonth: string;
+    accountCode: MonthlyBankAccountCode;
+    transactionDate: string;
+    amount: string;
+    direction: string;
+    payerAccount: string;
+    payeeAccount: string;
+    candidateFileId: string;
+    candidateFileHash: string;
+    originalName: string;
+    pageNo: number;
+    position: string;
+    recognitionVersion: string;
+  };
+}
+
+interface MonthlyBankContentCorrectionPublicConflict {
+  transactionId: string;
+  receiptNo: string;
+  normalizedReceiptNo: string;
+  differenceDigest: string;
+  accountCode: MonthlyBankAccountCode;
+  accountName: string;
+  differences: MonthlyBankCorrectionDifference[];
+  correctable: boolean;
+  blockingReason: string | null;
+  previous: {
+    fileName: string | null;
+    fileVersion: number;
+    transactionDate: string | null;
+    amount: string;
+    payerAccount: string;
+    payeeAccount: string;
+  };
+  incoming: {
+    fileName: string;
+    pageNo: number;
+    position: string;
+    transactionDate: string;
+    amount: string;
+    payerAccount: string;
+    payeeAccount: string;
+  };
+}
+
+interface MonthlyBankContentCorrectionState {
+  auditEntries: MonthlyBankContentCorrectionAuditEntry[];
+  publicConflicts: MonthlyBankContentCorrectionPublicConflict[];
+  fingerprint: string;
+  allCorrectable: boolean;
+}
+
+function stableMonthlyBankContentCorrectionEntry(
+  entry:
+    | MonthlyBankContentCorrectionAuditEntry
+    | Omit<MonthlyBankContentCorrectionAuditEntry, "differenceDigest">,
+) {
+  const stableIncoming = {
+    reportMonth: entry.incoming.reportMonth,
+    accountCode: entry.incoming.accountCode,
+    transactionDate: entry.incoming.transactionDate,
+    amount: entry.incoming.amount,
+    direction: entry.incoming.direction,
+    payerAccount: entry.incoming.payerAccount,
+    payeeAccount: entry.incoming.payeeAccount,
+    candidateFileHash: entry.incoming.candidateFileHash,
+    originalName: entry.incoming.originalName,
+    pageNo: entry.incoming.pageNo,
+    position: entry.incoming.position,
+    recognitionVersion: entry.incoming.recognitionVersion,
+  };
+  return {
+    transactionId: entry.transactionId,
+    normalizedReceiptNo: entry.normalizedReceiptNo,
+    receiptNo: entry.receiptNo,
+    differences: entry.differences,
+    previous: entry.previous,
+    incoming: stableIncoming,
+  };
+}
+
+interface MonthlyBankContentCorrectionAcknowledgement {
+  transactionId: string;
+  normalizedReceiptNo: string;
+  differenceDigest: string;
+}
+
+interface MonthlyBankContentCorrectionConfirmation {
+  reviewId: string;
+  token: string;
+  batchDigest: string;
+  reason: string;
+  acknowledgements: MonthlyBankContentCorrectionAcknowledgement[];
+}
+
+interface MonthlyBankContentCorrectionReviewResponse {
+  reviewId: string;
+  expectedVersion: number;
+  batchDigest: string;
+  confirmationToken: string;
+  expiresAt: string;
+  requiredFiles: Array<{
+    originalName: string;
+    fileHash: string;
+    accountCode: MonthlyBankAccountCode;
+  }>;
+  conflicts: MonthlyBankContentCorrectionPublicConflict[];
+}
+
+interface MonthlyBankContentCorrectionReviewRow {
+  id: string;
+  report_id: string;
+  report_month: string;
+  expected_report_version: number;
+  status: "pending" | "confirmed" | "expired" | "cancelled";
+  requested_by: string;
+  requested_role: string;
+  session_binding_hash: string;
+  token_hash: string;
+  batch_digest: string;
+  file_hashes_json: string[];
+  parser_version: string;
+  analysis_digest: string;
+  conflict_fingerprint: string;
+  conflicts_json: MonthlyBankContentCorrectionAuditEntry[];
+  expires_at: string;
+}
+
+function monthlyBankCorrectionSecret(): string {
+  return `${process.env.SESSION_SECRET || "development-only-session-secret"}:monthly-bank-content-correction`;
+}
+
+function monthlyBankCorrectionAmount(value: unknown): string {
+  return (financialAmountToCents(value) / 100).toFixed(2);
+}
+
+function redactMonthlyBankCorrectionAccount(value: unknown): string {
+  const account = normalizeMonthlyBankAccount(value);
+  if (!account) return "未识别为完整账号";
+  if (account.length <= 10) {
+    return `${account.slice(0, 4)}…${account.slice(-2)}（${account.length}位片段）`;
+  }
+  return `${account.slice(0, 4)}…${account.slice(-4)}（${account.length}位）`;
+}
+
+function monthlyBankOwnAccountRole(
+  accountCode: MonthlyBankAccountCode,
+  payerAccount: unknown,
+  payeeAccount: unknown,
+): "payer" | "payee" | "both" | "none" {
+  const ownAccount = MONTHLY_BANK_ACCOUNTS[accountCode].accountNumber;
+  const payerMatches = normalizeMonthlyBankAccount(payerAccount) === ownAccount;
+  const payeeMatches = normalizeMonthlyBankAccount(payeeAccount) === ownAccount;
+  if (payerMatches && payeeMatches) return "both";
+  if (payerMatches) return "payer";
+  if (payeeMatches) return "payee";
+  return "none";
+}
+
+async function collectMonthlyBankContentCorrections(
+  client: QueryClient,
+  candidates: MonthlyBankUploadCandidate[],
+): Promise<MonthlyBankContentCorrectionState> {
+  const normalizedNumbers = [
+    ...new Set(
+      candidates.flatMap((candidate) =>
+        candidate.analysis.transactions
+          .map((transaction) => transaction.normalizedElectronicReceiptNo)
+          .filter(Boolean),
+      ),
+    ),
+  ].sort();
+  if (!normalizedNumbers.length) {
+    return {
+      auditEntries: [],
+      publicConflicts: [],
+      fingerprint: fingerprintMonthlyBankContentCorrections([]),
+      allCorrectable: true,
+    };
+  }
+  const existingRows = await client.query<MonthlyBankCorrectionExistingRow>(
+    `SELECT transaction.id, transaction.report_month,
+            transaction.account_code, transaction.electronic_receipt_no,
+            transaction.normalized_electronic_receipt_no,
+            transaction.transaction_date, transaction.amount::text AS amount,
+            transaction.direction, transaction.payer_account,
+            transaction.payee_account, transaction.current_file_id,
+            transaction.current_file_version, file.original_name,
+            file.recognition_version,
+            EXISTS(
+              SELECT 1
+              FROM monthly_financial_bank_transaction_links business_link
+              WHERE business_link.transaction_id = transaction.id
+                AND business_link.is_active = TRUE
+                AND business_link.business_object_type <> 'monthly_bank_file'
+            ) AS has_business_links
+     FROM monthly_financial_bank_transactions transaction
+     LEFT JOIN monthly_financial_bank_files file
+       ON file.id = transaction.current_file_id
+     WHERE transaction.normalized_electronic_receipt_no = ANY($1::text[])
+     FOR UPDATE OF transaction`,
+    [normalizedNumbers],
+  );
+  const existingByNumber = new Map(
+    existingRows.rows.map((row) => [row.normalized_electronic_receipt_no, row]),
+  );
+  const auditEntries: MonthlyBankContentCorrectionAuditEntry[] = [];
+  const publicConflicts: MonthlyBankContentCorrectionPublicConflict[] = [];
+
+  for (const candidate of candidates) {
+    const accountCode = candidate.analysis.accountCode!;
+    for (const transaction of candidate.analysis.transactions) {
+      const normalizedNo = transaction.normalizedElectronicReceiptNo;
+      if (!normalizedNo) continue;
+      const existing = existingByNumber.get(normalizedNo);
+      const transactionMonth = transaction.transactionMonth;
+      if (
+        !existing ||
+        existing.account_code !== accountCode ||
+        existing.report_month !== transactionMonth
+      ) {
+        continue;
+      }
+      const differences: MonthlyBankCorrectionDifference[] = [];
+      if (existing.transaction_date !== transaction.transactionDate) {
+        differences.push("transactionDate");
+      }
+      if (
+        financialAmountToCents(existing.amount || "0") !==
+        financialAmountToCents(transaction.amount)
+      ) {
+        differences.push("amount");
+      }
+      if (
+        normalizeMonthlyBankAccount(existing.payer_account) !==
+        normalizeMonthlyBankAccount(transaction.payerAccount)
+      ) {
+        differences.push("payerAccount");
+      }
+      if (
+        normalizeMonthlyBankAccount(existing.payee_account) !==
+        normalizeMonthlyBankAccount(transaction.payeeAccount)
+      ) {
+        differences.push("payeeAccount");
+      }
+      if (!differences.length) continue;
+
+      const previousRole = monthlyBankOwnAccountRole(
+        accountCode,
+        existing.payer_account,
+        existing.payee_account,
+      );
+      const incomingRole = monthlyBankOwnAccountRole(
+        accountCode,
+        transaction.payerAccount,
+        transaction.payeeAccount,
+      );
+      const blockingReason = existing.has_business_links
+        ? "该历史回单已挂载合同、报销或薪资业务，不能在月报上传中直接纠正"
+        : previousRole === "none" || incomingRole === "none"
+          ? "新旧记录未能在同一收付方确认本公司完整账号"
+          : previousRole !== incomingRole ||
+              existing.direction !== transaction.direction
+            ? "新旧记录的收付方向不一致，需先进行专项财务复核"
+            : null;
+      const receiptNo =
+        transaction.electronicReceiptNo ||
+        existing.electronic_receipt_no ||
+        normalizedNo;
+      const auditEntryWithoutDigest = {
+        transactionId: existing.id,
+        normalizedReceiptNo: normalizedNo,
+        receiptNo,
+        differences,
+        previous: {
+          reportMonth: existing.report_month,
+          accountCode: existing.account_code,
+          transactionDate: existing.transaction_date,
+          amount: monthlyBankCorrectionAmount(existing.amount || "0"),
+          direction: existing.direction,
+          payerAccount: normalizeMonthlyBankAccount(existing.payer_account),
+          payeeAccount: normalizeMonthlyBankAccount(existing.payee_account),
+          currentFileId: existing.current_file_id,
+          currentFileVersion: existing.current_file_version,
+          originalName: existing.original_name,
+          recognitionVersion: existing.recognition_version || "legacy-unknown",
+        },
+        incoming: {
+          reportMonth: transactionMonth,
+          accountCode,
+          transactionDate: transaction.transactionDate,
+          amount: monthlyBankCorrectionAmount(transaction.amount),
+          direction: transaction.direction,
+          payerAccount: normalizeMonthlyBankAccount(transaction.payerAccount),
+          payeeAccount: normalizeMonthlyBankAccount(transaction.payeeAccount),
+          candidateFileId: candidate.id,
+          candidateFileHash: candidate.analysis.fileHash,
+          originalName: candidate.file.originalname,
+          pageNo: transaction.pageNo,
+          position: transaction.position,
+          recognitionVersion: MONTHLY_BANK_RECOGNITION_VERSION,
+        },
+      };
+      const auditEntry: MonthlyBankContentCorrectionAuditEntry = {
+        ...auditEntryWithoutDigest,
+        differenceDigest: fingerprintMonthlyBankContentCorrections([
+          stableMonthlyBankContentCorrectionEntry(auditEntryWithoutDigest),
+        ]),
+      };
+      auditEntries.push(auditEntry);
+      publicConflicts.push({
+        transactionId: existing.id,
+        receiptNo,
+        normalizedReceiptNo: normalizedNo,
+        differenceDigest: auditEntry.differenceDigest,
+        accountCode,
+        accountName: MONTHLY_BANK_ACCOUNTS[accountCode].label,
+        differences,
+        correctable: blockingReason === null,
+        blockingReason,
+        previous: {
+          fileName: existing.original_name,
+          fileVersion: existing.current_file_version,
+          transactionDate: existing.transaction_date,
+          amount: auditEntry.previous.amount,
+          payerAccount: redactMonthlyBankCorrectionAccount(
+            existing.payer_account,
+          ),
+          payeeAccount: redactMonthlyBankCorrectionAccount(
+            existing.payee_account,
+          ),
+        },
+        incoming: {
+          fileName: candidate.file.originalname,
+          pageNo: transaction.pageNo,
+          position: transaction.position,
+          transactionDate: transaction.transactionDate,
+          amount: auditEntry.incoming.amount,
+          payerAccount: redactMonthlyBankCorrectionAccount(
+            transaction.payerAccount,
+          ),
+          payeeAccount: redactMonthlyBankCorrectionAccount(
+            transaction.payeeAccount,
+          ),
+        },
+      });
+    }
+  }
+
+  auditEntries.sort((left, right) =>
+    left.normalizedReceiptNo.localeCompare(right.normalizedReceiptNo),
+  );
+  publicConflicts.sort((left, right) =>
+    left.receiptNo.localeCompare(right.receiptNo),
+  );
+  return {
+    auditEntries,
+    publicConflicts,
+    fingerprint: fingerprintMonthlyBankContentCorrections(
+      auditEntries.map(stableMonthlyBankContentCorrectionEntry),
+    ),
+    allCorrectable: publicConflicts.every((item) => item.correctable),
+  };
+}
+
+function monthlyBankCorrectionFileHashes(
+  candidates: MonthlyBankUploadCandidate[],
+): string[] {
+  return [...new Set(candidates.map((item) => item.analysis.fileHash))].sort();
+}
+
+function monthlyBankCorrectionBatchDigest(
+  candidates: MonthlyBankUploadCandidate[],
+): string {
+  return fingerprintMonthlyBankContentCorrections(
+    monthlyBankCorrectionFileHashes(candidates),
+  );
+}
+
+function monthlyBankCorrectionAnalysisDigest(
+  candidates: MonthlyBankUploadCandidate[],
+): string {
+  const canonical = candidates
+    .map((candidate) => ({
+      fileHash: candidate.analysis.fileHash,
+      accountCode: candidate.analysis.accountCode,
+      recognitionVersion: MONTHLY_BANK_RECOGNITION_VERSION,
+      pageCount: candidate.analysis.pageCount,
+      transactions: candidate.analysis.transactions
+        .map((transaction) => ({
+          normalizedReceiptNo: transaction.normalizedElectronicReceiptNo,
+          transactionDate: transaction.transactionDate,
+          transactionMonth: transaction.transactionMonth,
+          amountCents: financialAmountToCents(transaction.amount),
+          payer: transaction.payer,
+          payerAccount: normalizeMonthlyBankAccount(transaction.payerAccount),
+          payee: transaction.payee,
+          payeeAccount: normalizeMonthlyBankAccount(transaction.payeeAccount),
+          direction: transaction.direction,
+          category: transaction.category,
+          recognitionStatus: transaction.recognitionStatus,
+          includeInReport: transaction.includeInReport,
+          pageNo: transaction.pageNo,
+          position: transaction.position,
+          warnings: [...transaction.warnings].sort(),
+          rawTextHash: transaction.rawTextHash,
+        }))
+        .sort((left, right) =>
+          `${left.normalizedReceiptNo}:${left.pageNo}:${left.position}`.localeCompare(
+            `${right.normalizedReceiptNo}:${right.pageNo}:${right.position}`,
+          ),
+        ),
+    }))
+    .sort((left, right) => left.fileHash.localeCompare(right.fileHash));
+  return fingerprintMonthlyBankContentCorrections(canonical);
+}
+
+function monthlyBankCorrectionAcknowledgementKey(
+  item: MonthlyBankContentCorrectionAcknowledgement,
+): string {
+  return `${item.transactionId}:${item.normalizedReceiptNo}:${item.differenceDigest}`;
+}
+
+async function createMonthlyBankContentCorrectionReview(input: {
+  client: QueryClient;
+  reportId: string;
+  month: string;
+  expectedVersion: number;
+  actor: FinancialActor;
+  sessionId: string;
+  candidates: MonthlyBankUploadCandidate[];
+  correctionState: MonthlyBankContentCorrectionState;
+  now: string;
+}): Promise<MonthlyBankContentCorrectionReviewResponse> {
+  const secret = monthlyBankCorrectionSecret();
+  const sessionBindingHash = hashMonthlyBankContentCorrectionSession(
+    input.sessionId,
+    secret,
+  );
+  const challenge = createMonthlyBankContentCorrectionChallengeToken(secret);
+  const reviewId = `mfbcr_${nanoid(16)}`;
+  const expiresAt = new Date(
+    Date.parse(input.now) + 30 * 60 * 1000,
+  ).toISOString();
+  const fileHashes = monthlyBankCorrectionFileHashes(input.candidates);
+  const batchDigest = monthlyBankCorrectionBatchDigest(input.candidates);
+  const analysisDigest = monthlyBankCorrectionAnalysisDigest(input.candidates);
+
+  await input.client.query(
+    `UPDATE monthly_financial_bank_correction_reviews
+     SET status = 'expired', updated_at = $1
+     WHERE status = 'pending' AND expires_at < $1`,
+    [input.now],
+  );
+  await input.client.query(
+    `UPDATE monthly_financial_bank_correction_reviews
+     SET status = 'cancelled', updated_at = $1
+     WHERE report_month = $2 AND requested_by = $3
+       AND session_binding_hash = $4 AND status = 'pending'`,
+    [input.now, input.month, input.actor.id, sessionBindingHash],
+  );
+  await input.client.query(
+    `INSERT INTO monthly_financial_bank_correction_reviews(
+       id, report_id, report_month, expected_report_version, status,
+       requested_by, requested_role, session_binding_hash, token_hash,
+       batch_digest, file_hashes_json, parser_version, analysis_digest,
+       conflict_fingerprint, conflicts_json, expires_at, created_at, updated_at
+     ) VALUES(
+       $1,$2,$3,$4,'pending',$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,
+       $14::jsonb,$15,$16,$16
+     )`,
+    [
+      reviewId,
+      input.reportId,
+      input.month,
+      input.expectedVersion,
+      input.actor.id,
+      input.actor.role,
+      sessionBindingHash,
+      challenge.tokenHash,
+      batchDigest,
+      JSON.stringify(fileHashes),
+      MONTHLY_BANK_RECOGNITION_VERSION,
+      analysisDigest,
+      input.correctionState.fingerprint,
+      JSON.stringify(input.correctionState.auditEntries),
+      expiresAt,
+      input.now,
+    ],
+  );
+  return {
+    reviewId,
+    expectedVersion: input.expectedVersion,
+    batchDigest,
+    confirmationToken: challenge.token,
+    expiresAt,
+    requiredFiles: input.candidates
+      .map((candidate) => ({
+        originalName: candidate.file.originalname,
+        fileHash: candidate.analysis.fileHash,
+        accountCode: candidate.analysis.accountCode!,
+      }))
+      .sort((left, right) => left.fileHash.localeCompare(right.fileHash)),
+    conflicts: input.correctionState.publicConflicts,
+  };
+}
+
+async function verifyMonthlyBankContentCorrectionReview(input: {
+  client: QueryClient;
+  reportId: string;
+  month: string;
+  expectedVersion: number;
+  actor: FinancialActor;
+  sessionId: string;
+  candidates: MonthlyBankUploadCandidate[];
+  correctionState: MonthlyBankContentCorrectionState;
+  confirmation: MonthlyBankContentCorrectionConfirmation;
+  now: string;
+}): Promise<MonthlyBankContentCorrectionReviewRow> {
+  const reason = input.confirmation.reason.trim();
+  if (reason.length < 10 || reason.length > 500) {
+    throw badRequest(
+      "MONTHLY_BANK_CORRECTION_REASON_REQUIRED",
+      "请填写10至500字的历史回单核实原因",
+    );
+  }
+  const reviewResult =
+    await input.client.query<MonthlyBankContentCorrectionReviewRow>(
+      `SELECT id, report_id, report_month, expected_report_version, status,
+            requested_by, requested_role, session_binding_hash, token_hash,
+            batch_digest, file_hashes_json, parser_version, analysis_digest,
+            conflict_fingerprint, conflicts_json, expires_at
+     FROM monthly_financial_bank_correction_reviews
+     WHERE id = $1 FOR UPDATE`,
+      [input.confirmation.reviewId],
+    );
+  const review = reviewResult.rows[0];
+  if (
+    !review ||
+    review.report_id !== input.reportId ||
+    review.report_month !== input.month
+  ) {
+    throw new MonthlyFinancialRouteError(
+      404,
+      "MONTHLY_BANK_CORRECTION_REVIEW_NOT_FOUND",
+      "历史回单复核记录不存在，请重新上传并核对",
+    );
+  }
+  if (review.status !== "pending") {
+    throw conflict(
+      "MONTHLY_BANK_CORRECTION_REVIEW_NOT_PENDING",
+      review.status === "confirmed"
+        ? "该历史回单复核已经确认，请刷新回单状态"
+        : "该历史回单复核已失效，请重新上传并核对",
+    );
+  }
+  if (Date.parse(review.expires_at) < Date.parse(input.now)) {
+    throw new MonthlyFinancialRouteError(
+      410,
+      "MONTHLY_BANK_CORRECTION_REVIEW_EXPIRED",
+      "历史回单复核已超过30分钟，请重新上传并核对",
+    );
+  }
+  const secret = monthlyBankCorrectionSecret();
+  const sessionBindingHash = hashMonthlyBankContentCorrectionSession(
+    input.sessionId,
+    secret,
+  );
+  if (
+    review.requested_by !== input.actor.id ||
+    review.requested_role !== input.actor.role ||
+    review.session_binding_hash !== sessionBindingHash ||
+    !verifyMonthlyBankContentCorrectionChallengeToken(
+      input.confirmation.token,
+      review.token_hash,
+      secret,
+    )
+  ) {
+    throw new MonthlyFinancialRouteError(
+      403,
+      "MONTHLY_BANK_CORRECTION_CONFIRMATION_FORBIDDEN",
+      "复核确认人与原上传会话不一致，请由原管理员重新上传并核对",
+    );
+  }
+  const fileHashes = monthlyBankCorrectionFileHashes(input.candidates);
+  const expectedAcknowledgements = review.conflicts_json
+    .map((item) =>
+      monthlyBankCorrectionAcknowledgementKey({
+        transactionId: item.transactionId,
+        normalizedReceiptNo: item.normalizedReceiptNo,
+        differenceDigest: item.differenceDigest,
+      }),
+    )
+    .sort();
+  const suppliedAcknowledgements = input.confirmation.acknowledgements
+    .map(monthlyBankCorrectionAcknowledgementKey)
+    .sort();
+  const stateStillMatches =
+    review.expected_report_version === input.expectedVersion &&
+    review.batch_digest === input.confirmation.batchDigest &&
+    review.batch_digest ===
+      monthlyBankCorrectionBatchDigest(input.candidates) &&
+    JSON.stringify(review.file_hashes_json) === JSON.stringify(fileHashes) &&
+    review.parser_version === MONTHLY_BANK_RECOGNITION_VERSION &&
+    review.analysis_digest ===
+      monthlyBankCorrectionAnalysisDigest(input.candidates) &&
+    review.conflict_fingerprint === input.correctionState.fingerprint &&
+    JSON.stringify(expectedAcknowledgements) ===
+      JSON.stringify(suppliedAcknowledgements);
+  if (!stateStillMatches) {
+    throw conflict(
+      "MONTHLY_BANK_CORRECTION_REVIEW_STALE",
+      "原件、识别结果、月报版本或历史记录已经变化，请重新上传并核对差异",
+    );
+  }
+  return review;
 }
 
 async function assertMonthlyBankPdfHeader(filePath: string): Promise<void> {
@@ -1828,6 +3016,25 @@ async function cleanupMonthlyBankUpload(
       .rm(outputDir, { recursive: true, force: true })
       .catch(() => undefined);
   }
+}
+
+function transactionCommitOutcomeUncertain(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "commitOutcomeUncertain" in error &&
+    (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+  );
+}
+
+async function cleanupRolledBackContractEvidence(
+  results: MonthlyContractReceiptReconciliationResult[],
+  error: unknown,
+): Promise<void> {
+  if (transactionCommitOutcomeUncertain(error)) return;
+  await Promise.all(
+    results.map((result) => cleanupMonthlyContractBridgeGroupFiles(result)),
+  );
 }
 
 function monthlyBankMatchedAccountRole(
@@ -2286,12 +3493,20 @@ async function persistMonthlyBankAnalyses(input: {
   month: string;
   expectedVersion: number;
   actor: FinancialActor;
+  sessionId: string;
   candidates: MonthlyBankUploadCandidate[];
+  correctionConfirmation?: MonthlyBankContentCorrectionConfirmation;
 }): Promise<{
   affectedMonths: string[];
   contractReconciliation: MonthlyContractReceiptReconciliationResult[];
   reimbursementReconciliation: MonthlyReimbursementReconciliationResult;
   salaryReconciliation: MonthlySalaryReceiptReconciliationResult[];
+  pendingCorrectionReview: MonthlyBankContentCorrectionReviewResponse | null;
+  confirmedCorrection: {
+    reviewId: string;
+    status: "confirmed";
+    correctedTransactionIds: string[];
+  } | null;
 }> {
   let affectedMonths: string[] = [];
   let contractReconciliation: MonthlyContractReceiptReconciliationResult[] = [];
@@ -2303,7 +3518,18 @@ async function persistMonthlyBankAnalyses(input: {
   };
   let salaryReconciliation: MonthlySalaryReceiptReconciliationResult[] = [];
   let bankAccountingFlagsNormalized = false;
-  await db.transaction(async (client) => {
+  let pendingCorrectionReview: MonthlyBankContentCorrectionReviewResponse | null =
+    null;
+  let confirmedCorrectionReview: MonthlyBankContentCorrectionReviewRow | null =
+    null;
+  let confirmedCorrectionEntries: MonthlyBankContentCorrectionAuditEntry[] = [];
+  let confirmedCorrectionResult: {
+    reviewId: string;
+    status: "confirmed";
+    correctedTransactionIds: string[];
+  } | null = null;
+  const confirmedCorrectionTransactionIds = new Set<string>();
+  const persistence = db.transaction(async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
     await lockFinancialMonth(client, input.month);
     const currentActor = await client.query<{
@@ -2314,7 +3540,8 @@ async function persistMonthlyBankAnalyses(input: {
     ]);
     if (
       currentActor.rows[0]?.status !== "active" ||
-      currentActor.rows[0]?.role !== "admin"
+      !canMaintainMonthlyFinancialReport(currentActor.rows[0]?.role) ||
+      currentActor.rows[0]?.role !== input.actor.role
     ) {
       throw new MonthlyFinancialRouteError(
         403,
@@ -2355,6 +3582,66 @@ async function persistMonthlyBankAnalyses(input: {
       : await loadAutomaticSnapshot(input.month, client);
     if (!currentAutomatic) {
       throw dataIntegrity(`${input.month}自动数据快照不完整，请先执行重新同步`);
+    }
+    const correctionState = await collectMonthlyBankContentCorrections(
+      client,
+      input.candidates,
+    );
+    if (correctionState.auditEntries.length) {
+      if (!reportRow) {
+        throw dataIntegrity("历史银行回单存在，但对应月报记录缺失");
+      }
+      if (!correctionState.allCorrectable) {
+        throw conflictWithDetails(
+          "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT",
+          "发现已挂载业务或收付方向变化的历史回单，不能直接换版，请先专项复核",
+          { conflicts: correctionState.publicConflicts },
+        );
+      }
+      if (!input.sessionId) {
+        throw new MonthlyFinancialRouteError(
+          403,
+          "MONTHLY_BANK_CORRECTION_SESSION_REQUIRED",
+          "当前登录会话无法绑定历史回单复核，请重新登录后再试",
+        );
+      }
+      if (!input.correctionConfirmation) {
+        pendingCorrectionReview =
+          await createMonthlyBankContentCorrectionReview({
+            client,
+            reportId,
+            month: input.month,
+            expectedVersion: input.expectedVersion,
+            actor: input.actor,
+            sessionId: input.sessionId,
+            candidates: input.candidates,
+            correctionState,
+            now,
+          });
+        return;
+      }
+      confirmedCorrectionReview =
+        await verifyMonthlyBankContentCorrectionReview({
+          client,
+          reportId,
+          month: input.month,
+          expectedVersion: input.expectedVersion,
+          actor: input.actor,
+          sessionId: input.sessionId,
+          candidates: input.candidates,
+          correctionState,
+          confirmation: input.correctionConfirmation,
+          now,
+        });
+      confirmedCorrectionEntries = correctionState.auditEntries;
+      for (const entry of confirmedCorrectionEntries) {
+        confirmedCorrectionTransactionIds.add(entry.transactionId);
+      }
+    } else if (input.correctionConfirmation) {
+      throw conflict(
+        "MONTHLY_BANK_CORRECTION_REVIEW_STALE",
+        "本次重新识别已不存在原复核差异，请重新上传并核对当前结果",
+      );
     }
     if (!reportRow) {
       await client.query(
@@ -2478,14 +3765,15 @@ async function persistMonthlyBankAnalyses(input: {
       await client.query(
         `INSERT INTO monthly_financial_bank_files(
            id, report_id, report_month, account_code, original_name,
-           storage_path, mime_type, file_size, file_hash, file_version,
+           storage_path, mime_type, file_size, file_hash, recognition_version,
+           file_version,
            is_active, replaces_file_id, page_count, recognized_receipt_count,
            included_receipt_count, recognition_status, detected_months_json,
            warnings_json, anomalies_json, uploaded_by, activated_at,
            recognized_at, created_at, updated_at
          ) VALUES(
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12,$13,$14,$15,
-           $16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$20,$20,$20
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,TRUE,$12,$13,$14,$15,$16,
+           $17::jsonb,$18::jsonb,$19::jsonb,$20,$21,$21,$21,$21
          )`,
         [
           candidate.id,
@@ -2497,6 +3785,7 @@ async function persistMonthlyBankAnalyses(input: {
           candidate.file.mimetype,
           candidate.file.size,
           analysis.fileHash,
+          MONTHLY_BANK_RECOGNITION_VERSION,
           fileVersion,
           replaced?.id || null,
           analysis.pageCount,
@@ -2576,7 +3865,10 @@ async function persistMonthlyBankAnalyses(input: {
           existing.account_code === accountCode &&
           existing.report_month === transactionMonth
         ) {
-          if (!existingContentMatches) {
+          if (
+            !existingContentMatches &&
+            !confirmedCorrectionTransactionIds.has(existing.id)
+          ) {
             throw conflict(
               "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT",
               `电子回单号${transaction.electronicReceiptNo}已存在，但完整账号、日期或金额不一致，请管理员核对`,
@@ -3026,12 +4318,75 @@ async function persistMonthlyBankAnalyses(input: {
         now,
       ],
     );
+    if (confirmedCorrectionReview && input.correctionConfirmation) {
+      const correctionAuditId = `mfal_${nanoid(16)}`;
+      const correctionReason = input.correctionConfirmation.reason.trim();
+      await client.query(
+        `INSERT INTO monthly_financial_audit_logs(
+           id, report_id, report_version, action, actor_id, actor_role,
+           reason, changes_json, created_at
+         ) VALUES(
+           $1,$2,$3,'bank_receipt_correction',$4,$5,$6,$7::jsonb,$8
+         )`,
+        [
+          correctionAuditId,
+          reportId,
+          nextVersion,
+          input.actor.id,
+          input.actor.role,
+          correctionReason,
+          JSON.stringify({
+            reviewId: confirmedCorrectionReview.id,
+            batchDigest: confirmedCorrectionReview.batch_digest,
+            parserVersion: MONTHLY_BANK_RECOGNITION_VERSION,
+            corrections: confirmedCorrectionEntries,
+            contractReconciliation,
+            reimbursementReconciliation,
+            salaryReconciliation,
+            invalidatedMonths: affectedMonths,
+          }),
+          now,
+        ],
+      );
+      await client.query(
+        `UPDATE monthly_financial_bank_correction_reviews
+         SET status = 'confirmed', reason = $2, confirmed_by = $3,
+             confirmed_role = $4, confirmed_at = $5,
+             confirmed_report_version = $6, audit_log_id = $7,
+             updated_at = $5
+         WHERE id = $1 AND status = 'pending'`,
+        [
+          confirmedCorrectionReview.id,
+          correctionReason,
+          input.actor.id,
+          input.actor.role,
+          now,
+          nextVersion,
+          correctionAuditId,
+        ],
+      );
+      confirmedCorrectionResult = {
+        reviewId: confirmedCorrectionReview.id,
+        status: "confirmed",
+        correctedTransactionIds: confirmedCorrectionEntries.map(
+          (entry) => entry.transactionId,
+        ),
+      };
+    }
   });
+  try {
+    await persistence;
+  } catch (error) {
+    await cleanupRolledBackContractEvidence(contractReconciliation, error);
+    throw error;
+  }
   return {
     affectedMonths,
     contractReconciliation,
     reimbursementReconciliation,
     salaryReconciliation,
+    pendingCorrectionReview,
+    confirmedCorrection: confirmedCorrectionResult,
   };
 }
 
@@ -3090,6 +4445,7 @@ function sendFailure(res: Response, error: unknown): void {
       success: false,
       code: error.code,
       message: error.message,
+      ...(error.details === undefined ? {} : { data: error.details }),
     });
     return;
   }
@@ -3208,7 +4564,7 @@ router.get(
   async (req, res) => {
     try {
       const actor = getActor(req);
-      const canReadMonthlyReport = READ_ROLES.includes(actor.role);
+      const canReadMonthlyReport = canReadMonthlyFinancialReport(actor.role);
       const requestedAccountCode = ["basic", "general", "business"].includes(
         String(req.query.accountCode || ""),
       )
@@ -3373,7 +4729,7 @@ router.get(
         return;
       }
       const canRead =
-        actor.role === "admin" ||
+        canMaintainMonthlyFinancialReport(actor.role) ||
         linked.user_id === actor.id ||
         (actor.role === "general_manager" && linked.type === "business");
       if (!canRead) {
@@ -3415,7 +4771,7 @@ router.get(
 
 router.get(
   "/:month/bank-receipts",
-  requireRole(READ_ROLES),
+  requireMonthlyReadRole,
   async (req, res) => {
     try {
       const month = assertFinancialMonth(req.params.month);
@@ -3428,7 +4784,7 @@ router.get(
 
 router.post(
   "/:month/bank-transactions/:transactionId/review",
-  requireRole(WRITE_ROLES),
+  requireMonthlyWriteRole,
   async (req, res) => {
     try {
       const month = assertFinancialMonth(req.params.month);
@@ -3461,7 +4817,7 @@ router.post(
         ]);
         if (
           currentActor.rows[0]?.status !== "active" ||
-          currentActor.rows[0]?.role !== "admin"
+          !canMaintainMonthlyFinancialReport(currentActor.rows[0]?.role)
         ) {
           throw new MonthlyFinancialRouteError(
             403,
@@ -3641,194 +4997,282 @@ router.post(
   },
 );
 
-router.post(
-  "/:month/bank-receipts",
-  requireRole(WRITE_ROLES),
-  receiveMonthlyBankFiles,
-  async (req, res) => {
-    const files = (
-      Array.isArray(req.files) ? req.files : []
-    ) as Express.Multer.File[];
-    const candidates: MonthlyBankUploadCandidate[] = [];
-    const outputDirsByFilePath = new Map<string, string>();
-    const submittedFileHashes = new Set<string>();
-    let remainingPageBudget = 200;
-    const duplicateFiles: Array<{
-      originalName: string;
-      existingFileId: string;
-    }> = [];
-    let committed = false;
-    try {
-      const month = assertFinancialMonth(req.params.month);
-      const actor = getActor(req);
-      const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
-      const mixedMonthConfirmed =
-        String(req.body?.mixedMonthConfirmed || "").toLowerCase() === "true";
-      if (!files.length) {
-        throw badRequest(
-          "MONTHLY_BANK_FILES_REQUIRED",
-          "请至少选择一份基本、一般或商务账户银行回单",
-        );
+function parseMonthlyBankCorrectionAcknowledgements(
+  value: unknown,
+): MonthlyBankContentCorrectionAcknowledgement[] {
+  if (value === undefined || value === null || value === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw badRequest(
+      "MONTHLY_BANK_CORRECTION_ACKNOWLEDGEMENTS_INVALID",
+      "历史回单差异确认清单格式不正确",
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw badRequest(
+      "MONTHLY_BANK_CORRECTION_ACKNOWLEDGEMENTS_INVALID",
+      "历史回单差异确认清单格式不正确",
+    );
+  }
+  const result: MonthlyBankContentCorrectionAcknowledgement[] = [];
+  const seen = new Set<string>();
+  for (const item of parsed) {
+    const candidate = item as Record<string, unknown>;
+    const acknowledgement = {
+      transactionId: String(candidate?.transactionId || "").trim(),
+      normalizedReceiptNo: String(candidate?.normalizedReceiptNo || "").trim(),
+      differenceDigest: String(candidate?.differenceDigest || "").trim(),
+    };
+    if (
+      !acknowledgement.transactionId ||
+      !acknowledgement.normalizedReceiptNo ||
+      !/^[0-9a-f]{64}$/u.test(acknowledgement.differenceDigest)
+    ) {
+      throw badRequest(
+        "MONTHLY_BANK_CORRECTION_ACKNOWLEDGEMENTS_INVALID",
+        "历史回单差异确认清单缺少必要字段",
+      );
+    }
+    const key = monthlyBankCorrectionAcknowledgementKey(acknowledgement);
+    if (seen.has(key)) {
+      throw badRequest(
+        "MONTHLY_BANK_CORRECTION_ACKNOWLEDGEMENTS_INVALID",
+        "历史回单差异确认清单存在重复项目",
+      );
+    }
+    seen.add(key);
+    result.push(acknowledgement);
+  }
+  return result;
+}
+
+async function handleMonthlyBankReceiptUpload(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const files = (
+    Array.isArray(req.files) ? req.files : []
+  ) as Express.Multer.File[];
+  const candidates: MonthlyBankUploadCandidate[] = [];
+  const outputDirsByFilePath = new Map<string, string>();
+  const submittedFileHashes = new Set<string>();
+  let remainingPageBudget = 200;
+  const duplicateFiles: Array<{
+    originalName: string;
+    existingFileId: string;
+  }> = [];
+  let committed = false;
+  try {
+    const month = assertFinancialMonth(req.params.month);
+    const actor = getActor(req);
+    const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
+    const mixedMonthConfirmed =
+      String(req.body?.mixedMonthConfirmed || "").toLowerCase() === "true";
+    const correctionReviewId = String(req.params.reviewId || "").trim();
+    const correctionConfirmation = correctionReviewId
+      ? {
+          reviewId: correctionReviewId,
+          token: String(req.body?.confirmationToken || "").trim(),
+          batchDigest: String(req.body?.batchDigest || "").trim(),
+          reason: String(req.body?.reason || "").trim(),
+          acknowledgements: parseMonthlyBankCorrectionAcknowledgements(
+            req.body?.acknowledgements,
+          ),
+        }
+      : undefined;
+    if (
+      correctionConfirmation &&
+      (!correctionConfirmation.token ||
+        !/^[0-9a-f]{64}$/u.test(correctionConfirmation.batchDigest) ||
+        !correctionConfirmation.acknowledgements.length)
+    ) {
+      throw badRequest(
+        "MONTHLY_BANK_CORRECTION_CONFIRMATION_INVALID",
+        "历史回单复核确认信息不完整，请重新上传并核对",
+      );
+    }
+    if (!files.length) {
+      throw badRequest(
+        "MONTHLY_BANK_FILES_REQUIRED",
+        "请至少选择一份基本、一般或商务账户银行回单",
+      );
+    }
+
+    for (const file of files) {
+      file.originalname = normalizeUploadFileName(file.originalname);
+      await assertMonthlyBankPdfHeader(file.path);
+      const fileHash = await calculateMonthlyBankFileHash(file.path);
+      if (submittedFileHashes.has(fileHash)) {
+        duplicateFiles.push({
+          originalName: file.originalname,
+          existingFileId: "",
+        });
+        await cleanupMonthlyBankUpload(file.path);
+        continue;
+      }
+      submittedFileHashes.add(fileHash);
+      const existing = await queryOne<{ id: string }>(
+        `SELECT id FROM monthly_financial_bank_files
+           WHERE report_month = ? AND file_hash = ?
+             AND recognition_version = ?`,
+        [month, fileHash, MONTHLY_BANK_RECOGNITION_VERSION],
+      );
+      if (existing) {
+        duplicateFiles.push({
+          originalName: file.originalname,
+          existingFileId: existing.id,
+        });
+        await cleanupMonthlyBankUpload(file.path);
+        continue;
       }
 
-      for (const file of files) {
-        file.originalname = normalizeUploadFileName(file.originalname);
-        await assertMonthlyBankPdfHeader(file.path);
-        const fileHash = await calculateMonthlyBankFileHash(file.path);
-        if (submittedFileHashes.has(fileHash)) {
-          duplicateFiles.push({
-            originalName: file.originalname,
-            existingFileId: "",
-          });
-          await cleanupMonthlyBankUpload(file.path);
-          continue;
-        }
-        submittedFileHashes.add(fileHash);
-        const existing = await queryOne<{ id: string }>(
-          `SELECT id FROM monthly_financial_bank_files
-           WHERE report_month = ? AND file_hash = ?`,
-          [month, fileHash],
+      const candidateId = `mfbf_${nanoid(16)}`;
+      const outputDir = path.join(MONTHLY_BANK_RECOGNIZED_ROOT, candidateId);
+      outputDirsByFilePath.set(file.path, outputDir);
+      const analysis = await analyzeMonthlyFinancialBankFile({
+        filePath: file.path,
+        originalName: file.originalname,
+        reportMonth: month,
+        outputDir,
+        maxPageCount: remainingPageBudget,
+      });
+      remainingPageBudget -= analysis.pageCount;
+      if (!analysis.accountCode) {
+        throw badRequest(
+          "MONTHLY_BANK_ACCOUNT_NOT_RECOGNIZED",
+          `${file.originalname}虽可能包含系统账号，但未能唯一确定所属的基本、一般或商务账户，未写入月报`,
         );
-        if (existing) {
-          duplicateFiles.push({
-            originalName: file.originalname,
-            existingFileId: existing.id,
-          });
-          await cleanupMonthlyBankUpload(file.path);
-          continue;
-        }
-
-        const candidateId = `mfbf_${nanoid(16)}`;
-        const outputDir = path.join(MONTHLY_BANK_RECOGNIZED_ROOT, candidateId);
-        outputDirsByFilePath.set(file.path, outputDir);
-        const analysis = await analyzeMonthlyFinancialBankFile({
-          filePath: file.path,
-          originalName: file.originalname,
-          reportMonth: month,
-          outputDir,
-          maxPageCount: remainingPageBudget,
-        });
-        remainingPageBudget -= analysis.pageCount;
-        if (!analysis.accountCode) {
-          throw badRequest(
-            "MONTHLY_BANK_ACCOUNT_NOT_RECOGNIZED",
-            `${file.originalname}虽可能包含系统账号，但未能唯一确定所属的基本、一般或商务账户，未写入月报`,
-          );
-        }
-        if (
-          analysis.transactionMonths.length === 1 &&
-          analysis.transactionMonths[0] !== month
-        ) {
+      }
+      if (
+        analysis.transactionMonths.length === 1 &&
+        analysis.transactionMonths[0] !== month
+      ) {
+        throw badRequest(
+          "MONTHLY_BANK_REPORT_MONTH_MISMATCH",
+          `${file.originalname}的银行交易日期归属${analysis.transactionMonths[0]}，与当前报表${month}不一致`,
+        );
+      }
+      if (analysis.transactionMonths.length > 1 && !mixedMonthConfirmed) {
+        throw conflict(
+          "MONTHLY_BANK_MIXED_MONTH_CONFIRMATION_REQUIRED",
+          `${file.originalname}包含${analysis.transactionMonths.join("、")}多个交易月份，请管理员确认后重新提交`,
+        );
+      }
+      if (analysis.transactionMonths.length > 1 && mixedMonthConfirmed) {
+        const excludedCount = analysis.transactions.filter(
+          (transaction) => transaction.transactionMonth !== month,
+        ).length;
+        analysis.transactions = analysis.transactions.filter(
+          (transaction) => transaction.transactionMonth === month,
+        );
+        if (!analysis.transactions.length) {
           throw badRequest(
             "MONTHLY_BANK_REPORT_MONTH_MISMATCH",
-            `${file.originalname}的银行交易日期归属${analysis.transactionMonths[0]}，与当前报表${month}不一致`,
+            `${file.originalname}不包含交易日期属于当前报表${month}的回单，不能入账`,
           );
         }
-        if (analysis.transactionMonths.length > 1 && !mixedMonthConfirmed) {
-          throw conflict(
-            "MONTHLY_BANK_MIXED_MONTH_CONFIRMATION_REQUIRED",
-            `${file.originalname}包含${analysis.transactionMonths.join("、")}多个交易月份，请管理员确认后重新提交`,
-          );
-        }
-        if (analysis.transactionMonths.length > 1 && mixedMonthConfirmed) {
-          const excludedCount = analysis.transactions.filter(
-            (transaction) => transaction.transactionMonth !== month,
-          ).length;
-          analysis.transactions = analysis.transactions.filter(
-            (transaction) => transaction.transactionMonth === month,
-          );
-          if (!analysis.transactions.length) {
-            throw badRequest(
-              "MONTHLY_BANK_REPORT_MONTH_MISMATCH",
-              `${file.originalname}不包含交易日期属于当前报表${month}的回单，不能入账`,
-            );
-          }
-          analysis.warnings.push(
-            `管理员已确认跨月文件；仅交易日期属于${month}的回单进入本月，其他月份${excludedCount}张回单不生成本月交易事实，请切换到对应月份重新上传并确认`,
-          );
-        }
-        const blockingWarnings = analysis.warnings.filter((warning) =>
-          /识别失败|未识别到有效回单文本|页面转换失败|页转换失败|超过两张回单|未成功拆分|同一文件电子回单号.*不一致/u.test(
-            warning,
-          ),
+        analysis.warnings.push(
+          `管理员已确认跨月文件；仅交易日期属于${month}的回单进入本月，其他月份${excludedCount}张回单不生成本月交易事实，请切换到对应月份重新上传并确认`,
         );
-        const reviewTransactions = analysis.transactions.filter(
-          (transaction) =>
-            transaction.recognitionStatus === "review_required" &&
-            !(
-              analysis.accountCode === "general" &&
-              transaction.category === "unclassified" &&
-              Boolean(transaction.normalizedElectronicReceiptNo) &&
-              Boolean(transaction.transactionDate) &&
-              transaction.amount > 0 &&
-              ["inflow", "outflow"].includes(transaction.direction) &&
-              Boolean(transaction.payerAccount) &&
-              Boolean(transaction.payeeAccount)
-            ),
-        );
-        if (blockingWarnings.length || reviewTransactions.length) {
-          throw badRequest(
-            "MONTHLY_BANK_REVIEW_REQUIRED",
-            `${file.originalname}识别不完整，未替换当前月报文件：${[
-              ...blockingWarnings,
-              ...reviewTransactions.flatMap(
-                (transaction) => transaction.warnings,
-              ),
-            ]
-              .slice(0, 3)
-              .join("；")}`,
-          );
-        }
-        const incomingPath = file.path;
-        const stableSourcePath = path.join(outputDir, "source.pdf");
-        await fs.promises.rename(incomingPath, stableSourcePath);
-        outputDirsByFilePath.delete(incomingPath);
-        outputDirsByFilePath.set(stableSourcePath, outputDir);
-        file.path = stableSourcePath;
-        candidates.push({
-          id: candidateId,
-          file,
-          outputDir,
-          analysis,
-        });
       }
-
-      const duplicateOnly = candidates.length === 0;
-      const accountCodes = candidates.map(
-        (candidate) => candidate.analysis.accountCode!,
+      const blockingWarnings = analysis.warnings.filter((warning) =>
+        /识别失败|未识别到有效回单文本|页面转换失败|页转换失败|超过两张回单|未成功拆分|同一文件电子回单号.*不一致/u.test(
+          warning,
+        ),
       );
-      if (new Set(accountCodes).size !== accountCodes.length) {
+      const reviewTransactions = analysis.transactions.filter(
+        (transaction) =>
+          transaction.recognitionStatus === "review_required" &&
+          !(
+            analysis.accountCode === "general" &&
+            transaction.category === "unclassified" &&
+            Boolean(transaction.normalizedElectronicReceiptNo) &&
+            Boolean(transaction.transactionDate) &&
+            transaction.amount > 0 &&
+            ["inflow", "outflow"].includes(transaction.direction) &&
+            Boolean(transaction.payerAccount) &&
+            Boolean(transaction.payeeAccount)
+          ),
+      );
+      if (blockingWarnings.length || reviewTransactions.length) {
         throw badRequest(
-          "MONTHLY_BANK_ACCOUNT_FILE_DUPLICATED",
-          "本次上传识别出重复账户文件，请每个账户只保留一份完整回单",
+          "MONTHLY_BANK_REVIEW_REQUIRED",
+          `${file.originalname}识别不完整，未替换当前月报文件：${[
+            ...blockingWarnings,
+            ...reviewTransactions.flatMap(
+              (transaction) => transaction.warnings,
+            ),
+          ]
+            .slice(0, 3)
+            .join("；")}`,
         );
       }
+      const incomingPath = file.path;
+      const stableSourcePath = path.join(outputDir, "source.pdf");
+      await fs.promises.rename(incomingPath, stableSourcePath);
+      outputDirsByFilePath.delete(incomingPath);
+      outputDirsByFilePath.set(stableSourcePath, outputDir);
+      file.path = stableSourcePath;
+      candidates.push({
+        id: candidateId,
+        file,
+        outputDir,
+        analysis,
+      });
+    }
 
-      const {
+    const duplicateOnly = candidates.length === 0;
+    const accountCodes = candidates.map(
+      (candidate) => candidate.analysis.accountCode!,
+    );
+    if (new Set(accountCodes).size !== accountCodes.length) {
+      throw badRequest(
+        "MONTHLY_BANK_ACCOUNT_FILE_DUPLICATED",
+        "本次上传识别出重复账户文件，请每个账户只保留一份完整回单",
+      );
+    }
+
+    const {
+      affectedMonths,
+      contractReconciliation,
+      reimbursementReconciliation,
+      salaryReconciliation,
+      pendingCorrectionReview,
+      confirmedCorrection,
+    } = await persistMonthlyBankAnalyses({
+      month,
+      expectedVersion,
+      actor,
+      sessionId: String(req.sessionID || ""),
+      candidates,
+      correctionConfirmation,
+    });
+    if (pendingCorrectionReview) {
+      throw conflictWithDetails(
+        "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED",
+        `发现${pendingCorrectionReview.conflicts.length}笔历史识别结果与本次原件不一致，请核对差异后确认换版`,
+        pendingCorrectionReview,
+      );
+    }
+    committed = true;
+    const loaded = await loadMonthlyReport(month, actor.role);
+    res.json({
+      success: true,
+      data: {
+        report: loaded.report,
+        bankStatements: await loadMonthlyBankState(month),
+        duplicateFiles,
         affectedMonths,
         contractReconciliation,
         reimbursementReconciliation,
         salaryReconciliation,
-      } = await persistMonthlyBankAnalyses({
-        month,
-        expectedVersion,
-        actor,
-        candidates,
-      });
-      committed = true;
-      const loaded = await loadMonthlyReport(month, actor.role);
-      res.json({
-        success: true,
-        data: {
-          report: loaded.report,
-          bankStatements: await loadMonthlyBankState(month),
-          duplicateFiles,
-          affectedMonths,
-          contractReconciliation,
-          reimbursementReconciliation,
-          salaryReconciliation,
-        },
-        message: duplicateOnly
+        correctionReview: confirmedCorrection,
+      },
+      message: confirmedCorrection
+        ? "历史识别差异已核实，银行回单已换版并更新月度财务报表"
+        : duplicateOnly
           ? contractReconciliation.some(
               (result) => result.changed && result.status === "matched",
             ) ||
@@ -3843,45 +5287,232 @@ router.post(
           : duplicateFiles.length
             ? "新回单已更新，重复文件已跳过"
             : "银行回单已识别并更新月度财务报表",
+    });
+  } catch (error) {
+    const commitOutcomeUncertain = Boolean(
+      error &&
+      typeof error === "object" &&
+      "commitOutcomeUncertain" in error &&
+      (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
+    );
+    if (committed || commitOutcomeUncertain) {
+      console.error("银行回单已提交，但响应刷新失败:", error);
+      res.status(500).json({
+        success: false,
+        code: "MONTHLY_BANK_UPLOAD_COMMITTED_REFRESH_REQUIRED",
+        message:
+          "银行回单提交结果暂时无法确认；已保留原件，请先重新加载回单状态，不要重复上传",
+      });
+      return;
+    }
+    if (!committed) {
+      await Promise.all(
+        files.map((file) => {
+          return cleanupMonthlyBankUpload(
+            file.path,
+            outputDirsByFilePath.get(file.path),
+          );
+        }),
+      );
+    }
+    sendFailure(res, error);
+  }
+}
+
+router.post(
+  "/:month/bank-receipts",
+  requireMonthlyWriteRole,
+  receiveMonthlyBankFiles,
+  handleMonthlyBankReceiptUpload,
+);
+
+router.post(
+  "/:month/bank-receipt-corrections/:reviewId/confirm",
+  requireMonthlyWriteRole,
+  receiveMonthlyBankFiles,
+  handleMonthlyBankReceiptUpload,
+);
+
+async function readFinancialAnalysis(
+  query: FinancialAnalysisQuery,
+  actor: { id: string; role: string },
+) {
+  const client = await pool.connect();
+  try {
+    // 全部业务来源和月结快照使用同一只读视图，查询不触发同步、建账或凭证关联。
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    await client.query("SET LOCAL statement_timeout = '60s'");
+    const current = await client.query<{ role: string; status: string }>(
+      "SELECT role, status FROM users WHERE id = $1",
+      [actor.id],
+    );
+    if (
+      current.rows[0]?.status !== "active" ||
+      !canReadMonthlyFinancialReport(current.rows[0]?.role)
+    ) {
+      throw new MonthlyFinancialRouteError(
+        403,
+        "MONTHLY_FINANCE_ANALYSIS_FORBIDDEN",
+        "当前账号无权读取财务分析",
+      );
+    }
+    const data = await loadMonthlyFinancialAnalysis(query, {
+      queryClient: client,
+      loadReport: async (month, reportClient) => {
+        const loaded = await loadMonthlyReport(
+          month,
+          current.rows[0].role,
+          true,
+          reportClient,
+        );
+        return {
+          ...loaded.report,
+          automaticDetails: loaded.automatic.details,
+          analysisLive: loaded.report.status !== "closed",
+        };
+      },
+    });
+    await client.query("COMMIT");
+    const visibleData = protectMonthlyFinancialAnalysis(
+      data,
+      current.rows[0].role,
+    );
+    return {
+      ...visibleData,
+      dataVersion: monthlyFinancialAnalysisVersion(visibleData),
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function analysisQuery(req: Request): FinancialAnalysisQuery {
+  try {
+    return parseMonthlyFinancialAnalysisQuery(req.query);
+  } catch (error) {
+    throw badRequest(
+      "MONTHLY_FINANCE_ANALYSIS_QUERY_INVALID",
+      error instanceof Error ? error.message : "财务分析筛选条件无效",
+    );
+  }
+}
+
+router.get("/analysis/export", requireMonthlyReadRole, async (req, res) => {
+  try {
+    const query = analysisQuery(req);
+    let moduleKey;
+    let requestedVersion;
+    try {
+      moduleKey = parseMonthlyFinancialAnalysisModule(req.query.module);
+      requestedVersion = parseMonthlyFinancialAnalysisVersion(
+        req.query.dataVersion,
+      );
+    } catch (error) {
+      throw badRequest(
+        "MONTHLY_FINANCE_ANALYSIS_EXPORT_INVALID",
+        error instanceof Error ? error.message : "导出条件无效",
+      );
+    }
+    const data = await readFinancialAnalysis(query, getActor(req));
+    if (requestedVersion && requestedVersion !== data.dataVersion) {
+      throw conflict(
+        "MONTHLY_FINANCE_ANALYSIS_CHANGED",
+        "分析数据已更新，请先刷新页面再导出，避免页面与文件金额不一致",
+      );
+    }
+    const buffer = buildMonthlyFinancialAnalysisWorkbook(data, moduleKey);
+    const fileName = `财务趋势分析-${query.from}-${query.to}.xlsx`;
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="financial-analysis.xlsx"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+    res.send(buffer);
+  } catch (error) {
+    sendFailure(res, error);
+  }
+});
+
+router.get("/analysis", requireMonthlyReadRole, async (req, res) => {
+  try {
+    const data = await readFinancialAnalysis(analysisQuery(req), getActor(req));
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ success: true, data });
+  } catch (error) {
+    sendFailure(res, error);
+  }
+});
+
+router.get(
+  "/analysis/projects/:rootId/receipts/:receiptId/preview",
+  requireMonthlyReadRole,
+  async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    let client: PoolClient | undefined;
+    try {
+      if (!req.session.user?.id || !req.session.user.role)
+        throw new ProjectReceiptPreviewError(401, "登录信息已失效");
+      const actor = getActor(req);
+      client = await pool.connect();
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query("SET LOCAL statement_timeout = '60s'");
+      const file = await prepareProjectReceiptPreview({
+        client,
+        actorId: actor.id,
+        rootContractId: req.params.rootId,
+        receiptId: req.params.receiptId,
+        from: req.query.from,
+        to: req.query.to,
+        evidenceVersion: req.query.evidenceVersion,
+      });
+      await client.query("COMMIT");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "sandbox");
+      res.setHeader("Content-Type", file.mimeType);
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
+      );
+      res.sendFile(file.absolutePath, (error) => {
+        if (error && !res.headersSent)
+          res
+            .status(404)
+            .json({ success: false, message: "回款文件暂时不可用" });
       });
     } catch (error) {
-      const commitOutcomeUncertain = Boolean(
-        error &&
-        typeof error === "object" &&
-        "commitOutcomeUncertain" in error &&
-        (error as { commitOutcomeUncertain?: unknown }).commitOutcomeUncertain,
-      );
-      if (committed || commitOutcomeUncertain) {
-        console.error("银行回单已提交，但响应刷新失败:", error);
-        res.status(500).json({
+      await client?.query("ROLLBACK").catch(() => undefined);
+      res
+        .status(
+          error instanceof ProjectReceiptPreviewError ? error.status : 500,
+        )
+        .json({
           success: false,
-          code: "MONTHLY_BANK_UPLOAD_COMMITTED_REFRESH_REQUIRED",
+          code: "MONTHLY_FINANCE_PROJECT_RECEIPT_PREVIEW_UNAVAILABLE",
           message:
-            "银行回单提交结果暂时无法确认；已保留原件，请先重新加载回单状态，不要重复上传",
+            error instanceof ProjectReceiptPreviewError
+              ? error.message
+              : "回款凭证预览失败，请稍后重试",
         });
-        return;
-      }
-      if (!committed) {
-        await Promise.all(
-          files.map((file) => {
-            return cleanupMonthlyBankUpload(
-              file.path,
-              outputDirsByFilePath.get(file.path),
-            );
-          }),
-        );
-      }
-      sendFailure(res, error);
+    } finally {
+      client?.release();
     }
   },
 );
 
-router.get("/trend", requireRole(READ_ROLES), async (req, res) => {
+router.get("/trend", requireMonthlyReadRole, async (req, res) => {
   try {
     const from = String(req.query.from || "");
     const to = String(req.query.to || "");
+    let trendMonths: string[];
     try {
-      listMonthlyFinancialTrendMonths(from, to);
+      trendMonths = listMonthlyFinancialTrendMonths(from, to);
     } catch (error) {
       throw badRequest(
         "MONTHLY_FINANCE_TREND_RANGE_INVALID",
@@ -3890,7 +5521,47 @@ router.get("/trend", requireRole(READ_ROLES), async (req, res) => {
     }
 
     const actor = getActor(req);
-    const [reportMonths, yearRows] = await Promise.all([
+    const [firstReport, earliestMainReceipt] = await Promise.all([
+      queryOne<{ report_month: string | null }>(
+        `SELECT MIN(report_month) AS report_month
+           FROM monthly_financial_reports`,
+        [],
+      ),
+      queryOne<{ month: string | null }>(
+        `SELECT MIN(LEFT(receipt.receipt_date, 7)) AS month
+           FROM contract_receipts receipt
+           JOIN contracts contract ON contract.id = receipt.contract_id
+           JOIN contracts root
+             ON root.id = COALESCE(contract.root_contract_id, contract.id)
+          WHERE receipt.status = 'confirmed'
+            AND CASE
+                  WHEN receipt.receipt_date ~ '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                    THEN TO_CHAR(
+                      TO_DATE(receipt.receipt_date, 'YYYY-MM-DD'),
+                      'YYYY-MM-DD'
+                    ) = receipt.receipt_date
+                  ELSE FALSE
+                END
+            AND (
+              receipt.currency IS NULL
+              OR UPPER(BTRIM(receipt.currency)) = 'CNY'
+            )
+            AND COALESCE(root.category, root.declared_category) = 'main_business'
+            AND root.is_deleted = FALSE
+            AND root.status NOT IN ('draft', 'rejected')`,
+        [],
+      ),
+    ]);
+    const firstReportMonth = firstReport?.report_month || null;
+    const earliestMainReceiptMonth = earliestMainReceipt?.month || null;
+    const [
+      reportMonths,
+      reportYearRows,
+      receiptRows,
+      receiptYearRows,
+      contractRows,
+      contractYearRows,
+    ] = await Promise.all([
       queryAll<{ report_month: string }>(
         `SELECT report_month
          FROM monthly_financial_reports
@@ -3904,7 +5575,183 @@ router.get("/trend", requireRole(READ_ROLES), async (req, res) => {
          ORDER BY year`,
         [],
       ),
+      queryAll<{
+        month: string;
+        region: string;
+        amount: string;
+        currency: string | null;
+        rate_snapshot_json: unknown;
+      }>(
+        `SELECT LEFT(receipt.receipt_date, 7) AS month,
+                COALESCE(NULLIF(BTRIM(root.area), ''), '未标注行政区') AS region,
+                receipt.amount::text AS amount, receipt.currency,
+                receipt.rate_snapshot_json
+           FROM contract_receipts receipt
+           JOIN contracts contract ON contract.id = receipt.contract_id
+           JOIN contracts root
+             ON root.id = COALESCE(contract.root_contract_id, contract.id)
+          WHERE receipt.status = 'confirmed'
+            AND CASE
+                  WHEN receipt.receipt_date ~ '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                    THEN TO_CHAR(
+                      TO_DATE(receipt.receipt_date, 'YYYY-MM-DD'),
+                      'YYYY-MM-DD'
+                    ) = receipt.receipt_date
+                  ELSE FALSE
+                END
+            AND LEFT(receipt.receipt_date, 7) >= ?
+            AND LEFT(receipt.receipt_date, 7) <= ?
+            AND COALESCE(root.category, root.declared_category) = 'main_business'
+            AND root.is_deleted = FALSE
+            AND root.status NOT IN ('draft', 'rejected')
+          ORDER BY receipt.receipt_date, receipt.id`,
+        [from, to],
+      ),
+      queryAll<{ year: number }>(
+        `SELECT DISTINCT LEFT(receipt.receipt_date, 4)::int AS year
+           FROM contract_receipts receipt
+           JOIN contracts contract ON contract.id = receipt.contract_id
+           JOIN contracts root
+             ON root.id = COALESCE(contract.root_contract_id, contract.id)
+          WHERE receipt.status = 'confirmed'
+            AND CASE
+                  WHEN receipt.receipt_date ~ '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                    THEN TO_CHAR(
+                      TO_DATE(receipt.receipt_date, 'YYYY-MM-DD'),
+                      'YYYY-MM-DD'
+                    ) = receipt.receipt_date
+                  ELSE FALSE
+                END
+            AND ?::text IS NOT NULL
+            AND LEFT(receipt.receipt_date, 7) < ?
+            AND (
+              receipt.currency IS NULL
+              OR UPPER(BTRIM(receipt.currency)) = 'CNY'
+            )
+            AND COALESCE(root.category, root.declared_category) = 'main_business'
+            AND root.is_deleted = FALSE
+            AND root.status NOT IN ('draft', 'rejected')
+          ORDER BY year`,
+        [firstReportMonth, firstReportMonth],
+      ),
+      queryAll<{
+        id: string;
+        month: string;
+        region: string;
+        amount: string;
+        contract_date_source: string | null;
+      }>(
+        `SELECT root.id, LEFT(root.contract_date, 7) AS month,
+                  COALESCE(NULLIF(BTRIM(root.area), ''), '未标注行政区') AS region,
+                  root.current_effective_amount::text AS amount,
+                  root.contract_date_source
+             FROM contracts root
+            WHERE root.is_deleted = FALSE
+              AND root.relation_type = 'main'
+              AND COALESCE(root.root_contract_id, root.id) = root.id
+              AND root.status NOT IN ('draft', 'rejected')
+              AND COALESCE(root.category, root.declared_category) = 'main_business'
+              AND CASE
+                    WHEN root.contract_date ~ '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                      THEN TO_CHAR(
+                        TO_DATE(root.contract_date, 'YYYY-MM-DD'),
+                        'YYYY-MM-DD'
+                      ) = root.contract_date
+                    ELSE FALSE
+                  END
+              AND LEFT(root.contract_date, 7) >= ?
+              AND LEFT(root.contract_date, 7) <= ?
+            ORDER BY root.contract_date, root.id`,
+        [from, to],
+      ),
+      queryAll<{ year: number }>(
+        `SELECT DISTINCT LEFT(root.contract_date, 4)::int AS year
+             FROM contracts root
+            WHERE root.is_deleted = FALSE
+              AND root.relation_type = 'main'
+              AND COALESCE(root.root_contract_id, root.id) = root.id
+              AND root.status NOT IN ('draft', 'rejected')
+              AND COALESCE(root.category, root.declared_category) = 'main_business'
+              AND root.contract_date_source IN ('ocr', 'manual')
+              AND CASE
+                    WHEN root.contract_date ~ '^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+                      THEN TO_CHAR(
+                        TO_DATE(root.contract_date, 'YYYY-MM-DD'),
+                        'YYYY-MM-DD'
+                      ) = root.contract_date
+                    ELSE FALSE
+                  END
+            ORDER BY year`,
+        [],
+      ),
     ]);
+
+    const receiptCentsByMonth = new Map<string, number>();
+    const receiptCentsByMonthRegion = new Map<string, number>();
+    const unsupportedCurrencyMonths = new Set<string>();
+    const unsupportedCurrencyRegionKeys = new Set<string>();
+    const mainBusinessRegions = new Set<string>();
+    for (const receipt of receiptRows) {
+      const region = String(receipt.region || "未标注行政区")
+        .normalize("NFKC")
+        .trim();
+      const regionKey = `${receipt.month}\u0000${region}`;
+      mainBusinessRegions.add(region);
+      const currency = String(receipt.currency || "CNY")
+        .normalize("NFKC")
+        .trim()
+        .toUpperCase();
+      if (currency !== "CNY") {
+        unsupportedCurrencyMonths.add(receipt.month);
+        unsupportedCurrencyRegionKeys.add(regionKey);
+        continue;
+      }
+      const calculation = calculateMainBusinessIncome(
+        receipt.amount,
+        resolveRateBasisPoints(receipt.rate_snapshot_json),
+      );
+      receiptCentsByMonth.set(
+        receipt.month,
+        (receiptCentsByMonth.get(receipt.month) || 0) +
+          calculation.contractAmountCents,
+      );
+      receiptCentsByMonthRegion.set(
+        regionKey,
+        (receiptCentsByMonthRegion.get(regionKey) || 0) +
+          calculation.contractAmountCents,
+      );
+    }
+    for (const month of unsupportedCurrencyMonths) {
+      receiptCentsByMonth.delete(month);
+    }
+
+    const contractAmountByMonthRegion = new Map<string, string>();
+    const contractCountByMonthRegion = new Map<string, number>();
+    const unsupportedContractDateMonths = new Set<string>();
+    const unsupportedContractDateRegionKeys = new Set<string>();
+    for (const contract of contractRows) {
+      const region = String(contract.region || "未标注行政区")
+        .normalize("NFKC")
+        .trim();
+      const key = `${contract.month}\u0000${region}`;
+      mainBusinessRegions.add(region);
+      if (!["ocr", "manual"].includes(String(contract.contract_date_source))) {
+        unsupportedContractDateMonths.add(contract.month);
+        unsupportedContractDateRegionKeys.add(key);
+        continue;
+      }
+      contractAmountByMonthRegion.set(
+        key,
+        addFinancialAmounts(
+          contractAmountByMonthRegion.get(key) || "0",
+          normalizeFinancialAmount(contract.amount),
+        ),
+      );
+      contractCountByMonthRegion.set(
+        key,
+        (contractCountByMonthRegion.get(key) || 0) + 1,
+      );
+    }
 
     const reports: MonthlyFinancialTrendReportInput[] = [];
     const concurrency = 8;
@@ -3926,21 +5773,84 @@ router.get("/trend", requireRole(READ_ROLES), async (req, res) => {
       );
     }
 
-    res.json({
-      success: true,
-      data: buildMonthlyFinancialTrendData({
-        from,
-        to,
-        availableYears: yearRows.map((row) => Number(row.year)),
-        reports,
-      }),
+    const regions = [...mainBusinessRegions].sort((left, right) =>
+      left.localeCompare(right, "zh-CN"),
+    );
+    const currentDate = new Date();
+    const currentMonth = `${currentDate.getFullYear()}-${String(
+      currentDate.getMonth() + 1,
+    ).padStart(2, "0")}`;
+    const actualReceipts = trendMonths.flatMap((month) => {
+      if (
+        !earliestMainReceiptMonth ||
+        month < earliestMainReceiptMonth ||
+        month > currentMonth ||
+        unsupportedCurrencyMonths.has(month)
+      ) {
+        return [];
+      }
+      return [
+        {
+          month,
+          amount: centsToFinancialAmount(receiptCentsByMonth.get(month) || 0),
+        },
+      ];
     });
+    const mainBusinessPoints = trendMonths.flatMap((month) =>
+      regions.map((region) => {
+        const key = `${month}\u0000${region}`;
+        return {
+          month,
+          region,
+          actualReceipt: unsupportedCurrencyRegionKeys.has(key)
+            ? null
+            : centsToFinancialAmount(receiptCentsByMonthRegion.get(key) || 0),
+          contractAmount: unsupportedContractDateRegionKeys.has(key)
+            ? null
+            : contractAmountByMonthRegion.get(key) || "0",
+          contractCount: unsupportedContractDateRegionKeys.has(key)
+            ? null
+            : contractCountByMonthRegion.get(key) || 0,
+        };
+      }),
+    );
+
+    const trend = buildMonthlyFinancialTrendData({
+      from,
+      to,
+      availableYears: [
+        ...reportYearRows.map((row) => Number(row.year)),
+        ...receiptYearRows.map((row) => Number(row.year)),
+        ...contractYearRows.map((row) => Number(row.year)),
+      ],
+      reports,
+      actualReceipts,
+      mainBusinessRegions: regions,
+      mainBusinessPoints,
+    });
+    if (unsupportedCurrencyMonths.size > 0) {
+      trend.warnings.push({
+        code: "MONTHLY_FINANCE_TREND_FOREIGN_CURRENCY_RECEIPT",
+        message:
+          "部分历史月份存在非人民币主营回款且没有冻结汇率，未生成该月主营实际到账趋势点",
+        months: [...unsupportedCurrencyMonths].sort(),
+      });
+    }
+    if (unsupportedContractDateMonths.size > 0) {
+      trend.warnings.push({
+        code: "MONTHLY_FINANCE_TREND_CONTRACT_DATE_SOURCE_UNCONFIRMED",
+        message:
+          "部分主营合同仅有上传日期，未纳入按签订月统计的合同额和合同数量趋势",
+        months: [...unsupportedContractDateMonths].sort(),
+      });
+    }
+    res.json({ success: true, data: trend });
   } catch (error) {
     sendFailure(res, error);
   }
 });
 
-router.get("/:month", requireRole(READ_ROLES), async (req, res) => {
+router.get("/:month", requireMonthlyReadRole, async (req, res) => {
   try {
     const actor = getActor(req);
     const loaded = await loadMonthlyReport(req.params.month, actor.role);
@@ -3952,13 +5862,13 @@ router.get("/:month", requireRole(READ_ROLES), async (req, res) => {
 
 router.put(
   "/:month/manual-items",
-  requireRole(WRITE_ROLES),
+  requireMonthlyWriteRole,
   async (req, res) => {
     try {
       const month = assertFinancialMonth(req.params.month);
       const actor = getActor(req);
       const expectedVersion = parseExpectedVersion(req.body?.expectedVersion);
-      const items = validateManualItems(req.body?.items, month);
+      let items = validateManualItems(req.body?.items, month);
       const requestedOpening =
         req.body?.openingBalances === undefined
           ? null
@@ -3975,6 +5885,12 @@ router.put(
         if (row?.status === "closed")
           throw new Error("已月结报表不能直接修改，请先重新开启");
         const previous = await loadPreviousContext(month, row, client);
+        if (requestedOpening && !previous.isFirstMonth) {
+          throw conflict(
+            "MONTHLY_FINANCE_OPENING_BALANCES_READ_ONLY",
+            `${month}不是首月，期初余额只能由上月月结期末承接，不能通过本次请求修改`,
+          );
+        }
         let openingBalances: FinancialAccountAmounts;
         if (previous.previousMonthClosed) {
           openingBalances = previous.openingBalances;
@@ -4054,6 +5970,77 @@ router.put(
         }
         const persistedReportId = row?.id || reportId;
         const beforeItems = await loadManualItems(row?.id || null, client);
+        const welfareCategories = await client.query<{
+          id: string;
+          name: string;
+          is_active: boolean;
+        }>(
+          `SELECT id, name, is_active
+             FROM welfare_one_expense_categories
+            FOR SHARE`,
+        );
+        const welfareTwoCategories = await client.query<{
+          id: string;
+          name: string;
+          is_active: boolean;
+        }>(
+          `SELECT id, name, is_active
+             FROM welfare_two_expense_categories
+            FOR SHARE`,
+        );
+        const welfareCategoryById = new Map(
+          [
+            ...welfareCategories.rows.map(
+              (category) => [`welfare_one:${category.id}`, category] as const,
+            ),
+            ...welfareTwoCategories.rows.map(
+              (category) => [`welfare_two:${category.id}`, category] as const,
+            ),
+          ],
+        );
+        const beforeItemById = new Map(
+          beforeItems.map((item) => [item.id!, item]),
+        );
+        items = items.map((item, index) => {
+          const welfareAccount =
+            item.category === "welfare_one_expense"
+              ? "welfare_one"
+              : item.category === "welfare_two_expense"
+                ? "welfare_two"
+                : null;
+          if (!welfareAccount) return item;
+          const category = welfareCategoryById.get(
+            `${welfareAccount}:${item.welfareCategoryId || ""}`,
+          );
+          if (!category) {
+            throw badRequest(
+              "MONTHLY_FINANCE_WELFARE_CATEGORY_NOT_FOUND",
+              `第${index + 1}条福利账户费用分类不存在`,
+            );
+          }
+          const previousItem = item.id ? beforeItemById.get(item.id) : undefined;
+          if (
+            previousItem?.welfareCategoryId &&
+            (previousItem.welfareCategoryId !== item.welfareCategoryId ||
+              previousItem.category !== item.category)
+          ) {
+            throw badRequest(
+              "MONTHLY_FINANCE_WELFARE_CATEGORY_IMMUTABLE",
+              `第${index + 1}条福利账户手工项目不能改换费用分类`,
+            );
+          }
+          if (!previousItem && !category.is_active) {
+            throw badRequest(
+              "MONTHLY_FINANCE_WELFARE_CATEGORY_INACTIVE",
+              `第${index + 1}条福利账户费用分类已停用`,
+            );
+          }
+          return {
+            ...item,
+            welfareCategoryNameSnapshot:
+              previousItem?.welfareCategoryNameSnapshot || category.name,
+          };
+        });
         const beforeIds = new Set(beforeItems.map((item) => item.id));
         for (const item of items) {
           if (item.id && !beforeIds.has(item.id)) {
@@ -4083,7 +6070,10 @@ router.put(
               `UPDATE monthly_financial_manual_items
                SET category = $3, account_code = $4, direction = $5,
                    amount = $6::numeric, occurred_on = $7, description = $8,
-                   voucher_reference = $9, updated_at = $10
+                   voucher_reference = $9, welfare_category_id = $10,
+                   welfare_category_name_snapshot = $11,
+                   welfare_two_category_id = $12,
+                   welfare_two_category_name_snapshot = $13, updated_at = $14
                WHERE report_id = $1 AND id = $2`,
               [
                 persistedReportId,
@@ -4095,6 +6085,18 @@ router.put(
                 item.occurredOn,
                 item.description,
                 item.voucherReference,
+                item.category === "welfare_one_expense"
+                  ? item.welfareCategoryId
+                  : null,
+                item.category === "welfare_one_expense"
+                  ? item.welfareCategoryNameSnapshot
+                  : null,
+                item.category === "welfare_two_expense"
+                  ? item.welfareCategoryId
+                  : null,
+                item.category === "welfare_two_expense"
+                  ? item.welfareCategoryNameSnapshot
+                  : null,
                 now,
               ],
             );
@@ -4102,8 +6104,11 @@ router.put(
             await client.query(
               `INSERT INTO monthly_financial_manual_items(
                id, report_id, category, account_code, direction, amount,
-               occurred_on, description, voucher_reference, created_by, created_at, updated_at
-             ) VALUES($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11, $11)`,
+               occurred_on, description, voucher_reference,
+               welfare_category_id, welfare_category_name_snapshot,
+               welfare_two_category_id, welfare_two_category_name_snapshot,
+               created_by, created_at, updated_at
+             ) VALUES($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15)`,
               [
                 item.id,
                 persistedReportId,
@@ -4114,6 +6119,18 @@ router.put(
                 item.occurredOn,
                 item.description,
                 item.voucherReference,
+                item.category === "welfare_one_expense"
+                  ? item.welfareCategoryId
+                  : null,
+                item.category === "welfare_one_expense"
+                  ? item.welfareCategoryNameSnapshot
+                  : null,
+                item.category === "welfare_two_expense"
+                  ? item.welfareCategoryId
+                  : null,
+                item.category === "welfare_two_expense"
+                  ? item.welfareCategoryNameSnapshot
+                  : null,
                 actor.id,
                 now,
               ],
@@ -4157,7 +6174,8 @@ router.put(
   },
 );
 
-router.post("/:month/refresh", requireRole(WRITE_ROLES), async (req, res) => {
+router.post("/:month/refresh", requireMonthlyWriteRole, async (req, res) => {
+  let contractReconciliation: MonthlyContractReceiptReconciliationResult[] = [];
   try {
     const month = assertFinancialMonth(req.params.month);
     const actor = getActor(req);
@@ -4170,8 +6188,6 @@ router.post("/:month/refresh", requireRole(WRITE_ROLES), async (req, res) => {
         pendingTransactions: [],
         replacedEvidence: [],
       };
-    let contractReconciliation: MonthlyContractReceiptReconciliationResult[] =
-      [];
     let salaryReconciliation: MonthlySalaryReceiptReconciliationResult[] = [];
     let bankAccountingFlagsNormalized = false;
     await db.transaction(async (client) => {
@@ -4183,6 +6199,12 @@ router.post("/:month/refresh", requireRole(WRITE_ROLES), async (req, res) => {
       if (row?.status === "closed")
         throw new Error("已月结报表不能刷新，请先重新开启");
       const previous = await loadPreviousContext(month, row, client);
+      if (!row && previous.isFirstMonth) {
+        throw conflict(
+          "MONTHLY_FINANCE_OPENING_BALANCES_REQUIRED",
+          "首月尚未保存，请先完整填写四个账户期初余额并点击保存维护数据，再同步自动数据",
+        );
+      }
       const now = new Date().toISOString();
       contractReconciliation = await reconcileMonthlyContractBankTransactions(
         client,
@@ -4285,11 +6307,12 @@ router.post("/:month/refresh", requireRole(WRITE_ROLES), async (req, res) => {
       message: "自动数据已同步",
     });
   } catch (error) {
+    await cleanupRolledBackContractEvidence(contractReconciliation, error);
     sendFailure(res, error);
   }
 });
 
-router.post("/:month/close", requireRole(WRITE_ROLES), async (req, res) => {
+router.post("/:month/close", requireMonthlyWriteRole, async (req, res) => {
   try {
     const month = assertFinancialMonth(req.params.month);
     const actor = getActor(req);
@@ -4443,7 +6466,7 @@ router.post("/:month/close", requireRole(WRITE_ROLES), async (req, res) => {
   }
 });
 
-router.post("/:month/reopen", requireRole(WRITE_ROLES), async (req, res) => {
+router.post("/:month/reopen", requireMonthlyWriteRole, async (req, res) => {
   try {
     const month = assertFinancialMonth(req.params.month);
     const actor = getActor(req);
@@ -4527,7 +6550,7 @@ router.post("/:month/reopen", requireRole(WRITE_ROLES), async (req, res) => {
   }
 });
 
-router.get("/:month/export", requireRole(READ_ROLES), async (req, res) => {
+router.get("/:month/export", requireMonthlyReadRole, async (req, res) => {
   try {
     const month = assertFinancialMonth(req.params.month);
     const actor = getActor(req);

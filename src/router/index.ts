@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, RouteRecordRaw } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { ElMessage } from "element-plus";
+import { isRouteRoleAllowed } from "@/utils/routeRoleAccess";
 
 const routes: RouteRecordRaw[] = [
   {
@@ -161,7 +162,7 @@ const routes: RouteRecordRaw[] = [
         }),
         meta: {
           title: "合同待办",
-          requiresRole: ["admin"],
+          requiresRole: ["super_admin", "admin"],
         },
       },
       {
@@ -318,6 +319,60 @@ const routes: RouteRecordRaw[] = [
         meta: { title: "大额报销单详情" },
       },
       {
+        path: "/welfare-one-reimbursement",
+        name: "WelfareOneReimbursement",
+        component: () => import("@/views/LargeReimbursement.vue"),
+        props: { reimbursementType: "welfare_one" },
+        meta: {
+          title: "福利1报销",
+          requiresRole: ["chairman"],
+        },
+      },
+      {
+        path: "/welfare-one-reimbursement/create",
+        name: "WelfareOneReimbursementCreate",
+        component: () => import("@/views/LargeReimbursementCreate.vue"),
+        props: { reimbursementType: "welfare_one" },
+        meta: {
+          title: "新建福利1报销单",
+          requiresRole: ["chairman"],
+        },
+      },
+      {
+        path: "/welfare-one-reimbursement/:id",
+        name: "WelfareOneReimbursementDetail",
+        component: () => import("@/views/LargeReimbursementDetail.vue"),
+        props: { reimbursementType: "welfare_one" },
+        meta: { title: "福利1报销单详情", requiresAdmin: true },
+      },
+      {
+        path: "/welfare-two-reimbursement",
+        name: "WelfareTwoReimbursement",
+        component: () => import("@/views/LargeReimbursement.vue"),
+        props: { reimbursementType: "welfare_two" },
+        meta: {
+          title: "福利2报销",
+          requiresRole: ["chairman"],
+        },
+      },
+      {
+        path: "/welfare-two-reimbursement/create",
+        name: "WelfareTwoReimbursementCreate",
+        component: () => import("@/views/LargeReimbursementCreate.vue"),
+        props: { reimbursementType: "welfare_two" },
+        meta: {
+          title: "新建福利2报销单",
+          requiresRole: ["chairman"],
+        },
+      },
+      {
+        path: "/welfare-two-reimbursement/:id",
+        name: "WelfareTwoReimbursementDetail",
+        component: () => import("@/views/LargeReimbursementDetail.vue"),
+        props: { reimbursementType: "welfare_two" },
+        meta: { title: "福利2报销单详情", requiresAdmin: true },
+      },
+      {
         path: "/business-reimbursement",
         name: "BusinessReimbursement",
         component: () => import("@/views/BusinessReimbursement.vue"),
@@ -347,7 +402,8 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/views/MonthlyFinancialReport.vue"),
         meta: {
           title: "月度财务报表",
-          requiresRole: ["admin", "general_manager"],
+          requiresRole: ["super_admin", "admin", "general_manager"],
+          requiresExactRole: true,
         },
       },
       {
@@ -486,13 +542,21 @@ const routes: RouteRecordRaw[] = [
         path: "/approval/payment/:id",
         name: "ApprovalPayment",
         component: () => import("@/views/ApprovalPayment.vue"),
-        meta: { title: "付款", requiresAdmin: true },
+        meta: {
+          title: "付款",
+          requiresRole: ["super_admin", "admin"],
+          requiresExactRole: true,
+        },
       },
       {
         path: "/approval/batch-payment/:batchId",
         name: "BatchPayment",
         component: () => import("@/views/ApprovalPayment.vue"),
-        meta: { title: "批量付款", requiresAdmin: true },
+        meta: {
+          title: "批量付款",
+          requiresRole: ["super_admin", "admin"],
+          requiresExactRole: true,
+        },
       },
     ],
   },
@@ -576,10 +640,11 @@ router.beforeEach(async (to, _from, next) => {
     if (to.meta.requiresRole) {
       const role = authStore.user?.role;
       const requiredRoles = to.meta.requiresRole as string[];
-      const roleAllowed =
-        !!role &&
-        (requiredRoles.includes(role) ||
-          (role === "chairman" && requiredRoles.includes("super_admin")));
+      const roleAllowed = isRouteRoleAllowed(
+        role,
+        requiredRoles,
+        to.meta.requiresExactRole === true,
+      );
       if (!roleAllowed) {
         next({ name: "Home" });
         return;

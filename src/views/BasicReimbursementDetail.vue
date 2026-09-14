@@ -145,7 +145,7 @@
                   保存草稿
                 </el-button>
                 <el-button type="primary" @click="handleSubmit" size="large" :loading="reimbursement.loading.value">
-                  提交审批
+                  {{ submitButtonText }}
                 </el-button>
               </div>
             </el-form-item>
@@ -245,21 +245,20 @@ import { api } from '@/utils/api'
 import { toFileUrl } from '@/utils/file'
 import { buildCrossUploadInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
 import { showUploadError } from '@/utils/uploadError'
+import { useAuthStore } from '@/stores/auth'
+import { getReimbursementTypeRoute } from '@/utils/reimbursement/typeConfig'
 
 const router = useRouter()
-
-// 报销类型到路由的映射
-const typeRouteMap: Record<string, string> = {
-  basic: '/basic-reimbursement',
-  business: '/business-reimbursement',
-  large: '/large-reimbursement',
-}
+const authStore = useAuthStore()
+const submitButtonText = computed(() =>
+  authStore.user?.role === 'chairman' ? '提交报销' : '提交审批',
+)
 
 // 点击批次中的报销单跳转
 function handleBatchItemClick(item: any) {
   const currentId = reimbursement.reimbursementId.value
   if (item.id === currentId) return
-  const basePath = typeRouteMap[item.type] || '/basic-reimbursement'
+  const basePath = getReimbursementTypeRoute(item.type) || '/basic-reimbursement'
   router.push({
     path: `${basePath}/${item.id}`,
     query: { mode: 'view' }

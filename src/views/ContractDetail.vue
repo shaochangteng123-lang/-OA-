@@ -93,6 +93,19 @@
           >{{ rentalExitLabel }}</el-button
         >
         <el-button
+          v-if="
+            canEdit &&
+            detail.contract.relationType === 'main' &&
+            ['draft', 'effective', 'executing', 'completed'].includes(
+              detail.contract.status,
+            )
+          "
+          type="primary"
+          plain
+          @click="openTargetAmountDialog"
+          >设置目标金额</el-button
+        >
+        <el-button
           v-if="canUploadSupplement"
           type="warning"
           plain
@@ -151,11 +164,7 @@
     <template v-else-if="detail && !errorMessage">
       <header v-if="!detailManagerSealApprovalActive" class="detail-hero">
         <div class="hero-main">
-          <span class="hero-kicker">{{
-            detail.contract.category
-              ? CONTRACT_CATEGORY_LABELS[detail.contract.category]
-              : "待识别"
-          }}</span>
+          <span class="hero-kicker">{{ contractCategoryDisplayLabel }}</span>
           <div class="title-row">
             <h1>{{ detail.contract.name || detail.contract.projectName }}</h1>
             <ContractStatusTag :status="detail.contract.status" />
@@ -189,6 +198,10 @@
             <span
               ><el-icon><Connection /></el-icon
               >{{ detail.contract.partyB }}</span
+            >
+            <span v-if="detail.contract.partyC"
+              ><el-icon><Connection /></el-icon
+              >{{ detail.contract.partyC }}</span
             >
             <span
               ><el-icon><Location /></el-icon
@@ -292,9 +305,26 @@
             >
           </template>
           <template v-else>
-            <span>当前合同总额</span>
+            <span>{{
+              detail.contract.pricingMode === "target"
+                ? "当前目标金额"
+                : "当前合同总额"
+            }}</span>
             <strong>{{ formatContractMoney(displayedCurrentAmount) }}</strong>
-            <small
+            <small v-if="detail.contract.pricingMode === 'target'">
+              当前确认金额
+              {{
+                formatContractMoney(
+                  detail.contract.confirmedContractAmount,
+                  "—",
+                )
+              }}
+              <template v-if="detail.contract.confirmedQuantity != null">
+                · 已确认 {{ detail.contract.confirmedQuantity
+                }}{{ detail.contract.quantityUnit || "" }}
+              </template>
+            </small>
+            <small v-else
               >{{ CONTRACT_RELATION_LABELS[detail.contract.relationType] }} ·
               服务端实时核算</small
             >
@@ -350,7 +380,7 @@
       >
         <ContractMetricCard
           :label="
-            isAssetContract
+            isCostContract
               ? isInternalFundingMode
                 ? '工程已支出'
                 : '已付款'
@@ -358,13 +388,13 @@
           "
           :value="
             formatContractMoney(
-              isAssetContract
+              isCostContract
                 ? detail.contract.paidAmount
                 : detail.contract.receivedAmount,
             )
           "
           :note="
-            isAssetContract
+            isCostContract
               ? isInternalFundingMode
                 ? `按工程咨询转给${assetSigningSubject || '签约公司'}的回单日期计支出`
                 : '已上传有效付款凭证口径'
@@ -383,7 +413,7 @@
         />
         <ContractMetricCard
           :label="
-            isAssetContract
+            isCostContract
               ? isInternalFundingMode
                 ? '待工程划拨'
                 : '未付款金额'
@@ -391,7 +421,7 @@
           "
           :value="
             formatContractMoney(
-              isAssetContract
+              isCostContract
                 ? detail.accounting?.unpaidAmount
                 : detail.accounting?.unreceivedAmount,
               '—',
@@ -403,15 +433,15 @@
         />
         <ContractMetricCard
           :label="
-            isAssetContract && isInternalFundingMode
+            isCostContract && isInternalFundingMode
               ? '履约支付完成率'
-              : isAssetContract
+              : isCostContract
                 ? '付款完成率'
                 : '合同完成率'
           "
           :value="`${normalizedProgress}%`"
           :note="
-            isAssetContract
+            isCostContract
               ? `${isInternalFundingMode ? `${assetSigningSubject || '签约公司'}对外付款` : '有效付款'} / ${hasPendingSupplementAmountChange ? '变更后合同金额' : '当前合同总额'}`
               : `有效回单 / ${hasPendingSupplementAmountChange ? '变更后合同金额' : '当前合同总额'}`
           "
@@ -419,12 +449,10 @@
           tone="cyan"
         />
         <ContractMetricCard
-          :label="
-            detail.contract.category === 'asset' ? '本月支出' : '核算基数'
-          "
+          :label="isCostContract ? '本月支出' : '核算基数'"
           :value="
             formatContractMoney(
-              detail.contract.category === 'asset'
+              isCostContract
                 ? detail.accounting?.monthExpense
                 : detail.accounting?.basis,
             )
@@ -510,27 +538,49 @@
                 <span>识别结果已归档</span>
               </div>
               <el-descriptions :column="2" border>
-                <el-descriptions-item label="甲方单位">{{
-                  detail.contract.partyA
-                }}</el-descriptions-item>
-                <el-descriptions-item label="乙方单位">{{
-                  detail.contract.partyB
-                }}</el-descriptions-item>
                 <el-descriptions-item
                   :label="
-                    detail.contract.category === 'asset'
-                      ? '合同名称'
-                      : '项目名称'
+                    detail.contract.assetCategory === 'notary_fee'
+                      ? '付款单位'
+                      : '甲方单位'
+                  "
+                  >{{ detail.contract.partyA }}</el-descriptions-item
+                >
+                <el-descriptions-item
+                  :label="
+                    detail.contract.assetCategory === 'notary_fee'
+                      ? '对方名称'
+                      : '乙方单位'
+                  "
+                  >{{ detail.contract.partyB }}</el-descriptions-item
+                >
+                <el-descriptions-item
+                  v-if="detail.contract.partyC"
+                  label="丙方单位"
+                  >{{ detail.contract.partyC }}</el-descriptions-item
+                >
+                <el-descriptions-item
+                  :label="
+                    detail.contract.assetCategory === 'notary_fee'
+                      ? '通知标题'
+                      : detail.contract.category === 'asset'
+                        ? '合同名称'
+                        : '项目名称'
                   "
                   >{{ detail.contract.projectName }}</el-descriptions-item
                 >
-                <el-descriptions-item label="合同签订日期">{{
-                  formatContractDate(detail.contract.contractDate)
-                }}</el-descriptions-item>
+                <el-descriptions-item
+                  :label="
+                    detail.contract.assetCategory === 'notary_fee'
+                      ? '通知日期'
+                      : '合同签订日期'
+                  "
+                  >{{
+                    formatContractDate(detail.contract.contractDate)
+                  }}</el-descriptions-item
+                >
                 <el-descriptions-item label="合同分类">{{
-                  detail.contract.category
-                    ? CONTRACT_CATEGORY_LABELS[detail.contract.category]
-                    : "待识别"
+                  contractCategoryDisplayLabel
                 }}</el-descriptions-item>
                 <el-descriptions-item label="合同关系">{{
                   CONTRACT_RELATION_LABELS[detail.contract.relationType]
@@ -539,36 +589,44 @@
                   detail.contract.description || "—"
                 }}</el-descriptions-item>
                 <el-descriptions-item label="是否需要辅助材料">
-                  <el-switch
-                    v-if="canEdit"
-                    :model-value="
-                      Boolean(detail.contract.requiresAuxiliaryMaterials)
-                    "
-                    :loading="auxiliarySettingLoading"
-                    :disabled="
-                      auxiliarySettingLoading ||
-                      (Boolean(detail.contract.requiresAuxiliaryMaterials) &&
-                        auxiliaryHasContent)
-                    "
-                    active-text="是"
-                    inactive-text="否"
-                    @change="updateAuxiliaryMaterialRequirement"
-                  />
-                  <small
-                    v-if="
-                      detail.contract.requiresAuxiliaryMaterials &&
-                      auxiliaryHasContent
-                    "
-                    class="auxiliary-setting-tip"
-                  >
-                    请先删除全部辅助材料后再关闭
-                  </small>
+                  <template v-if="canEdit">
+                    <el-switch
+                      :model-value="
+                        Boolean(detail.contract.requiresAuxiliaryMaterials)
+                      "
+                      :loading="auxiliarySettingLoading"
+                      :disabled="
+                        auxiliarySettingLoading ||
+                        (Boolean(detail.contract.requiresAuxiliaryMaterials) &&
+                          auxiliaryHasContent)
+                      "
+                      inline-prompt
+                      active-text="是"
+                      inactive-text="否"
+                      @change="updateAuxiliaryMaterialRequirement"
+                    />
+                    <small
+                      v-if="
+                        detail.contract.requiresAuxiliaryMaterials &&
+                        auxiliaryHasContent
+                      "
+                      class="auxiliary-setting-tip"
+                    >
+                      请先删除全部辅助材料后再关闭
+                    </small>
+                  </template>
                   <span v-else>{{
                     detail.contract.requiresAuxiliaryMaterials ? "是" : "否"
                   }}</span>
                 </el-descriptions-item>
                 <el-descriptions-item
-                  :label="isSupplementContract ? '本次增减' : '合同金额'"
+                  :label="
+                    isSupplementContract
+                      ? '本次增减'
+                      : detail.contract.pricingMode === 'target'
+                        ? '目标金额'
+                        : '合同金额'
+                  "
                   >{{
                     formatContractMoney(
                       isSupplementContract
@@ -577,6 +635,31 @@
                     )
                   }}</el-descriptions-item
                 >
+                <template v-if="detail.contract.pricingMode === 'target'">
+                  <el-descriptions-item label="目标数量">
+                    <template v-if="detail.contract.targetQuantity != null">
+                      {{ detail.contract.targetQuantity
+                      }}{{ detail.contract.quantityUnit || "" }}
+                    </template>
+                    <span v-else>—</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="单价">{{
+                    formatContractMoney(detail.contract.unitPrice, "—")
+                  }}</el-descriptions-item>
+                  <el-descriptions-item label="当前确认数量">
+                    <template v-if="detail.contract.confirmedQuantity != null">
+                      {{ detail.contract.confirmedQuantity
+                      }}{{ detail.contract.quantityUnit || "" }}
+                    </template>
+                    <span v-else>—</span>
+                  </el-descriptions-item>
+                  <el-descriptions-item label="当前确认金额">{{
+                    formatContractMoney(
+                      detail.contract.confirmedContractAmount,
+                      "—",
+                    )
+                  }}</el-descriptions-item>
+                </template>
                 <el-descriptions-item
                   v-if="isSupplementContract"
                   label="补充协议变更类型"
@@ -677,6 +760,47 @@
                   detail.contract.ownerName || "财务"
                 }}</el-descriptions-item>
               </el-descriptions>
+            </section>
+            <section
+              v-if="detail.contract.pricingMode === 'target'"
+              class="content-card"
+            >
+              <div class="card-heading">
+                <h2>目标金额变更记录</h2>
+                <span>首次设置不计入变更次数，历史不可修改</span>
+              </div>
+              <el-table
+                v-if="detail.targetAmountChanges?.length"
+                :data="detail.targetAmountChanges"
+                size="small"
+              >
+                <el-table-column label="次数" width="100">
+                  <template #default="{ row }">
+                    {{ targetAmountChangeLabel(row.changeType, row.changeNo) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="变更前" min-width="140">
+                  <template #default="{ row }">{{
+                    formatContractMoney(row.oldTargetAmount, "—")
+                  }}</template>
+                </el-table-column>
+                <el-table-column label="变更后" min-width="140">
+                  <template #default="{ row }">{{
+                    formatContractMoney(row.newTargetAmount)
+                  }}</template>
+                </el-table-column>
+                <el-table-column prop="reason" label="原因" min-width="220" />
+                <el-table-column label="操作人" min-width="120">
+                  <template #default="{ row }">{{
+                    row.changedByName || "管理员"
+                  }}</template>
+                </el-table-column>
+                <el-table-column label="时间" min-width="180">
+                  <template #default="{ row }">{{
+                    formatContractDateTime(row.changedAt)
+                  }}</template>
+                </el-table-column>
+              </el-table>
             </section>
           </div>
         </el-tab-pane>
@@ -1075,6 +1199,7 @@
             class="finance-registration-workspace"
             :contract-id="contractId"
             :category="detail.contract.category"
+            :declared-subtype="detail.contract.declaredSubtype"
             :asset-funding-mode="detail.contract.assetFundingMode || undefined"
             :contract-company-subject="assetSigningSubject || undefined"
             :contract-counterparty="assetContractCounterparty"
@@ -1427,7 +1552,7 @@
               </div>
               <template v-if="detail.accounting">
                 <div
-                  v-if="isAssetContract && !isRentalLease"
+                  v-if="isCostContract && !isHouseRentalLease"
                   class="accounting-summary"
                 >
                   <div>
@@ -1450,21 +1575,6 @@
                     }}</span
                     ><strong>{{
                       formatContractMoney(detail.accounting.unpaidAmount, "—")
-                    }}</strong>
-                  </div>
-                </div>
-                <div
-                  v-if="isVehicleRentalLease"
-                  class="accounting-summary vehicle-rental-accounting-summary"
-                >
-                  <div>
-                    <span>合同总金额</span>
-                    <strong>{{
-                      formatContractMoney(
-                        detail.contract.currentEffectiveAmount ??
-                          detail.contract.currentAmount ??
-                          detail.contract.amount,
-                      )
                     }}</strong>
                   </div>
                 </div>
@@ -1520,7 +1630,7 @@
                     </div>
                   </section>
                 </div>
-                <div v-if="!isAssetContract" class="accounting-summary">
+                <div v-if="!isCostContract" class="accounting-summary">
                   <div>
                     <span>本月收入</span
                     ><strong>{{
@@ -1560,7 +1670,7 @@
                   </div>
                 </div>
                 <el-empty
-                  v-else-if="isAssetContract && !isRentalLease"
+                  v-else-if="isCostContract && !isRentalLease"
                   description="暂无本合同相关支出记录"
                   :image-size="52"
                 />
@@ -1568,7 +1678,7 @@
                   v-if="
                     !isRentalLease &&
                     detail.accounting.note &&
-                    (!isAssetContract || relatedAccountingLines.length)
+                    (!isCostContract || relatedAccountingLines.length)
                   "
                   type="info"
                   :closable="false"
@@ -1587,7 +1697,7 @@
                 <span class="seal-workspace-kicker">正式合同归档</span>
                 <h2>盖章合同核验与归档</h2>
                 <p>
-                  上传盖章版后，系统将逐项核对草拟审批版与盖章版的甲乙双方名称。
+                  上传盖章版后，系统将逐项核对草拟审批版与盖章版的合同各方名称。
                 </p>
               </div>
               <el-tag
@@ -1608,7 +1718,7 @@
             >
               <el-step title="上传盖章版" />
               <el-step title="自动识别" />
-              <el-step title="甲乙方核对" />
+              <el-step title="合同各方核对" />
               <el-step title="归档生效" />
             </el-steps>
 
@@ -1623,7 +1733,7 @@
                   :closable="false"
                   show-icon
                   title="上传后由系统自动识别并核验，不会直接让合同生效"
-                  description="甲方、乙方或合同金额无法可靠识别时，只能重新识别或重新上传；合同签订日期缺失时采用上传日期兜底。"
+                  description="甲方、乙方、丙方（如有）或合同金额无法可靠识别时，只能重新识别或重新上传；合同签订日期缺失时采用上传日期兜底。"
                   class="seal-workspace-alert"
                 />
                 <el-form label-position="top">
@@ -1722,7 +1832,7 @@
                   show-icon
                   :closable="false"
                   title="正在上传并识别，请勿关闭页面"
-                  description="系统将在核验完成后显示甲乙双方名称、合同金额和签订日期的对照结果。"
+                  description="系统将在核验完成后显示合同各方名称、合同金额和签订日期的对照结果。"
                   class="seal-upload-status"
                 />
               </div>
@@ -1757,7 +1867,7 @@
               <div class="seal-party-section">
                 <div class="seal-section-heading">
                   <div>
-                    <h3>甲乙双方名称核对</h3>
+                    <h3>合同各方名称核对</h3>
                     <p>
                       分别比较审批版与盖章版；任一方不一致都会明确提示并阻止直接归档。
                     </p>
@@ -1971,6 +2081,86 @@
       </el-tabs>
     </template>
 
+    <el-dialog
+      v-model="targetAmountDialogVisible"
+      title="设置合同目标金额"
+      width="620px"
+      destroy-on-close
+    >
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="目标金额是台账、看板和财务完成率的统一分母"
+        description="首次设置不计入变更次数；后续调整目标金额、数量或单价必须填写原因。"
+      />
+      <el-form label-position="top" class="target-amount-form">
+        <div class="target-amount-grid">
+          <el-form-item label="目标金额" required>
+            <el-input
+              v-model="targetAmountForm.targetAmount"
+              inputmode="decimal"
+            >
+              <template #prepend>¥</template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="数量单位">
+            <el-input
+              v-model="targetAmountForm.quantityUnit"
+              maxlength="20"
+              placeholder="例如：套"
+            />
+          </el-form-item>
+          <el-form-item label="目标数量">
+            <el-input
+              v-model="targetAmountForm.targetQuantity"
+              inputmode="decimal"
+            />
+          </el-form-item>
+          <el-form-item label="单价">
+            <el-input v-model="targetAmountForm.unitPrice" inputmode="decimal">
+              <template #prepend>¥</template>
+            </el-input>
+          </el-form-item>
+          <el-form-item label="当前确认数量">
+            <el-input
+              v-model="targetAmountForm.confirmedQuantity"
+              inputmode="decimal"
+            />
+          </el-form-item>
+          <el-form-item label="当前确认金额">
+            <el-input
+              v-model="targetAmountForm.confirmedContractAmount"
+              inputmode="decimal"
+            >
+              <template #prepend>¥</template>
+            </el-input>
+          </el-form-item>
+        </div>
+        <el-form-item
+          :label="targetAmountIsInitial ? '首次设置说明（可选）' : '变更原因'"
+          :required="!targetAmountIsInitial"
+        >
+          <el-input
+            v-model="targetAmountForm.reason"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="targetAmountDialogVisible = false">取消</el-button>
+        <el-button
+          type="primary"
+          :loading="targetAmountSaving"
+          @click="saveTargetAmount"
+          >保存</el-button
+        >
+      </template>
+    </el-dialog>
+
     <ContractReadOnlyPreview
       :visible="readonlyPreviewVisible"
       :url="readonlyPreviewUrl"
@@ -2053,6 +2243,7 @@ import {
   reverseContractRecord,
   submitContract,
   updateContractAuxiliaryMaterialSetting,
+  updateContractTargetAmount,
   uploadSealedContract,
   withdrawContractApproval,
 } from "@/utils/contractApi";
@@ -2073,6 +2264,16 @@ const router = useRouter();
 const authStore = useAuthStore();
 const contractId = computed(() => String(route.params.id || ""));
 const adminRoles = new Set(["super_admin", "chairman", "admin"]);
+const contractCategoryDisplayLabel = computed(() => {
+  const contract = detail.value?.contract;
+  if (!contract?.category) return "待识别";
+  if (contract.category === "non_main") {
+    return contract.declaredSubtype === "non_main_expense"
+      ? CONTRACT_DECLARED_SUBTYPE_LABELS.non_main_expense
+      : CONTRACT_DECLARED_SUBTYPE_LABELS.non_main_income;
+  }
+  return CONTRACT_CATEGORY_LABELS[contract.category];
+});
 const contractLedgerRoles = new Set([
   "super_admin",
   "chairman",
@@ -2169,7 +2370,15 @@ const canManageFinancials = computed(
     Boolean(
       detail.value &&
       detail.value.contract.relationType === "main" &&
-      ["effective", "executing"].includes(detail.value.contract.status),
+      (["effective", "executing"].includes(detail.value.contract.status) ||
+        (detail.value.contract.status === "completed" &&
+          detail.value.contract.category === "asset" &&
+          ["engineering_direct", "technology_direct"].includes(
+            detail.value.contract.assetFundingMode || "",
+          ) &&
+          financialRegistrationCards.value.some(
+            (card) => card.status === "draft",
+          ))),
     ),
 );
 const canUploadSupplement = computed(
@@ -2215,6 +2424,13 @@ const supplementAmountDelta = computed(() =>
 );
 const isAssetContract = computed(
   () => detail.value?.contract.category === "asset",
+);
+const isCostContract = computed(
+  () =>
+    detail.value?.contract.financialDirection === "cost" ||
+    isAssetContract.value ||
+    (detail.value?.contract.category === "non_main" &&
+      detail.value?.contract.declaredSubtype === "non_main_expense"),
 );
 const depositSubtypeLabel = computed(() => {
   const subtype = detail.value?.contract.declaredSubtype;
@@ -2263,15 +2479,12 @@ const canManageRentalLifecycle = computed(
 const rentalExitLabel = computed(() =>
   detail.value?.contract.declaredSubtype === "vehicle_rental" ? "还车" : "退租",
 );
-const isVehicleRentalLease = computed(
-  () => detail.value?.contract.declaredSubtype === "vehicle_rental",
-);
 const isHouseRentalLease = computed(
   () => detail.value?.contract.declaredSubtype === "house_rental",
 );
 const relatedAccountingLines = computed(() => {
   const lines = detail.value?.accounting?.lines || [];
-  return isAssetContract.value
+  return isCostContract.value
     ? lines.filter((line) => Math.abs(moneyToNumber(line.amount)) > 0)
     : lines;
 });
@@ -2542,7 +2755,7 @@ const assetContractCounterparty = computed(() => {
     assetSigningSubject.value,
   );
   return (
-    [contract.partyA, contract.partyB].find(
+    [contract.partyA, contract.partyB, contract.partyC].find(
       (party) =>
         normalizeContractSubjectName(party) &&
         normalizeContractSubjectName(party) !== normalizedSigningSubject,
@@ -2676,6 +2889,20 @@ const contractFileGroups = computed(() => {
 });
 const loading = ref(false);
 const actionLoading = ref(false);
+const targetAmountDialogVisible = ref(false);
+const targetAmountSaving = ref(false);
+const targetAmountForm = reactive({
+  targetAmount: "",
+  targetQuantity: "",
+  unitPrice: "",
+  confirmedQuantity: "",
+  confirmedContractAmount: "",
+  quantityUnit: "",
+  reason: "",
+});
+const targetAmountIsInitial = computed(
+  () => detail.value?.contract.pricingMode !== "target",
+);
 const rentalExitConfirming = ref(false);
 const auxiliarySettingLoading = ref(false);
 const auxiliaryHasContent = ref(false);
@@ -2800,7 +3027,7 @@ const sealedFileTypeLabel = computed(() =>
 
 type SealPartyFieldKey = Extract<
   ContractSealVerificationFieldKey,
-  "party_a" | "party_b"
+  "party_a" | "party_b" | "party_c"
 >;
 type SealContentComparisonState = "match" | "mismatch" | "missing";
 type SealPartyComparisonState = SealContentComparisonState;
@@ -2850,14 +3077,21 @@ const sealCanArchive = computed(
 const sealPartyComparisons = computed(() => {
   const verification = sealVerification.value;
   if (!verification) return [];
-  return (["party_a", "party_b"] as const).map((fieldCode) => {
+  const partyFields: SealPartyFieldKey[] = [
+    "party_a",
+    "party_b",
+    ...(verification.approvedSnapshot.partyC ? (["party_c"] as const) : []),
+  ];
+  return partyFields.map((fieldCode) => {
     const field = verification.fields.find(
       (candidate) => candidate.field === fieldCode,
     );
     const approvedSnapshotValue =
       fieldCode === "party_a"
         ? verification.approvedSnapshot.partyA
-        : verification.approvedSnapshot.partyB;
+        : fieldCode === "party_b"
+          ? verification.approvedSnapshot.partyB
+          : verification.approvedSnapshot.partyC;
     const approvedValue = field?.approvedValue || approvedSnapshotValue || null;
     const sealedValue = field?.recognizedValue || field?.finalValue || null;
     const state = sealContentComparisonState(
@@ -2878,14 +3112,28 @@ const sealPartyComparisons = computed(() => {
 const sealSecondaryFields = computed(
   () =>
     sealVerification.value?.fields.filter(
-      (field) => field.field !== "party_a" && field.field !== "party_b",
+      (field) =>
+        field.field !== "party_a" &&
+        field.field !== "party_b" &&
+        field.field !== "party_c",
     ) || [],
 );
 
 const sealReviewCoreFields = computed(() => {
   const verification = sealVerification.value;
   if (!verification) return [];
-  return (["party_a", "party_b", "amount"] as const).map((fieldCode) => {
+  const coreFields: Array<
+    Extract<
+      ContractSealVerificationFieldKey,
+      "party_a" | "party_b" | "party_c" | "amount"
+    >
+  > = [
+    "party_a",
+    "party_b",
+    ...(verification.approvedSnapshot.partyC ? (["party_c"] as const) : []),
+    "amount",
+  ];
+  return coreFields.map((fieldCode) => {
     const field = verification.fields.find(
       (candidate) => candidate.field === fieldCode,
     );
@@ -2895,7 +3143,9 @@ const sealReviewCoreFields = computed(() => {
         ? verification.approvedSnapshot.partyA
         : fieldCode === "party_b"
           ? verification.approvedSnapshot.partyB
-          : verification.approvedSnapshot.amount);
+          : fieldCode === "party_c"
+            ? verification.approvedSnapshot.partyC
+            : verification.approvedSnapshot.amount);
     const sealedValue = field?.recognizedValue || field?.finalValue || null;
     return {
       fieldCode,
@@ -3185,7 +3435,7 @@ const sealStatusDescription = computed(() => {
     return "本轮差异复审已拒绝，合同进入已拒绝终态；识别记录仅保留用于审计。";
   if (status === "infrastructure_failed")
     return "请稍后重新识别或重新上传文件，系统不会以人工录入绕过识别故障。";
-  return "甲乙方、合同金额和合同签订日期均以系统自动识别结果为归档依据；签订日期缺失时采用上传日期。";
+  return "合同各方、合同金额和合同签订日期均以系统自动识别结果为归档依据；签订日期缺失时采用上传日期。";
 });
 
 type FinancialRecordCollection =
@@ -3689,7 +3939,8 @@ function financialCardInternalPendingLabel(
 
 function financialCardSettlementAction(card: FinancialRegistrationCard) {
   if (isInternalFundingMode.value) return "工程咨询划拨";
-  return card.documents.some((document) => document.type === "payments")
+  return isCostContract.value ||
+    card.documents.some((document) => document.type === "payments")
     ? "付款"
     : "回款";
 }
@@ -3702,10 +3953,10 @@ function financialRegistrationCardTitle(card: FinancialRegistrationCard) {
       : "发票与回单财务登记";
   }
   if (financialCardInvoiceRemainingAmount(card) > 0) {
-    return "回款登记·待补发票";
+    return `${financialCardSettlementAction(card)}登记·待补发票`;
   }
   if (financialCardRemainingAmount(card) > 0) {
-    return "发票与回款待闭环";
+    return `发票与${financialCardSettlementAction(card)}待闭环`;
   }
   return "发票与回单财务登记";
 }
@@ -3720,7 +3971,8 @@ function financialRegistrationCardStatusLabel(card: FinancialRegistrationCard) {
       : financeRecordStatusLabel(card.status);
   }
   if (financialCardInvoiceRemainingAmount(card) > 0) return "待补发票";
-  if (financialCardRemainingAmount(card) > 0) return "待补回款";
+  if (financialCardRemainingAmount(card) > 0)
+    return `待补${financialCardSettlementAction(card)}`;
   if (canConfirmFinancialCard(card)) return "待整组确认";
   return financeRecordStatusLabel(card.status);
 }
@@ -3731,7 +3983,7 @@ function financialCardPendingActionLabel(card: FinancialRegistrationCard) {
       return "尚待补发票，暂不可确认";
     }
     if (financialCardRemainingAmount(card) > 0) {
-      return "尚待补回款，暂不可确认";
+      return `尚待补${financialCardSettlementAction(card)}，暂不可确认`;
     }
   }
   return `尚待${financialCardSettlementAction(card)}，暂不可确认`;
@@ -3755,6 +4007,7 @@ function isAwaitingSettlement(card: FinancialRegistrationCard): boolean {
   const externalCents = financialRegistrationAmountSummary(card).externalCents;
   const usesExternalSettlement =
     detail.value?.contract.assetFundingMode === "engineering_to_technology";
+  if (!usesExternalSettlement) return invoiceCents !== settlementCents;
   return (
     (usesExternalSettlement && externalCents > 0 && invoiceCents === 0) ||
     (invoiceCents > 0 &&
@@ -4152,6 +4405,97 @@ async function loadLatestSealVerification(
   }
 }
 
+function targetAmountChangeLabel(
+  changeType: "initial" | "update",
+  changeNo: number,
+): string {
+  return changeType === "initial" ? "首次设置" : `第${changeNo}次`;
+}
+
+function targetFormNumber(value: string): number | null {
+  const normalized = value.replace(/[,，￥¥\s]/gu, "").trim();
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function openTargetAmountDialog() {
+  const contract = detail.value?.contract;
+  if (!contract) return;
+  targetAmountForm.targetAmount = String(
+    contract.targetAmount ?? contract.currentEffectiveAmount ?? "",
+  );
+  targetAmountForm.targetQuantity = String(contract.targetQuantity ?? "");
+  targetAmountForm.unitPrice = String(contract.unitPrice ?? "");
+  targetAmountForm.confirmedQuantity = String(contract.confirmedQuantity ?? "");
+  targetAmountForm.confirmedContractAmount = String(
+    contract.confirmedContractAmount ?? "",
+  );
+  targetAmountForm.quantityUnit = contract.quantityUnit || "";
+  targetAmountForm.reason = "";
+  targetAmountDialogVisible.value = true;
+}
+
+async function saveTargetAmount() {
+  const contract = detail.value?.contract;
+  if (!contract || targetAmountSaving.value) return;
+  const wasInitial = targetAmountIsInitial.value;
+  const targetAmount = targetFormNumber(targetAmountForm.targetAmount);
+  const targetQuantity = targetFormNumber(targetAmountForm.targetQuantity);
+  const unitPrice = targetFormNumber(targetAmountForm.unitPrice);
+  const confirmedQuantity = targetFormNumber(
+    targetAmountForm.confirmedQuantity,
+  );
+  const confirmedContractAmount = targetFormNumber(
+    targetAmountForm.confirmedContractAmount,
+  );
+  if (targetAmount == null || !Number.isFinite(targetAmount)) {
+    ElMessage.warning("请填写正确的目标金额");
+    return;
+  }
+  if (
+    [
+      targetQuantity,
+      unitPrice,
+      confirmedQuantity,
+      confirmedContractAmount,
+    ].some((value) => value != null && !Number.isFinite(value))
+  ) {
+    ElMessage.warning("数量、单价或当前确认金额格式不正确");
+    return;
+  }
+  if ((targetQuantity == null) !== (unitPrice == null)) {
+    ElMessage.warning("目标数量与单价必须同时填写");
+    return;
+  }
+  if (!targetAmountIsInitial.value && !targetAmountForm.reason.trim()) {
+    ElMessage.warning("请填写变更原因或确认进度的依据说明");
+    return;
+  }
+  targetAmountSaving.value = true;
+  try {
+    await updateContractTargetAmount(contract.id, {
+      expectedVersion: contract.version,
+      targetAmount,
+      targetQuantity,
+      unitPrice,
+      confirmedQuantity,
+      confirmedContractAmount,
+      quantityUnit: targetAmountForm.quantityUnit.trim() || null,
+      reason: targetAmountForm.reason.trim() || null,
+    });
+    targetAmountDialogVisible.value = false;
+    await loadDetail();
+    ElMessage.success(
+      wasInitial ? "合同目标金额已设置" : "合同目标金额或确认进度已更新",
+    );
+  } catch (error) {
+    ElMessage.error(getContractErrorMessage(error, "保存合同目标金额失败"));
+  } finally {
+    targetAmountSaving.value = false;
+  }
+}
+
 async function loadDetail() {
   const requestedContractId = contractId.value;
   if (!requestedContractId) return;
@@ -4497,6 +4841,7 @@ function sealFieldLabel(field: ContractSealVerificationFieldKey): string {
   return {
     party_a: "甲方单位",
     party_b: "乙方单位",
+    party_c: "丙方单位",
     amount: "合同金额",
     contract_date: "合同签订日期",
   }[field];
@@ -5559,6 +5904,14 @@ onBeforeUnmount(() => {
   color: #284760;
   font-size: 17px;
 }
+.target-amount-form {
+  margin-top: 18px;
+}
+.target-amount-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+}
 .card-heading span,
 .card-heading div > span {
   color: #8d99a4;
@@ -6004,9 +6357,6 @@ onBeforeUnmount(() => {
   gap: 10px;
   margin-top: 10px;
 }
-.vehicle-rental-accounting-summary {
-  grid-template-columns: minmax(0, 1fr);
-}
 .rental-cost-group {
   overflow: hidden;
   border: 1px solid #dce9e7;
@@ -6190,6 +6540,12 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 768px) {
+  .contract-detail-page :deep(.el-dialog) {
+    width: calc(100vw - 28px) !important;
+  }
+  .target-amount-grid {
+    grid-template-columns: 1fr;
+  }
   .contract-detail-page {
     margin: -16px -20px;
     padding: 14px;

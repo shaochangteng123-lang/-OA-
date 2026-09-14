@@ -41,7 +41,10 @@ import {
   rebuildContractFinancialRegistrationMatches,
 } from "../server/services/contractService";
 import { lockInvoiceApplicationRoot } from "../server/services/invoiceApplication";
-import { bridgeMonthlyBankTransactionToContractRegistration } from "../server/services/monthlyFinancialContractBridge";
+import {
+  bridgeMonthlyBankAssetPaymentToContractRegistration,
+  bridgeMonthlyBankTransactionToContractRegistration,
+} from "../server/services/monthlyFinancialContractBridge";
 
 const NOW = "2026-08-25T12:00:00.000Z";
 const SOURCE_FILE_HASH = "a".repeat(64);
@@ -272,6 +275,162 @@ async function cleanupCreatedContractEvidence(
   }
 }
 
+function assetPaymentTransactionFixture(
+  overrides: Record<string, unknown> = {},
+) {
+  return transactionFixture({
+    report_month: "2026-08",
+    transaction_date: "2026-08-31",
+    amount: "780.00",
+    direction: "outflow",
+    payer_name: "北京羽隶工程咨询有限公司",
+    payer_account: "0200303519000018418",
+    payee_name: "曾宇",
+    payee_account: "6214850108771988",
+    electronic_receipt_no: "0919-5826-5117-1100",
+    normalized_electronic_receipt_no: "0919582651171100",
+    remark: "汽车租赁-8月",
+    category: "asset_expense",
+    ...overrides,
+  });
+}
+
+function assetPaymentCandidateRows(
+  includeSecondOutstandingInvoice = false,
+  overallocatedHistory = false,
+): Array<Record<string, unknown>> {
+  const common = {
+    registration_id: "asset-registration-1",
+    direction_invoice_record_id: "invoice-october",
+    contract_id: "asset-contract-1",
+    contract_status: "executing",
+    root_status: "executing",
+    contract_category: "asset",
+    root_financial_direction: "cost",
+    contract_party_a: "曾宇",
+    contract_party_b: "北京羽隶工程咨询有限公司",
+    contract_project_name: "公司租个人小客车",
+    root_project_name: "公司租个人小客车",
+    contract_title: "小客车租赁协议",
+    root_title: "小客车租赁协议",
+    contract_business_contract_no: "HT-20260826-000101",
+    root_business_contract_no: "HT-20260826-000101",
+    contract_worklog_project_name: null,
+    root_worklog_project_name: null,
+    contract_area: null,
+    root_area: null,
+    contract_asset_category: "vehicle_rental",
+    root_asset_funding_mode: "engineering_direct",
+    invoice_buyer: "北京羽隶工程咨询有限公司",
+    invoice_seller: "曾宇",
+    invoice_status: "confirmed",
+    invoice_job_status: "consumed",
+    invoice_validation_status: "verified",
+    invoice_document_status: "normal",
+    invoice_direction: "input",
+    invoice_can_auto_post: true,
+  };
+  return [
+    {
+      ...common,
+      invoice_item_id: "invoice-item-july",
+      invoice_record_id: "invoice-july",
+      invoice_amount: "780.00",
+      invoice_allocated_amount: overallocatedHistory ? "1560.00" : "780.00",
+      invoice_date: "2026-07-06",
+    },
+    {
+      ...common,
+      invoice_item_id: "invoice-item-august",
+      invoice_record_id: "invoice-august",
+      invoice_amount: "780.00",
+      invoice_allocated_amount: "0.00",
+      invoice_date: "2026-08-07",
+    },
+    ...(includeSecondOutstandingInvoice
+      ? [
+          {
+            ...common,
+            invoice_item_id: "invoice-item-extra",
+            invoice_record_id: "invoice-extra",
+            invoice_amount: "780.00",
+            invoice_allocated_amount: "0.00",
+            invoice_date: "2026-08-08",
+          },
+        ]
+      : []),
+  ];
+}
+
+function createAssetPaymentClient(
+  input: {
+    includeSecondOutstandingInvoice?: boolean;
+    overallocatedHistory?: boolean;
+    paymentTotal?: string;
+    allocatedTotal?: string;
+  } = {},
+) {
+  const sqlHistory: Array<{ sql: string; params: unknown[] }> = [];
+  const transaction = assetPaymentTransactionFixture();
+  const candidates = assetPaymentCandidateRows(
+    input.includeSecondOutstandingInvoice === true,
+    input.overallocatedHistory === true,
+  );
+  const query = jest.fn(async (sqlValue: string, params: unknown[] = []) => {
+    const sql = String(sqlValue);
+    sqlHistory.push({ sql, params });
+    if (
+      sql.includes("FROM monthly_financial_bank_transactions transaction") &&
+      sql.includes("FOR UPDATE OF transaction, file")
+    ) {
+      return { rows: [transaction], rowCount: 1 };
+    }
+    if (
+      sql.includes("FROM contract_financial_registrations registration") &&
+      sql.includes("root_asset_funding_mode")
+    ) {
+      return { rows: candidates, rowCount: candidates.length };
+    }
+    if (
+      sql.includes("SELECT id, status FROM contracts") &&
+      sql.includes("FOR UPDATE")
+    ) {
+      return {
+        rows: [{ id: "asset-contract-1", status: "executing" }],
+        rowCount: 1,
+      };
+    }
+    if (
+      sql.includes("AS payment_total") &&
+      sql.includes("AS allocated_total")
+    ) {
+      return {
+        rows: [
+          {
+            payment_total: input.paymentTotal || "780.00",
+            allocated_total: input.allocatedTotal || "780.00",
+          },
+        ],
+        rowCount: 1,
+      };
+    }
+    if (sql.includes("AS duplicated")) {
+      return { rows: [{ duplicated: false }], rowCount: 1 };
+    }
+    if (
+      sql.includes("UPDATE contract_financial_registrations") &&
+      sql.includes("RETURNING id")
+    ) {
+      return { rows: [{ id: "asset-registration-1" }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 1 };
+  });
+  return {
+    client: { query } as unknown as PoolClient,
+    sqlHistory,
+  };
+}
+
 describe("月报银行回单自动补合同财务草稿", () => {
   beforeAll(async () => {
     await fs.promises.mkdir(TEST_DIRECTORY, { recursive: true });
@@ -348,6 +507,114 @@ describe("月报银行回单自动补合同财务草稿", () => {
     );
     expect(candidateQueries).toHaveLength(2);
     await cleanupCreatedContractEvidence(sqlHistory);
+  });
+
+  it("一般账户资产付款唯一命中未覆盖发票时增量挂载且不打乱历史对应", async () => {
+    const { client, sqlHistory } = createAssetPaymentClient();
+
+    const result = await bridgeMonthlyBankAssetPaymentToContractRegistration(
+      client,
+      "bank-transaction-1",
+      "admin-1",
+      "admin",
+      NOW,
+    );
+    expect(result).toMatchObject({
+      status: "created",
+      changed: true,
+      contractId: "asset-contract-1",
+      registrationId: "asset-registration-1",
+      paymentRecordId: "monthly-contract-bridge-test-id",
+      registrationConfirmed: true,
+    });
+    expect(rebuildContractFinancialRegistrationMatches).not.toHaveBeenCalled();
+    expect(postContractFinancialSettlements).toHaveBeenCalledWith(
+      client,
+      expect.objectContaining({
+        contractId: "asset-contract-1",
+        registrationId: "asset-registration-1",
+        settlementKind: "payment",
+        financialDirection: "cost",
+        directionInvoiceRecordId: "invoice-october",
+      }),
+    );
+    expect(
+      (postContractFinancialSettlements as jest.Mock).mock.calls[0]?.[1],
+    ).not.toHaveProperty("allowUnallocatedSettlement");
+    expect(
+      confirmContractFinancialRegistrationInTransaction,
+    ).toHaveBeenCalledWith(
+      client,
+      "asset-registration-1",
+      "admin-1",
+      "admin",
+      "asset-contract-1",
+    );
+    const paymentInsert = sqlHistory.find(({ sql }) =>
+      sql.includes("INSERT INTO contract_payments"),
+    );
+    expect(paymentInsert?.params[5]).toBe("car_rental");
+    const matchInsert = sqlHistory.find(({ sql }) =>
+      sql.includes("INSERT INTO contract_financial_registration_matches"),
+    );
+    expect(matchInsert?.params).toEqual(
+      expect.arrayContaining(["invoice-item-august", "780.00"]),
+    );
+    expect(
+      sqlHistory.some(
+        ({ sql }) =>
+          sql.includes("INSERT INTO contract_financial_ocr_jobs") &&
+          sql.includes("'payment','bank_receipt'") &&
+          sql.includes("'payment','normal'"),
+      ),
+    ).toBe(true);
+    expect(
+      sqlHistory.some(({ sql }) =>
+        sql.includes("monthly_bank_payment_attached"),
+      ),
+    ).toBe(true);
+    await cleanupCreatedContractEvidence(sqlHistory);
+  });
+
+  it("资产合同存在多张未覆盖发票时保持待关联且不猜测付款归属", async () => {
+    const { client, sqlHistory } = createAssetPaymentClient({
+      includeSecondOutstandingInvoice: true,
+    });
+
+    const result = await bridgeMonthlyBankAssetPaymentToContractRegistration(
+      client,
+      "bank-transaction-1",
+      "admin-1",
+      "admin",
+      NOW,
+    );
+
+    expect(result.status).toBe("pending");
+    expect(result.warnings.join("；")).toContain("未能根据合同双方");
+    expect(
+      sqlHistory.some(({ sql }) => /^\s*INSERT INTO contract_/u.test(sql)),
+    ).toBe(false);
+    expect(postContractFinancialSettlements).not.toHaveBeenCalled();
+  });
+
+  it("资产合同历史存在单张发票超分配时拒绝用累计总额掩盖异常", async () => {
+    const { client, sqlHistory } = createAssetPaymentClient({
+      overallocatedHistory: true,
+    });
+
+    const result = await bridgeMonthlyBankAssetPaymentToContractRegistration(
+      client,
+      "bank-transaction-1",
+      "admin-1",
+      "admin",
+      NOW,
+    );
+
+    expect(result.status).toBe("pending");
+    expect(
+      sqlHistory.some(({ sql }) => /^\s*INSERT INTO contract_/u.test(sql)),
+    ).toBe(false);
+    expect(postContractFinancialSettlements).not.toHaveBeenCalled();
   });
 
   it("命中多笔合同草稿时保持待关联且不写业务表", async () => {

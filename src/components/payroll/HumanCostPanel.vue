@@ -129,6 +129,13 @@
                 支持
                 PDF（便携式文档格式）、JPEG（图像格式）、PNG（便携式网络图形）；可多选，单个文件不超过
                 50MB
+                <template
+                  v-if="
+                    category.value === 'social_security' ||
+                    category.value === 'housing_fund'
+                  "
+                  >；支持继续追加，按电子回单号查重，回单汇总为本月该类别有效已识别金额的累计总额</template
+                >
               </small>
             </label>
 
@@ -512,6 +519,27 @@
                 formatExact(row.withheld_total)
               }}</template>
             </el-table-column>
+            <el-table-column
+              prop="withheld_actual_amount"
+              width="132"
+              align="center"
+              class-name="actual-amount-column"
+              label-class-name="actual-amount-header"
+            >
+              <template #header>
+                <div class="payroll-header">
+                  <span>实际发生额</span><small>可修改</small>
+                </div>
+              </template>
+              <template #default="{ row }">
+                <el-input
+                  v-model="row.withheld_actual_amount"
+                  inputmode="decimal"
+                  :disabled="savingFields.size > 0"
+                  @change="saveField(row, 'withheld_actual_amount')"
+                />
+              </template>
+            </el-table-column>
           </el-table-column>
 
           <el-table-column label="社保（个人承担）" align="center">
@@ -628,6 +656,27 @@
               </strong>
             </template>
           </el-table-column>
+          <el-table-column
+            prop="net_salary_actual_amount"
+            width="138"
+            align="center"
+            class-name="actual-amount-column"
+            label-class-name="actual-amount-header"
+          >
+            <template #header>
+              <div class="payroll-header">
+                <span>实际发生额</span><small>可修改</small>
+              </div>
+            </template>
+            <template #default="{ row }">
+              <el-input
+                v-model="row.net_salary_actual_amount"
+                inputmode="decimal"
+                :disabled="savingFields.size > 0"
+                @change="saveField(row, 'net_salary_actual_amount')"
+              />
+            </template>
+          </el-table-column>
         </el-table-column>
       </el-table>
     </div>
@@ -640,7 +689,7 @@
       <div class="cost-total-description">
         <span class="cost-total-title">成本合计</span>
         <span class="cost-total-formula"
-          >社保＋公积金＋个税总额 + 本月实发工资总额</span
+          >代扣实际发生额总计 + 工资实际发生额总计</span
         >
       </div>
       <strong class="cost-total-value"
@@ -925,6 +974,8 @@ function getCategoryReceipts(
 }
 
 function isReceiptCategoryLocked(category: HumanCostReceiptCategory): boolean {
+  if (category === "social_security" || category === "housing_fund")
+    return false;
   return (
     getCategoryReceipts(category).length > 0 ||
     (category === "net_salary" &&
@@ -1215,7 +1266,9 @@ async function saveField(
     | "monthly_salary"
     | "housing_fund_base"
     | "contribution_base"
-    | "individual_income_tax",
+    | "individual_income_tax"
+    | "withheld_actual_amount"
+    | "net_salary_actual_amount",
 ) {
   const value = String(row[field] ?? "").trim() || "0";
   if (!/^(?:0|[1-9]\d{0,11})(?:\.\d{1,8})?$/.test(value)) {
@@ -1841,10 +1894,44 @@ onBeforeUnmount(() => {
   padding-right: 18px;
 }
 
+.payroll-table :deep(.actual-amount-header) {
+  background: #eaf5f2;
+  color: #2f766a;
+}
+
+.payroll-table :deep(.actual-amount-column) {
+  background: #eaf5f2;
+}
+
+.payroll-table :deep(.actual-amount-column .el-input__wrapper) {
+  background: rgb(255 255 255 / 82%);
+  box-shadow: 0 0 0 1px #b8d5ce inset;
+}
+
+.payroll-table :deep(.actual-amount-column .el-input__wrapper:hover) {
+  background: #fff;
+  box-shadow: 0 0 0 1px #83b7ab inset;
+}
+
+.payroll-table :deep(.actual-amount-column .el-input__wrapper.is-focus) {
+  background: #fff;
+  box-shadow: 0 0 0 1px #6ca99b inset;
+}
+
+.payroll-table :deep(.actual-amount-column .el-input__inner) {
+  color: #2f766a;
+  font-weight: 600;
+}
+
 .payroll-table :deep(.el-table__footer-wrapper td) {
   background: #edf6e8;
   color: #1f2937;
   font-weight: 600;
+}
+
+.payroll-table :deep(.el-table__footer-wrapper td.actual-amount-column) {
+  background: #eaf5f2;
+  color: #2f766a;
 }
 
 .cost-total-bar {

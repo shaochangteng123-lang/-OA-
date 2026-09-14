@@ -171,11 +171,20 @@ describe("合同财务记录三态闭环", () => {
     );
   });
 
-  it("合同分类唯一决定收入或支出方向", () => {
+  it("合同大类与非主营收支分类共同决定收入或支出方向", () => {
     expect(financialDirectionFromContractCategory("main_business")).toBe(
       "income",
     );
     expect(financialDirectionFromContractCategory("non_main")).toBe("income");
+    expect(
+      financialDirectionFromContractCategory("non_main", "non_main_income"),
+    ).toBe("income");
+    expect(
+      financialDirectionFromContractCategory("non_main", "other_service"),
+    ).toBe("income");
+    expect(
+      financialDirectionFromContractCategory("non_main", "non_main_expense"),
+    ).toBe("cost");
     expect(financialDirectionFromContractCategory("asset")).toBe("cost");
   });
 
@@ -287,6 +296,117 @@ describe("合同财务记录三态闭环", () => {
       expect.stringContaining("INSERT INTO contract_audit_logs"),
       expect.arrayContaining(["financial_settlements_posted"]),
     );
+  });
+
+  it("非主营支出付款按成本方向即时入账并推进履约状态", async () => {
+    let rootFinancialDirection: "cost" | null = null;
+    let rootStatus = "effective";
+    const client = {
+      query: jest.fn(async (sql: string, params?: unknown[]) => {
+        if (
+          sql.includes("FROM contract_financial_registrations") &&
+          sql.includes("FOR UPDATE")
+        )
+          return {
+            rows: [
+              {
+                id: "registration-non-main-expense",
+                contract_id: "contract-non-main-expense",
+                settlement_kind: "payment",
+                financial_direction: "cost",
+                direction_invoice_record_id: "invoice-non-main-expense",
+                status: "draft",
+              },
+            ],
+          };
+        if (sql.includes("FROM contract_financial_registration_items"))
+          return {
+            rows: [
+              {
+                record_id: "payment-non-main-expense",
+                amount: "300.00",
+                allocated_amount: "300.00",
+              },
+            ],
+          };
+        if (sql.includes("SELECT * FROM contracts"))
+          return {
+            rows: [
+              {
+                id: "contract-non-main-expense",
+                root_contract_id: "contract-non-main-expense",
+                status: rootStatus,
+                category: "non_main",
+                declared_category: "non_main",
+                declared_subtype: "non_main_expense",
+                financial_direction: rootFinancialDirection,
+                asset_funding_mode: null,
+                project_id: null,
+              },
+            ],
+          };
+        if (sql.includes("UPDATE contracts SET financial_direction")) {
+          rootFinancialDirection = "cost";
+          return { rows: [] };
+        }
+        if (sql.includes("UPDATE contract_payments AS payment"))
+          return { rows: [{ id: "payment-non-main-expense" }] };
+        if (sql.includes("AS contract_total"))
+          return {
+            rows: [
+              {
+                contract_total: 1000,
+                invoice_count: 1,
+                invoice_total: 300,
+                receipt_total: 0,
+                payment_total: 300,
+                external_payment_total: 0,
+              },
+            ],
+          };
+        if (sql.includes("UPDATE contracts SET status = $2")) {
+          rootStatus = String(params?.[1] || "executing");
+          return {
+            rows: [
+              {
+                id: "contract-non-main-expense",
+                root_contract_id: "contract-non-main-expense",
+                status: rootStatus,
+                category: "non_main",
+                declared_category: "non_main",
+                declared_subtype: "non_main_expense",
+                financial_direction: rootFinancialDirection,
+                project_id: null,
+              },
+            ],
+          };
+        }
+        return { rows: [] };
+      }),
+    };
+
+    await expect(
+      postContractFinancialSettlements(client as never, {
+        contractId: "contract-non-main-expense",
+        registrationId: "registration-non-main-expense",
+        settlementKind: "payment",
+        settlementRecordIds: ["payment-non-main-expense"],
+        financialDirection: "cost",
+        directionInvoiceRecordId: "invoice-non-main-expense",
+        actorId: "finance-1",
+        actorRole: "admin",
+        now: "2026-09-10T09:00:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "executing" });
+
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("UPDATE contract_payments AS payment"),
+      expect.arrayContaining([
+        ["payment-non-main-expense"],
+        "contract-non-main-expense",
+      ]),
+    );
+    expect(rootFinancialDirection).toBe("cost");
   });
 
   it("银行凭证未完整分配到发票时不得即时入账", async () => {
@@ -2427,7 +2547,7 @@ describe("合同财务记录三态闭环", () => {
     expect(source).toContain('"FINANCIAL_REGISTRATION_PAIR_REQUIRED"');
     expect(source).toContain("assertMainContractFinancialTarget");
     expect(source).toContain(
-      "CASE WHEN $5 = 'asset' THEN 'cost' ELSE 'income' END",
+      "OR ($5 = 'non_main' AND $6 = 'non_main_expense')",
     );
     expect(source).toContain('"FINANCIAL_REGISTRATION_MAIN_CONTRACT_ONLY"');
     expect(source).toContain("财务登记统一归集至主合同，请在所属主合同中操作");

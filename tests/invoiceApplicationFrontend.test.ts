@@ -170,13 +170,25 @@ describe("开票申请前端流程", () => {
     );
     expect(createSource).not.toContain("seal-flow-alert");
     expect(createSource).toContain(
-      "在线填写本次付款，系统自动计算合同金额与累计付款",
+      "填写本次实际付款，系统自动计算合同金额与累计付款",
     );
     expect(createSource).toContain('v-model="triplicateProjectName"');
     expect(createSource).toContain('v-model="form.amount"');
+    expect(
+      createSource.match(/v-model="form\.amount"[\s\S]{0,160}@input=/g),
+    ).toHaveLength(2);
+    expect(createSource).not.toContain(
+      "form.amount = plainAmount(eligibility.value.amounts.remainingAmount)",
+    );
+    expect(createSource).toContain("本次付款由申请人根据本次实际付款填写");
+    expect(createSource).not.toContain("例如47500.00");
     expect(createSource).toContain("plainAmount(triplicateCurrentPayment)");
     expect(createSource).toContain("plainAmount(triplicateCumulativePayment)");
     expect(createSource).toContain("之前累计付款");
+    expect(createSource).toContain("剩余可申请额度");
+    expect(createSource).toContain(
+      "plainAmount(eligibility.amounts.remainingAmount)",
+    );
     expect(createSource).toContain("不增加千位分隔符");
     expect(createSource).toContain(
       "Number(application.amount || 0).toFixed(2)",
@@ -231,6 +243,27 @@ describe("开票申请前端流程", () => {
     );
     expect(centerSource).toContain("撤回后申请恢复为草稿");
     expect(apiSource).toContain("`/api/invoice-applications/${id}/withdraw`");
+  });
+
+  it("员工本人未提交的开票草稿可以二次确认后删除", () => {
+    expect(centerSource).toContain(
+      "mode === 'mine' && item.status === 'draft'",
+    );
+    expect(centerSource).toContain(">删除草稿</el-button");
+    expect(centerSource).toContain("deleteDraftApplication(item)");
+    expect(centerSource).toContain("删除后将同时清理该草稿的三联单和申请材料");
+    expect(centerSource).toContain(
+      "deleteInvoiceApplicationDraft(item.id, item.version)",
+    );
+    expect(createSource).toContain("currentApplication?.status === 'draft'");
+    expect(createSource).toContain("deleteCurrentDraft");
+    expect(createSource).toContain(
+      "deleteInvoiceApplicationDraft(application.id, application.version)",
+    );
+    expect(apiSource).toContain(
+      "export async function deleteInvoiceApplicationDraft",
+    );
+    expect(apiSource).toContain("`/api/invoice-applications/${id}`");
   });
 
   it("总经理审批签字，管理员仅执行盖章交付和记录发票已开具", () => {

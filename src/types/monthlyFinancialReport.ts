@@ -110,6 +110,67 @@ export interface MonthlyFinancialBankReceiptDuplicateFile {
   existingFileId: string;
 }
 
+export type MonthlyFinancialBankCorrectionDifference =
+  | "transactionDate"
+  | "amount"
+  | "payerAccount"
+  | "payeeAccount";
+
+export interface MonthlyFinancialBankContentCorrectionConflict {
+  transactionId: string;
+  receiptNo: string;
+  normalizedReceiptNo: string;
+  differenceDigest: string;
+  accountCode: MonthlyFinancialBankAccountCode;
+  accountName: string;
+  differences: MonthlyFinancialBankCorrectionDifference[];
+  correctable: boolean;
+  blockingReason: string | null;
+  previous: {
+    fileName: string | null;
+    fileVersion: number;
+    transactionDate: string | null;
+    amount: string;
+    payerAccount: string;
+    payeeAccount: string;
+  };
+  incoming: {
+    fileName: string;
+    pageNo: number;
+    position: string;
+    transactionDate: string;
+    amount: string;
+    payerAccount: string;
+    payeeAccount: string;
+  };
+}
+
+export interface MonthlyFinancialBankContentCorrectionReview {
+  reviewId: string;
+  expectedVersion: number;
+  batchDigest: string;
+  confirmationToken: string;
+  expiresAt: string;
+  requiredFiles: Array<{
+    originalName: string;
+    fileHash: string;
+    accountCode: MonthlyFinancialBankAccountCode;
+  }>;
+  conflicts: MonthlyFinancialBankContentCorrectionConflict[];
+}
+
+export interface MonthlyFinancialBankContentCorrectionConfirmation {
+  reviewId: string;
+  batchDigest: string;
+  confirmationToken: string;
+  reason: string;
+  acknowledgements: Array<{
+    transactionId: string;
+    normalizedReceiptNo: string;
+    differenceDigest: string;
+  }>;
+}
+
 export type MonthlyFinancialReportStatus =
   | "draft"
   | "pending_review"
@@ -128,6 +189,7 @@ export type MonthlyFinancialManualCategory =
   | "general_interest"
   | "business_interest"
   | "general_bank_fee"
+  | "general_tax_payment"
   | "general_other"
   | "business_bank_fee"
   | "welfare_one_supplement"
@@ -140,7 +202,9 @@ export type MonthlyFinancialManualCategory =
   | "welfare_two_supplement"
   | "welfare_two_refreshment"
   | "welfare_two_team_building"
-  | "welfare_two_physical_exam";
+  | "welfare_two_physical_exam"
+  | "welfare_one_expense"
+  | "welfare_two_expense";
 
 export interface MonthlyFinancialAccountSummary {
   code: MonthlyFinancialAccountCode;
@@ -169,6 +233,7 @@ export interface MonthlyFinancialExpenseSummary {
   largeReimbursement: MonthlyFinancialAmount;
   assetAdministration: MonthlyFinancialAmount;
   generalBankFee: MonthlyFinancialAmount;
+  generalTaxPayment: MonthlyFinancialAmount;
   generalOther: MonthlyFinancialAmount;
   businessReimbursement: MonthlyFinancialAmount;
   businessBankFee: MonthlyFinancialAmount;
@@ -201,10 +266,12 @@ export interface MonthlyFinancialManualItem {
   amount: MonthlyFinancialAmount;
   description: string | null;
   voucherReference: string | null;
-  sourceType?: "manual" | "monthly_bank_transaction";
+  sourceType?: "manual" | "monthly_bank_transaction" | "reimbursement";
   readOnly?: boolean;
   effective?: boolean;
   previewUrl?: string | null;
+  welfareCategoryId?: string | null;
+  welfareCategoryNameSnapshot?: string | null;
 }
 
 export interface MonthlyFinancialManualItemInput {
@@ -214,6 +281,68 @@ export interface MonthlyFinancialManualItemInput {
   amount: MonthlyFinancialAmount;
   description?: string | null;
   voucherReference?: string | null;
+  welfareCategoryId?: string | null;
+  welfareCategoryNameSnapshot?: string | null;
+}
+
+export interface MonthlyFinancialWelfareOneExpenseCategory {
+  id: string;
+  code: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+  automaticAmount: MonthlyFinancialAmount;
+  manualAmount: MonthlyFinancialAmount;
+  totalAmount: MonthlyFinancialAmount;
+  isFixed: boolean;
+}
+
+export type MonthlyFinancialWelfareTwoExpenseCategory =
+  MonthlyFinancialWelfareOneExpenseCategory;
+
+export interface MonthlyFinancialAnalysisMetadata {
+  schemaVersion: 1;
+  payrollParts?: {
+    salary: string;
+    social: string;
+    housing: string;
+    adjustment: string;
+  };
+  canonicalPersonId?: string | null;
+  reimbursementCategory?: string | null;
+  reimbursementScope?: string | null;
+  reimbursementScopeValue?: string | null;
+  reimbursementScopePath?: string | null;
+  reimbursementRegion?: string | null;
+  reimbursementRegionSource?: string | null;
+  reimbursementServiceTarget?: string | null;
+  welfareCategoryId?: string | null;
+  welfareCategoryCode?: string | null;
+  welfareCategoryName?: string | null;
+  contractRootId?: string | null;
+  partyA?: string | null;
+  contractRegion?: string | null;
+}
+
+export interface MonthlyFinancialAnalysisMetadata {
+  schemaVersion: 1;
+  payrollParts?: {
+    salary: string;
+    social: string;
+    housing: string;
+    adjustment: string;
+  };
+  canonicalPersonId?: string | null;
+  reimbursementCategory?: string | null;
+  reimbursementScope?: string | null;
+  reimbursementScopeValue?: string | null;
+  reimbursementScopePath?: string | null;
+  reimbursementRegion?: string | null;
+  reimbursementRegionSource?: string | null;
+  reimbursementServiceTarget?: string | null;
+  contractRootId?: string | null;
+  partyA?: string | null;
+  contractRegion?: string | null;
 }
 
 export interface MonthlyFinancialAutomaticDetail {
@@ -226,6 +355,7 @@ export interface MonthlyFinancialAutomaticDetail {
   description: string;
   personId?: string | null;
   personName: string | null;
+  analysis?: MonthlyFinancialAnalysisMetadata;
   bankAccountCode?: MonthlyFinancialBankAccountCode | null;
   electronicReceiptNo?: string | null;
   previewUrl?: string | null;
@@ -301,6 +431,8 @@ export interface MonthlyFinancialReport {
   bank?: MonthlyFinancialAutomaticBankSummary;
   totals: MonthlyFinancialTotals;
   manualItems: MonthlyFinancialManualItem[];
+  welfareOneExpenseCategories?: MonthlyFinancialWelfareOneExpenseCategory[];
+  welfareTwoExpenseCategories?: MonthlyFinancialWelfareTwoExpenseCategory[];
   sources: MonthlyFinancialSourceSummary[];
   validations: {
     canClose: boolean;
@@ -327,6 +459,7 @@ export interface MonthlyFinancialTrendPoint {
   month: string;
   status: MonthlyFinancialReportStatus | null;
   valueState: "closed" | "current" | null;
+  actualReceiptState: "closed" | "current" | "confirmed_source" | null;
   actualReceipt: MonthlyFinancialAmount | null;
   settlementInflow: MonthlyFinancialAmount | null;
   totalOutflow: MonthlyFinancialAmount | null;
@@ -344,11 +477,21 @@ export interface MonthlyFinancialTrendWarning {
   months: string[];
 }
 
+export interface MonthlyFinancialMainBusinessTrendPoint {
+  month: string;
+  region: string;
+  actualReceipt: MonthlyFinancialAmount | null;
+  contractAmount: MonthlyFinancialAmount | null;
+  contractCount: number | null;
+}
+
 export interface MonthlyFinancialTrendData {
   from: string;
   to: string;
   availableYears: number[];
   points: MonthlyFinancialTrendPoint[];
+  mainBusinessRegions: string[];
+  mainBusinessPoints: MonthlyFinancialMainBusinessTrendPoint[];
   warnings: MonthlyFinancialTrendWarning[];
 }
 

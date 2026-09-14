@@ -12,6 +12,12 @@ jest.mock("nanoid", () => ({
   nanoid: () => `matcher-test-${++mockIdCounter}`,
 }));
 
+const mockRecognizeBankReceiptImage = jest.fn();
+jest.mock("../server/services/bankReceiptProcessor", () => ({
+  recognizeBankReceiptImage: (...args: unknown[]) =>
+    mockRecognizeBankReceiptImage(...args),
+}));
+
 import { reconcileMonthlyReimbursementTransactions } from "../server/services/monthlyFinancialReimbursementMatcher";
 
 interface QueryCall {
@@ -210,6 +216,7 @@ function createProgrammableClient(fixture: MatcherFixture = {}) {
 }
 
 let temporaryDirectory = "";
+let legacyProofDirectory = "";
 
 function cropFile(name: string): string {
   const filePath = path.join(temporaryDirectory, `${name}.jpg`);
@@ -224,6 +231,12 @@ function cropFileHash(filePath: string): string {
     .digest("hex");
 }
 
+function legacyProofFile(name: string): string {
+  const absolutePath = path.join(legacyProofDirectory, `${name}.png`);
+  fs.writeFileSync(absolutePath, `历史审批回单-${name}`, "utf8");
+  return path.relative(process.cwd(), absolutePath);
+}
+
 function monthlyTransaction(input: {
   id: string;
   amount: string;
@@ -236,6 +249,10 @@ function monthlyTransaction(input: {
   proofNo?: string;
   transactionDate?: string;
   cropPath?: string;
+  payerName?: string;
+  payerAccount?: string;
+  payeeName?: string;
+  payeeAccount?: string;
 }): Record<string, unknown> {
   const proofNo = input.proofNo || `NO-${input.id}`;
   return {
@@ -245,6 +262,10 @@ function monthlyTransaction(input: {
     normalized_electronic_receipt_no: proofNo.replace(/[^A-Za-z0-9]/gu, ""),
     transaction_date: input.transactionDate || "2026-06-18",
     amount: input.amount,
+    payer_name: input.payerName || "北京羽隶工程咨询有限公司",
+    payer_account: input.payerAccount || "0200049609201258271",
+    payee_name: input.payeeName || "测试员工",
+    payee_account: input.payeeAccount || "6212260200123456789",
     category: input.category,
     employee_id: input.employeeId,
     employee_user_id: input.employeeUserId,
@@ -317,14 +338,23 @@ beforeAll(() => {
   temporaryDirectory = fs.mkdtempSync(
     path.join(os.tmpdir(), "monthly-reimbursement-matcher-"),
   );
+  legacyProofDirectory = path.resolve(
+    process.cwd(),
+    "uploads",
+    "invoices",
+    `.monthly-reimbursement-matcher-${process.pid}`,
+  );
+  fs.mkdirSync(legacyProofDirectory, { recursive: true });
 });
 
 beforeEach(() => {
   mockIdCounter = 0;
+  mockRecognizeBankReceiptImage.mockReset();
 });
 
 afterAll(() => {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  fs.rmSync(legacyProofDirectory, { recursive: true, force: true });
 });
 
 describe("月底银行回单与报销两阶段匹配", () => {
@@ -925,6 +955,195 @@ describe("月底银行回单与报销两阶段匹配", () => {
     );
   });
 
+  it("历史审批中心回单缺少业务日期时以唯一回单号和闭合批次核验后补齐并替换", async () => {
+    const cropPath = cropFile("tx-legacy-business-date");
+    const oldProofPath = legacyProofFile("legacy-business-date");
+    const transaction = monthlyTransaction({
+      id: "tx-legacy-business-date",
+      amount: "1782.90",
+      employeeId: "employee-legacy-date",
+      employeeUserId: "user-legacy-date",
+      category: "business_reimbursement",
+      proofNo: "0918-9439-0829-1100",
+      transactionDate: "2026-06-20",
+      cropPath,
+      payeeName: "刘行",
+      payeeAccount: "6212260200121854844",
+    });
+    mockRecognizeBankReceiptImage.mockResolvedValue({
+      payer: "北京羽隶工程咨询有限公司",
+      payerAccount: "0200049609201258271",
+      payee: "刘行",
+      payeeAccount: "6212260200121854844",
+      amount: 1782.9,
+      remark: "商务报销-刘行-2026年6月",
+      proofNo: "0918-9439-0829-1100",
+      transactionDate: "",
+      transactionDateCandidates: ["2026-06-20"],
+      rawText: "打印日期：2026年6月20日\n2026年06月20\n记账日期",
+    });
+    const context = createProgrammableClient({
+      transactions: [transaction],
+      proofOwners: [
+        {
+          normalized_proof_no: "0918943908291100",
+          batch_id: "batch-legacy-date",
+        },
+      ],
+      proofSets: {
+        "batch-legacy-date": ["0918-9439-0829-1100"],
+      },
+      replacementContexts: {
+        "batch-legacy-date": [
+          {
+            batch_status: "confirmed",
+            batch_amount: "1782.90",
+            batch_proof_path: oldProofPath,
+            batch_business_date: null,
+            item_amount: "1782.90",
+            id: "reimbursement-legacy-date",
+            type: "business",
+            title: "历史商务报销",
+            status: "completed",
+            total_amount: "1782.90",
+            user_id: "user-legacy-date",
+            employee_id: "employee-legacy-date",
+            payment_batch_id: "batch-legacy-date",
+            payment_proof_path: oldProofPath,
+            payment_business_date: null,
+            payment_upload_time: "2026-06-20T09:00:00.000Z",
+            completed_time: "2026-06-20T09:30:00.000Z",
+            receipt_confirmed_by: "测试员工",
+          },
+        ],
+      },
+    });
+
+    const result = await reconcileMonthlyReimbursementTransactions(
+      context.client,
+      reconcileInput,
+    );
+
+    expect(result.matchedGroups).toEqual([
+      expect.objectContaining({
+        transactionIds: ["tx-legacy-business-date"],
+        reimbursementIds: ["reimbursement-legacy-date"],
+        paymentBatchId: "batch-legacy-date",
+        displayAction: "replaced",
+      }),
+    ]);
+    const batchUpdate = context.calls.find(
+      (call) =>
+        call.sql.startsWith("UPDATE payment_batches") &&
+        !call.sql.includes("status = 'uploaded'"),
+    );
+    expect(batchUpdate?.params[2]).toBe("2026-06-20");
+    const reimbursementUpdate = context.calls.find(
+      (call) =>
+        call.sql.startsWith("UPDATE reimbursements") &&
+        !call.sql.includes("SET status = 'payment_uploaded'"),
+    );
+    expect(reimbursementUpdate?.params[2]).toBe("2026-06-20");
+    expect(result.pendingTransactions).toEqual([]);
+    expect(mockRecognizeBankReceiptImage).toHaveBeenCalledWith(
+      path.resolve(process.cwd(), oldProofPath),
+    );
+    const proofOwnerQueries = context.calls.filter(
+      (call) =>
+        call.sql.includes("AS normalized_proof_no") &&
+        call.sql.includes("FROM payment_proof_hashes"),
+    );
+    const replacementContextQueries = context.calls.filter(
+      (call) =>
+        call.sql.includes("FROM payment_batches batch") &&
+        call.sql.includes("WHERE batch.id = $1"),
+    );
+    expect(proofOwnerQueries[0]?.sql).not.toContain("FOR UPDATE");
+    expect(proofOwnerQueries.at(-1)?.sql).toContain("FOR UPDATE");
+    expect(replacementContextQueries[0]?.sql).not.toContain("FOR UPDATE");
+    expect(replacementContextQueries.at(-1)?.sql).toContain("FOR UPDATE");
+  });
+
+  it("历史审批回单重新识别出的完整账号不一致时拒绝替换", async () => {
+    const oldProofPath = legacyProofFile("legacy-account-mismatch");
+    const transaction = monthlyTransaction({
+      id: "tx-legacy-account-mismatch",
+      amount: "7080.40",
+      employeeId: "employee-account-mismatch",
+      employeeUserId: "user-account-mismatch",
+      category: "business_reimbursement",
+      proofNo: "0918-9438-8933-1100",
+      transactionDate: "2026-06-20",
+      payeeName: "邵长腾",
+      payeeAccount: "6212260200184017354",
+    });
+    mockRecognizeBankReceiptImage.mockResolvedValue({
+      payer: "北京羽隶工程咨询有限公司",
+      payerAccount: "0200049609201258271",
+      payee: "邵长腾",
+      payeeAccount: "6212260200184017355",
+      amount: 7080.4,
+      remark: "商务报销-邵长腾-2026年6月",
+      proofNo: "0918-9438-8933-1100",
+      transactionDate: "2026-06-20",
+      transactionDateCandidates: ["2026-06-20"],
+      rawText: "测试回单",
+    });
+    const context = createProgrammableClient({
+      transactions: [transaction],
+      proofOwners: [
+        {
+          normalized_proof_no: "0918943889331100",
+          batch_id: "batch-account-mismatch",
+        },
+      ],
+      proofSets: {
+        "batch-account-mismatch": ["0918-9438-8933-1100"],
+      },
+      replacementContexts: {
+        "batch-account-mismatch": [
+          {
+            batch_status: "confirmed",
+            batch_amount: "7080.40",
+            batch_proof_path: oldProofPath,
+            batch_business_date: null,
+            item_amount: "7080.40",
+            id: "reimbursement-account-mismatch",
+            type: "business",
+            title: "历史商务报销",
+            status: "completed",
+            total_amount: "7080.40",
+            user_id: "user-account-mismatch",
+            employee_id: "employee-account-mismatch",
+            payment_batch_id: "batch-account-mismatch",
+            payment_proof_path: oldProofPath,
+            payment_business_date: null,
+            payment_upload_time: "2026-06-20T09:00:00.000Z",
+            completed_time: "2026-06-20T09:30:00.000Z",
+            receipt_confirmed_by: "测试员工",
+          },
+        ],
+      },
+    });
+
+    const result = await reconcileMonthlyReimbursementTransactions(
+      context.client,
+      reconcileInput,
+    );
+
+    expect(result.matchedGroups).toEqual([]);
+    expect(result.pendingTransactions).toEqual([
+      expect.objectContaining({
+        transactionIds: ["tx-legacy-account-mismatch"],
+      }),
+    ]);
+    expect(
+      context.calls.some((call) =>
+        call.sql.startsWith("UPDATE reimbursements"),
+      ),
+    ).toBe(false);
+  });
+
   it("旧付款业务日期不属于报表月时不替换当前凭证", async () => {
     const transaction = monthlyTransaction({
       id: "tx-cross-month",
@@ -937,32 +1156,36 @@ describe("月底银行回单与报销两阶段匹配", () => {
     });
     const context = createProgrammableClient({
       transactions: [transaction],
-      proofOwners: [{
-        normalized_proof_no: "CROSSMONTH500",
-        batch_id: "batch-cross-month",
-      }],
+      proofOwners: [
+        {
+          normalized_proof_no: "CROSSMONTH500",
+          batch_id: "batch-cross-month",
+        },
+      ],
       proofSets: { "batch-cross-month": ["CROSS-MONTH-500"] },
       replacementContexts: {
-        "batch-cross-month": [{
-          batch_status: "confirmed",
-          batch_amount: "500.00",
-          batch_proof_path: "uploads/invoices/old.jpg",
-          batch_business_date: "2026-05-31",
-          item_amount: "500.00",
-          id: "reimbursement-cross-month",
-          type: "business",
-          title: "跨月报销",
-          status: "completed",
-          total_amount: "500.00",
-          user_id: "user-cross-month",
-          employee_id: "employee-cross-month",
-          payment_batch_id: "batch-cross-month",
-          payment_proof_path: "uploads/invoices/old.jpg",
-          payment_business_date: "2026-05-31",
-          payment_upload_time: "2026-05-31T09:00:00.000Z",
-          completed_time: "2026-06-01T09:00:00.000Z",
-          receipt_confirmed_by: "测试员工",
-        }],
+        "batch-cross-month": [
+          {
+            batch_status: "confirmed",
+            batch_amount: "500.00",
+            batch_proof_path: "uploads/invoices/old.jpg",
+            batch_business_date: "2026-05-31",
+            item_amount: "500.00",
+            id: "reimbursement-cross-month",
+            type: "business",
+            title: "跨月报销",
+            status: "completed",
+            total_amount: "500.00",
+            user_id: "user-cross-month",
+            employee_id: "employee-cross-month",
+            payment_batch_id: "batch-cross-month",
+            payment_proof_path: "uploads/invoices/old.jpg",
+            payment_business_date: "2026-05-31",
+            payment_upload_time: "2026-05-31T09:00:00.000Z",
+            completed_time: "2026-06-01T09:00:00.000Z",
+            receipt_confirmed_by: "测试员工",
+          },
+        ],
       },
     });
 
@@ -976,20 +1199,24 @@ describe("月底银行回单与报销两阶段匹配", () => {
       expect.objectContaining({ transactionIds: ["tx-cross-month"] }),
     ]);
     expect(
-      context.calls.some((call) => call.sql.startsWith("UPDATE reimbursements")),
+      context.calls.some((call) =>
+        call.sql.startsWith("UPDATE reimbursements"),
+      ),
     ).toBe(false);
   });
 
   it("同一规范回单号历史指向多个批次时不选择任一批次", async () => {
     const context = createProgrammableClient({
-      transactions: [monthlyTransaction({
-        id: "tx-multi-owner",
-        amount: "300.00",
-        employeeId: "employee-owner",
-        employeeUserId: "user-owner",
-        category: "basic_reimbursement",
-        proofNo: "DUP-OWNER-300",
-      })],
+      transactions: [
+        monthlyTransaction({
+          id: "tx-multi-owner",
+          amount: "300.00",
+          employeeId: "employee-owner",
+          employeeUserId: "user-owner",
+          category: "basic_reimbursement",
+          proofNo: "DUP-OWNER-300",
+        }),
+      ],
       proofOwners: [
         { normalized_proof_no: "DUPOWNER300", batch_id: "batch-a" },
         { normalized_proof_no: "DUPOWNER300", batch_id: "batch-b" },
@@ -1004,8 +1231,7 @@ describe("月底银行回单与报销两阶段匹配", () => {
     expect(result.matchedGroups).toEqual([]);
     expect(result.pendingTransactions).toHaveLength(1);
     expect(
-      context.calls.some((call) =>
-        call.sql.includes("WHERE batch.id = $1")),
+      context.calls.some((call) => call.sql.includes("WHERE batch.id = $1")),
     ).toBe(false);
   });
 
@@ -1040,7 +1266,8 @@ describe("月底银行回单与报销两阶段匹配", () => {
           {
             batch_status: "confirmed",
             batch_amount: "300.00",
-            batch_proof_path: "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
+            batch_proof_path:
+              "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
             batch_business_date: "2026-06-18",
             item_amount: "100.00",
             id: "reimbursement-multi-a",
@@ -1051,7 +1278,8 @@ describe("月底银行回单与报销两阶段匹配", () => {
             user_id: "user-multi",
             employee_id: "employee-multi",
             payment_batch_id: "batch-multi",
-            payment_proof_path: "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
+            payment_proof_path:
+              "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
             payment_business_date: "2026-06-18",
             payment_upload_time: "2026-06-18T09:00:00.000Z",
             completed_time: "2026-06-19T09:00:00.000Z",
@@ -1060,7 +1288,8 @@ describe("月底银行回单与报销两阶段匹配", () => {
           {
             batch_status: "confirmed",
             batch_amount: "300.00",
-            batch_proof_path: "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
+            batch_proof_path:
+              "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
             batch_business_date: "2026-06-18",
             item_amount: "200.00",
             id: "reimbursement-multi-b",
@@ -1071,7 +1300,8 @@ describe("月底银行回单与报销两阶段匹配", () => {
             user_id: "user-multi",
             employee_id: "employee-multi",
             payment_batch_id: "batch-multi",
-            payment_proof_path: "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
+            payment_proof_path:
+              "uploads/invoices/old-a.jpg,uploads/invoices/old-b.jpg",
             payment_business_date: "2026-06-18",
             payment_upload_time: "2026-06-18T09:00:00.000Z",
             completed_time: "2026-06-19T09:00:00.000Z",
@@ -1185,9 +1415,9 @@ describe("月底银行回单与报销两阶段匹配", () => {
       (link) => link.businessObjectType === "reimbursement",
     );
     expect(reimbursementLinks).toHaveLength(4);
-    expect(reimbursementLinks.every((link) => link.allocatedAmount === null)).toBe(
-      true,
-    );
+    expect(
+      reimbursementLinks.every((link) => link.allocatedAmount === null),
+    ).toBe(true);
     expect(
       reimbursementLinks.every(
         (link) =>

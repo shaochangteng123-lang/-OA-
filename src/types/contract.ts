@@ -1,12 +1,14 @@
 // 合同管理模块类型定义
 
 export type ContractCategory = "main_business" | "non_main" | "asset";
+export type ContractPricingMode = "fixed" | "target";
 
 export type ContractDeclaredSubtype =
   | "engineering_consulting"
   | "preliminary_procedures"
   | "technical_consulting"
   | "non_main_income"
+  | "non_main_expense"
   | "other_service"
   | "procurement"
   | "software"
@@ -14,7 +16,8 @@ export type ContractDeclaredSubtype =
   | "house_rental"
   | "vehicle_rental"
   | "parking_space"
-  | "office_asset";
+  | "office_asset"
+  | "notary_fee";
 
 export type ContractRelationType = "main" | "supplement" | "termination";
 
@@ -44,6 +47,7 @@ export type ContractOcrStatus =
 export type ContractOcrFieldKey =
   | "party_a"
   | "party_b"
+  | "party_c"
   | "project_name"
   | "amount"
   | "category"
@@ -105,6 +109,7 @@ export type ContractSealVerificationStatus =
 export type ContractSealVerificationFieldKey =
   | "party_a"
   | "party_b"
+  | "party_c"
   | "amount"
   | "contract_date";
 
@@ -137,6 +142,7 @@ export interface ContractSealVerification {
   approvedSnapshot: {
     partyA: string;
     partyB: string;
+    partyC?: string | null;
     amount: MoneyValue;
     contractDate?: string | null;
   };
@@ -171,6 +177,7 @@ export type ContractAssetCategory =
   | "vehicle_rental"
   | "parking_space"
   | "office_asset"
+  | "notary_fee"
   | "other";
 
 export type ContractUploadAssetCategory = Exclude<
@@ -253,6 +260,7 @@ export interface ContractListItem {
   name: string;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   projectName: string;
   projectId?: string | null;
   category: ContractCategory | null;
@@ -286,6 +294,13 @@ export interface ContractListItem {
   recognizedFinalAmount?: MoneyValue | null;
   currentAmount?: MoneyValue | null;
   currentEffectiveAmount?: MoneyValue | null;
+  pricingMode?: ContractPricingMode;
+  targetAmount?: MoneyValue | null;
+  targetQuantity?: MoneyValue | null;
+  unitPrice?: MoneyValue | null;
+  confirmedQuantity?: MoneyValue | null;
+  confirmedContractAmount?: MoneyValue | null;
+  quantityUnit?: string | null;
   projectedAmount?: MoneyValue | null;
   pendingSupplementCount?: number | null;
   relatedAgreementCount?: number;
@@ -459,6 +474,7 @@ export interface ContractSealApplication {
     projectName: string | null;
     partyA: string | null;
     partyB: string | null;
+    partyC?: string | null;
     amount: MoneyValue | null;
     categoryLabel: string;
     relationLabel: string;
@@ -471,7 +487,11 @@ export type ContractAuxiliaryStatus =
   | "succeeded"
   | "partial"
   | "failed";
-export type ContractAuxiliaryFileKind = "contract" | "invoice" | "receipt";
+export type ContractAuxiliaryFileKind =
+  | "contract"
+  | "invoice"
+  | "receipt"
+  | "other";
 
 export interface ContractAuxiliaryFile {
   id: string;
@@ -899,9 +919,43 @@ export interface ContractDetailResponse {
   externalPayments: ContractFinanceRecord[];
   depositReceipts: ContractDepositReceipt[];
   financialRegistrationMatches: ContractFinancialRegistrationMatch[];
+  targetAmountChanges?: ContractTargetAmountChange[];
   relations: ContractRelation[];
   accounting: ContractAccounting | null;
   rentalInvoiceSummary: ContractRentalInvoiceSummary;
+}
+
+export interface ContractTargetAmountChange {
+  id: string;
+  contractId: string;
+  changeNo: number;
+  changeType: "initial" | "update";
+  oldTargetAmount: MoneyValue | null;
+  newTargetAmount: MoneyValue;
+  oldTargetQuantity: MoneyValue | null;
+  newTargetQuantity: MoneyValue | null;
+  oldUnitPrice: MoneyValue | null;
+  newUnitPrice: MoneyValue | null;
+  reason: string;
+  changedBy: string;
+  changedByName?: string | null;
+  changedAt: string;
+}
+
+export interface ContractTargetAmountPayload {
+  expectedVersion: number;
+  targetAmount: MoneyValue;
+  targetQuantity?: MoneyValue | null;
+  unitPrice?: MoneyValue | null;
+  confirmedQuantity?: MoneyValue | null;
+  confirmedContractAmount?: MoneyValue | null;
+  quantityUnit?: string | null;
+  reason?: string | null;
+}
+
+export interface ContractTargetAmountUpdateResult {
+  contract: ContractDetailResponse["contract"];
+  targetAmountChanges: ContractTargetAmountChange[];
 }
 
 export interface ContractRentalInvoiceSummary {
@@ -939,7 +993,11 @@ export interface ContractDashboardCategory {
   contractCount: number;
   fixedAmountContractCount?: number;
   noFixedAmountCount?: number;
+  incomeContractCount?: number;
+  expenseContractCount?: number;
   totalAmount: MoneyValue;
+  incomeContractAmount?: MoneyValue | null;
+  expenseContractAmount?: MoneyValue | null;
   periodAmount?: MoneyValue | null;
   periodSettledAmount?: MoneyValue | null;
   monthAmount?: MoneyValue | null;
@@ -979,10 +1037,16 @@ export interface ContractDashboardMainBusiness {
 export interface ContractDashboardNonMain {
   contractAmount: MoneyValue | null;
   totalContractAmount: MoneyValue | null;
+  incomeContractAmount?: MoneyValue | null;
+  expenseContractAmount?: MoneyValue | null;
   monthReceiptAmount: MoneyValue | null;
   periodReceiptAmount?: MoneyValue | null;
   cumulativeReceiptAmount: MoneyValue | null;
   unreceivedAmount: MoneyValue | null;
+  monthPaymentAmount?: MoneyValue | null;
+  periodPaymentAmount?: MoneyValue | null;
+  cumulativePaymentAmount?: MoneyValue | null;
+  unpaidAmount?: MoneyValue | null;
   financialCost: MoneyValue | null;
   tax: MoneyValue | null;
   accountingBase: MoneyValue | null;
@@ -1077,6 +1141,7 @@ export interface ContractDashboardQuery {
   startMonth?: string;
   endMonth?: string;
   category?: ContractCategory | "";
+  declaredSubtype?: ContractDeclaredSubtype | "";
   projectId?: string;
 }
 
@@ -1139,6 +1204,7 @@ export interface ContractListQuery {
   keyword?: string;
   counterparty?: string;
   category?: ContractCategory | ContractCategory[] | "";
+  declaredSubtype?: ContractDeclaredSubtype | ContractDeclaredSubtype[] | "";
   status?: ContractStatus | ContractStatus[] | "";
   settlementStatus?: ContractSettlementStatus | "";
   relationType?: ContractRelationType | "";
@@ -1175,6 +1241,7 @@ export interface ContractSupplementUploadContext {
   projectName: string;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   parentContractName: string;
   supplementSequence: number;
   generatedContractName: string;
@@ -1195,6 +1262,7 @@ export interface ContractRentalRenewalUploadContext {
   projectName: string;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   currentLeaseEndDate: string;
   canUpload: boolean;
   blockingReason?: string | null;
@@ -1215,6 +1283,7 @@ export interface ContractTerminationUploadContext {
   projectName: string;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   currentEffectiveAmount: MoneyValue;
   settledAmount: MoneyValue;
   unperformedAmount: MoneyValue;
@@ -1328,6 +1397,8 @@ export interface ContractInvoiceLineItem {
 export interface ContractFinancialBankFields {
   electronicReceiptNo: string;
   paymentTime: string;
+  currency: string;
+  currencyEvidence: "currency_label" | "renminbi_text" | "currency_symbol" | "";
   payer: string;
   payerAccount: string;
   payee: string;

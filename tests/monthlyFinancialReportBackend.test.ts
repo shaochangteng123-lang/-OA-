@@ -24,6 +24,15 @@ jest.mock("../server/middleware/auth", () => ({
     Object.assign(middleware, { allowedRoles: [...roles] });
     return middleware;
   }),
+  requireExactRole: jest.fn((roles: string[]) => {
+    const middleware = (_req: unknown, _res: unknown, next: () => void) =>
+      next();
+    Object.assign(middleware, {
+      allowedRoles: [...roles],
+      exactRoleRequired: true,
+    });
+    return middleware;
+  }),
 }));
 
 jest.mock("../server/services/monthlyFinancialBankStatement", () => {
@@ -42,7 +51,9 @@ import os from "os";
 import path from "path";
 import * as XLSX from "xlsx";
 import { db, pool } from "../server/db/index";
-import monthlyFinancialReportRouter from "../server/routes/monthly-financial-reports";
+import monthlyFinancialReportRouter, {
+  loadAutomaticSnapshot,
+} from "../server/routes/monthly-financial-reports";
 import {
   analyzeMonthlyFinancialBankFile,
   calculateMonthlyBankFileHash,
@@ -64,6 +75,10 @@ import {
   type MonthlyFinancialAutomaticSnapshot,
   type MonthlyFinancialManualItemInput,
 } from "../server/types/monthly-financial-report";
+import {
+  canMaintainMonthlyFinancialReport,
+  canReadMonthlyFinancialReport,
+} from "../server/utils/monthly-financial-permissions";
 
 function source(relativePath: string): string {
   return fs.readFileSync(path.resolve(process.cwd(), relativePath), "utf8");
@@ -103,6 +118,7 @@ interface RouterLayer {
       handle: ((...args: unknown[]) => unknown) & {
         allowedRoles?: string[];
         authRequired?: boolean;
+        exactRoleRequired?: boolean;
       };
     }>;
   };
@@ -128,6 +144,69 @@ function findRoute(
 }
 
 describe("月度财务报表精确金额与分类规则", () => {
+  it("福利账户一已付款报销按付款业务日期形成分类自动来源", async () => {
+    (db.all as jest.Mock).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM welfare_one_expense_categories")) {
+        return [
+          {
+            id: "welfare_one_other",
+            code: "other",
+            name: "其他",
+            sort_order: 6,
+            is_active: true,
+          },
+        ];
+      }
+      if (sql.includes("FROM reimbursements reimbursement")) {
+        return [
+          {
+            id: "welfare-reimbursement-1",
+            user_id: "user-1",
+            type: "welfare_one",
+            title: "九月福利支出",
+            applicant_name: "测试员工",
+            total_amount: "18.88",
+            occurred_at: "2026-09-08",
+            updated_at: "2026-09-08T01:00:00.000Z",
+            category: null,
+            reimbursement_scope: null,
+            scope_label: null,
+            scope_name_count: 0,
+            service_target: null,
+            employee_id: "employee-1",
+            welfare_category_id: "welfare_one_other",
+            welfare_category_name_snapshot: "其他",
+          },
+        ];
+      }
+      return [];
+    });
+
+    const snapshot = await loadAutomaticSnapshot("2026-09");
+
+    expect(snapshot.welfareOneExpenseCategories).toEqual([
+      expect.objectContaining({
+        id: "welfare_one_other",
+        name: "其他",
+        amount: "18.88",
+      }),
+    ]);
+    expect(snapshot.details).toContainEqual(
+      expect.objectContaining({
+        sourceType: "reimbursement",
+        sourceId: "welfare-reimbursement-1",
+        occurredOn: "2026-09-08",
+        accountCode: "welfare_one",
+        metric: "welfare_one_expense",
+        amount: "18.88",
+      }),
+    );
+    const reimbursementSql = (db.all as jest.Mock).mock.calls.find(([sql]) =>
+      String(sql).includes("FROM reimbursements reimbursement"),
+    )?.[0];
+    expect(reimbursementSql).toContain("reimbursement.payment_business_date");
+  });
+
   it("启动时将手工项目分类约束升级为包含全部福利分类", () => {
     const databaseSource = source("server/db/index.ts");
     const migrationStart = databaseSource.indexOf(
@@ -140,6 +219,7 @@ describe("月度财务报表精确金额与分类规则", () => {
 
     expect(migrationStart).toBeGreaterThan(-1);
     for (const category of [
+      "general_tax_payment",
       "welfare_one_supplement",
       "welfare_two_supplement",
       "welfare_one_407",
@@ -154,6 +234,15 @@ describe("月度财务报表精确金额与分类规则", () => {
     ]) {
       expect(migrationSection).toContain(`'${category}'`);
     }
+    expect(databaseSource).toContain(
+      "monthly_financial_manual_tax_evidence_check",
+    );
+    expect(databaseSource).toContain(
+      "VALIDATE CONSTRAINT monthly_financial_manual_tax_evidence_check",
+    );
+    expect(databaseSource).toMatch(
+      /category <> 'general_tax_payment'[\s\S]*?BTRIM\(COALESCE\(description, ''\)\)[\s\S]*?BTRIM\(COALESCE\(voucher_reference, ''\)\)/,
+    );
   });
 
   it("自动快照保留薪资和报销人员稳定编号、姓名并返回前端", () => {
@@ -171,7 +260,9 @@ describe("月度财务报表精确金额与分类规则", () => {
       "LEFT(COALESCE(paid_time, pay_time, completed_time), 7)",
     );
     expect(routeSource).toContain('description: "人力成本"');
-    expect(routeSource).toContain("automaticDetails: automatic.details");
+    expect(routeSource).toMatch(
+      /automaticDetails: protectMonthlyFinancialPayrollMetadata\(\s*automatic\.details,\s*role,?\s*\)/,
+    );
     expect(routeSource).toContain("hasValidPersonMetadata");
     expect(typeSource).toContain("personId?: string | null");
     expect(typeSource).toContain("personName?: string | null");
@@ -298,7 +389,25 @@ describe("月度财务报表精确金额与分类规则", () => {
         category,
         amount: `${index + 1}.123`,
         occurredOn: `2026-08-${String(index + 1).padStart(2, "0")}`,
-        description: category === "general_other" ? "其他支出说明" : "",
+        description:
+          category === "general_other"
+            ? "其他支出说明"
+            : category === "general_tax_payment"
+              ? "已实际缴纳企业所得税"
+              : "",
+        voucherReference:
+          category === "general_tax_payment" ? "税收缴款凭证-001" : "",
+        ...(category === "welfare_one_expense"
+          ? {
+              welfareCategoryId: "welfare_one_other",
+              welfareCategoryNameSnapshot: "其他",
+            }
+          : category === "welfare_two_expense"
+            ? {
+                welfareCategoryId: "welfare_two_refreshment",
+                welfareCategoryNameSnapshot: "茶歇",
+              }
+          : {}),
       }),
     );
 
@@ -375,6 +484,34 @@ describe("月度财务报表精确金额与分类规则", () => {
         "2026-08",
       ),
     ).toThrow("其他支出必须填写说明");
+    expect(() =>
+      validateManualItems(
+        [
+          {
+            category: "general_tax_payment",
+            amount: "100",
+            occurredOn: "2026-08-01",
+            description: "企业所得税",
+            voucherReference: "   ",
+          },
+        ],
+        "2026-08",
+      ),
+    ).toThrow("实际税费支出必须填写说明和凭证号");
+    expect(() =>
+      validateManualItems(
+        [
+          {
+            category: "general_tax_payment",
+            amount: "100",
+            occurredOn: "2026-08-01",
+            description: "   ",
+            voucherReference: "税凭-001",
+          },
+        ],
+        "2026-08",
+      ),
+    ).toThrow("实际税费支出必须填写说明和凭证号");
   });
 });
 
@@ -528,6 +665,111 @@ describe("月度财务报表账户公式", () => {
     });
   });
 
+  it("福利账户一自动报销与手工金额分源相加且固定同名分类只展示一次", () => {
+    const automatic = emptyAutomaticSnapshot();
+    automatic.welfareOneExpenseCategories = [
+      {
+        id: "welfare_one_drinking_water",
+        code: "drinking_water",
+        name: "饮用水",
+        sortOrder: 1,
+        isActive: true,
+        amount: "10",
+      },
+      {
+        id: "future-407",
+        code: "future_407",
+        name: "407-AI",
+        sortOrder: 4,
+        isActive: true,
+        amount: "3",
+      },
+      {
+        id: "welfare_one_other",
+        code: "other",
+        name: "其他",
+        sortOrder: 6,
+        isActive: true,
+        amount: "20",
+      },
+      {
+        id: "disabled-empty",
+        code: "disabled_empty",
+        name: "已停用空分类",
+        sortOrder: 7,
+        isActive: false,
+        amount: "0",
+      },
+    ];
+    const items = validateManualItems(
+      [
+        {
+          category: "welfare_one_drinking_water",
+          amount: "1",
+          occurredOn: "2026-08-01",
+        },
+        {
+          category: "welfare_one_407_ai",
+          amount: "4",
+          occurredOn: "2026-08-02",
+        },
+        {
+          category: "welfare_one_expense",
+          amount: "2",
+          occurredOn: "2026-08-03",
+          welfareCategoryId: "welfare_one_other",
+          welfareCategoryNameSnapshot: "其他",
+        },
+      ],
+      "2026-08",
+    );
+    const result = buildMonthlyFinancialReportView({
+      id: "report-welfare",
+      month: "2026-08",
+      status: "draft",
+      version: 1,
+      openingBalances: {
+        general: "0",
+        business: "0",
+        welfare_one: "50",
+        welfare_two: "0",
+      },
+      automatic,
+      manualItems: items,
+      lastRefreshedAt: null,
+      closedAt: null,
+      updatedAt: null,
+      canMaintain: true,
+    });
+
+    expect(
+      result.welfareOneExpenseCategories.map((category) => category.name),
+    ).toEqual(["饮用水", "407-AI", "其他"]);
+    expect(
+      result.welfareOneExpenseCategories.find(
+        (category) => category.name === "饮用水",
+      ),
+    ).toMatchObject({
+      automaticAmount: "10",
+      manualAmount: "1",
+      totalAmount: "11",
+      isFixed: true,
+    });
+    expect(
+      result.welfareOneExpenseCategories.find(
+        (category) => category.name === "407-AI",
+      ),
+    ).toMatchObject({ automaticAmount: "3", manualAmount: "4", totalAmount: "7" });
+    expect(
+      result.welfareOneExpenseCategories.find(
+        (category) => category.name === "其他",
+      ),
+    ).toMatchObject({ automaticAmount: "20", manualAmount: "2", totalAmount: "22" });
+    expect(
+      result.accounts.find((account) => account.code === "welfare_one"),
+    ).toMatchObject({ expense: "40", closingBalance: "10" });
+  });
+
   it("一般及商务手续费分别只进入对应账户支出一次", () => {
     const withFees = report();
     const withoutFees = report(
@@ -556,6 +798,67 @@ describe("月度财务报表账户公式", () => {
     ).toBe("0.25");
     expect(withFees.expenses.generalBankFee).toBe("0.5");
     expect(withFees.expenses.businessBankFee).toBe("0.25");
+  });
+
+  it("实际税费付款只进入一般账户支出一次并保留证据", () => {
+    const taxItem = validateManualItems(
+      [
+        {
+          category: "general_tax_payment",
+          amount: "88.123",
+          occurredOn: "2026-08-15",
+          description: "已实际缴纳增值税",
+          voucherReference: "税收缴款凭证-20260815",
+        },
+      ],
+      "2026-08",
+    )[0];
+    const withoutTax = report([]);
+    const withTax = report([taxItem]);
+    expect(withTax.expenses.generalTaxPayment).toBe("88.123");
+    expect(
+      subtractFinancialAmounts(
+        withoutTax.accounts.find((item) => item.code === "general")!
+          .closingBalance,
+        withTax.accounts.find((item) => item.code === "general")!
+          .closingBalance,
+      ),
+    ).toBe("88.123");
+    expect(taxItem).toMatchObject({
+      accountCode: "general",
+      direction: "expense",
+      description: "已实际缴纳增值税",
+      voucherReference: "税收缴款凭证-20260815",
+    });
+  });
+
+  it("新税费分类不会回填或改写既有月结快照", () => {
+    const closedSnapshot = { ...report([]), status: "closed" as const };
+    const original = JSON.stringify(closedSnapshot);
+    const taxItem = validateManualItems(
+      [
+        {
+          category: "general_tax_payment",
+          amount: "99",
+          occurredOn: "2026-08-15",
+          description: "后来录入税费",
+          voucherReference: "税凭-历史隔离",
+        },
+      ],
+      "2026-08",
+    );
+    const result = buildMonthlyFinancialReportView({
+      ...closedSnapshot,
+      status: "closed",
+      manualItems: taxItem,
+      automatic: emptyAutomaticSnapshot(),
+      canMaintain: true,
+      closedSnapshot,
+    });
+    expect(result.manualItems).toEqual([]);
+    expect(result.expenses.generalTaxPayment).toBe("0");
+    expect(result.accounts).toEqual(closedSnapshot.accounts);
+    expect(JSON.stringify(closedSnapshot)).toBe(original);
   });
 
   it("一般和商务银行来源活跃后覆盖各自手工利息手续费且只计一次", () => {
@@ -629,12 +932,16 @@ describe("月度财务报表月结、重开与快照安全", () => {
     };
   }
 
-  function requestMock(month: string, body: Record<string, unknown> = {}) {
+  function requestMock(
+    month: string,
+    body: Record<string, unknown> = {},
+    role = "admin",
+  ) {
     return {
       params: { month },
       body,
       session: {
-        user: { id: "admin-1", role: "admin", name: "管理员甲" },
+        user: { id: `${role}-1`, role, name: "管理员甲" },
       },
     };
   }
@@ -694,6 +1001,47 @@ describe("月度财务报表月结、重开与快照安全", () => {
         expect.objectContaining({ code: "general", inflow: "75479.4" }),
         expect.objectContaining({ code: "business", inflow: "12800.6" }),
       ]),
+    );
+  });
+
+  it("开放报表向超级管理员返回完整维护权限，总经理仍只读", async () => {
+    (db.get as jest.Mock).mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM monthly_financial_reports report")) {
+        return reportRow();
+      }
+      return undefined;
+    });
+    (db.all as jest.Mock).mockResolvedValue([]);
+    const route = findRoute("/:month", "get");
+
+    const superAdminResponse = responseMock();
+    await route.stack
+      .at(-1)!
+      .handle(requestMock("2026-08", {}, "super_admin"), superAdminResponse);
+    expect(superAdminResponse.status).not.toHaveBeenCalled();
+    expect(superAdminResponse.json.mock.calls[0][0].data.permissions).toEqual(
+      expect.objectContaining({
+        canEdit: true,
+        canRefresh: true,
+        canClose: true,
+        canReopen: false,
+        canDownload: true,
+      }),
+    );
+
+    const managerResponse = responseMock();
+    await route.stack
+      .at(-1)!
+      .handle(requestMock("2026-08", {}, "general_manager"), managerResponse);
+    expect(managerResponse.status).not.toHaveBeenCalled();
+    expect(managerResponse.json.mock.calls[0][0].data.permissions).toEqual(
+      expect.objectContaining({
+        canEdit: false,
+        canRefresh: false,
+        canClose: false,
+        canReopen: false,
+        canDownload: true,
+      }),
     );
   });
 
@@ -1007,6 +1355,64 @@ describe("月度财务报表月结、重开与快照安全", () => {
     expect(savedOpeningBalances).toEqual(previousClosing);
   });
 
+  it("非首月请求携带期初余额时明确拒绝而不是静默忽略", async () => {
+    const current = reportRow({ report_month: "2026-08", version: 3 });
+    const previous = reportRow({
+      id: "report-july",
+      report_month: "2026-07",
+      status: "closed",
+      version: 2,
+      closing_balances_json: {
+        general: "88",
+        business: "22",
+        welfare_one: "3",
+        welfare_two: "4",
+      },
+    });
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes("FROM monthly_financial_reports report")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("WHERE report_month <")) return { rows: [previous] };
+        return { rows: [] };
+      }),
+    };
+    (db.transaction as jest.Mock).mockImplementation(
+      async (callback: (client: typeof client) => Promise<unknown>) =>
+        callback(client),
+    );
+    const route = findRoute("/:month/manual-items", "put");
+    const response = responseMock();
+
+    await route.stack.at(-1)!.handle(
+      requestMock("2026-08", {
+        expectedVersion: 3,
+        openingBalances: {
+          general: "999",
+          business: "999",
+          welfare_one: "999",
+          welfare_two: "999",
+        },
+        items: [],
+      }),
+      response,
+    );
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith({
+      success: false,
+      code: "MONTHLY_FINANCE_OPENING_BALANCES_READ_ONLY",
+      message:
+        "2026-08不是首月，期初余额只能由上月月结期末承接，不能通过本次请求修改",
+    });
+    expect(
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("UPDATE monthly_financial_reports"),
+      ),
+    ).toBe(false);
+  });
+
   it("月结在同一可串行化事务内读取全部来源、手工项并写入快照", async () => {
     const current = reportRow();
     let storedSnapshot: Record<string, unknown> | undefined;
@@ -1235,6 +1641,169 @@ describe("月度财务报表月结、重开与快照安全", () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  it("同号历史识别差异先创建一次性复核挑战且不改月报和旧文件", async () => {
+    const temporaryRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "monthly-bank-content-correction-review-"),
+    );
+    const filePath = path.join(temporaryRoot, "基本账户.pdf");
+    fs.writeFileSync(filePath, "%PDF-1.4\n%%EOF\n");
+    const fileHash = "c".repeat(64);
+    const current = reportRow({
+      id: "report-august",
+      report_month: "2026-08",
+      version: 3,
+    });
+    (calculateMonthlyBankFileHash as jest.Mock).mockResolvedValue(fileHash);
+    (analyzeMonthlyFinancialBankFile as jest.Mock).mockImplementation(
+      async (input: { outputDir: string }) => {
+        fs.mkdirSync(input.outputDir, { recursive: true });
+        return {
+          originalName: "基本账户.pdf",
+          fileHash,
+          accountCode: "basic",
+          accountNumber: "0200049609201258271",
+          filenameAccountHint: "basic",
+          pageCount: 1,
+          skippedBlankPages: [],
+          transactionMonths: ["2026-08"],
+          requiresMixedMonthConfirmation: false,
+          warnings: [],
+          transactions: [
+            {
+              pageNo: 1,
+              position: "full",
+              previewPath: path.join(input.outputDir, "receipt.jpg"),
+              electronicReceiptNo: "0918-9264-4631-1100",
+              normalizedElectronicReceiptNo: "0918926446311100",
+              transactionDate: "2026-08-12",
+              transactionMonth: "2026-08",
+              amount: 19_794.27,
+              payer: "北京羽隶工程咨询有限公司",
+              payerAccount: "0200049609201258271",
+              payee: "待报解预算收入",
+              payeeAccount: "",
+              remark: "代理国库税收收缴",
+              direction: "outflow",
+              category: "ignored",
+              isInternalTransfer: false,
+              includeInReport: false,
+              recognitionStatus: "ignored",
+              warnings: [],
+              rawTextHash: "d".repeat(64),
+            },
+          ],
+        };
+      },
+    );
+    (db.get as jest.Mock).mockResolvedValue(undefined);
+    const client = {
+      query: jest.fn(async (sqlValue: string) => {
+        const sql = String(sqlValue);
+        if (sql.includes("SELECT role, status FROM users")) {
+          return { rows: [{ role: "admin", status: "active" }] };
+        }
+        if (sql.includes("FROM monthly_financial_reports report")) {
+          return { rows: [current] };
+        }
+        if (
+          sql.includes("FROM monthly_financial_bank_transactions transaction")
+        ) {
+          return {
+            rows: [
+              {
+                id: "bank-tax-old",
+                report_month: "2026-08",
+                account_code: "basic",
+                electronic_receipt_no: "0918-9264-4631-1100",
+                normalized_electronic_receipt_no: "0918926446311100",
+                transaction_date: "2026-08-12",
+                amount: "19794.20",
+                direction: "outflow",
+                payer_account: "0200049609201258271",
+                payee_account: "0200099811",
+                current_file_id: "old-basic-file",
+                current_file_version: 1,
+                original_name: "１.pdf",
+                recognition_version: "legacy-unknown",
+                has_business_links: false,
+              },
+            ],
+          };
+        }
+        if (sql.includes("WHERE report_month <")) return { rows: [] };
+        return { rows: [] };
+      }),
+    };
+    (db.transaction as jest.Mock).mockImplementation(
+      async (callback: (client: typeof client) => Promise<unknown>) =>
+        callback(client),
+    );
+    const route = findRoute("/:month/bank-receipts", "post");
+    const response = responseMock();
+    const request = {
+      params: { month: "2026-08" },
+      body: { expectedVersion: "3", mixedMonthConfirmed: "false" },
+      files: [
+        {
+          fieldname: "files",
+          originalname: "基本账户.pdf",
+          encoding: "7bit",
+          mimetype: "application/pdf",
+          size: fs.statSync(filePath).size,
+          destination: temporaryRoot,
+          filename: path.basename(filePath),
+          path: filePath,
+          buffer: Buffer.alloc(0),
+        },
+      ],
+      sessionID: "session-content-correction",
+      session: {
+        user: { id: "admin-1", role: "admin", name: "管理员甲" },
+      },
+    };
+
+    try {
+      await route.stack.at(-1)!.handle(request, response);
+    } finally {
+      fs.rmSync(temporaryRoot, { recursive: true, force: true });
+    }
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        code: "MONTHLY_BANK_RECEIPT_CONTENT_CONFLICT_CONFIRMATION_REQUIRED",
+        data: expect.objectContaining({
+          reviewId: expect.stringContaining("mfbcr_"),
+          confirmationToken: expect.any(String),
+          conflicts: [
+            expect.objectContaining({
+              receiptNo: "0918-9264-4631-1100",
+              differences: expect.arrayContaining(["amount", "payeeAccount"]),
+              correctable: true,
+            }),
+          ],
+        }),
+      }),
+    );
+    const sqls = client.query.mock.calls.map(([sql]) => String(sql));
+    expect(sqls).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "INSERT INTO monthly_financial_bank_correction_reviews",
+        ),
+      ]),
+    );
+    expect(
+      sqls.some(
+        (sql) =>
+          sql.includes("UPDATE monthly_financial_bank_files") ||
+          sql.includes("UPDATE monthly_financial_reports") ||
+          sql.includes("INSERT INTO monthly_financial_bank_files"),
+      ),
+    ).toBe(false);
+  });
+
   it("管理员可填写原因排除冲正后的待复核交易并重新计算月报", async () => {
     const current = reportRow();
     const client = {
@@ -1412,19 +1981,12 @@ describe("月度财务报表月结、重开与快照安全", () => {
     ).toBe(false);
   });
 
-  it("补建早于既有月结月份的报表时自动失效后续承接链", async () => {
+  it("未保存首月期初时禁止同步自动创建零期初月报", async () => {
     const august = reportRow({
       id: "report-august",
       report_month: "2026-08",
       status: "closed",
       version: 5,
-    });
-    const createdJuly = reportRow({
-      id: "monthly-test-id",
-      report_month: "2026-07",
-      status: "draft",
-      version: 1,
-      automatic_snapshot_json: emptyAutomaticSnapshot(),
     });
     const client = {
       query: jest.fn(async (sql: string) => {
@@ -1448,9 +2010,68 @@ describe("月度财务报表月结、重开与快照安全", () => {
       async (callback: (client: typeof client) => Promise<unknown>) =>
         callback(client),
     );
+    const route = findRoute("/:month/refresh", "post");
+    const response = responseMock();
+
+    await route.stack
+      .at(-1)!
+      .handle(requestMock("2026-07", { expectedVersion: 0 }), response);
+
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith({
+      success: false,
+      code: "MONTHLY_FINANCE_OPENING_BALANCES_REQUIRED",
+      message:
+        "首月尚未保存，请先完整填写四个账户期初余额并点击保存维护数据，再同步自动数据",
+    });
+    expect(
+      client.query.mock.calls.some(
+        ([sql]) =>
+          String(sql).includes("INSERT INTO monthly_financial_reports") ||
+          String(sql).includes("UPDATE monthly_financial_reports"),
+      ),
+    ).toBe(false);
+    expect(
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("WHERE report_month >"),
+      ),
+    ).toBe(false);
+  });
+
+  it("首月已经保存期初后仍可正常同步自动数据", async () => {
+    const current = reportRow({
+      report_month: "2026-08",
+      version: 1,
+      opening_balances_json: {
+        general: "1000",
+        business: "200",
+        welfare_one: "30",
+        welfare_two: "40",
+      },
+    });
+    const refreshed = reportRow({
+      ...current,
+      version: 2,
+      last_refreshed_at: "2026-08-31T01:00:00.000Z",
+      updated_at: "2026-08-31T01:00:00.000Z",
+    });
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes("FROM monthly_financial_reports report")) {
+          return { rows: [current] };
+        }
+        if (sql.includes("WHERE report_month <")) return { rows: [] };
+        if (sql.includes("WHERE report_month >")) return { rows: [] };
+        return { rows: [] };
+      }),
+    };
+    (db.transaction as jest.Mock).mockImplementation(
+      async (callback: (client: typeof client) => Promise<unknown>) =>
+        callback(client),
+    );
     (db.get as jest.Mock).mockImplementation(async (sql: string) => {
       if (sql.includes("FROM monthly_financial_reports report")) {
-        return createdJuly;
+        return refreshed;
       }
       return undefined;
     });
@@ -1460,17 +2081,26 @@ describe("月度财务报表月结、重开与快照安全", () => {
 
     await route.stack
       .at(-1)!
-      .handle(requestMock("2026-07", { expectedVersion: 0 }), response);
+      .handle(requestMock("2026-08", { expectedVersion: 1 }), response);
 
     expect(response.status).not.toHaveBeenCalled();
-    expect(response.json.mock.calls[0][0].affectedMonths).toEqual(["2026-08"]);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        message: "自动数据已同步",
+      }),
+    );
     expect(
-      client.query.mock.calls.some(
-        ([sql, params]) =>
-          String(sql).includes("UPDATE monthly_financial_reports") &&
-          params?.[0] === "report-august",
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("UPDATE monthly_financial_reports"),
       ),
     ).toBe(true);
+    expect(response.json.mock.calls[0][0].data.accounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "general", opening: "1000" }),
+        expect.objectContaining({ code: "business", opening: "200" }),
+      ]),
+    );
   });
 });
 
@@ -1762,7 +2392,69 @@ describe("月报银行交易关联状态与受控裁片预览", () => {
     }
   });
 
-  it("原回单仅通过有效替换链接向申请人、管理员和商务总经理开放，并限制三类证据根目录", async () => {
+  it("超级管理员可预览月报回单裁片，董事长仍无权预览", async () => {
+    const previewRoot = path.join(
+      process.cwd(),
+      "uploads",
+      "monthly-financial-bank",
+      "recognized",
+    );
+    const temporaryDirectory = fs.mkdtempSync(
+      path.join(previewRoot, "super-admin-access-test-"),
+    );
+    const previewPath = path.join(temporaryDirectory, "receipt.jpg");
+    fs.writeFileSync(previewPath, "preview");
+    const storedPreviewPath = path.relative(process.cwd(), previewPath);
+    const route = findRoute("/bank-transactions/:transactionId/preview", "get");
+
+    try {
+      (db.get as jest.Mock).mockResolvedValue({
+        crop_path: storedPreviewPath,
+        occurrence_crop_path: null,
+        historical_crop_path: null,
+        owns_linked_reimbursement: false,
+      });
+
+      const superAdminResponse = previewResponseMock();
+      await route.stack.at(-1)!.handle(
+        {
+          params: { transactionId: "bank-transaction-1" },
+          query: {},
+          session: {
+            user: {
+              id: "super-admin-1",
+              role: "super_admin",
+              name: "超级管理员",
+            },
+          },
+        },
+        superAdminResponse,
+      );
+      expect(superAdminResponse.status).not.toHaveBeenCalled();
+      expect(superAdminResponse.sendFile).toHaveBeenCalledWith(previewPath);
+
+      const chairmanResponse = previewResponseMock();
+      await route.stack.at(-1)!.handle(
+        {
+          params: { transactionId: "bank-transaction-1" },
+          query: {},
+          session: {
+            user: { id: "chairman-1", role: "chairman", name: "董事长" },
+          },
+        },
+        chairmanResponse,
+      );
+      expect(chairmanResponse.status).toHaveBeenCalledWith(403);
+      expect(chairmanResponse.json).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "MONTHLY_BANK_PREVIEW_FORBIDDEN" }),
+      );
+      expect(chairmanResponse.sendFile).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("原回单仅通过有效替换链接向申请人、两类管理员和商务总经理开放，并限制三类证据根目录", async () => {
     const fixtureRoots = [
       path.join(process.cwd(), "uploads", "invoices"),
       path.join(process.cwd(), "uploads", "bank-receipts"),
@@ -1805,6 +2497,7 @@ describe("月报银行交易关联状态与受控裁片预览", () => {
       (db.get as jest.Mock)
         .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
         .mockResolvedValueOnce(linkedRow(storedPaths[1]!))
+        .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
         .mockResolvedValueOnce(linkedRow(`/${storedPaths[2]!}`, "business"))
         .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
         .mockResolvedValueOnce(linkedRow(storedPaths[0]!))
@@ -1825,6 +2518,15 @@ describe("月报银行交易关联状态与受控裁片预览", () => {
         .at(-1)!
         .handle(request({ id: "admin-1", role: "admin" }), adminResponse);
       expect(adminResponse.sendFile).toHaveBeenCalledWith(fixturePaths[1]);
+
+      const superAdminResponse = previewResponseMock();
+      await route.stack
+        .at(-1)!
+        .handle(
+          request({ id: "super-admin-1", role: "super_admin" }),
+          superAdminResponse,
+        );
+      expect(superAdminResponse.sendFile).toHaveBeenCalledWith(fixturePaths[0]);
 
       const businessManagerResponse = previewResponseMock();
       await route.stack
@@ -1920,7 +2622,7 @@ describe("月报银行交易关联状态与受控裁片预览", () => {
 });
 
 describe("月度财务报表菜单、路由与后端接口权限", () => {
-  it("菜单和页面路由精确限制普通管理员及总经理", () => {
+  it("菜单和页面路由向两类管理员及总经理开放", () => {
     const layoutSource = source("src/layouts/MainLayout.vue");
     const routerSource = source("src/router/index.ts");
     const financeStart = layoutSource.indexOf("<!-- 财务区 -->");
@@ -1948,20 +2650,45 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
 
     expect(financeSection).toContain('path="/monthly-financial-report"');
     expect(financeSection).toContain('v-if="canViewMonthlyFinancialReport"');
-    expect(permissionBlock).toContain('authStore.user?.role === "admin"');
     expect(permissionBlock).toContain(
-      'authStore.user?.role === "general_manager"',
+      "canViewMonthlyFinancialReportForRole(authStore.user?.role)",
     );
-    expect(permissionBlock).not.toContain('"super_admin"');
     expect(permissionBlock).not.toContain('"chairman"');
     expect(permissionBlock).not.toContain('"boss"');
-    expect(routeBlock).toContain('requiresRole: ["admin", "general_manager"]');
-    expect(routeBlock).not.toContain('"super_admin"');
+    expect(routeBlock).toContain(
+      'requiresRole: ["super_admin", "admin", "general_manager"]',
+    );
+    expect(routeBlock).toContain("requiresExactRole: true");
     expect(routeBlock).not.toContain('"chairman"');
     expect(routeBlock).not.toContain('"boss"');
   });
 
-  it("十二个后端接口完整存在，裁片与原回单受登录保护且其余接口绑定精确角色", () => {
+  it("超级管理员与普通管理员具有相同维护权限，总经理保持只读", () => {
+    expect(canReadMonthlyFinancialReport("admin")).toBe(true);
+    expect(canMaintainMonthlyFinancialReport("admin")).toBe(true);
+    expect(canReadMonthlyFinancialReport("super_admin")).toBe(true);
+    expect(canMaintainMonthlyFinancialReport("super_admin")).toBe(true);
+    expect(canReadMonthlyFinancialReport("general_manager")).toBe(true);
+    expect(canMaintainMonthlyFinancialReport("general_manager")).toBe(false);
+    for (const role of ["chairman", "boss", "user", null, undefined]) {
+      expect(canReadMonthlyFinancialReport(role)).toBe(false);
+      expect(canMaintainMonthlyFinancialReport(role)).toBe(false);
+    }
+
+    const monthlyRouteSource = source(
+      "server/routes/monthly-financial-reports.ts",
+    );
+    const contractsRouteSource = source("server/routes/contracts.ts");
+    expect(monthlyRouteSource).not.toMatch(/role\s*[!=]==?\s*["']admin["']/u);
+    expect(monthlyRouteSource).toContain(
+      "!canMaintainMonthlyFinancialReport(currentActor.rows[0]?.role)",
+    );
+    expect(contractsRouteSource).toContain(
+      "canReadMonthlyFinancialReport(req.session.user?.role)",
+    );
+  });
+
+  it("十六个后端接口完整存在，裁片与原回单受登录保护且其余接口绑定精确角色", () => {
     const expected = [
       {
         path: "/bank-transactions/:transactionId/preview",
@@ -1976,28 +2703,72 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
       {
         path: "/:month/bank-receipts",
         method: "get",
-        roles: ["admin", "general_manager"],
+        roles: ["admin", "super_admin", "general_manager"],
       },
       {
         path: "/:month/bank-receipts",
         method: "post",
-        roles: ["admin"],
+        roles: ["admin", "super_admin"],
+      },
+      {
+        path: "/:month/bank-receipt-corrections/:reviewId/confirm",
+        method: "post",
+        roles: ["admin", "super_admin"],
       },
       {
         path: "/:month/bank-transactions/:transactionId/review",
         method: "post",
-        roles: ["admin"],
+        roles: ["admin", "super_admin"],
       },
-      { path: "/trend", method: "get", roles: ["admin", "general_manager"] },
-      { path: "/:month", method: "get", roles: ["admin", "general_manager"] },
-      { path: "/:month/manual-items", method: "put", roles: ["admin"] },
-      { path: "/:month/refresh", method: "post", roles: ["admin"] },
-      { path: "/:month/close", method: "post", roles: ["admin"] },
-      { path: "/:month/reopen", method: "post", roles: ["admin"] },
+      {
+        path: "/trend",
+        method: "get",
+        roles: ["admin", "super_admin", "general_manager"],
+      },
+      {
+        path: "/analysis",
+        method: "get",
+        roles: ["admin", "super_admin", "general_manager"],
+      },
+      {
+        path: "/analysis/export",
+        method: "get",
+        roles: ["admin", "super_admin", "general_manager"],
+      },
+      {
+        path: "/analysis/projects/:rootId/receipts/:receiptId/preview",
+        method: "get",
+        roles: ["admin", "super_admin", "general_manager"],
+      },
+      {
+        path: "/:month",
+        method: "get",
+        roles: ["admin", "super_admin", "general_manager"],
+      },
+      {
+        path: "/:month/manual-items",
+        method: "put",
+        roles: ["admin", "super_admin"],
+      },
+      {
+        path: "/:month/refresh",
+        method: "post",
+        roles: ["admin", "super_admin"],
+      },
+      {
+        path: "/:month/close",
+        method: "post",
+        roles: ["admin", "super_admin"],
+      },
+      {
+        path: "/:month/reopen",
+        method: "post",
+        roles: ["admin", "super_admin"],
+      },
       {
         path: "/:month/export",
         method: "get",
-        roles: ["admin", "general_manager"],
+        roles: ["admin", "super_admin", "general_manager"],
       },
     ];
 
@@ -2009,8 +2780,9 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
         expect(route.stack[0].handle.allowedRoles).toBeUndefined();
       } else {
         expect(route.stack[0].handle.allowedRoles).toEqual(permission.roles);
+        expect(route.stack[0].handle.exactRoleRequired).toBe(true);
         expect(route.stack[0].handle.allowedRoles).not.toEqual(
-          expect.arrayContaining(["super_admin", "chairman", "boss", "user"]),
+          expect.arrayContaining(["chairman", "boss", "user"]),
         );
       }
     });
@@ -2166,6 +2938,7 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
       month: "2026-01",
       status: "closed",
       valueState: "closed",
+      actualReceiptState: "closed",
       actualReceipt: "500",
     });
     expect(payload.data.points[0].actualReceipt).not.toBe("999");
@@ -2173,9 +2946,189 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
       month: "2026-02",
       status: null,
       valueState: null,
+      actualReceiptState: null,
       actualReceipt: null,
       closingTotal: null,
     });
+  });
+
+  it("首个建账月之前仅按人民币已确认合同回款补主营趋势", async () => {
+    const sqlCalls: string[] = [];
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("MIN(report_month)")) {
+        return { report_month: "2026-08" };
+      }
+      if (sql.includes("MIN(LEFT(receipt.receipt_date, 7))")) {
+        return { month: "2026-07" };
+      }
+      return undefined;
+    });
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      sqlCalls.push(sql);
+      if (sql.includes("SELECT report_month")) return [];
+      if (sql.includes("SELECT DISTINCT LEFT(report_month, 4)")) {
+        return [{ year: 2026 }];
+      }
+      if (
+        sql.includes("receipt.amount::text AS amount") &&
+        !sql.includes("SELECT DISTINCT")
+      ) {
+        return [
+          {
+            month: "2026-06",
+            region: "朝阳区",
+            amount: "100.00",
+            currency: "USD",
+            rate_snapshot_json: null,
+          },
+          {
+            month: "2026-07",
+            region: "朝阳区",
+            amount: "50000.00",
+            currency: "CNY",
+            rate_snapshot_json: null,
+          },
+        ];
+      }
+      if (sql.includes("SELECT DISTINCT LEFT(receipt.receipt_date, 4)")) {
+        return [{ year: 2025 }, { year: 2026 }];
+      }
+      if (sql.includes("root.current_effective_amount::text AS amount")) {
+        return [
+          {
+            id: "contract-upload-date",
+            month: "2026-06",
+            region: "朝阳区",
+            amount: "999.00",
+            contract_date_source: "upload_date",
+          },
+          {
+            id: "contract-chaoyang",
+            month: "2026-07",
+            region: "朝阳区",
+            amount: "1000.00",
+            contract_date_source: "manual",
+          },
+          {
+            id: "contract-haidian",
+            month: "2026-07",
+            region: "海淀区",
+            amount: "2000.00",
+            contract_date_source: "ocr",
+          },
+        ];
+      }
+      if (sql.includes("SELECT DISTINCT LEFT(root.contract_date, 4)")) {
+        return [{ year: 2026 }];
+      }
+      return [];
+    });
+    const response = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn().mockReturnThis(),
+    };
+    const route = findRoute("/trend", "get");
+
+    await route.stack.at(-1)!.handle(
+      {
+        query: { from: "2026-06", to: "2026-09" },
+        session: {
+          user: { id: "admin-1", role: "admin", name: "管理员甲" },
+        },
+      },
+      response,
+    );
+
+    const data = response.json.mock.calls[0]?.[0].data;
+    expect(data.availableYears).toEqual([2025, 2026]);
+    expect(data.points[0]).toMatchObject({
+      month: "2026-06",
+      actualReceipt: null,
+      actualReceiptState: null,
+    });
+    expect(data.points[1]).toMatchObject({
+      month: "2026-07",
+      status: null,
+      actualReceipt: "50000",
+      actualReceiptState: "confirmed_source",
+      closingTotal: null,
+    });
+    expect(data.points[2]).toMatchObject({
+      month: "2026-08",
+      actualReceipt: "0",
+      actualReceiptState: "confirmed_source",
+    });
+    expect(data.points[3]).toMatchObject({
+      month: "2026-09",
+      actualReceipt: "0",
+      actualReceiptState: "confirmed_source",
+    });
+    expect(data.mainBusinessRegions).toEqual(["朝阳区", "海淀区"]);
+    expect(
+      data.mainBusinessPoints.find(
+        (point: { month: string; region: string }) =>
+          point.month === "2026-06" && point.region === "朝阳区",
+      ),
+    ).toMatchObject({
+      actualReceipt: null,
+      contractAmount: null,
+      contractCount: null,
+    });
+    expect(
+      data.mainBusinessPoints.find(
+        (point: { month: string; region: string }) =>
+          point.month === "2026-07" && point.region === "朝阳区",
+      ),
+    ).toMatchObject({
+      actualReceipt: "50000",
+      contractAmount: "1000",
+      contractCount: 1,
+    });
+    expect(
+      data.mainBusinessPoints.find(
+        (point: { month: string; region: string }) =>
+          point.month === "2026-07" && point.region === "海淀区",
+      ),
+    ).toMatchObject({
+      actualReceipt: "0",
+      contractAmount: "2000",
+      contractCount: 1,
+    });
+    expect(data.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "MONTHLY_FINANCE_TREND_FOREIGN_CURRENCY_RECEIPT",
+          months: ["2026-06"],
+        }),
+        expect.objectContaining({
+          code: "MONTHLY_FINANCE_TREND_CONTRACT_DATE_SOURCE_UNCONFIRMED",
+          months: ["2026-06"],
+        }),
+      ]),
+    );
+    const receiptRangeSql = sqlCalls.find(
+      (sql) =>
+        sql.includes("receipt.amount::text AS amount") &&
+        !sql.includes("SELECT DISTINCT"),
+    );
+    expect(receiptRangeSql).toContain("LEFT(receipt.receipt_date, 7) >= ?");
+    expect(source("server/routes/monthly-financial-reports.ts")).toContain(
+      "month > currentMonth",
+    );
+    expect(receiptRangeSql).toContain("TO_DATE(receipt.receipt_date");
+    expect(receiptRangeSql).toContain("receipt.status = 'confirmed'");
+    const contractRangeSql = sqlCalls.find((sql) =>
+      sql.includes("root.current_effective_amount::text AS amount"),
+    );
+    expect(contractRangeSql).toContain("root.relation_type = 'main'");
+    expect(contractRangeSql).toContain(
+      "COALESCE(root.root_contract_id, root.id) = root.id",
+    );
+    expect(contractRangeSql).toContain(
+      "root.status NOT IN ('draft', 'rejected')",
+    );
   });
 
   it("趋势接口对重新开启月份使用当前开放报表的精确工作值", async () => {
@@ -2256,6 +3209,7 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
       month: "2026-03",
       status: "reopened",
       valueState: "current",
+      actualReceiptState: "current",
       actualReceipt: "300",
     });
     expect(currentPoint).not.toHaveProperty("isEstimate");
@@ -2461,6 +3415,25 @@ describe("月度财务报表菜单、路由与后端接口权限", () => {
     expect(pool.query).toHaveBeenCalledWith(
       expect.stringContaining("'export'"),
       expect.arrayContaining(["report-export", 3, "admin-1", "admin"]),
+    );
+  });
+
+  it("合同桥接后外层事务回滚会清理复制证据且提交结果不确定时保留", () => {
+    const monthlyRouteSource = source(
+      "server/routes/monthly-financial-reports.ts",
+    );
+    const bankLinkerSource = source(
+      "server/services/monthlyFinancialBankLinker.ts",
+    );
+    expect(bankLinkerSource).toContain("createdEvidencePaths?: string[]");
+    expect(monthlyRouteSource).toContain(
+      "cleanupRolledBackContractEvidence(contractReconciliation, error)",
+    );
+    expect(monthlyRouteSource).toContain(
+      "if (transactionCommitOutcomeUncertain(error)) return",
+    );
+    expect(monthlyRouteSource).toContain(
+      "cleanupMonthlyContractBridgeGroupFiles(result)",
     );
   });
 });

@@ -20,6 +20,7 @@ import type { ContractRecognitionResult } from "../server/services/contractOcr";
 import {
   appendContractAuxiliaryFiles,
   createContractAuxiliaryPackage,
+  deleteContractAuxiliaryFile,
   deleteContractAuxiliaryPackage,
   getContractAuxiliaryPackage,
   retryContractAuxiliaryPackageRecognition,
@@ -148,7 +149,7 @@ function packageRow(overrides: Record<string, unknown> = {}) {
 
 function fileRow(
   id: string,
-  fileKind: "contract" | "invoice" | "receipt",
+  fileKind: "contract" | "invoice" | "receipt" | "other",
   fileName: string,
   createdAt = "2026-08-11T00:00:00.000Z",
 ) {
@@ -182,7 +183,7 @@ describe("辅助合同档案包领域服务", () => {
     (nanoid as jest.Mock).mockImplementation(() => `generated-${++id}`);
   });
 
-  it("必须关联现有主合同并把多份合同、发票和回单保存为隔离资料", async () => {
+  it("必须关联现有主合同并把多类辅助材料保存为隔离资料", async () => {
     const packageInsert: { sql?: string; params?: unknown[] } = {};
     const fileInserts: unknown[][] = [];
     const client = {
@@ -223,6 +224,11 @@ describe("辅助合同档案包领域服务", () => {
           storedFile("回单-1.png", "e", "image/png"),
           storedFile("回单-2.png", "f", "image/png"),
         ],
+        other: storedFile(
+          "工作量确认单.xlsx",
+          "1",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ),
       } as never,
       note: "  本合同仅用于特殊事项说明  ",
       actor,
@@ -241,20 +247,21 @@ describe("辅助合同档案包领域服务", () => {
       "invoice",
       "receipt",
       "receipt",
+      "other",
     ]);
     expect(packageInsert.sql).toContain("accounting_included");
     expect(packageInsert.sql).toMatch(/,FALSE,/);
     expect(packageInsert.params).toEqual(
       expect.arrayContaining(["contract-1", "本合同仅用于特殊事项说明"]),
     );
-    expect(fileInserts).toHaveLength(6);
+    expect(fileInserts).toHaveLength(7);
     expect(client.query).toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO contract_audit_logs"),
       expect.arrayContaining(["auxiliary_package_created"]),
     );
   });
 
-  it("已有辅助合同档案后允许只追加发票和回单", async () => {
+  it("已有档案后允许在没有辅助合同时追加其他材料", async () => {
     const fileInserts: unknown[][] = [];
     const client = {
       query: jest.fn(async (sql: string, params: unknown[] = []) => {
@@ -278,12 +285,7 @@ describe("辅助合同档案包领域服务", () => {
         }
         if (sql.includes("SELECT file_hash, file_kind")) {
           return {
-            rows: [
-              {
-                file_hash: "a".padStart(64, "0"),
-                file_kind: "contract",
-              },
-            ],
+            rows: [],
             rowCount: 1,
           };
         }
@@ -302,6 +304,7 @@ describe("辅助合同档案包领域服务", () => {
       files: {
         invoice: [storedFile("发票.pdf", "b")],
         receipt: [storedFile("回单.png", "c", "image/png")],
+        other: [storedFile("评审材料.zip", "d", "application/zip")],
       },
       actor,
     });
@@ -314,8 +317,9 @@ describe("辅助合同档案包领域服务", () => {
     expect(appended.files.map((file) => file.fileKind)).toEqual([
       "invoice",
       "receipt",
+      "other",
     ]);
-    expect(fileInserts).toHaveLength(2);
+    expect(fileInserts).toHaveLength(3);
     expect(client.query).toHaveBeenCalledWith(
       expect.stringContaining("INSERT INTO contract_audit_logs"),
       expect.arrayContaining(["auxiliary_package_files_appended"]),
@@ -394,7 +398,39 @@ describe("辅助合同档案包领域服务", () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  it("至少一份辅助合同必传，发票和回单保持可选", async () => {
+  it("首次归档任一材料即可，空请求仍会被拒绝", async () => {
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes("requires_auxiliary_materials FROM contracts")) {
+          return {
+            rows: [
+              {
+                id: "contract-1",
+                status: "effective",
+                requires_auxiliary_materials: true,
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+    installTransaction(client);
+    await expect(
+      createContractAuxiliaryPackage({
+        parentContractId: "contract-1",
+        files: {
+          other: storedFile("报价单.zip", "a", "application/zip"),
+        },
+        actor,
+      }),
+    ).resolves.toMatchObject({
+      accountingIncluded: false,
+      files: [expect.objectContaining({ fileKind: "other" })],
+    });
+
+    jest.clearAllMocks();
     await expect(
       createContractAuxiliaryPackage({
         parentContractId: "contract-1",
@@ -402,7 +438,7 @@ describe("辅助合同档案包领域服务", () => {
         actor,
       }),
     ).rejects.toMatchObject({
-      code: "CONTRACT_AUXILIARY_CONTRACT_FILE_REQUIRED",
+      code: "CONTRACT_AUXILIARY_FILE_REQUIRED",
     });
     expect(db.transaction).not.toHaveBeenCalled();
   });
@@ -579,7 +615,7 @@ describe("辅助合同档案包领域服务", () => {
     });
   });
 
-  it("正常读取返回备注、识别结果和三类归档文件，但不暴露可变核算开关", async () => {
+  it("正常读取返回备注、识别结果和归档文件，但不暴露可变核算开关", async () => {
     (db.get as jest.Mock).mockResolvedValueOnce(
       packageRow({
         ocr_fields_json: [
@@ -648,6 +684,7 @@ describe("辅助合同档案包领域服务", () => {
       fileRow("file-invoice-2", "invoice", "发票-2.pdf"),
       fileRow("file-receipt-1", "receipt", "回单-1.png"),
       fileRow("file-receipt-2", "receipt", "回单-2.png"),
+      fileRow("file-other-1", "other", "工作量确认单.xlsx"),
     ]);
 
     const result = await getContractAuxiliaryPackage("contract-1", "package-1");
@@ -659,6 +696,7 @@ describe("辅助合同档案包领域服务", () => {
       ["invoice", "发票-2.pdf"],
       ["receipt", "回单-1.png"],
       ["receipt", "回单-2.png"],
+      ["other", "工作量确认单.xlsx"],
     ]);
     const fileQuery = String((db.all as jest.Mock).mock.calls[0]?.[0]);
     expect(fileQuery).toMatch(
@@ -720,16 +758,28 @@ describe("辅助合同档案包领域服务", () => {
         if (sql.includes("SELECT version")) {
           return { rows: [{ version: 2 }], rowCount: 1 };
         }
-        if (sql.includes("SELECT file_path")) {
+        if (
+          sql.includes("FROM contract_auxiliary_files") &&
+          sql.includes("ORDER BY created_at")
+        ) {
           return {
             rows: [
-              { file_path: "uploads/contracts/辅助合同.pdf" },
-              { file_path: "uploads/contracts/发票-1.pdf" },
-              { file_path: "uploads/contracts/发票-2.pdf" },
-              { file_path: "uploads/contracts/回单-1.png" },
-              { file_path: "uploads/contracts/回单-2.png" },
+              {
+                file_kind: "contract",
+                file_name: "辅助合同.pdf",
+                file_path: "uploads/contracts/辅助合同.pdf",
+                file_size: 1024,
+                file_hash: "a".repeat(64),
+              },
+              {
+                file_kind: "other",
+                file_name: "工作量确认单.xlsx",
+                file_path: "uploads/contracts/工作量确认单.xlsx",
+                file_size: 2048,
+                file_hash: "b".repeat(64),
+              },
             ],
-            rowCount: 5,
+            rowCount: 2,
           };
         }
         return { rows: [], rowCount: 1 };
@@ -749,10 +799,7 @@ describe("辅助合同档案包领域服务", () => {
       deleted: true,
       storedFilePaths: [
         "uploads/contracts/辅助合同.pdf",
-        "uploads/contracts/发票-1.pdf",
-        "uploads/contracts/发票-2.pdf",
-        "uploads/contracts/回单-1.png",
-        "uploads/contracts/回单-2.png",
+        "uploads/contracts/工作量确认单.xlsx",
       ],
     });
     expect(
@@ -761,6 +808,117 @@ describe("辅助合同档案包领域服务", () => {
       calls.findIndex((sql) =>
         sql.includes("DELETE FROM contract_auxiliary_packages"),
       ),
+    );
+  });
+
+  it("历史导入和正常上传的辅助文件都可单独硬删除并保留审计", async () => {
+    const calls: string[] = [];
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        calls.push(sql);
+        if (sql.includes("SELECT version FROM contract_auxiliary_packages")) {
+          return { rows: [{ version: 4 }], rowCount: 1 };
+        }
+        if (sql.includes("SELECT file_kind, file_name")) {
+          return {
+            rows: [
+              {
+                file_kind: "other",
+                file_name: "历史工作量确认单.xlsx",
+                file_path:
+                  "uploads/contract-auxiliary/2026/09/10/历史工作量确认单.xlsx",
+                file_size: 2048,
+                file_hash: "c".repeat(64),
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("SELECT COUNT(*) AS file_count")) {
+          return { rows: [{ file_count: "2" }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+    installTransaction(client);
+
+    const result = await deleteContractAuxiliaryFile({
+      parentContractId: "contract-1",
+      packageId: "package-1",
+      fileId: "file-other-1",
+      expectedVersion: 4,
+      actor,
+    });
+
+    expect(result).toEqual({
+      packageId: "package-1",
+      fileId: "file-other-1",
+      deleted: true,
+      packageDeleted: false,
+      version: 5,
+      storedFilePath:
+        "uploads/contract-auxiliary/2026/09/10/历史工作量确认单.xlsx",
+    });
+    expect(
+      calls.findIndex((sql) => sql.includes("INSERT INTO contract_audit_logs")),
+    ).toBeLessThan(
+      calls.findIndex((sql) =>
+        sql.includes("DELETE FROM contract_auxiliary_files"),
+      ),
+    );
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO contract_audit_logs"),
+      expect.arrayContaining(["auxiliary_package_file_deleted"]),
+    );
+  });
+
+  it("删除档案中最后一份文件时同步删除空档案包", async () => {
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes("SELECT version FROM contract_auxiliary_packages")) {
+          return { rows: [{ version: 1 }], rowCount: 1 };
+        }
+        if (sql.includes("SELECT file_kind, file_name")) {
+          return {
+            rows: [
+              {
+                file_kind: "invoice",
+                file_name: "辅助发票.pdf",
+                file_path: "uploads/contract-auxiliary/辅助发票.pdf",
+                file_size: 1024,
+                file_hash: "d".repeat(64),
+              },
+            ],
+            rowCount: 1,
+          };
+        }
+        if (sql.includes("SELECT COUNT(*) AS file_count")) {
+          return { rows: [{ file_count: 1 }], rowCount: 1 };
+        }
+        if (sql.includes("AS has_reference")) {
+          return { rows: [{ has_reference: true }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 1 };
+      }),
+    };
+    installTransaction(client);
+
+    await expect(
+      deleteContractAuxiliaryFile({
+        parentContractId: "contract-1",
+        packageId: "package-1",
+        fileId: "file-invoice-1",
+        expectedVersion: 1,
+        actor,
+      }),
+    ).resolves.toMatchObject({
+      packageDeleted: true,
+      version: null,
+      storedFilePath: null,
+    });
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining("DELETE FROM contract_auxiliary_packages"),
+      ["package-1", "contract-1", 1],
     );
   });
 

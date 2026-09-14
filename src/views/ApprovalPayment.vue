@@ -25,7 +25,7 @@
           <el-table-column label="标题" prop="title" min-width="150" />
           <el-table-column label="类型" width="100" align="center">
             <template #default="{ row }">
-              <el-tag :type="getTypeTagType(row.type)" size="small">{{ getTypeLabel(row.type) }}</el-tag>
+              <el-tag :type="getTypeTagType(row.type)" :color="getTypeTagColor(row.type)" :style="getTypeTagColor(row.type) ? { color: '#fff' } : {}" size="small">{{ getTypeLabel(row.type) }}</el-tag>
             </template>
           </el-table-column>
           <el-table-column label="金额" width="120" align="right">
@@ -42,7 +42,7 @@
         <el-descriptions :column="2" border>
           <el-descriptions-item label="报销单号">{{ reimbursement?.id }}</el-descriptions-item>
           <el-descriptions-item label="报销类型">
-            <el-tag :type="getTypeTagType(reimbursement?.type)" size="small">
+            <el-tag :type="getTypeTagType(reimbursement?.type)" :color="getTypeTagColor(reimbursement?.type)" :style="getTypeTagColor(reimbursement?.type) ? { color: '#fff' } : {}" size="small">
               {{ getTypeLabel(reimbursement?.type) }}
             </el-tag>
           </el-descriptions-item>
@@ -166,6 +166,11 @@ import { showUploadError } from '@/utils/uploadError'
 import { ArrowLeft, UploadFilled, Delete, Loading, Plus } from '@element-plus/icons-vue'
 import type { UploadFile } from 'element-plus'
 import { api } from '@/utils/api'
+import {
+  getReimbursementTypeAccentColor,
+  getReimbursementTypeLabel,
+  getReimbursementTypeTagType,
+} from '@/utils/reimbursement/typeConfig'
 import { usePendingStore } from '@/stores/pending'
 import { format } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
@@ -220,19 +225,15 @@ const isDragOver = ref(false)
 const isBatchMode = computed(() => !!route.params.batchId)
 
 function getTypeTagType(type?: string): 'success' | 'warning' | 'danger' | 'info' | 'primary' {
-  if (!type) return 'info'
-  const typeMap: Record<string, 'success' | 'warning' | 'danger' | 'info' | 'primary'> = {
-    basic: 'success', large: 'warning', business: 'danger',
-  }
-  return typeMap[type] || 'info'
+  return getReimbursementTypeTagType(type)
+}
+
+function getTypeTagColor(type?: string): string {
+  return type?.startsWith('welfare_') ? getReimbursementTypeAccentColor(type) : ''
 }
 
 function getTypeLabel(type?: string): string {
-  if (!type) return '-'
-  const typeMap: Record<string, string> = {
-    basic: '基础报销', large: '大额报销', business: '商务报销',
-  }
-  return typeMap[type] || type
+  return getReimbursementTypeLabel(type)
 }
 
 function formatDate(dateStr: string) {

@@ -5,7 +5,13 @@ jest.mock("@/utils/api", () => ({ api: {} }));
 
 import { isMonthlyFinancialReportVersionConflict } from "../src/utils/monthlyFinancialReportApi";
 import {
+  canMaintainMonthlyFinancialReport,
+  canViewMonthlyFinancialReport,
+} from "../src/utils/monthlyFinancialReportPermissions";
+import { isRouteRoleAllowed } from "../src/utils/routeRoleAccess";
+import {
   aggregateAutomaticDetailsByPerson,
+  formatMonthlyFinancialAmount,
   isMonthlyFinancialAmountText,
   isPositiveMonthlyFinancialAmountText,
   monthlyFinancialBankSourceLabel,
@@ -33,7 +39,16 @@ describe("月度财务报表前端权限与金额口径", () => {
   );
   const typeSource = source("src/types/monthlyFinancialReport.ts");
 
-  it("位于财务区审批中心下方且菜单精确限制管理员和总经理", () => {
+  it("金额至少展示两位小数且不丢失服务端原始精度", () => {
+    expect(formatMonthlyFinancialAmount("2053235.4")).toBe("¥2,053,235.40");
+    expect(formatMonthlyFinancialAmount("0")).toBe("¥0.00");
+    expect(formatMonthlyFinancialAmount("-192321.14")).toBe("¥-192,321.14");
+    expect(
+      formatMonthlyFinancialAmount("999999999999999999.123456789012"),
+    ).toBe("¥999,999,999,999,999,999.123456789012");
+  });
+
+  it("位于财务区审批中心下方且菜单允许超级管理员、管理员和总经理", () => {
     const financeStart = layoutSource.indexOf("<!-- 财务区 -->");
     const financeEnd = layoutSource.indexOf("<!-- 人力资源区 -->");
     const financeSection = layoutSource.slice(financeStart, financeEnd);
@@ -44,28 +59,48 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(
       financeSection.indexOf('path="/monthly-financial-report"'),
     ).toBeGreaterThan(financeSection.lastIndexOf('label="审批中心"'));
-    expect(layoutSource).toContain('authStore.user?.role === "admin"');
     expect(layoutSource).toContain(
-      'authStore.user?.role === "general_manager"',
+      "canViewMonthlyFinancialReportForRole(authStore.user?.role)",
     );
+    expect(canViewMonthlyFinancialReport("super_admin")).toBe(true);
+    expect(canViewMonthlyFinancialReport("admin")).toBe(true);
+    expect(canViewMonthlyFinancialReport("general_manager")).toBe(true);
+    expect(canViewMonthlyFinancialReport("chairman")).toBe(false);
   });
 
-  it("直接地址访问仅允许管理员和总经理", () => {
+  it("直接地址访问精确允许超级管理员、管理员和总经理且不放行董事长", () => {
     const routeStart = routerSource.indexOf(
       'path: "/monthly-financial-report"',
     );
     const routeEnd = routerSource.indexOf("},", routeStart) + 2;
     const routeBlock = routerSource.slice(routeStart, routeEnd);
 
-    expect(routeBlock).toContain('requiresRole: ["admin", "general_manager"]');
+    expect(routeBlock).toContain(
+      'requiresRole: ["super_admin", "admin", "general_manager"]',
+    );
+    expect(routeBlock).toContain("requiresExactRole: true");
     expect(routeBlock).not.toContain('"boss"');
-    expect(routeBlock).not.toContain('"super_admin"');
     expect(routeBlock).not.toContain('"chairman"');
+    expect(
+      isRouteRoleAllowed(
+        "super_admin",
+        ["super_admin", "admin", "general_manager"],
+        true,
+      ),
+    ).toBe(true);
+    expect(
+      isRouteRoleAllowed(
+        "chairman",
+        ["super_admin", "admin", "general_manager"],
+        true,
+      ),
+    ).toBe(false);
+    expect(isRouteRoleAllowed("chairman", ["super_admin"])).toBe(true);
   });
 
-  it("管理员维护与月结，总经理只读且双方均可下载", () => {
+  it("超级管理员和管理员可维护与月结，总经理只读且三者均可下载", () => {
     expect(pageSource).toContain(
-      'const isAdminRole = computed(() => authStore.user?.role === "admin")',
+      "canMaintainMonthlyFinancialReport(authStore.user?.role)",
     );
     expect(pageSource).toContain('authStore.user?.role === "general_manager"');
     expect(pageSource).toContain('v-if="canEdit"');
@@ -73,6 +108,10 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).toContain('v-if="canReopen"');
     expect(pageSource).toContain('v-if="canDownload"');
     expect(pageSource).toContain("下载全部报表");
+    expect(canMaintainMonthlyFinancialReport("super_admin")).toBe(true);
+    expect(canMaintainMonthlyFinancialReport("admin")).toBe(true);
+    expect(canMaintainMonthlyFinancialReport("general_manager")).toBe(false);
+    expect(canMaintainMonthlyFinancialReport("chairman")).toBe(false);
   });
 
   it("管理员未月结报表始终显示月结按钮并直接展示阻断原因", () => {
@@ -158,7 +197,7 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).not.toContain("请选择项目分类");
   });
 
-  it("福利账户一按需求表提供饮用水、办公、电费和两个 AI 分类", () => {
+  it("福利双账户按分类目录同步手工录入与自动报销", () => {
     for (const category of [
       "welfare_one_drinking_water",
       "welfare_one_office",
@@ -171,6 +210,16 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).not.toContain(
       'categoryOption("welfare_one_407", "407费用"',
     );
+    expect(pageSource).toContain("dynamicWelfareCategoryOptions");
+    expect(pageSource).toContain('"welfare_two_expense"');
+    expect(pageSource).toContain("welfareOneCategoryOptions");
+    expect(pageSource).toContain("welfareTwoCategoryOptions");
+    expect(pageSource).toContain("legacyWelfareCategoryCode");
+    expect(pageSource).toContain('item.sourceType === "reimbursement"');
+    expect(pageSource).toContain("自动报销");
+    expect(pageSource).toContain("`${accountName}报销＋手工录入`");
+    expect(typeSource).toContain('"welfare_two_expense"');
+    expect(typeSource).toContain("welfareTwoExpenseCategories");
   });
 
   it("账户与结算为四个账户分别展示流入和流出明细", () => {
@@ -228,10 +277,22 @@ describe("月度财务报表前端权限与金额口径", () => {
       "<MonthlyBankReceiptPanel",
     );
     expect(pageSource.slice(trendTab, summaryTab)).toContain(
-      "<MonthlyFinancialTrendChart",
+      "<MonthlyFinancialAnalysisPanel",
     );
     expect(pageSource.slice(trendTab, summaryTab)).toContain(
       ':selected-month="selectedMonth"',
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).toContain(
+      ":active=\"activeTab === 'trend'\"",
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).toContain(
+      ':refresh-key="report.version"',
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).not.toContain(
+      "<MonthlyFinancialTrendChart",
+    );
+    expect(pageSource.slice(trendTab, summaryTab)).not.toContain(
+      "连续历史趋势与同期对比",
     );
     expect(metricGrid).toBeGreaterThan(summaryTab);
     expect(metricGrid).toBeLessThan(manualTab);
@@ -243,7 +304,7 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(pageSource).toContain('const activeTab = ref<ReportTab>("trend")');
   });
 
-  it("财务趋势使用双年度单指标折线并保持字符串金额精度", () => {
+  it("保留的旧独立趋势组件仍支持双年度单指标折线及字符串金额精度", () => {
     for (const label of [
       "期末资金",
       "主营实际到账",
@@ -264,16 +325,26 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(trendSource).toContain("查看月份");
     expect(trendSource).toContain("handleViewMonthChange");
     expect(trendSource).toContain("monthIndexForYear");
-    expect(trendSource).toContain("金额明细来自服务端精确金额字符串");
-    expect(trendSource).toContain("缺失月份不按零金额参与连线");
+    expect(trendSource).toContain("趋势值来自服务端精准数据");
+    expect(trendSource).toContain("明确零值参与连线");
     expect(trendSource).toContain("不代表利润");
     expect(trendSource).toContain('class="series-edge"');
     expect(trendSource).not.toContain("buildSmoothPath");
   });
 
-  it("财务趋势接口按范围读取并防止跨年度旧响应覆盖", () => {
+  it("旧独立趋势接口与类型继续保留，但月报页面不再发旧查询或维护全历史状态", () => {
     expect(typeSource).toContain("export interface MonthlyFinancialTrendData");
     expect(typeSource).toContain('valueState: "closed" | "current" | null');
+    expect(typeSource).toContain(
+      'actualReceiptState: "closed" | "current" | "confirmed_source" | null',
+    );
+    expect(typeSource).toContain(
+      "export interface MonthlyFinancialMainBusinessTrendPoint",
+    );
+    expect(typeSource).toContain("mainBusinessRegions: string[]");
+    expect(typeSource).toContain(
+      "mainBusinessPoints: MonthlyFinancialMainBusinessTrendPoint[]",
+    );
     for (const field of [
       "actualReceipt",
       "settlementInflow",
@@ -287,13 +358,39 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(apiSource).toContain("getMonthlyFinancialReportTrend");
     expect(apiSource).toContain("`${BASE_PATH}/trend`");
     expect(apiSource).toContain("params: { from, to }");
-    expect(pageSource).toContain("trendRequestSequence");
-    expect(pageSource).toContain("sequence !== trendRequestSequence");
-    expect(pageSource).toContain("resolveTrendComparisonYear");
-    expect(pageSource).toContain("historicalYears.at(-1) ?? null");
+    for (const oldDependency of [
+      "MonthlyFinancialTrendChart",
+      "getMonthlyFinancialReportTrend",
+      "trendRequestSequence",
+      "trendAvailableYears",
+      "resolveTrendComparisonYear",
+      "splitMonthlyFinancialTrendRange",
+      "loadTrendRangeChunks",
+      "trendFullHistory",
+      "trendYearComparison",
+      "trendSelectedYear",
+      "ensureTrendForMonth",
+      "refreshTrendAfterReportMutation",
+      "handleTrendComparisonYearChange",
+      "handleTrendSelectedYearChange",
+      "handleTrendFullHistoryChange",
+      "handleTrendYearComparisonChange",
+      "handleTrendRetry",
+    ])
+      expect(pageSource).not.toContain(oldDependency);
+    expect(pageSource).toContain("() => route.query.month");
+    expect(pageSource).toContain(
+      "void loadReport(normalizedMonth, monthViewSequence)",
+    );
+    expect(pageSource).toContain(
+      'window.addEventListener("beforeunload", handleBeforeUnload)',
+    );
+    expect(pageSource).toContain(
+      'window.removeEventListener("beforeunload", handleBeforeUnload)',
+    );
   });
 
-  it("财务趋势具备局部加载失败空态和窄屏适配", () => {
+  it("保留的旧独立趋势组件仍具备局部加载失败空态和窄屏适配", () => {
     expect(trendSource).toContain('v-if="loading"');
     expect(trendSource).toContain('v-else-if="error"');
     expect(trendSource).toContain('v-else-if="!hasData"');
@@ -302,6 +399,54 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(trendSource).toContain("resizeObserver?.disconnect()");
     expect(trendSource).toContain("@media (max-width: 720px)");
     expect(trendSource).toContain("visibleMonthIndexes");
+    expect(trendSource).toContain("历史缺月仅取合同已确认回款");
+    expect(trendSource).toContain("series-point--confirmed-source");
+    expect(trendSource).toContain("fullHistoryCanvasWidth");
+    expect(trendSource).toContain("handleHistoryPointerMove");
+    expect(trendSource).toContain("handleHistoryWheel");
+    expect(trendSource).toContain("handleHistoryKeydown");
+    expect(trendSource).toContain("完整历史");
+    expect(trendSource).toContain("fullHistoryComparisonAxis");
+    expect(trendSource).toContain("fullHistoryComparisonPlottedPoints");
+    expect(trendSource).toContain("fullHistoryPointValueLabels");
+    expect(trendSource).toContain("historyFirstVisibleIndex");
+    expect(trendSource).toContain("当前窗口全部有效月份显示精准值");
+    expect(trendSource).toContain("shiftMonthKey(target.month, -12)");
+    expect(trendSource).toContain("上年同期（随窗口同步移动）");
+    expect(trendSource).toContain("year-comparison-change");
+    expect(trendSource).toContain('label: "新增主营合同额"');
+    expect(trendSource).toContain('label: "新增主营合同数"');
+    expect(trendSource).toContain("选择主营业务行政区");
+  });
+
+  it("当前月份未建报表时仍展示新七模块分析，而不出现旧趋势折叠区", () => {
+    const emptyMonthStart = pageSource.indexOf(
+      'v-else-if="!report && !loadError"',
+    );
+    const reportTemplateStart = pageSource.indexOf(
+      '<template v-else-if="report">',
+      emptyMonthStart,
+    );
+    const emptyMonthBlock = pageSource.slice(
+      emptyMonthStart,
+      reportTemplateStart,
+    );
+    expect(emptyMonthStart).toBeGreaterThan(-1);
+    expect(reportTemplateStart).toBeGreaterThan(emptyMonthStart);
+    expect(emptyMonthBlock).toContain("<MonthlyFinancialAnalysisPanel");
+    expect(emptyMonthBlock).toContain(':selected-month="selectedMonth"');
+    expect(emptyMonthBlock).toContain(':active="true"');
+    expect(emptyMonthBlock).not.toContain("<MonthlyFinancialTrendChart");
+    expect(emptyMonthBlock).not.toContain("连续历史趋势与同期对比");
+    expect(emptyMonthBlock).not.toContain("已保留年度主营回款趋势");
+    expect(pageSource.match(/<MonthlyFinancialAnalysisPanel\b/gu)).toHaveLength(
+      2,
+    );
+    expect(pageSource).not.toContain('class="analysis-history"');
+    expect(pageSource).toContain("clearReportForMissingMonth(targetMonth)");
+    expect(pageSource).not.toContain(
+      "await replaceMonthRouteWithoutPrompt(loadedMonth.value)",
+    );
   });
 
   it("一般和商务回单利息手续费独立展示并按活动账户切换来源", () => {
@@ -556,6 +701,12 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(loadFailureBlock).not.toContain("manualItems.value = []");
     expect(loadFailureBlock).not.toContain("manualItemsDirty.value = false");
     expect(loadFailureBlock).not.toContain("report.value = null");
+    expect(loadFailureBlock).toContain(
+      "isMonthlyFinancialReportNotFound(error)",
+    );
+    expect(loadFailureBlock).toContain(
+      "clearReportForMissingMonth(targetMonth)",
+    );
     expect(pageSource).toContain(
       ':disabled="actionLoading || hasUnsavedChanges"',
     );
@@ -579,6 +730,33 @@ describe("月度财务报表前端权限与金额口径", () => {
     expect(heroActions).not.toContain("重新加载");
     expect(heroActions).not.toContain('@click="handleReloadReport"');
     expect(heroActions).toContain("同步自动数据");
+  });
+
+  it("未持久化首月先保存四账户期初再开放自动同步", () => {
+    const heroActions = pageSource.slice(
+      pageSource.indexOf('<div class="hero-actions">'),
+      pageSource.indexOf(
+        "</section>",
+        pageSource.indexOf('<div class="hero-actions">'),
+      ),
+    );
+    const refreshBlock = pageSource.slice(
+      pageSource.indexOf("async function handleRefreshSources"),
+      pageSource.indexOf("async function handleSaveManualItems"),
+    );
+
+    expect(pageSource).toContain("const requiresFirstMonthInitialization");
+    expect(pageSource).toContain("report.value?.isFirstMonth");
+    expect(pageSource).toContain("Number(report.value?.version || 0) === 0");
+    expect(heroActions).toContain("requiresFirstMonthInitialization");
+    expect(heroActions).toContain(':title="refreshActionReason || undefined"');
+    expect(pageSource).toContain("请先保存首月期初余额");
+    expect(refreshBlock).toContain(
+      "if (requiresFirstMonthInitialization.value)",
+    );
+    expect(refreshBlock).toContain(
+      "ElMessage.warning(refreshActionReason.value)",
+    );
   });
 
   it("重新开启原因前端限制为500字", () => {

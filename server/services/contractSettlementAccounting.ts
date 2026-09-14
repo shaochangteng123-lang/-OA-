@@ -11,7 +11,7 @@
  */
 
 export interface ContractCostSettlementSqlOptions {
-  /** 根合同记录别名，必须包含 asset_funding_mode 与 declared_subtype。 */
+  /** 根合同记录别名，必须包含 category、asset_funding_mode 与 declared_subtype。 */
   rootAlias: string;
   /** 根合同 ID SQL 表达式。 */
   rootIdExpression: string;
@@ -131,7 +131,7 @@ function matchedInvoiceAccountingTotalSql(
           (${rootAlias}.asset_funding_mode = 'engineering_to_technology'
             AND settlement_item.item_kind = 'external_payment')
           OR
-          (${rootAlias}.asset_funding_mode <> 'engineering_to_technology'
+          (${rootAlias}.asset_funding_mode IS DISTINCT FROM 'engineering_to_technology'
             AND settlement_item.item_kind = 'payment')
         )
         AND (${paymentDatePredicate})
@@ -197,7 +197,7 @@ export function contractCostSettlementAmountSql(
   );
 
   return `(CASE
-    WHEN ${hasInvoiceLineItems}
+    WHEN ${options.rootAlias}.category = 'asset' AND ${hasInvoiceLineItems}
       THEN ${matchedInvoiceAccountingPayment}
     WHEN ${options.rootAlias}.asset_funding_mode = 'engineering_to_technology'
       THEN ${externalPayment}
@@ -275,7 +275,7 @@ function matchedInvoiceAccountingLastDateSql(
         (${rootAlias}.asset_funding_mode = 'engineering_to_technology'
           AND settlement_item.item_kind = 'external_payment')
         OR
-        (${rootAlias}.asset_funding_mode <> 'engineering_to_technology'
+        (${rootAlias}.asset_funding_mode IS DISTINCT FROM 'engineering_to_technology'
           AND settlement_item.item_kind = 'payment')
       )
       AND EXISTS (
@@ -297,7 +297,7 @@ export function contractCostSettlementLastDateSql(options: {
     options.rootIdExpression,
   );
   return `(CASE
-    WHEN ${hasInvoiceLineItems}
+    WHEN ${options.rootAlias}.category = 'asset' AND ${hasInvoiceLineItems}
       THEN ${matchedInvoiceAccountingLastDateSql(
         options.rootAlias,
         options.rootIdExpression,

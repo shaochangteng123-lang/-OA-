@@ -31,6 +31,7 @@ interface ContractSealApplicationContractRow {
   project_name: string | null;
   party_a: string | null;
   party_b: string | null;
+  party_c: string | null;
   amount_delta: number | null;
   category: "main_business" | "non_main" | "asset" | null;
   relation_type: "main" | "supplement" | "termination";
@@ -215,7 +216,7 @@ async function lockedRecognizedCopyCount(
 
 async function lockContract(client: PoolClient, contractId: string) {
   const result = await client.query<ContractSealApplicationContractRow>(
-    `SELECT id, contract_no, business_contract_no, title, project_name, party_a, party_b,
+    `SELECT id, contract_no, business_contract_no, title, project_name, party_a, party_b, party_c,
             amount_delta, category, relation_type, area, status, version,
             created_by
      FROM contracts
@@ -262,7 +263,7 @@ router.get(
   async (req, res) => {
     try {
       const contract = await db.get<ContractSealApplicationContractRow>(
-        `SELECT id, contract_no, business_contract_no, title, project_name, party_a, party_b,
+        `SELECT id, contract_no, business_contract_no, title, project_name, party_a, party_b, party_c,
               amount_delta, category, relation_type, area, status, version,
               created_by
        FROM contracts WHERE id = ? AND is_deleted = FALSE`,
@@ -314,6 +315,7 @@ router.get(
             projectName: contract.project_name,
             partyA: contract.party_a,
             partyB: contract.party_b,
+            partyC: contract.party_c,
             amount:
               contract.relation_type === "termination"
                 ? 0
@@ -452,6 +454,7 @@ router.post("/:id/seal-application/sign", requireFinance, async (req, res) => {
           contractTitle: contract.title,
           partyA: contract.party_a || "",
           partyB: contract.party_b || "",
+          partyC: contract.party_c || null,
           projectName: contract.project_name,
           amount:
             contract.relation_type === "termination"

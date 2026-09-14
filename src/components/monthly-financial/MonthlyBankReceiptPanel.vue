@@ -428,15 +428,72 @@
         v-if="uploadErrorMessage"
         class="upload-dialog-alert"
         :title="
-          mixedMonthConfirmationPending
-            ? '检测到跨月回单，需要管理员确认'
-            : '上传未完成'
+          contentCorrectionReview
+            ? '发现历史识别差异，等待管理员核实'
+            : mixedMonthConfirmationPending
+              ? '检测到跨月回单，需要管理员确认'
+              : '上传未完成'
         "
         :description="uploadErrorMessage"
-        :type="mixedMonthConfirmationPending ? 'warning' : 'error'"
+        :type="
+          mixedMonthConfirmationPending || contentCorrectionReview
+            ? 'warning'
+            : 'error'
+        "
         :closable="false"
         show-icon
       />
+
+      <section
+        v-if="contentCorrectionReview"
+        class="content-correction-review"
+        aria-label="历史银行回单差异复核"
+      >
+        <header>
+          <div>
+            <strong>
+              共 {{ contentCorrectionReview.conflicts.length }} 笔需要核实
+            </strong>
+            <span>
+              旧文件和旧值会永久保留审计；确认后仅用本次原件重新识别的值换版。
+            </span>
+          </div>
+          <el-tag type="warning" effect="plain">30分钟内有效</el-tag>
+        </header>
+        <article
+          v-for="conflict in contentCorrectionReview.conflicts"
+          :key="conflict.transactionId"
+          class="content-correction-item"
+        >
+          <div class="content-correction-item-heading">
+            <div>
+              <strong>回单号 {{ conflict.receiptNo }}</strong>
+              <span>
+                {{ conflict.accountName }} · {{ conflict.incoming.fileName }} ·
+                第{{ conflict.incoming.pageNo }}页
+              </span>
+            </div>
+            <el-tag type="warning" size="small">
+              {{ conflict.differences.length }}项差异
+            </el-tag>
+          </div>
+          <div class="content-correction-grid">
+            <div class="content-correction-grid-heading">字段</div>
+            <div class="content-correction-grid-heading">历史记录</div>
+            <div class="content-correction-grid-heading">本次原件</div>
+            <template
+              v-for="field in conflict.differences"
+              :key="`${conflict.transactionId}-${field}`"
+            >
+              <div>{{ correctionFieldLabel(field) }}</div>
+              <div>{{ correctionFieldValue(conflict, field, "previous") }}</div>
+              <div class="content-correction-new-value">
+                {{ correctionFieldValue(conflict, field, "incoming") }}
+              </div>
+            </template>
+          </div>
+        </article>
+      </section>
 
       <div
         class="bank-file-drop"
@@ -445,12 +502,14 @@
             uploading ||
             !canUpload ||
             disabled ||
+            Boolean(contentCorrectionReview) ||
             (processingOutcomeUncertain && !uncertainSafeRetryMode),
         }"
         :aria-disabled="
           uploading ||
           !canUpload ||
           disabled ||
+          Boolean(contentCorrectionReview) ||
           (processingOutcomeUncertain && !uncertainSafeRetryMode)
         "
         role="button"
@@ -471,6 +530,7 @@
             uploading ||
             !canUpload ||
             disabled ||
+            Boolean(contentCorrectionReview) ||
             (processingOutcomeUncertain && !uncertainSafeRetryMode)
           "
           @change="handleFileInput"
@@ -499,6 +559,7 @@
             :icon="Delete"
             :disabled="
               uploading ||
+              Boolean(contentCorrectionReview) ||
               (processingOutcomeUncertain && !uncertainSafeRetryMode)
             "
             :aria-label="`移除${file.name}`"
@@ -530,6 +591,16 @@
           取消
         </el-button>
         <el-button
+          v-if="contentCorrectionReview"
+          type="warning"
+          :loading="uploading"
+          :disabled="disabled || !canUpload"
+          @click="confirmContentCorrection"
+        >
+          核实后替换旧识别结果
+        </el-button>
+        <el-button
+          v-else
           :type="mixedMonthConfirmationPending ? 'warning' : 'primary'"
           :loading="uploading"
           :disabled="
@@ -559,8 +630,13 @@ import {
   UploadFilled,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { monthlyReimbursementLinkDisplay } from "@/utils/monthlyFinancialReportPresentation";
 import {
+  formatMonthlyFinancialAmount,
+  monthlyReimbursementLinkDisplay,
+} from "@/utils/monthlyFinancialReportPresentation";
+import {
+  confirmMonthlyFinancialBankContentCorrection,
+  getMonthlyFinancialBankContentCorrectionReview,
   getMonthlyFinancialBankReceipts,
   getMonthlyFinancialReport,
   getMonthlyFinancialReportErrorCode,
@@ -573,6 +649,8 @@ import {
 } from "@/utils/monthlyFinancialReportApi";
 import type {
   MonthlyFinancialAmount,
+  MonthlyFinancialBankContentCorrectionConflict,
+  MonthlyFinancialBankContentCorrectionReview,
   MonthlyFinancialBankAccountCode,
   MonthlyFinancialBankReceiptAccount,
   MonthlyFinancialBankReceiptTransaction,
@@ -604,6 +682,10 @@ const selectedFiles = ref<File[]>([]);
 const uploading = ref(false);
 const uploadErrorMessage = ref("");
 const mixedMonthConfirmationPending = ref(false);
+const contentCorrectionReview =
+  ref<MonthlyFinancialBankContentCorrectionReview | null>(null);
+const contentCorrectionMixedMonthConfirmed = ref(false);
+const selectedFileHashes = ref<string[]>([]);
 const processingOutcomeUncertain = ref(false);
 const uncertainFileNames = ref<string[]>([]);
 const uncertainFileHashes = ref<string[]>([]);
@@ -717,6 +799,7 @@ async function loadBankState() {
 
 function openUploadDialog() {
   if (!props.canUpload || props.disabled || uploading.value) return;
+  clearContentCorrectionReview();
   uploadErrorMessage.value = processingOutcomeUncertain.value
     ? "上一批上传结果仍待确认，请先使用页面上的“刷新回单状态”，不要重复提交"
     : "";
@@ -729,6 +812,7 @@ function openFilePicker() {
     uploading.value ||
     !props.canUpload ||
     props.disabled ||
+    contentCorrectionReview.value ||
     (processingOutcomeUncertain.value && !uncertainSafeRetryMode.value)
   )
     return;
@@ -746,6 +830,7 @@ function handleFileDrop(event: DragEvent) {
     uploading.value ||
     !props.canUpload ||
     props.disabled ||
+    contentCorrectionReview.value ||
     (processingOutcomeUncertain.value && !uncertainSafeRetryMode.value)
   )
     return;
@@ -753,6 +838,7 @@ function handleFileDrop(event: DragEvent) {
 }
 
 function addSelectedFiles(files: File[]) {
+  clearContentCorrectionReview();
   uploadErrorMessage.value = "";
   mixedMonthConfirmationPending.value = false;
   for (const file of files) {
@@ -773,6 +859,7 @@ function addSelectedFiles(files: File[]) {
 }
 
 function removeSelectedFile(file: File) {
+  clearContentCorrectionReview();
   selectedFiles.value = selectedFiles.value.filter((item) => item !== file);
   uploadErrorMessage.value = "";
   mixedMonthConfirmationPending.value = false;
@@ -783,6 +870,7 @@ async function submitSelectedFiles(mixedMonthConfirmed: boolean) {
     uploading.value ||
     props.disabled ||
     !props.canUpload ||
+    contentCorrectionReview.value ||
     (processingOutcomeUncertain.value && !uncertainSafeRetryMode.value) ||
     selectedFiles.value.length === 0
   ) {
@@ -805,6 +893,7 @@ async function submitSelectedFiles(mixedMonthConfirmed: boolean) {
     )
       ? calculatedFileHashes
       : [];
+    selectedFileHashes.value = [...targetFileHashes];
     if (
       uncertainSafeRetryMode.value &&
       uncertainFileHashes.value.length > 0 &&
@@ -827,20 +916,7 @@ async function submitSelectedFiles(mixedMonthConfirmed: boolean) {
       mixedMonthConfirmed,
       uploadAbortController.signal,
     );
-    if (props.month !== targetMonth) {
-      ElMessage.info(
-        "回单上传已完成，但当前页面月份已变化，未覆盖当前月份状态",
-      );
-      return;
-    }
-    bankState.value = result.bankStatements;
-    stateError.value = "";
-    clearUncertainOutcome(targetMonth);
-    lastUploadNotice.value = uploadResultMessage(result);
-    selectedFiles.value = [];
-    uploadDialogVisible.value = false;
-    emit("uploaded", result);
-    ElMessage.success(result.message || "银行回单已识别并更新月度财务报表");
+    applyBankUploadResult(result, targetMonth);
   } catch (error) {
     const errorCode = String((error as { code?: unknown })?.code || "");
     if (errorCode === "ERR_CANCELED") {
@@ -870,6 +946,17 @@ async function submitSelectedFiles(mixedMonthConfirmed: boolean) {
       return;
     }
     clearUncertainOutcome(targetMonth);
+    const correctionReview =
+      getMonthlyFinancialBankContentCorrectionReview(error);
+    if (correctionReview) {
+      contentCorrectionReview.value = correctionReview;
+      contentCorrectionMixedMonthConfirmed.value = mixedMonthConfirmed;
+      uploadErrorMessage.value = getMonthlyFinancialReportErrorMessage(
+        error,
+        "发现历史识别差异，请核对后确认是否换版",
+      );
+      return;
+    }
     if (isMonthlyFinancialReportVersionConflict(error)) {
       try {
         const [latestReport, latestBankState] = await Promise.all([
@@ -901,6 +988,172 @@ async function submitSelectedFiles(mixedMonthConfirmed: boolean) {
     uploadAbortController = null;
     setUploading(false);
   }
+}
+
+async function confirmContentCorrection() {
+  const review = contentCorrectionReview.value;
+  if (
+    !review ||
+    uploading.value ||
+    props.disabled ||
+    !props.canUpload ||
+    selectedFiles.value.length === 0
+  ) {
+    return;
+  }
+  if (
+    review.expectedVersion !== props.expectedVersion ||
+    Date.parse(review.expiresAt) < Date.now()
+  ) {
+    clearContentCorrectionReview();
+    uploadErrorMessage.value =
+      "历史回单复核已过期或月报版本已变化，请重新点击上传并识别";
+    return;
+  }
+  let reason = "";
+  try {
+    const prompt = await ElMessageBox.prompt(
+      `将按本次原件纠正${review.conflicts.length}笔历史识别结果，旧文件、旧值和操作记录会永久保留。请填写核实原因。`,
+      "核实后替换历史识别结果",
+      {
+        confirmButtonText: "确认换版",
+        cancelButtonText: "取消",
+        inputType: "textarea",
+        inputPlaceholder:
+          "例如：已逐笔核对银行原件，确认本次金额及账号展示正确",
+        inputValidator: (value: string) => {
+          const length = String(value || "").trim().length;
+          return length >= 10 && length <= 500
+            ? true
+            : "请填写10至500字的核实原因";
+        },
+      },
+    );
+    reason = String(prompt.value || "").trim();
+  } catch {
+    return;
+  }
+
+  const targetMonth = props.month;
+  const targetVersion = props.expectedVersion;
+  const targetFiles = [...selectedFiles.value];
+  uploadErrorMessage.value = "";
+  setUploading(true);
+  uploadAbortController = new AbortController();
+  try {
+    const calculatedHashes = await Promise.all(
+      targetFiles.map((file) => calculateFileSha256(file)),
+    );
+    const currentHashes = calculatedHashes.filter(
+      (fileHash): fileHash is string => Boolean(fileHash),
+    );
+    const requiredHashes = review.requiredFiles.map((file) => file.fileHash);
+    if (
+      currentHashes.length !== targetFiles.length ||
+      requiredHashes.some((fileHash) => !currentHashes.includes(fileHash))
+    ) {
+      clearContentCorrectionReview();
+      uploadErrorMessage.value =
+        "当前选择的原件与复核时不一致，请重新选择完整原件并上传识别";
+      return;
+    }
+    selectedFileHashes.value = [...currentHashes];
+    markUncertainOutcome(
+      targetMonth,
+      targetFiles.map((file) => file.name),
+      currentHashes,
+    );
+    const result = await confirmMonthlyFinancialBankContentCorrection(
+      targetMonth,
+      targetVersion,
+      targetFiles,
+      {
+        reviewId: review.reviewId,
+        batchDigest: review.batchDigest,
+        confirmationToken: review.confirmationToken,
+        reason,
+        acknowledgements: review.conflicts.map((conflict) => ({
+          transactionId: conflict.transactionId,
+          normalizedReceiptNo: conflict.normalizedReceiptNo,
+          differenceDigest: conflict.differenceDigest,
+        })),
+      },
+      contentCorrectionMixedMonthConfirmed.value,
+      uploadAbortController.signal,
+    );
+    applyBankUploadResult(result, targetMonth);
+  } catch (error) {
+    const errorCode = String((error as { code?: unknown })?.code || "");
+    const responseErrorCode = getMonthlyFinancialReportErrorCode(error);
+    if (
+      errorCode === "ERR_CANCELED" ||
+      errorCode === "ECONNABORTED" ||
+      errorCode === "ERR_NETWORK" ||
+      responseErrorCode === "MONTHLY_BANK_UPLOAD_COMMITTED_REFRESH_REQUIRED"
+    ) {
+      markUncertainOutcome(
+        targetMonth,
+        targetFiles.map((file) => file.name),
+        selectedFileHashes.value,
+      );
+      uploadErrorMessage.value = getMonthlyFinancialReportErrorMessage(
+        error,
+        "确认换版结果暂时无法确定，请关闭弹窗并刷新回单状态，不要重复确认",
+      );
+      return;
+    }
+    clearUncertainOutcome(targetMonth);
+    clearContentCorrectionReview();
+    uploadErrorMessage.value = getMonthlyFinancialReportErrorMessage(
+      error,
+      "历史回单复核确认失败，请重新上传并核对",
+    );
+  } finally {
+    uploadAbortController = null;
+    setUploading(false);
+  }
+}
+
+function applyBankUploadResult(
+  result: MonthlyFinancialBankReceiptUploadResult,
+  targetMonth: string,
+) {
+  if (props.month !== targetMonth) {
+    ElMessage.info("回单上传已完成，但当前页面月份已变化，未覆盖当前月份状态");
+    return;
+  }
+  bankState.value = result.bankStatements;
+  stateError.value = "";
+  clearUncertainOutcome(targetMonth);
+  clearContentCorrectionReview();
+  lastUploadNotice.value = uploadResultMessage(result);
+  selectedFiles.value = [];
+  selectedFileHashes.value = [];
+  uploadDialogVisible.value = false;
+  emit("uploaded", result);
+  ElMessage.success(result.message || "银行回单已识别并更新月度财务报表");
+}
+
+function correctionFieldLabel(
+  field: MonthlyFinancialBankContentCorrectionConflict["differences"][number],
+) {
+  return {
+    transactionDate: "交易日期",
+    amount: "金额",
+    payerAccount: "付款账号",
+    payeeAccount: "收款账号",
+  }[field];
+}
+
+function correctionFieldValue(
+  conflict: MonthlyFinancialBankContentCorrectionConflict,
+  field: MonthlyFinancialBankContentCorrectionConflict["differences"][number],
+  side: "previous" | "incoming",
+) {
+  const values = conflict[side];
+  if (field === "amount") return formatAmount(values.amount);
+  if (field === "transactionDate") return values.transactionDate || "未识别";
+  return values[field] || "未识别为完整账号";
 }
 
 function stopWaiting() {
@@ -950,6 +1203,13 @@ function resetUploadDialog() {
   selectedFiles.value = [];
   uploadErrorMessage.value = "";
   mixedMonthConfirmationPending.value = false;
+  selectedFileHashes.value = [];
+  clearContentCorrectionReview();
+}
+
+function clearContentCorrectionReview() {
+  contentCorrectionReview.value = null;
+  contentCorrectionMixedMonthConfirmed.value = false;
 }
 
 function uncertainStorageKey(month: string) {
@@ -1317,12 +1577,7 @@ function formatDateTime(value: string | null | undefined): string {
 function formatAmount(
   value: MonthlyFinancialAmount | null | undefined,
 ): string {
-  if (value === null || value === undefined || value === "") return "—";
-  const text = String(value).trim();
-  const match = text.match(/^([+-]?)(\d+)(\.\d+)?$/);
-  if (!match) return text;
-  const integer = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `¥${match[1]}${integer}${match[3] || ""}`;
+  return formatMonthlyFinancialAmount(value);
 }
 </script>
 
@@ -1620,6 +1875,80 @@ function formatAmount(
   padding: 18px 0 22px;
 }
 
+.content-correction-review {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #e8c98a;
+  border-radius: 12px;
+  background: #fffaf0;
+}
+
+.content-correction-review > header,
+.content-correction-item-heading {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.content-correction-review > header span,
+.content-correction-item-heading span {
+  display: block;
+  margin-top: 4px;
+  color: #7a6849;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.content-correction-item {
+  padding: 12px;
+  border: 1px solid #ecd9b4;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.content-correction-grid {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.7fr) minmax(150px, 1fr) minmax(
+      150px,
+      1fr
+    );
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid #ebdfc8;
+  border-radius: 8px;
+}
+
+.content-correction-grid > div {
+  min-width: 0;
+  padding: 8px 10px;
+  border-right: 1px solid #eee3cf;
+  border-bottom: 1px solid #eee3cf;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.content-correction-grid > div:nth-child(3n) {
+  border-right: 0;
+}
+
+.content-correction-grid > div:nth-last-child(-n + 3) {
+  border-bottom: 0;
+}
+
+.content-correction-grid-heading {
+  color: #765c2d;
+  font-weight: 600;
+  background: #fff7e8;
+}
+
+.content-correction-new-value {
+  color: #b26400;
+  font-weight: 600;
+}
+
 .bank-file-drop {
   display: grid;
   justify-items: center;
@@ -1759,6 +2088,11 @@ function formatAmount(
 
   .bank-total-grid .basic-bank-exclusion-total {
     grid-column: span 1;
+  }
+
+  .content-correction-grid {
+    grid-template-columns: 82px minmax(120px, 1fr) minmax(120px, 1fr);
+    overflow-x: auto;
   }
 }
 </style>

@@ -188,6 +188,7 @@ export type ContractDeclaredSubtype =
   | "preliminary_procedures"
   | "technical_consulting"
   | "non_main_income"
+  | "non_main_expense"
   | "other_service"
   | "procurement"
   | "software"
@@ -195,7 +196,8 @@ export type ContractDeclaredSubtype =
   | "house_rental"
   | "vehicle_rental"
   | "parking_space"
-  | "office_asset";
+  | "office_asset"
+  | "notary_fee";
 export type ContractAssetCategory =
   | "procurement"
   | "software"
@@ -204,6 +206,7 @@ export type ContractAssetCategory =
   | "vehicle_rental"
   | "parking_space"
   | "office_asset"
+  | "notary_fee"
   | "other";
 export type ContractDepositStatus =
   | "pending_payment"
@@ -257,6 +260,7 @@ export interface Contract {
   renewed_from_lease_end_date: string | null;
   party_a: string | null;
   party_b: string | null;
+  party_c: string | null;
   project_name: string | null;
   amount_delta: number | null;
   original_contract_amount: number | null;
@@ -542,7 +546,7 @@ export interface ContractSealVerificationField {
   id: string;
   verification_id: string;
   contract_id: string;
-  field_code: "party_a" | "party_b" | "amount" | "contract_date";
+  field_code: "party_a" | "party_b" | "party_c" | "amount" | "contract_date";
   approved_value: string | null;
   recognized_value: string | null;
   final_value: string | null;
@@ -619,6 +623,7 @@ export interface ApprovalRecord {
     | "comment"
     | "payment_uploaded"
     | "payment_proof_replaced"
+    | "auto_approved"
     | "resubmit";
   comment: string | null;
   action_time: string;

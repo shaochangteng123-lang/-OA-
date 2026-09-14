@@ -64,7 +64,7 @@ validate_dated_upload_tree() {
   local environment_name="$1"
   local environment_root="$2"
   local ignore_temp="${3:-0}"
-  local relative_path category year month day remaining
+  local relative_path category second third fourth fifth remaining year month day
 
   while IFS= read -r -d '' relative_path; do
     relative_path="${relative_path#./}"
@@ -73,12 +73,27 @@ validate_dated_upload_tree() {
       .DS_Store|*/.DS_Store)
         continue
         ;;
+      monthly-financial-bank/recognized/*/*)
+        # 月报识别目录以文件版本号分组，保存原件、页图和裁片；业务日期
+        # 已记录在数据库交易及文件版本中，不能在备份阶段移动或改名。
+        continue
+        ;;
     esac
     if [ "$ignore_temp" -eq 1 ] && [[ "$relative_path" = temp/* ]]; then
       continue
     fi
 
-    IFS='/' read -r category year month day remaining <<< "$relative_path"
+    IFS='/' read -r category second third fourth fifth remaining <<< "$relative_path"
+    if [[ ! "$second" =~ ^[0-9]{4}$ ]]; then
+      year="$third"
+      month="$fourth"
+      day="$fifth"
+    else
+      year="$second"
+      month="$third"
+      day="$fourth"
+      remaining="$fifth${remaining:+/$remaining}"
+    fi
 
     if [ -z "$category" ] || [ -z "$remaining" ] \
       || [[ ! "$year" =~ ^[0-9]{4}$ ]] \

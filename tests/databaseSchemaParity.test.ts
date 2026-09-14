@@ -18,6 +18,13 @@ import {
   assertRequiredDatabaseSchema,
   type DatabaseColumnReader,
 } from "../server/db/index";
+import fs from "node:fs";
+import path from "node:path";
+
+const schemaSource = fs.readFileSync(
+  path.resolve(process.cwd(), "server/db/index.ts"),
+  "utf8",
+);
 
 function createColumnReader(
   rows: Array<{ table_name: string; column_name: string }>,
@@ -34,6 +41,24 @@ function createColumnReader(
 }
 
 describe("数据库必需字段校验", () => {
+  it("启动迁移统一开发与生产历史兼容字段", () => {
+    expect(schemaSource).toContain(
+      "ADD COLUMN IF NOT EXISTS client_contact_name TEXT NOT NULL DEFAULT ''",
+    );
+    expect(schemaSource).toContain(
+      "ADD COLUMN IF NOT EXISTS client_contact_phone TEXT NOT NULL DEFAULT ''",
+    );
+    expect(schemaSource).toContain(
+      "ADD COLUMN IF NOT EXISTS proof_hash_set TEXT",
+    );
+    expect(schemaSource).toContain(
+      "CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_batches_proof_hash_set",
+    );
+    expect(schemaSource).toContain(
+      "ADD COLUMN IF NOT EXISTS applicant_department_snapshot TEXT NOT NULL DEFAULT ''",
+    );
+  });
+
   it("生产旧库缺少转正申请备注字段时阻止服务继续启动", async () => {
     const { database } = createColumnReader([]);
 

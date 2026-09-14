@@ -29,10 +29,17 @@ import AdminContractTasks from "@/views/AdminContractTasks.vue";
 const { flushPromises, mount } =
   require("../node_modules/@vue/test-utils/dist/vue-test-utils.cjs.js") as typeof import("@vue/test-utils");
 
-function user(role: "admin" | "chairman") {
+type ContractTaskRole = "admin" | "super_admin" | "chairman";
+
+function user(role: ContractTaskRole) {
   return {
     id: `${role}-id`,
-    name: role === "admin" ? "管理员" : "董事长",
+    name:
+      role === "admin"
+        ? "管理员"
+        : role === "super_admin"
+          ? "超级管理员"
+          : "董事长",
     email: null,
     avatarUrl: null,
     role,
@@ -40,7 +47,7 @@ function user(role: "admin" | "chairman") {
   };
 }
 
-async function setup(role: "admin" | "chairman") {
+async function setup(role: ContractTaskRole) {
   const pinia = createPinia();
   setActivePinia(pinia);
   useAuthStore().user = user(role);
@@ -108,6 +115,25 @@ describe("管理员合同待办聚合页", () => {
     expect(router.currentRoute.value.query.tab).toBe("invoice");
     expect(wrapper.find(".download-task-center").exists()).toBe(false);
     expect(wrapper.find(".invoice-task-center").text()).toContain("admin");
+    wrapper.unmount();
+  });
+
+  it("超级管理员与普通管理员同享合同下载和开票用印待办", async () => {
+    const { wrapper } = await setup("super_admin");
+    await flushPromises();
+
+    expect(wrapper.findAll(".el-tabs__item")).toHaveLength(2);
+    expect(wrapper.findAll(".task-tab-label")[0].text()).toContain(
+      "合同下载待办 2",
+    );
+    expect(wrapper.findAll(".task-tab-label")[1].text()).toContain(
+      "开票与用印待办 4",
+    );
+    expect(wrapper.find(".download-task-center").text()).toContain("admin");
+    expect(wrapper.find(".invoice-task-center").exists()).toBe(false);
+    expect(api.get).toHaveBeenCalledWith(
+      "/api/contract-download-requests/pending-counts",
+    );
     wrapper.unmount();
   });
 

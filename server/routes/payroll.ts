@@ -12,6 +12,10 @@ import { nanoid } from "nanoid";
 import { db } from "../db/index.js";
 import { requireAdmin } from "../middleware/auth.js";
 import { recognizeHumanCostReceipt } from "../services/humanCostReceiptOcr.js";
+import {
+  HumanCostReceiptIdentityError,
+  reserveHumanCostReceiptNumbers,
+} from "../services/humanCostReceiptIdentity.js";
 import { recognizePayrollTaxDetail } from "../services/payrollTaxDetailOcr.js";
 import {
   calculateAutomaticMonthlySalary,
@@ -68,6 +72,8 @@ interface StoredPayrollRow {
   housing_fund_base: string;
   contribution_base: string;
   individual_income_tax: string;
+  withheld_actual_amount: string | null;
+  net_salary_actual_amount: string | null;
   monthly_salary_is_manual: boolean;
   housing_fund_base_is_manual: boolean;
   contribution_base_is_manual: boolean;
@@ -88,9 +94,9 @@ const HUMAN_COST_RECEIPT_RECOGNITION_VERSIONS: Record<
   HumanCostReceiptCategory,
   number
 > = {
-  social_security: 3,
-  housing_fund: 3,
-  income_tax: 3,
+  social_security: 6,
+  housing_fund: 4,
+  income_tax: 4,
   net_salary: 4,
 };
 
@@ -319,14 +325,17 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
   );
   const receiptCandidates = await db.all<{
     id: string;
+    payroll_month: string;
     file_path: string;
     mime_type: string;
     category: HumanCostReceiptCategory;
     recognition_version: number;
   }>(
-    `SELECT id, file_path, mime_type, category, recognition_version
+    `SELECT id, payroll_month, file_path, mime_type, category, recognition_version
      FROM human_cost_receipts
-     WHERE payroll_month = ?
+     WHERE (payroll_month = ? OR
+       (category = 'social_security' AND recognition_version < 6) OR
+       (category = 'housing_fund' AND recognition_version < 4))
        AND recognition_status <> 'processing'
      ORDER BY CASE category
        WHEN 'social_security' THEN 1
@@ -370,7 +379,7 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
       filePath: path.resolve(process.cwd(), receipt.file_path),
       mimeType: receipt.mime_type,
       category: receipt.category,
-      payrollMonth,
+      payrollMonth: receipt.payroll_month,
     });
   }
   if (receiptsToReprocess.length > 0) {
@@ -420,6 +429,7 @@ async function loadHumanCostReceiptSummary(payrollMonth: string) {
      FROM human_cost_receipts
      WHERE payroll_month = ?
        AND recognition_status IN ('recognized', 'partial')
+       AND (category NOT IN ('social_security', 'housing_fund') OR recognition_version >= 4)
      GROUP BY category`,
     payrollMonth,
   );
@@ -661,6 +671,14 @@ async function processHumanCostReceiptRecord(
     );
 
     await db.transaction(async (client) => {
+      if (category === "social_security" || category === "housing_fund") {
+        const reserved = await reserveHumanCostReceiptNumbers(
+          client,
+          receiptId,
+          recognition.items,
+        );
+        if (!reserved) return;
+      }
       await client.query(
         `DELETE FROM human_cost_receipt_items WHERE receipt_id = $1`,
         [receiptId],
@@ -732,7 +750,8 @@ async function processHumanCostReceiptRecord(
       new Date().toISOString(),
       receiptId,
     );
-    return false;
+    // 重复回单属于业务校验失败，不触发引擎熔断或中断后续新回单识别。
+    return error instanceof HumanCostReceiptIdentityError;
   }
 }
 
@@ -837,6 +856,12 @@ function buildPayrollRow(row: StoredPayrollRow) {
     contributionBase,
     individualIncomeTax,
   );
+  const withheldActualAmount = formatPayrollAmount(
+    row.withheld_actual_amount ?? breakdown.withheld_total,
+  );
+  const netSalaryActualAmount = formatPayrollAmount(
+    row.net_salary_actual_amount ?? breakdown.net_salary,
+  );
 
   return {
     id: row.id,
@@ -862,6 +887,8 @@ function buildPayrollRow(row: StoredPayrollRow) {
     salary_recognized: row.initial_monthly_salary !== null,
     updated_at: row.updated_at,
     ...breakdown,
+    withheld_actual_amount: withheldActualAmount,
+    net_salary_actual_amount: netSalaryActualAmount,
   };
 }
 
@@ -889,6 +916,8 @@ async function loadPayrollRows(payrollMonth: string): Promise<
       pr.housing_fund_base::text AS housing_fund_base,
       pr.contribution_base::text AS contribution_base,
       pr.individual_income_tax::text AS individual_income_tax,
+      pr.withheld_actual_amount::text AS withheld_actual_amount,
+      pr.net_salary_actual_amount::text AS net_salary_actual_amount,
       pr.monthly_salary_is_manual,
       pr.housing_fund_base_is_manual,
       pr.contribution_base_is_manual,
@@ -1110,7 +1139,11 @@ router.post(
         payrollMonth,
         category,
       );
-      if (existingCategoryReceipt) {
+      if (
+        existingCategoryReceipt &&
+        category !== "social_security" &&
+        category !== "housing_fund"
+      ) {
         removeTemporaryFiles();
         return res.status(409).json({
           success: false,
@@ -1818,11 +1851,21 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
       req.body,
       "individual_income_tax",
     );
+    const hasWithheldActualAmount = Object.prototype.hasOwnProperty.call(
+      req.body,
+      "withheld_actual_amount",
+    );
+    const hasNetSalaryActualAmount = Object.prototype.hasOwnProperty.call(
+      req.body,
+      "net_salary_actual_amount",
+    );
     if (
       !hasMonthlySalary &&
       !hasHousingFundBase &&
       !hasContributionBase &&
-      !hasIncomeTax
+      !hasIncomeTax &&
+      !hasWithheldActualAmount &&
+      !hasNetSalaryActualAmount
     ) {
       return res
         .status(400)
@@ -1847,6 +1890,12 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
     const incomeTax = hasIncomeTax
       ? normalizePayrollAmount(req.body.individual_income_tax)
       : "0";
+    const withheldActualAmount = hasWithheldActualAmount
+      ? normalizePayrollAmount(req.body.withheld_actual_amount)
+      : "0";
+    const netSalaryActualAmount = hasNetSalaryActualAmount
+      ? normalizePayrollAmount(req.body.net_salary_actual_amount)
+      : "0";
     const now = new Date().toISOString();
 
     await db.transaction(async (client) => {
@@ -1856,12 +1905,17 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
         housing_fund_base: string;
         contribution_base: string;
         individual_income_tax: string;
+        withheld_actual_amount: string | null;
+        net_salary_actual_amount: string | null;
         version: number;
       }>(
         `SELECT pr.id, pr.monthly_salary::text AS monthly_salary,
                 pr.housing_fund_base::text AS housing_fund_base,
                 pr.contribution_base::text AS contribution_base,
-                pr.individual_income_tax::text AS individual_income_tax, pr.version
+                pr.individual_income_tax::text AS individual_income_tax,
+                pr.withheld_actual_amount::text AS withheld_actual_amount,
+                pr.net_salary_actual_amount::text AS net_salary_actual_amount,
+                pr.version
          FROM payroll_records pr
          JOIN employee_profiles ep ON ep.id = pr.employee_id
          LEFT JOIN users u ON u.id = ep.user_id
@@ -1883,14 +1937,16 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
              housing_fund_base = CASE WHEN $3::boolean THEN $4::numeric ELSE housing_fund_base END,
              contribution_base = CASE WHEN $5::boolean THEN $6::numeric ELSE contribution_base END,
              individual_income_tax = CASE WHEN $7::boolean THEN $8::numeric ELSE individual_income_tax END,
+             withheld_actual_amount = CASE WHEN $9::boolean THEN $10::numeric ELSE withheld_actual_amount END,
+             net_salary_actual_amount = CASE WHEN $11::boolean THEN $12::numeric ELSE net_salary_actual_amount END,
              monthly_salary_is_manual = monthly_salary_is_manual OR $1::boolean,
              housing_fund_base_is_manual = housing_fund_base_is_manual OR $3::boolean,
              contribution_base_is_manual = contribution_base_is_manual OR $5::boolean,
              tax_is_manual = tax_is_manual OR $7::boolean,
              version = version + 1,
-             updated_by = $9,
-             updated_at = $10
-         WHERE id = $11 AND version = $12`,
+             updated_by = $13,
+             updated_at = $14
+         WHERE id = $15 AND version = $16`,
         [
           hasMonthlySalary,
           monthlySalary,
@@ -1900,6 +1956,10 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
           contributionBase,
           hasIncomeTax,
           incomeTax,
+          hasWithheldActualAmount,
+          withheldActualAmount,
+          hasNetSalaryActualAmount,
+          netSalaryActualAmount,
           req.session.userId,
           now,
           record.id,
@@ -1922,6 +1982,32 @@ router.patch("/:month/:employeeId", requireAdmin, async (req, res) => {
           : null,
         hasIncomeTax
           ? ["individual_income_tax", record.individual_income_tax, incomeTax]
+          : null,
+        hasWithheldActualAmount
+          ? [
+              "withheld_actual_amount",
+              record.withheld_actual_amount ??
+                calculatePayrollBreakdown(
+                  record.monthly_salary,
+                  record.housing_fund_base,
+                  record.contribution_base,
+                  record.individual_income_tax,
+                ).withheld_total,
+              withheldActualAmount,
+            ]
+          : null,
+        hasNetSalaryActualAmount
+          ? [
+              "net_salary_actual_amount",
+              record.net_salary_actual_amount ??
+                calculatePayrollBreakdown(
+                  record.monthly_salary,
+                  record.housing_fund_base,
+                  record.contribution_base,
+                  record.individual_income_tax,
+                ).net_salary,
+              netSalaryActualAmount,
+            ]
           : null,
       ].filter((item): item is string[] => item !== null);
       for (const [fieldName, oldValue, newValue] of changes) {

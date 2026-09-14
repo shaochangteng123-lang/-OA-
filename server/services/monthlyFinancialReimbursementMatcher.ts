@@ -8,6 +8,7 @@ import {
   lockPaymentProofIdentities,
   normalizePaymentProofNo,
 } from "../utils/payment-proof-identity.js";
+import { recognizeBankReceiptImage } from "./bankReceiptProcessor.js";
 
 type ReimbursementType = "basic" | "large" | "business";
 
@@ -19,6 +20,10 @@ interface MonthlyTransaction {
   transactionDate: string;
   amount: string;
   amountCents: bigint;
+  payerName: string;
+  payerAccount: string;
+  payeeName: string;
+  payeeAccount: string;
   reimbursementType: ReimbursementType;
   employeeId: string;
   employeeUserId: string;
@@ -306,6 +311,105 @@ function cropHash(cropPath: string): string {
     .digest("hex");
 }
 
+function normalizePartyName(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("zh-CN")
+    .replace(/\s+/gu, "");
+}
+
+function normalizePartyAccount(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/[^A-Za-z0-9]/gu, "")
+    .toUpperCase();
+}
+
+function uniqueCalendarDateFromProofText(value: unknown): string | null {
+  const text = String(value || "").normalize("NFKC");
+  const dates = new Set<string>();
+  for (const match of text.matchAll(
+    /((?:19|20)\d{2})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})(?:\s*日)?/gu,
+  )) {
+    const year = match[1];
+    const month = String(Number(match[2])).padStart(2, "0");
+    const day = String(Number(match[3])).padStart(2, "0");
+    const date = `${year}-${month}-${day}`;
+    const parsed = new Date(`${date}T00:00:00.000Z`);
+    if (
+      !Number.isNaN(parsed.getTime()) &&
+      parsed.toISOString().slice(0, 10) === date
+    ) {
+      dates.add(date);
+    }
+  }
+  return dates.size === 1 ? [...dates][0]! : null;
+}
+
+function storedProofPaths(rows: BatchItemRow[]): string[] {
+  return [rows[0]?.batchProofPath, ...rows.map((row) => row.paymentProofPath)]
+    .flatMap((value) => String(value || "").split(","))
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+async function legacyPaymentProofsMatchMonthlyTransactions(
+  rows: BatchItemRow[],
+  transactions: MonthlyTransaction[],
+): Promise<boolean> {
+  const proofPaths = storedProofPaths(rows);
+  if (!proofPaths.length || proofPaths.length !== transactions.length) {
+    return false;
+  }
+  const uploadRoot = path.resolve(process.cwd(), "uploads");
+  const recognizedByProofNo = new Map<
+    string,
+    Awaited<ReturnType<typeof recognizeBankReceiptImage>>
+  >();
+  try {
+    for (const proofPath of proofPaths) {
+      const absolutePath = path.resolve(process.cwd(), proofPath);
+      if (
+        absolutePath === uploadRoot ||
+        !absolutePath.startsWith(`${uploadRoot}${path.sep}`) ||
+        !fs.existsSync(absolutePath) ||
+        !fs.statSync(absolutePath).isFile()
+      ) {
+        return false;
+      }
+      const recognized = await recognizeBankReceiptImage(absolutePath);
+      const normalizedProofNo = normalizePaymentProofNo(recognized.proofNo);
+      if (!normalizedProofNo || recognizedByProofNo.has(normalizedProofNo)) {
+        return false;
+      }
+      recognizedByProofNo.set(normalizedProofNo, recognized);
+    }
+  } catch {
+    return false;
+  }
+  return transactions.every((transaction) => {
+    const recognized = recognizedByProofNo.get(transaction.normalizedProofNo);
+    const recognizedDate =
+      recognized?.transactionDate ||
+      uniqueCalendarDateFromProofText(recognized?.rawText);
+    return (
+      Boolean(recognized) &&
+      recognizedDate === transaction.transactionDate &&
+      moneyToCents(recognized!.amount) === transaction.amountCents &&
+      normalizePartyName(recognized!.payer) ===
+        normalizePartyName(transaction.payerName) &&
+      normalizePartyAccount(recognized!.payerAccount) ===
+        normalizePartyAccount(transaction.payerAccount) &&
+      normalizePartyName(recognized!.payee) ===
+        normalizePartyName(transaction.payeeName) &&
+      normalizePartyAccount(recognized!.payeeAccount) ===
+        normalizePartyAccount(transaction.payeeAccount)
+    );
+  });
+}
+
 async function loadMonthlyTransactions(
   client: PoolClient,
   reportMonth: string,
@@ -317,6 +421,10 @@ async function loadMonthlyTransactions(
     normalized_electronic_receipt_no: string | null;
     transaction_date: string;
     amount: string;
+    payer_name: string | null;
+    payer_account: string | null;
+    payee_name: string | null;
+    payee_account: string | null;
     category: string;
     employee_id: string;
     employee_user_id: string;
@@ -326,6 +434,8 @@ async function loadMonthlyTransactions(
             bank_transaction.normalized_electronic_receipt_no,
             bank_transaction.transaction_date,
             bank_transaction.amount::text AS amount,
+            bank_transaction.payer_name, bank_transaction.payer_account,
+            bank_transaction.payee_name, bank_transaction.payee_account,
             bank_transaction.category,
             employee.id AS employee_id,
             employee.user_id AS employee_user_id
@@ -367,6 +477,10 @@ async function loadMonthlyTransactions(
         transactionDate: row.transaction_date,
         amount: row.amount,
         amountCents: moneyToCents(row.amount),
+        payerName: row.payer_name || "",
+        payerAccount: row.payer_account || "",
+        payeeName: row.payee_name || "",
+        payeeAccount: row.payee_account || "",
         reimbursementType,
         employeeId: row.employee_id,
         employeeUserId: row.employee_user_id,
@@ -756,9 +870,68 @@ async function applyNewAttachment(
   };
 }
 
+function mapBatchItemRows(
+  batchId: string,
+  rows: BatchItemQueryRow[],
+): BatchItemRow[] {
+  return rows.map((row) => ({
+    id: row.id,
+    type: row.type,
+    title: row.title,
+    status: row.status,
+    totalAmount: row.total_amount,
+    amountCents: moneyToCents(row.total_amount),
+    userId: row.user_id,
+    employeeId: row.employee_id,
+    paymentBatchId: row.payment_batch_id,
+    paymentProofPath: row.payment_proof_path,
+    paymentBusinessDate: row.payment_business_date,
+    paymentUploadTime: row.payment_upload_time,
+    completedTime: row.completed_time,
+    receiptConfirmedBy: row.receipt_confirmed_by,
+    batchId,
+    batchStatus: row.batch_status,
+    batchAmount: row.batch_amount,
+    batchProofPath: row.batch_proof_path,
+    batchBusinessDate: row.batch_business_date,
+    itemAmount: row.item_amount,
+    itemAmountCents: moneyToCents(row.item_amount),
+  }));
+}
+
+async function loadReplacementContext(
+  client: PoolClient,
+  batchId: string,
+  lockRows: boolean,
+): Promise<BatchItemRow[]> {
+  const contextResult = await client.query<BatchItemQueryRow>(
+    `SELECT batch.status AS batch_status, batch.total_amount::text AS batch_amount,
+            batch.payment_proof_path AS batch_proof_path,
+            batch.payment_business_date::text AS batch_business_date,
+            item.amount::text AS item_amount,
+            reimbursement.id, reimbursement.type, reimbursement.title,
+            reimbursement.status, reimbursement.total_amount::text AS total_amount,
+            reimbursement.user_id, employee.id AS employee_id,
+            reimbursement.payment_batch_id, reimbursement.payment_proof_path,
+            reimbursement.payment_business_date::text AS payment_business_date,
+            reimbursement.payment_upload_time, reimbursement.completed_time,
+            reimbursement.receipt_confirmed_by
+       FROM payment_batches batch
+       JOIN payment_batch_items item ON item.batch_id = batch.id
+       JOIN reimbursements reimbursement ON reimbursement.id = item.reimbursement_id
+       JOIN employee_profiles employee ON employee.user_id = reimbursement.user_id
+      WHERE batch.id = $1 AND reimbursement.is_deleted = FALSE
+      ORDER BY item.created_at, item.id
+      ${lockRows ? "FOR UPDATE OF batch, item, reimbursement" : ""}`,
+    [batchId],
+  );
+  return mapBatchItemRows(batchId, contextResult.rows);
+}
+
 async function replacementGroups(
   client: PoolClient,
   transactions: MonthlyTransaction[],
+  lockRows: boolean,
 ): Promise<Array<{ batchId: string; transactions: MonthlyTransaction[] }>> {
   const proofNos = transactions
     .map((row) => row.normalizedProofNo)
@@ -777,7 +950,7 @@ async function replacementGroups(
         AND UPPER(REGEXP_REPLACE(
               NORMALIZE(BTRIM(proof_no), NFKC), '[^A-Za-z0-9]+', '', 'g'
             )) = ANY($1::text[])
-      FOR UPDATE`,
+      ${lockRows ? "FOR UPDATE" : ""}`,
     [proofNos],
   );
   const byBatch = new Map<string, MonthlyTransaction[]>();
@@ -804,6 +977,33 @@ async function replacementGroups(
   }));
 }
 
+async function prevalidateLegacyReplacementEvidence(
+  client: PoolClient,
+  transactions: MonthlyTransaction[],
+): Promise<Map<string, { proofPaths: string[]; valid: boolean }>> {
+  const reviews = new Map<string, { proofPaths: string[]; valid: boolean }>();
+  const groups = await replacementGroups(client, transactions, false);
+  for (const group of groups) {
+    const rows = await loadReplacementContext(client, group.batchId, false);
+    if (
+      !rows.length ||
+      (rows[0]!.batchBusinessDate &&
+        rows.every((row) => Boolean(row.paymentBusinessDate)))
+    ) {
+      continue;
+    }
+    const proofPaths = storedProofPaths(rows);
+    reviews.set(group.batchId, {
+      proofPaths,
+      valid: await legacyPaymentProofsMatchMonthlyTransactions(
+        rows,
+        group.transactions,
+      ),
+    });
+  }
+  return reviews;
+}
+
 async function applyReplacement(
   client: PoolClient,
   batchId: string,
@@ -811,56 +1011,14 @@ async function applyReplacement(
   actorId: string,
   now: string,
   reportMonth: string,
+  legacyReview?: { proofPaths: string[]; valid: boolean },
 ): Promise<{
   group: MonthlyReimbursementMatchedGroup;
   links: MonthlyReimbursementLinkWrite[];
   evidence?: MonthlyReimbursementReplacedEvidence;
 } | null> {
-  const contextResult = await client.query<BatchItemQueryRow>(
-    `SELECT batch.status AS batch_status, batch.total_amount::text AS batch_amount,
-            batch.payment_proof_path AS batch_proof_path,
-            batch.payment_business_date::text AS batch_business_date,
-            item.amount::text AS item_amount,
-            reimbursement.id, reimbursement.type, reimbursement.title,
-            reimbursement.status, reimbursement.total_amount::text AS total_amount,
-            reimbursement.user_id, employee.id AS employee_id,
-            reimbursement.payment_batch_id, reimbursement.payment_proof_path,
-            reimbursement.payment_business_date::text AS payment_business_date,
-            reimbursement.payment_upload_time, reimbursement.completed_time,
-            reimbursement.receipt_confirmed_by
-       FROM payment_batches batch
-       JOIN payment_batch_items item ON item.batch_id = batch.id
-       JOIN reimbursements reimbursement ON reimbursement.id = item.reimbursement_id
-       JOIN employee_profiles employee ON employee.user_id = reimbursement.user_id
-      WHERE batch.id = $1 AND reimbursement.is_deleted = FALSE
-      ORDER BY item.created_at, item.id
-      FOR UPDATE OF batch, item, reimbursement`,
-    [batchId],
-  );
-  if (!contextResult.rows.length) return null;
-  const rows: BatchItemRow[] = contextResult.rows.map((row) => ({
-    id: row.id,
-    type: row.type,
-    title: row.title,
-    status: row.status,
-    totalAmount: row.total_amount,
-    amountCents: moneyToCents(row.total_amount),
-    userId: row.user_id,
-    employeeId: row.employee_id,
-    paymentBatchId: row.payment_batch_id,
-    paymentProofPath: row.payment_proof_path,
-    paymentBusinessDate: row.payment_business_date,
-    paymentUploadTime: row.payment_upload_time,
-    completedTime: row.completed_time,
-    receiptConfirmedBy: row.receipt_confirmed_by,
-    batchId,
-    batchStatus: row.batch_status,
-    batchAmount: row.batch_amount,
-    batchProofPath: row.batch_proof_path,
-    batchBusinessDate: row.batch_business_date,
-    itemAmount: row.item_amount,
-    itemAmountCents: moneyToCents(row.item_amount),
-  }));
+  const rows = await loadReplacementContext(client, batchId, true);
+  if (!rows.length) return null;
   if (!["uploaded", "confirmed"].includes(rows[0]!.batchStatus)) return null;
   if (
     rows.some((row) => !["payment_uploaded", "completed"].includes(row.status))
@@ -869,15 +1027,19 @@ async function applyReplacement(
   }
   const employees = new Set(transactions.map((row) => row.employeeId));
   const types = new Set(transactions.map((row) => row.reimbursementType));
+  const historicalBusinessDates = [
+    rows[0]!.batchBusinessDate,
+    ...rows.map((row) => row.paymentBusinessDate),
+  ].filter((value): value is string => Boolean(value));
   if (
     employees.size !== 1 ||
     types.size !== 1 ||
     transactions.some(
-      (transaction) =>
-        transaction.transactionDate.slice(0, 7) !== reportMonth,
+      (transaction) => transaction.transactionDate.slice(0, 7) !== reportMonth,
     ) ||
-    rows[0]!.batchBusinessDate?.slice(0, 7) !== reportMonth ||
-    rows.some((row) => row.paymentBusinessDate?.slice(0, 7) !== reportMonth) ||
+    historicalBusinessDates.some(
+      (businessDate) => businessDate.slice(0, 7) !== reportMonth,
+    ) ||
     rows.some(
       (row) =>
         row.employeeId !== transactions[0]!.employeeId ||
@@ -915,8 +1077,21 @@ async function applyReplacement(
   const incomingProofs = [
     ...new Set(transactions.map((row) => row.normalizedProofNo)),
   ].sort();
+  // 历史审批中心回单可能在付款业务日期字段上线前已经确认。只有旧原件重新
+  // 识别出的回单号、交易日期、金额、双方名称及完整账号均与月报一致，且人员、
+  // 报销类型、批次金额和逐项金额全部闭合时，才补齐日期并替换；已有跨月日期阻断。
   if (JSON.stringify(existingProofs) !== JSON.stringify(incomingProofs))
     return null;
+  const legacyBusinessDateMissing =
+    !rows[0]!.batchBusinessDate || rows.some((row) => !row.paymentBusinessDate);
+  if (
+    legacyBusinessDateMissing &&
+    (!legacyReview?.valid ||
+      JSON.stringify(legacyReview.proofPaths) !==
+        JSON.stringify(storedProofPaths(rows)))
+  ) {
+    return null;
+  }
   const identities = transactions.map((row) => ({
     fileHash: cropHash(row.cropPath),
     proofNo: row.normalizedProofNo,
@@ -1079,6 +1254,12 @@ export async function reconcileMonthlyReimbursementTransactions(
   };
   const transactions = await loadMonthlyTransactions(client, input.reportMonth);
   if (!transactions.length) return result;
+  // 旧审批回单重新识别可能触发模型冷启动，先在不持有付款批次、报销行和
+  // 付款凭证身份锁时完成只读复核；正式加锁后再次比对原文件路径及业务上下文。
+  const legacyReviews = await prevalidateLegacyReplacementEvidence(
+    client,
+    transactions,
+  );
   // 与审批中心保持相同锁顺序：先锁全部付款凭证身份，再锁批次和报销行。
   // 后续分组内重复取得同一事务级咨询锁是幂等的。
   await lockPaymentProofIdentities(
@@ -1091,7 +1272,11 @@ export async function reconcileMonthlyReimbursementTransactions(
   const assignedTransactions = new Set<string>();
   const assignedReimbursements = new Set<string>();
 
-  for (const replacement of await replacementGroups(client, transactions)) {
+  for (const replacement of await replacementGroups(
+    client,
+    transactions,
+    true,
+  )) {
     if (
       replacement.transactions.some((row) => assignedTransactions.has(row.id))
     )
@@ -1103,6 +1288,7 @@ export async function reconcileMonthlyReimbursementTransactions(
       input.actorId,
       input.now,
       input.reportMonth,
+      legacyReviews.get(replacement.batchId),
     );
     if (!applied) continue;
     applied.group.transactionIds.forEach((id) => assignedTransactions.add(id));

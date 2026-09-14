@@ -1,6 +1,5 @@
 # 依赖
 node_modules/
-package-lock.json
 
 # 构建产物
 dist/
@@ -44,9 +43,6 @@ Thumbs.db
 coverage/
 .nyc_output/
 
-# Docker
-.dockerignore
-
 # 日志
 logs/
 *.log
@@ -87,6 +83,8 @@ debug/contract-ocr-stage8-private/
 debug/contract-ocr-stage9-private/
 debug/contract-ocr-stage10-private/
 debug/contract-ocr-stage11-private/
+debug/contract-ledger-final-snapshot-*/
+debug/contract-ledger-rehearsal-storage-*/
 
 # Python 缓存
 __pycache__/

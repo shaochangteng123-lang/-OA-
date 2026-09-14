@@ -1,15 +1,14 @@
 <template>
-  <div class="create-reimbursement-container">
+  <div class="create-reimbursement-container" :style="themeStyle">
     <el-card class="page-card">
-      <!-- 大额报销 - 橙色顶部色条 -->
-      <div class="page-type-bar page-type-bar--large"></div>
+      <div class="page-type-bar"></div>
 
       <template #header>
         <div class="card-header">
           <div class="header-left">
             <el-button :icon="ArrowLeft" @click="handleBack">返回</el-button>
-            <h2>新建大额报销单</h2>
-            <span class="page-type-badge page-type-badge--large">大额</span>
+            <h2>新建{{ typeConfig.label }}单</h2>
+            <span class="page-type-badge">{{ typeConfig.shortLabel }}</span>
           </div>
         </div>
       </template>
@@ -26,12 +25,12 @@
               <el-input :value="getCurrentMonth()" disabled />
             </el-form-item>
 
-            <el-form-item label="报销范围/区域" required>
+            <el-form-item :label="scopeLabel" required>
               <el-cascader
                 v-model="formData.reimbursementScope"
                 :options="scopeOptions"
                 :props="cascaderProps"
-                placeholder="请选择报销范围/区域"
+                :placeholder="`请选择${scopeLabel}`"
                 style="width: 100%"
                 clearable
               />
@@ -42,7 +41,7 @@
                 <el-form-item label="发票上传" required>
                   <InvoiceUploader
                     v-model="invoice.fileList.value"
-                    theme-color="#e6a23c"
+                    :theme-color="typeConfig.accentColor"
                     @file-change="handleFileChange"
                     @delete-file="handleDeleteFile"
                   />
@@ -53,7 +52,7 @@
                 <el-form-item label="无票上传">
                   <ReceiptUploader
                     v-model="receiptFileList"
-                    theme-color="#e6a23c"
+                    :theme-color="typeConfig.accentColor"
                     @file-change="handleReceiptChange"
                     @delete-file="handleDeleteReceipt"
                   />
@@ -66,7 +65,7 @@
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="false"
                 :total-invoice-amount="invoice.totalAmount.value"
-                theme-color="#409eff"
+                :theme-color="typeConfig.accentColor"
                 @delete="handleDeleteInvoice"
               />
             </el-form-item>
@@ -88,8 +87,8 @@
             <el-button :loading="submitting" @click="handleSaveDraft">
               保存草稿
             </el-button>
-            <el-button class="submit-btn submit-btn--large" :loading="submitting" @click="handleSubmit">
-              提交审批
+            <el-button class="submit-btn" :loading="submitting" @click="handleSubmit">
+              {{ submitButtonText }}
             </el-button>
           </div>
         </div>
@@ -99,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { computed, ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -114,8 +113,32 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
 import { api } from '@/utils/api'
+import { useAuthStore } from '@/stores/auth'
+import {
+  getReimbursementTypeConfig,
+  type ReimbursementType,
+} from '@/utils/reimbursement/typeConfig'
 
 const router = useRouter()
+const authStore = useAuthStore()
+const props = withDefaults(defineProps<{
+  reimbursementType?: ReimbursementType
+}>(), {
+  reimbursementType: 'large',
+})
+const typeConfig = computed(() => getReimbursementTypeConfig(props.reimbursementType)!)
+const isWelfareReimbursement = computed(() =>
+  ['welfare_one', 'welfare_two'].includes(typeConfig.value.type),
+)
+const scopeLabel = computed(() => isWelfareReimbursement.value ? '福利分类' : '报销范围/区域')
+const submitButtonText = computed(() =>
+  authStore.user?.role === 'chairman' ? '提交报销' : '提交审批',
+)
+const themeStyle = computed(() => ({
+  '--reimbursement-accent': typeConfig.value.accentColor,
+  '--reimbursement-accent-hover': typeConfig.value.accentHoverColor,
+  '--reimbursement-accent-active': typeConfig.value.accentActiveColor,
+}))
 
 // 表单数据
 const formData = reactive({
@@ -148,9 +171,17 @@ const cascaderProps = {
 // 加载报销范围选项
 const loadScopeOptions = async () => {
   try {
-    const response = await api.get('/api/reimbursement-scope/list')
+    const response = await api.get(
+      typeConfig.value.scopeListEndpoint || '/api/reimbursement-scope/list',
+    )
     if (response.data.success) {
-      scopeOptions.value = response.data.data
+      const items = Array.isArray(response.data.data) ? response.data.data : []
+      scopeOptions.value = isWelfareReimbursement.value
+        ? items.map((item: Record<string, unknown>) => ({
+            ...item,
+            value: String(item.id || item.code || ''),
+          }))
+        : items
     }
   } catch (error) {
     console.error('加载报销范围失败:', error)
@@ -159,7 +190,7 @@ const loadScopeOptions = async () => {
 
 // 获取当前月份（大额报销直接使用当月）
 const getCurrentMonth = () => {
-  const monthStr = calculateReimbursementMonth(undefined, 'large')
+  const monthStr = calculateReimbursementMonth(undefined, typeConfig.value.type)
   return formatReimbursementMonth(monthStr)
 }
 
@@ -234,10 +265,12 @@ const handleSaveDraft = async () => {
     submitting.value = true
 
     // 构建提交数据（将级联选择器的数组转为最后一个值）
+    const selectedScope = formData.reimbursementScope[formData.reimbursementScope.length - 1]
     const submitData = {
-      type: 'large' as const,
-      title: `${getCurrentMonth()}-大额报销`,
+      type: typeConfig.value.type,
+      title: `${getCurrentMonth()}-${typeConfig.value.label}`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
+      ...(isWelfareReimbursement.value ? { welfareCategoryId: selectedScope } : {}),
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
       status: 'draft', // 草稿状态
@@ -255,8 +288,8 @@ const handleSaveDraft = async () => {
     const result = await response.json()
 
     if (result.success) {
-      ElMessage.success('草稿保存成功')
-      router.push({ path: '/large-reimbursement', query: { refresh: Date.now().toString() } })
+      ElMessage.success(result.message || '草稿保存成功')
+      router.push({ path: typeConfig.value.listRoute, query: { refresh: Date.now().toString() } })
     } else {
       ElMessage.error(result.message || '保存草稿失败')
     }
@@ -285,10 +318,12 @@ const handleSubmit = async () => {
     submitting.value = true
 
     // 构建提交数据（将级联选择器的数组转为最后一个值）
+    const selectedScope = formData.reimbursementScope[formData.reimbursementScope.length - 1]
     const submitData = {
-      type: 'large' as const,
-      title: `${getCurrentMonth()}-大额报销`,
+      type: typeConfig.value.type,
+      title: `${getCurrentMonth()}-${typeConfig.value.label}`,
       reimbursementScope: formData.reimbursementScope[formData.reimbursementScope.length - 1],
+      ...(isWelfareReimbursement.value ? { welfareCategoryId: selectedScope } : {}),
       description: formData.description,
       invoices: invoice.getInvoicesForSubmit(),
     }
@@ -305,8 +340,8 @@ const handleSubmit = async () => {
     const result = await response.json()
 
     if (result.success) {
-      ElMessage.success('提交成功')
-      router.push({ path: '/large-reimbursement', query: { refresh: Date.now().toString() } })
+      ElMessage.success(result.message || '提交成功')
+      router.push({ path: typeConfig.value.listRoute, query: { refresh: Date.now().toString() } })
     } else {
       ElMessage.error(result.message || '提交失败')
     }
@@ -346,8 +381,8 @@ onMounted(() => {
   height: 4px;
   width: 100%;
   flex-shrink: 0;
+  background-color: var(--reimbursement-accent);
 }
-.page-type-bar--large { background-color: #e6a23c; }
 
 /* 类型 Badge */
 .page-type-badge {
@@ -359,8 +394,8 @@ onMounted(() => {
   font-weight: 700;
   color: #fff;
   letter-spacing: 0.5px;
+  background-color: var(--reimbursement-accent);
 }
-.page-type-badge--large { background-color: #e6a23c; }
 
 .page-card :deep(.el-card__header) {
   padding: 16px 24px;
@@ -476,14 +511,12 @@ onMounted(() => {
 
 .submit-btn {
   font-weight: 600;
-}
-.submit-btn--large {
-  --el-button-bg-color: #e6a23c;
-  --el-button-border-color: #e6a23c;
-  --el-button-hover-bg-color: #ebb563;
-  --el-button-hover-border-color: #ebb563;
-  --el-button-active-bg-color: #cf9236;
-  --el-button-active-border-color: #cf9236;
+  --el-button-bg-color: var(--reimbursement-accent);
+  --el-button-border-color: var(--reimbursement-accent);
+  --el-button-hover-bg-color: var(--reimbursement-accent-hover);
+  --el-button-hover-border-color: var(--reimbursement-accent-hover);
+  --el-button-active-bg-color: var(--reimbursement-accent-active);
+  --el-button-active-border-color: var(--reimbursement-accent-active);
   --el-button-text-color: #fff;
 }
 </style>

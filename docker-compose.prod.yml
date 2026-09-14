@@ -42,7 +42,7 @@ services:
       - NODE_ENV=production
       - PORT=8899
       - DATABASE_URL=postgresql://postgres:${DB_PASSWORD:-postgres}@postgres:5432/yulilog_worklog
-      - OCR_MODEL=${OCR_MODEL:-v4_mobile}
+      - OCR_MODEL=${OCR_MODEL:-v6_medium}
       - OCR_V6_MODEL_ROOT=${OCR_V6_MODEL_ROOT:-/opt/paddleocr-v6-medium}
       - TZ=Asia/Shanghai
       - FRONTEND_URL=http://yuliseek.com

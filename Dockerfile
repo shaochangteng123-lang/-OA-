@@ -98,7 +98,7 @@ COPY server/assets/tesseract ./server/assets/tesseract
 RUN cd /app/server/assets/tesseract && sha256sum -c SHA256SUMS
 
 ENV NODE_ENV=development \
-    OCR_MODEL=v4_mobile \
+    OCR_MODEL=v6_medium \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \
     TESSERACT_TESSDATA_PATH=/app/server/assets/tesseract \
@@ -179,7 +179,7 @@ USER yulilog
 
 ENV NODE_ENV=production \
     PORT=8899 \
-    OCR_MODEL=v4_mobile \
+    OCR_MODEL=v6_medium \
     DATABASE_URL=postgresql://postgres:postgres@postgres:5432/yulilog_worklog \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
     FLAGS_allocator_strategy=auto_growth \

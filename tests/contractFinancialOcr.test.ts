@@ -1357,6 +1357,8 @@ describe("合同财务凭证独立识别服务", () => {
     expect(callTesseractOcrDetailed).not.toHaveBeenCalled();
     expect(result.fields).toMatchObject({
       paymentTime: "2025-12-10",
+      currency: "CNY",
+      currencyEvidence: "currency_label",
       amount: 95000,
       electronicReceiptNo: "0917-8226-7633-1100",
       payer: "国网北京市电力公司",
@@ -1367,6 +1369,8 @@ describe("合同财务凭证独立识别服务", () => {
     expect(Object.keys(result.fields).sort()).toEqual(
       [
         "paymentTime",
+        "currency",
+        "currencyEvidence",
         "amount",
         "electronicReceiptNo",
         "payer",
@@ -1382,6 +1386,84 @@ describe("合同财务凭证独立识别服务", () => {
       );
       expect(renderCleanup).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it.each([
+    [
+      "CNY标签",
+      normalReceiptText().replace("币种：人民币", "币种：CNY"),
+      "currency_label",
+    ],
+    [
+      "RMB金额文本",
+      normalReceiptText()
+        .replace("金额（小写）：¥95,000.00", "金额（小写）：RMB95,000.00")
+        .replace("币种：人民币", ""),
+      "renminbi_text",
+    ],
+    [
+      "人民币货币符号",
+      normalReceiptText().replace("币种：人民币", ""),
+      "currency_symbol",
+    ],
+  ])("%s可作为明确人民币证据", async (_label, text, evidence) => {
+    const filePath = writePng(`人民币证据-${_label}.png`);
+    (callPaddleOcrDetailed as jest.Mock).mockResolvedValue(ocrResult(text));
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: COMPANY_CONTEXT,
+    });
+    expect(result).toMatchObject({
+      validationStatus: "verified",
+      canAutoPost: true,
+      fields: { currency: "CNY", currencyEvidence: evidence },
+    });
+  });
+
+  it.each([
+    [
+      "只有元字样",
+      normalReceiptText()
+        .replace("金额（小写）：¥95,000.00", "金额（小写）：95,000.00元")
+        .replace("币种：人民币", ""),
+    ],
+    [
+      "明确美元",
+      normalReceiptText()
+        .replace("金额（小写）：¥95,000.00", "金额（小写）：USD95,000.00")
+        .replace("币种：人民币", "币种：美元"),
+    ],
+    [
+      "流水号偶然包含CNY",
+      normalReceiptText()
+        .replace("金额（小写）：¥95,000.00", "金额（小写）：95,000.00元")
+        .replace("币种：人民币", "")
+        .replace("交易流水号：92087313110", "交易流水号：ABCNY123"),
+    ],
+    [
+      "回单号偶然包含RMB",
+      normalReceiptText()
+        .replace("金额（小写）：¥95,000.00", "金额（小写）：95,000.00元")
+        .replace("币种：人民币", "")
+        .replace("电子回单号码：0917-8226-7633-1100", "电子回单号码：RMB123"),
+    ],
+  ])("%s不能被推断为人民币", async (_label, text) => {
+    const filePath = writePng(`非人民币证据-${_label}.png`);
+    (callPaddleOcrDetailed as jest.Mock).mockResolvedValue(ocrResult(text));
+    const result = await recognizeContractFinancialDocument({
+      filePath,
+      kind: "bank_receipt",
+      context: COMPANY_CONTEXT,
+    });
+    expect(result).toMatchObject({
+      validationStatus: "blocked",
+      canAutoPost: false,
+      fields: { currency: "", currencyEvidence: "" },
+    });
+    expect(result.blockingReasons).toContainEqual(
+      expect.objectContaining({ code: "BANK_CNY_CURRENCY_MISSING" }),
+    );
   });
 
   it("整图遗漏收款主体时仅增强一次动态主体带并恢复明确角色同行值", async () => {

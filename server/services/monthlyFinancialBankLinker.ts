@@ -2,6 +2,7 @@ import { nanoid } from "nanoid";
 import type { PoolClient } from "pg";
 
 import {
+  bridgeMonthlyBankAssetPaymentToContractRegistration,
   bridgeMonthlyBankTransactionGroupsToContractRegistrations,
   bridgeMonthlyBankTransactionToContractRegistration,
   cleanupMonthlyContractBridgeGroupFiles,
@@ -893,6 +894,7 @@ export interface MonthlyContractReceiptReconciliationResult {
   category: "main_income" | "asset_expense" | "unclassified";
   changed: boolean;
   warnings: string[];
+  createdEvidencePaths?: string[];
 }
 
 const CONTRACT_PENDING_FILE_WARNING =
@@ -916,8 +918,8 @@ function contractTransactionWarnings(
  * 对活动月报中的主营／资产银行回单执行整月重匹配。
  *
  * 用于银行文件早于合同财务登记的场景。优先链接既有合同凭证；若主营收入
- * 回单唯一命中一笔尚无结算项、全额闭合的合同财务草稿，则通过专用桥接
- * 服务补入并确认回款，再按完整字段重新建立证据链接。任何歧义均保持待核对。
+ * 回单唯一命中合同财务登记时，通过专用桥接服务补入主营回款或资产付款，
+ * 再按完整字段重新建立证据链接。任何歧义均保持待核对。
  */
 export async function reconcileMonthlyContractBankTransactions(
   client: PoolClient,
@@ -1024,13 +1026,18 @@ export async function reconcileMonthlyContractBankTransactions(
     for (const transaction of transactions.rows) {
       let linkResult = initialLinks.get(transaction.id)!;
       const groupResult = groupResultByTransaction.get(transaction.id);
-      const shouldTryDraftBridge =
+      const shouldTryReceiptBridge =
         (!groupResult || groupResult.status === "pending") &&
         transaction.direction === "inflow" &&
         ["main_income", "unclassified"].includes(transaction.category) &&
         linkResult.matched.length === 0 &&
         linkResult.conflicts.length === 0;
-      const bridgeResult = shouldTryDraftBridge
+      const shouldTryAssetPaymentBridge =
+        transaction.direction === "outflow" &&
+        ["asset_expense", "unclassified"].includes(transaction.category) &&
+        linkResult.matched.length === 0 &&
+        linkResult.conflicts.length === 0;
+      const bridgeResult = shouldTryReceiptBridge
         ? await bridgeMonthlyBankTransactionToContractRegistration(
             client,
             transaction.id,
@@ -1038,7 +1045,15 @@ export async function reconcileMonthlyContractBankTransactions(
             actorRole,
             now,
           )
-        : null;
+        : shouldTryAssetPaymentBridge
+          ? await bridgeMonthlyBankAssetPaymentToContractRegistration(
+              client,
+              transaction.id,
+              actorId,
+              actorRole,
+              now,
+            )
+          : null;
       if (bridgeResult?.status === "created") {
         createdSingleResults.push(bridgeResult);
         linkResult = await linkMonthlyFinancialBankTransaction(
@@ -1047,14 +1062,22 @@ export async function reconcileMonthlyContractBankTransactions(
           actorId,
           now,
         );
-        const bridgedReceiptLinked = linkResult.matched.some(
+        const expectedBusinessObjectType = bridgeResult.paymentRecordId
+          ? "contract_payment"
+          : "contract_receipt";
+        const expectedBusinessObjectId =
+          bridgeResult.paymentRecordId || bridgeResult.receiptRecordId;
+        const expectedCategory = bridgeResult.paymentRecordId
+          ? "asset_expense"
+          : "main_income";
+        const bridgedSettlementLinked = linkResult.matched.some(
           (match) =>
-            match.businessObjectType === "contract_receipt" &&
-            match.businessObjectId === bridgeResult.receiptRecordId,
+            match.businessObjectType === expectedBusinessObjectType &&
+            match.businessObjectId === expectedBusinessObjectId,
         );
         if (
-          linkResult.categoryOverride !== "main_income" ||
-          !bridgedReceiptLinked
+          linkResult.categoryOverride !== expectedCategory ||
+          !bridgedSettlementLinked
         ) {
           throw new Error(
             "月报回单已补入合同，但完整字段复核未能建立唯一挂载，已回滚本次同步",
@@ -1116,6 +1139,10 @@ export async function reconcileMonthlyContractBankTransactions(
           linkResult.changed ||
           transactionChanged,
         warnings: matchedCategory ? [] : [contractWarning!],
+        createdEvidencePaths:
+          bridgeResult?.createdEvidencePaths ||
+          groupResult?.createdEvidencePaths ||
+          undefined,
       });
     }
 

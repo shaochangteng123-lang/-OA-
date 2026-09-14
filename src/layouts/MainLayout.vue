@@ -191,6 +191,26 @@
               badge-type="warning"
             />
             <SidebarMenuItem
+              v-if="isChairman"
+              path="/welfare-one-reimbursement"
+              label="福利1报销"
+              :icon="Present"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="福利1报销"
+              :badge="welfareOneReimbursementBadge"
+              badge-type="warning"
+            />
+            <SidebarMenuItem
+              v-if="isChairman"
+              path="/welfare-two-reimbursement"
+              label="福利2报销"
+              :icon="Present"
+              :collapsed="sidebarCollapsed"
+              tooltip-content="福利2报销"
+              :badge="welfareTwoReimbursementBadge"
+              badge-type="warning"
+            />
+            <SidebarMenuItem
               path="/reimbursement-statistics"
               label="报销统计"
               :icon="DataAnalysis"
@@ -556,6 +576,7 @@ import {
   getContractDownloadPendingCounts,
 } from "@/utils/contractDownloadApi";
 import { getInvoiceApplicationPendingCounts } from "@/utils/invoiceApplicationApi";
+import { canViewMonthlyFinancialReport as canViewMonthlyFinancialReportForRole } from "@/utils/monthlyFinancialReportPermissions";
 import {
   Calendar,
   FolderOpened,
@@ -580,6 +601,7 @@ import {
   Document,
   TrendCharts,
   Tickets,
+  Present,
 } from "@element-plus/icons-vue";
 import SidebarHeader from "./components/SidebarHeader.vue";
 import SidebarMenuItem from "./components/SidebarMenuItem.vue";
@@ -736,17 +758,17 @@ const isGeneralManager = computed(() => {
   return authStore.user?.role === "general_manager";
 });
 
-// 月度财务报表按业务要求精确限制为普通管理员和总经理。
+const isChairman = computed(() => authStore.user?.role === "chairman");
+
+// 月度财务报表允许超级管理员、普通管理员和总经理查看。
 const canViewMonthlyFinancialReport = computed(() => {
-  return (
-    authStore.user?.role === "admin" ||
-    authStore.user?.role === "general_manager"
-  );
+  return canViewMonthlyFinancialReportForRole(authStore.user?.role);
 });
 
 const isProjectUser = computed(() => authStore.user?.role === "user");
 const isContractDownloadExecutor = computed(
-  () => authStore.user?.role === "admin",
+  () =>
+    authStore.user?.role === "admin" || authStore.user?.role === "super_admin",
 );
 const contractTaskPendingCount = computed(
   () =>
@@ -786,12 +808,16 @@ const financeGroupHasBadge = computed(() => {
   const userReimbursement =
     counts.myReimbursementBasic +
     counts.myReimbursementLarge +
-    counts.myReimbursementBusiness;
+    counts.myReimbursementBusiness +
+    counts.myReimbursementWelfareOne +
+    counts.myReimbursementWelfareTwo;
   // 用户的报销已驳回
   const userRejected =
     (counts.myReimbursementBasicRejected || 0) +
     (counts.myReimbursementLargeRejected || 0) +
-    (counts.myReimbursementBusinessRejected || 0);
+    (counts.myReimbursementBusinessRejected || 0) +
+    (counts.myReimbursementWelfareOneRejected || 0) +
+    (counts.myReimbursementWelfareTwoRejected || 0);
   // 管理员的审批待办
   const adminApproval = isAdmin.value ? counts.approvalPending : 0;
   // 总经理的审批待办
@@ -883,6 +909,20 @@ const businessReimbursementBadge = computed(() => {
   return total > 0 ? total : undefined;
 });
 
+const welfareOneReimbursementBadge = computed(() => {
+  const pending = pendingStore.counts.myReimbursementWelfareOne || 0;
+  const rejected = pendingStore.counts.myReimbursementWelfareOneRejected || 0;
+  const total = pending + rejected;
+  return total > 0 ? total : undefined;
+});
+
+const welfareTwoReimbursementBadge = computed(() => {
+  const pending = pendingStore.counts.myReimbursementWelfareTwo || 0;
+  const rejected = pendingStore.counts.myReimbursementWelfareTwoRejected || 0;
+  const total = pending + rejected;
+  return total > 0 ? total : undefined;
+});
+
 const probationBadge = computed(() => {
   return pendingStore.counts.myProbationPending ? 1 : undefined;
 });
@@ -952,6 +992,10 @@ const pageTitle = computed(() => {
     "/large-reimbursement/create": "", // 不显示标题
     "/business-reimbursement": "",
     "/business-reimbursement/create": "", // 不显示标题
+    "/welfare-one-reimbursement": "",
+    "/welfare-one-reimbursement/create": "", // 不显示标题
+    "/welfare-two-reimbursement": "",
+    "/welfare-two-reimbursement/create": "", // 不显示标题
     "/reimbursement-statistics": "", // 不显示标题
     "/monthly-financial-report": "", // 页面内展示完整标题和状态
     "/reimbursement-management": "", // 不显示标题
@@ -976,7 +1020,11 @@ const pageTitle = computed(() => {
   };
 
   // 检查是否是报销单详情页面（带 ID 参数的路由）
-  if (route.path.match(/^\/(basic|large|business)-reimbursement\/.+$/)) {
+  if (
+    route.path.match(
+      /^\/(basic|large|business|welfare-one|welfare-two)-reimbursement\/.+$/,
+    )
+  ) {
     return "";
   }
 

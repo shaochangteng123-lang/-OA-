@@ -61,7 +61,10 @@ type TaskTab = "download" | "invoice";
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const isDownloadExecutor = computed(() => authStore.user?.role === "admin");
+const isDownloadExecutor = computed(
+  () =>
+    authStore.user?.role === "admin" || authStore.user?.role === "super_admin",
+);
 const downloadPendingCount = ref(0);
 const invoicePendingCount = ref(0);
 const activeTab = computed<TaskTab>(() => {

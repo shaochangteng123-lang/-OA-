@@ -18,7 +18,7 @@ export const FALLBACK_CONTRACT_DECLARED_SUBTYPE_OPTIONS: ContractDeclaredSubtype
     ],
     non_main: [
       { value: "non_main_income", label: "非主营业务收入合同" },
-      { value: "other_service", label: "其他服务合同" },
+      { value: "non_main_expense", label: "非主营业务支出合同" },
     ],
     asset: [
       { value: "procurement", label: "采购合同" },
@@ -28,6 +28,7 @@ export const FALLBACK_CONTRACT_DECLARED_SUBTYPE_OPTIONS: ContractDeclaredSubtype
       { value: "vehicle_rental", label: "汽车租赁" },
       { value: "parking_space", label: "车位租赁" },
       { value: "office_asset", label: "办公资产合同" },
+      { value: "notary_fee", label: "公证费" },
     ],
   };
 
@@ -39,6 +40,7 @@ export const CONTRACT_DECLARED_SUBTYPE_LABELS: Record<
   preliminary_procedures: "项目前期手续办理",
   technical_consulting: "技术咨询服务",
   non_main_income: "非主营业务收入合同",
+  non_main_expense: "非主营业务支出合同",
   other_service: "其他服务合同",
   procurement: "采购合同",
   software: "软件合同",
@@ -47,6 +49,7 @@ export const CONTRACT_DECLARED_SUBTYPE_LABELS: Record<
   vehicle_rental: "汽车租赁",
   parking_space: "车位租赁",
   office_asset: "办公资产合同",
+  notary_fee: "公证费",
 };
 
 export const CONTRACT_ASSET_CATEGORY_LABELS: Record<
@@ -60,6 +63,7 @@ export const CONTRACT_ASSET_CATEGORY_LABELS: Record<
   vehicle_rental: "汽车租赁",
   parking_space: "车位租赁",
   office_asset: "办公资产合同",
+  notary_fee: "公证费",
   other: "其他",
 };
 

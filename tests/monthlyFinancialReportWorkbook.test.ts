@@ -171,6 +171,258 @@ function automaticFixture(): MonthlyFinancialAutomaticSnapshot {
 }
 
 describe("月度财务报表模板工作簿", () => {
+  it("实际税费手工凭证进入总支出与期末余额公式且导出凭证号", async () => {
+    const report = reportFixture();
+    report.expenses.generalTaxPayment = "25.123";
+    report.accounts[0].outflow = "51.123";
+    report.accounts[0].closing = "75631.967";
+    report.manualItems = [
+      {
+        categoryLabel: "一般账户实际税费支出",
+        accountCode: "general",
+        direction: "expense",
+        occurredOn: "2026-08-15",
+        amount: "25.123",
+        description: "已实际缴纳企业所得税",
+        voucherReference: "税收缴款凭证-20260815",
+      },
+    ];
+    const workbook = XLSX.read(
+      await buildMonthlyFinancialWorkbook(report, automaticFixture()),
+      { type: "buffer" },
+    );
+    const summary = workbook.Sheets["月度结算"]!;
+    expect(summary.B14.f).toContain('"一般账户实际税费支出"');
+    expect(summary.B14.v).toBe(51.12);
+    expect(summary.B29.f).toContain("-SUMIF(");
+    expect(summary.B29.v).toBe(75631.97);
+    const details = workbook.Sheets["手工项目明细"]!;
+    expect(details.E2.v).toBe(25.123);
+    expect(details.G2.v).toBe("税收缴款凭证-20260815");
+  });
+
+  it("福利账户一动态分类向右扩展主表并同步公式与打印区域", async () => {
+    const report = reportFixture();
+    report.welfareOneExpenseCategories = [
+      {
+        id: "welfare_one_drinking_water",
+        code: "drinking_water",
+        name: "饮用水",
+        sortOrder: 1,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "11",
+        totalAmount: "11",
+        isFixed: true,
+      },
+      {
+        id: "welfare_one_office",
+        code: "office",
+        name: "办公",
+        sortOrder: 2,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "12",
+        totalAmount: "12",
+        isFixed: true,
+      },
+      {
+        id: "welfare_one_electricity",
+        code: "electricity",
+        name: "电费",
+        sortOrder: 3,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "13",
+        totalAmount: "13",
+        isFixed: true,
+      },
+      {
+        id: "welfare_one_407_ai",
+        code: "407_ai",
+        name: "407-AI",
+        sortOrder: 4,
+        isActive: false,
+        automaticAmount: "0",
+        manualAmount: "0",
+        totalAmount: "0",
+        isFixed: true,
+      },
+      {
+        id: "welfare_one_8h_ai",
+        code: "8h_ai",
+        name: "8H-AI",
+        sortOrder: 5,
+        isActive: false,
+        automaticAmount: "0",
+        manualAmount: "0",
+        totalAmount: "0",
+        isFixed: true,
+      },
+      {
+        id: "welfare-one-other",
+        code: "other",
+        name: "其他",
+        sortOrder: 6,
+        isActive: true,
+        automaticAmount: "10",
+        manualAmount: "0",
+        totalAmount: "10",
+        isFixed: false,
+      },
+      {
+        id: "welfare-one-future",
+        code: "future",
+        name: "未来分类",
+        sortOrder: 7,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "20",
+        totalAmount: "20",
+        isFixed: false,
+      },
+    ];
+    const welfare = report.accounts.find(
+      (account) => account.code === "welfare_one",
+    )!;
+    welfare.outflow = "66";
+    welfare.closing = "-63";
+
+    const buffer = await buildMonthlyFinancialWorkbook(
+      report,
+      automaticFixture(),
+    );
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const summary = workbook.Sheets["月度结算"]!;
+
+    expect(summary.H22.v).toBe("其他");
+    expect(summary.H23.v).toBe(10);
+    expect(summary.I22.v).toBe("未来分类");
+    expect(summary.I23.v).toBe(20);
+    expect(summary.B23.f).toBe("ROUND(SUM(C23:I23),2)");
+    expect(summary.H29.f).toContain("SUM(C23:I23)");
+    expect(
+      (summary["!merges"] || []).map((range) => XLSX.utils.encode_range(range)),
+    ).toContain("A21:I21");
+
+    const zip = await JSZip.loadAsync(buffer);
+    const workbookXml = await zip.file("xl/workbook.xml")!.async("string");
+    expect(workbookXml).toContain("$A$1:$I$30");
+  });
+
+  it("福利账户二分类按管理顺序进入主表并支持新增与删除后的列同步", async () => {
+    const report = reportFixture();
+    report.welfareTwoExpenseCategories = [
+      {
+        id: "welfare_two_refreshment",
+        code: "refreshment",
+        name: "茶歇",
+        sortOrder: 1,
+        isActive: true,
+        automaticAmount: "1",
+        manualAmount: "2",
+        totalAmount: "3",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_physical_exam",
+        code: "physical_exam",
+        name: "体检",
+        sortOrder: 3,
+        isActive: true,
+        automaticAmount: "4",
+        manualAmount: "5",
+        totalAmount: "9",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_transport",
+        code: "transport",
+        name: "交通补助",
+        sortOrder: 4,
+        isActive: true,
+        automaticAmount: "6",
+        manualAmount: "0",
+        totalAmount: "6",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_health",
+        code: "health",
+        name: "健康关怀",
+        sortOrder: 5,
+        isActive: true,
+        automaticAmount: "1",
+        manualAmount: "0",
+        totalAmount: "1",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_gift",
+        code: "gift",
+        name: "节日礼品",
+        sortOrder: 6,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "2",
+        totalAmount: "2",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_fitness",
+        code: "fitness",
+        name: "健身",
+        sortOrder: 7,
+        isActive: true,
+        automaticAmount: "3",
+        manualAmount: "0",
+        totalAmount: "3",
+        isFixed: false,
+      },
+      {
+        id: "welfare_two_family",
+        code: "family",
+        name: "家庭关怀",
+        sortOrder: 8,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "4",
+        totalAmount: "4",
+        isFixed: false,
+      },
+    ];
+    const welfare = report.accounts.find(
+      (account) => account.code === "welfare_two",
+    )!;
+    welfare.outflow = "28";
+    welfare.closing = "-24";
+
+    const buffer = await buildMonthlyFinancialWorkbook(
+      report,
+      automaticFixture(),
+    );
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const summary = workbook.Sheets["月度结算"]!;
+
+    expect(summary.C24.v).toBe("茶歇");
+    expect(summary.D24.v).toBe("体检");
+    expect(summary.E24.v).toBe("交通补助");
+    expect(summary.I24.v).toBe("家庭关怀");
+    expect(summary.C25.v).toBe(3);
+    expect(summary.D25.v).toBe(9);
+    expect(summary.E25.v).toBe(6);
+    expect(summary.I25.v).toBe(4);
+    expect(summary.B25.f).toBe("ROUND(SUM(C25:I25),2)");
+    expect(summary.H30.f).toContain("SUM(C25:I25)");
+    expect(summary.H30.v).toBe(-24);
+    expect(
+      (summary["!merges"] || []).map((range) => XLSX.utils.encode_range(range)),
+    ).toContain("A21:I21");
+    const zip = await JSZip.loadAsync(buffer);
+    const workbookXml = await zip.file("xl/workbook.xml")!.async("string");
+    expect(workbookXml).toContain("$A$1:$I$30");
+  });
+
   it("实际到账保持十万元，超过七人的明细汇总到其他人员且公式可追溯", async () => {
     const buffer = await buildMonthlyFinancialWorkbook(
       reportFixture(),
@@ -194,7 +446,7 @@ describe("月度财务报表模板工作簿", () => {
     expect(summary["D23"]?.v).toBe(12);
     expect(summary["E23"]?.v).toBe(13);
     expect(summary["B23"]?.f).toBe("ROUND(SUM(C23:G23),2)");
-    expect(summary["A23"]?.f).toBe("ROUND(B23+B25,2)");
+    expect(summary["A24"]?.f).toBe("ROUND(B23+B25,2)");
     expect(summary["B22"]?.v).toBe("账户一");
     expect(summary["B24"]?.v).toBe("账户二");
     expect(summary["H22"]?.v).toBe("");
@@ -213,7 +465,8 @@ describe("月度财务报表模板工作簿", () => {
     );
     expect(summaryMerges).toEqual(
       expect.arrayContaining([
-        "A23:A25",
+        "A22:A23",
+        "A24:A25",
         "A29:A30",
         "B29:B30",
         "C29:C30",
@@ -223,8 +476,15 @@ describe("月度财务报表模板工作簿", () => {
       ]),
     );
     expect(summaryMerges).not.toEqual(
-      expect.arrayContaining(["G29:H30", "G31:H31", "G32:H32"]),
+      expect.arrayContaining(["A23:A25", "G29:H30", "G31:H31", "G32:H32"]),
     );
+    expect(summary["E29"]?.v).toBe("福利金-商务-总额");
+    expect(summary["!rows"]?.[0]?.hpt).toBeGreaterThanOrEqual(48);
+    expect(summary["A4"]?.s?.fgColor?.rgb).toBe("73B2AA");
+    expect(summary["A9"]?.s?.fgColor?.rgb).toBe("8AB695");
+    expect(summary["A13"]?.s?.fgColor?.rgb).toBe("E59A89");
+    expect(summary["A21"]?.s?.fgColor?.rgb).toBe("E6C86D");
+    expect(summary["A27"]?.s?.fgColor?.rgb).toBe("7CAECB");
     expect(summary["A4"]?.s).toBeDefined();
 
     const zip = await JSZip.loadAsync(buffer);

@@ -5,12 +5,12 @@ import { ref, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { InvoiceItem } from './useInvoice'
+import type { ReimbursementType } from '@/utils/reimbursement/typeConfig'
 
-// 报销单类型
-export type ReimbursementType = 'basic' | 'large' | 'business'
+export type { ReimbursementType } from '@/utils/reimbursement/typeConfig'
 
 // 报销单状态
-export type ReimbursementStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'payment_uploaded' | 'completed'
+export type ReimbursementStatus = 'draft' | 'pending' | 'approved' | 'paid' | 'rejected' | 'payment_uploaded' | 'completed'
 
 // 报销单数据
 export interface ReimbursementData {
@@ -21,6 +21,9 @@ export interface ReimbursementData {
   description: string
   status: ReimbursementStatus
   invoices: Omit<InvoiceItem, 'id' | 'fileUid'>[]
+  reimbursementScope?: string
+  welfareCategoryId?: string
+  approvalSkipped?: boolean
 }
 
 // API 响应
@@ -107,7 +110,7 @@ export function useReimbursement(type: ReimbursementType, listRoute: string) {
       const result: ApiResponse = await response.json()
 
       if (result.success) {
-        ElMessage.success(isDraft ? '草稿保存成功' : '提交成功')
+        ElMessage.success(result.message || (isDraft ? '草稿保存成功' : '提交成功'))
         // 提交审批成功后需要刷新列表，草稿保存不需要
         goBack(!isDraft)
         return true

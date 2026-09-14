@@ -61,7 +61,8 @@ describe("合同经营看板与台账后端契约", () => {
     expect(source).toContain(
       "FROM root_groups roots CROSS JOIN filter_parameters filters",
     );
-    expect(source).toContain("roots.category IN ('main_business', 'non_main')");
+    expect(source).toContain("roots.financial_direction = 'income'");
+    expect(source).toContain("roots.financial_direction = 'cost'");
     expect(source).toContain("allContractAmount");
     expect(source).toContain("effectiveContractAmount");
     expect(source).toContain("effectiveIncomeContractAmount");
@@ -91,13 +92,20 @@ describe("合同经营看板与台账后端契约", () => {
     );
   });
 
-  it("分类汇总按合同分类确定收支方向并区分无固定金额", () => {
+  it("分类汇总按合同锁定收支方向并区分无固定金额", () => {
     expect(source).toContain("function contractCategoryDirectionExpression");
     expect(source).toContain("function currentFixedContractAmountExpression");
     expect(source).toContain("fixed_amount_contract_count");
     expect(source).toContain("unfixed_amount_contract_count");
     expect(source).toContain("cumulative_settled_amount");
     expect(source).toContain("outstanding_amount");
+    expect(source).toContain("income_contract_amount");
+    expect(source).toContain("expense_contract_amount");
+    expect(source).toContain("period_received_amount");
+    expect(source).toContain("period_paid_amount");
+    expect(source).toContain(
+      "safeCategorySummary.map((row) => row.unreceivedAmount)",
+    );
     expect(source).toContain("completionRate");
     expect(source).toContain("noFixedAmountCount");
   });

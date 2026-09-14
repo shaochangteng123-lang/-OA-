@@ -40,11 +40,13 @@ import {
 } from "./contractFinancialWorkflow.js";
 
 export type ContractCategory = "main_business" | "non_main" | "asset";
+export type ContractPricingMode = "fixed" | "target";
 export type ContractDeclaredSubtype =
   | "engineering_consulting"
   | "preliminary_procedures"
   | "technical_consulting"
   | "non_main_income"
+  | "non_main_expense"
   | "other_service"
   | "procurement"
   | "software"
@@ -52,7 +54,8 @@ export type ContractDeclaredSubtype =
   | "house_rental"
   | "vehicle_rental"
   | "parking_space"
-  | "office_asset";
+  | "office_asset"
+  | "notary_fee";
 export type ContractAssetCategory =
   | "procurement"
   | "software"
@@ -61,6 +64,7 @@ export type ContractAssetCategory =
   | "vehicle_rental"
   | "parking_space"
   | "office_asset"
+  | "notary_fee"
   | "other";
 export type ContractExpenseCategory =
   | "rent"
@@ -79,15 +83,25 @@ export function inferAssetFundingMode(
   category: ContractCategory | null,
   partyA: unknown,
   partyB: unknown,
+  partyCOrCompanySubjects?: unknown,
   companySubjects: readonly {
     name: string;
     taxId?: string;
   }[] = CONTRACT_COMPANY_SUBJECTS,
 ): ContractAssetFundingMode | null {
   if (category !== "asset") return null;
+  const legacyCompanySubjects = Array.isArray(partyCOrCompanySubjects)
+    ? (partyCOrCompanySubjects as readonly {
+        name: string;
+        taxId?: string;
+      }[])
+    : companySubjects;
+  const partyC = Array.isArray(partyCOrCompanySubjects)
+    ? null
+    : partyCOrCompanySubjects;
   const subject = resolveContractFinancialCompanySubject(
-    [partyA, partyB],
-    companySubjects,
+    [partyA, partyB, partyC],
+    legacyCompanySubjects,
   );
   if (!subject) return "pending_review";
   return subject.name.normalize("NFKC").replace(/\s+/gu, "").trim() ===
@@ -96,6 +110,69 @@ export function inferAssetFundingMode(
     : "engineering_to_technology";
 }
 export type ContractRelationType = "main" | "supplement" | "termination";
+
+export function allowsDirectAssetPaymentFirst(contract: {
+  category: ContractCategory | null;
+  asset_funding_mode: ContractAssetFundingMode | null;
+}): boolean {
+  return (
+    contract.category === "asset" &&
+    ["engineering_direct", "technology_direct"].includes(
+      contract.asset_funding_mode || "",
+    )
+  );
+}
+
+/** 补齐历史资产主合同遗漏的自动资金方式；不覆盖已经确定的付款链路。 */
+export async function refreshPendingAssetFundingMode(
+  client: PoolClient,
+  contractId: string,
+  actorId: string,
+  actorRole: string,
+): Promise<void> {
+  const result = await client.query<ContractRow>(
+    `SELECT root.* FROM contracts c JOIN contracts root
+       ON root.id=COALESCE(c.root_contract_id,c.id)
+     WHERE c.id=$1 AND c.is_deleted=FALSE AND root.is_deleted=FALSE
+       AND root.category='asset' AND root.relation_type='main'
+       AND (root.asset_funding_mode IS NULL OR root.asset_funding_mode='pending_review')
+     FOR UPDATE OF root`,
+    [contractId],
+  );
+  const root = result.rows[0];
+  if (!root) return;
+  const mode = inferAssetFundingMode(
+    "asset",
+    root.party_a,
+    root.party_b,
+    root.party_c,
+  );
+  if (!mode || mode === "pending_review") return;
+  const now = new Date().toISOString();
+  await client.query(
+    `UPDATE contracts
+     SET asset_funding_mode = $2, updated_at = $3, version = version + 1
+     WHERE id = $1`,
+    [root.id, mode, now],
+  );
+  await client.query(
+    `INSERT INTO contract_audit_logs(id,contract_id,action,actor_id,actor_role,from_status,to_status,changes_json,created_at)
+     VALUES($1,$2,'asset_funding_mode_inferred',$3,$4,$5,$5,$6::jsonb,$7)`,
+    [
+      nanoid(),
+      root.id,
+      actorId,
+      actorRole,
+      root.status,
+      JSON.stringify({
+        previousFundingMode: root.asset_funding_mode,
+        fundingMode: mode,
+        source: "contract_subject_auto_repair",
+      }),
+      now,
+    ],
+  );
+}
 export type ContractSupplementChangeType =
   | "payment_terms_only"
   | "amount_adjustment"
@@ -211,7 +288,7 @@ const CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY: Record<
     "preliminary_procedures",
     "technical_consulting",
   ]),
-  non_main: new Set(["non_main_income", "other_service"]),
+  non_main: new Set(["non_main_income", "non_main_expense", "other_service"]),
   asset: new Set([
     "procurement",
     "software",
@@ -220,7 +297,15 @@ const CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY: Record<
     "vehicle_rental",
     "parking_space",
     "office_asset",
+    "notary_fee",
   ]),
+};
+const NEW_CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY: Record<
+  ContractCategory,
+  ReadonlySet<string>
+> = {
+  ...CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY,
+  non_main: new Set(["non_main_income", "non_main_expense"]),
 };
 const DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY: Record<
   ContractCategory,
@@ -238,6 +323,7 @@ const NEW_CONTRACT_ASSET_CATEGORY_SET = new Set<string>([
   "vehicle_rental",
   "parking_space",
   "office_asset",
+  "notary_fee",
 ]);
 const STORED_CONTRACT_ASSET_CATEGORY_SET = new Set<string>([
   ...NEW_CONTRACT_ASSET_CATEGORY_SET,
@@ -267,6 +353,7 @@ export interface ContractRow {
   renewed_from_lease_end_date: string | null;
   party_a: string | null;
   party_b: string | null;
+  party_c: string | null;
   project_name: string | null;
   amount_delta: number | null;
   original_contract_amount: number | null;
@@ -275,6 +362,13 @@ export interface ContractRow {
   amount_before_change: number | null;
   amount_after_change: number | null;
   current_effective_amount: number | null;
+  pricing_mode?: ContractPricingMode;
+  target_amount?: number | null;
+  target_quantity?: number | null;
+  unit_price?: number | null;
+  confirmed_quantity?: number | null;
+  confirmed_contract_amount?: number | null;
+  quantity_unit?: string | null;
   supplement_change_type: ContractSupplementChangeType | null;
   supplement_sequence: number | null;
   contract_date: string | null;
@@ -324,11 +418,15 @@ export function isBeijingContractArea(value: unknown): value is string {
   );
 }
 
-/** 合同财务方向完全由锁定合同大类决定。 */
+/** 合同财务方向由锁定大类和非主营收支二级分类共同决定。 */
 export function financialDirectionFromContractCategory(
   category: ContractCategory,
+  declaredSubtype?: ContractDeclaredSubtype | null,
 ): "income" | "cost" {
-  return category === "asset" ? "cost" : "income";
+  return category === "asset" ||
+    (category === "non_main" && declaredSubtype === "non_main_expense")
+    ? "cost"
+    : "income";
 }
 
 export function normalizeAutomaticContractConfidence(value: unknown): number {
@@ -417,7 +515,7 @@ export function validateNewContractUploadContext(input: {
       : "") ||
     DEFAULT_DECLARED_SUBTYPE_BY_CATEGORY[declaredCategory as ContractCategory];
   const declaredSubtypeSet =
-    CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY[
+    NEW_CONTRACT_DECLARED_SUBTYPES_BY_CATEGORY[
       declaredCategory as ContractCategory
     ];
   if (!declaredSubtypeSet.has(rawDeclaredSubtype)) {
@@ -789,7 +887,7 @@ export async function calculateTerminationSettlementSnapshot(
   }
   const financialDirection =
     root.financial_direction ||
-    financialDirectionFromContractCategory(rootCategory);
+    financialDirectionFromContractCategory(rootCategory, root.declared_subtype);
   const currentEffectiveAmount =
     target.relation_type === "main"
       ? Number(
@@ -1436,6 +1534,7 @@ export interface ContractDraftUpdate {
   parentContractId?: string | null;
   partyA?: string | null;
   partyB?: string | null;
+  partyC?: string | null;
   projectName?: string | null;
   amountDelta?: number | null;
   expectedVersion: number;
@@ -1739,8 +1838,8 @@ export async function updateContractDraft(
          category = $4, asset_category = $5,
          relation_type = $6, area = $7, project_id = $8, parent_contract_id = $9,
          root_contract_id = $10, party_a = $11, party_b = $12,
-         project_name = $13, amount_delta = $14,
-         updated_by = $15, updated_at = $16, version = version + 1
+         party_c = $13, project_name = $14, amount_delta = $15,
+         updated_by = $16, updated_at = $17, version = version + 1
        WHERE id = $1
        RETURNING *`,
       [
@@ -1762,6 +1861,9 @@ export async function updateContractDraft(
         update.partyB !== undefined
           ? update.partyB?.trim() || null
           : current.party_b,
+        update.partyC !== undefined
+          ? update.partyC?.trim() || null
+          : current.party_c,
         projectName,
         amountDelta,
         actorId,
@@ -2529,6 +2631,7 @@ export const CONTRACT_OCR_AUTOMATIC_ACCEPTED_MARKER = `自动采用结果：${CO
 export interface ContractAutomaticOcrFieldInput {
   field: string;
   normalizedValue: unknown;
+  warnings?: readonly string[];
 }
 
 export interface ContractAutomaticOcrPolicyInput {
@@ -2558,6 +2661,7 @@ export interface ContractAutomaticOcrPolicyDecision {
   accepted: boolean;
   status: "succeeded" | "partial" | "failed";
   values: Record<ContractOcrCoreField, string | null>;
+  partyC: string | null;
   legalEmptyFields: ContractOcrCoreField[];
   blockers: string[];
   warnings: string[];
@@ -2627,9 +2731,10 @@ function isAutomaticProjectOrganizationName(
   value: string,
   partyA: string | null,
   partyB: string | null,
+  partyC: string | null,
 ): boolean {
   const compacted = value.normalize("NFKC").replace(/\s+/g, "");
-  const partyValues = [partyA, partyB]
+  const partyValues = [partyA, partyB, partyC]
     .map((party) =>
       String(party || "")
         .normalize("NFKC")
@@ -2750,6 +2855,10 @@ export function decideContractAutomaticOcrAdoption(
     if (!fieldsByCode.has(fieldCode)) continue;
     values[fieldCode] = fieldsByCode.get(fieldCode) || null;
   }
+  const partyCField = input.fields.find(
+    (field) => String(field.field || "").trim() === "party_c",
+  );
+  const partyC = fieldsByCode.get("party_c") || null;
 
   if (
     ["supplement", "termination"].includes(input.relationType) &&
@@ -2818,6 +2927,7 @@ export function decideContractAutomaticOcrAdoption(
           values.project_name,
           values.party_a,
           values.party_b,
+          partyC,
         )
       ) {
         blockers.push(`${subjectNameLabel}候选属于单位名称`);
@@ -2959,6 +3069,24 @@ export function decideContractAutomaticOcrAdoption(
   ) {
     blockers.push("甲方单位与乙方单位不能完全相同");
   }
+  if (partyC) {
+    if (
+      (partyCField?.warnings || []).some((warning) =>
+        /候选冲突|识别为同一单位/u.test(warning),
+      )
+    ) {
+      blockers.push("丙方单位存在候选冲突，不能自动采用");
+    }
+    const normalizedPartyC = normalizeContractPartyIdentity(partyC);
+    if (
+      [values.party_a, values.party_b].some(
+        (party) =>
+          party && normalizeContractPartyIdentity(party) === normalizedPartyC,
+      )
+    ) {
+      blockers.push("丙方单位不能与甲方单位或乙方单位相同");
+    }
+  }
 
   if (values.amount) {
     try {
@@ -2991,6 +3119,7 @@ export function decideContractAutomaticOcrAdoption(
     accepted: status === "succeeded",
     status,
     values,
+    partyC,
     legalEmptyFields,
     blockers: uniqueBlockers,
     warnings: [...new Set(warnings)],
@@ -3892,6 +4021,20 @@ async function validateSubmission(
       "CONTRACT_PARTIES_IDENTICAL",
     );
   }
+  if (
+    contract.party_c &&
+    [contract.party_a, contract.party_b].some(
+      (party) =>
+        normalizeContractPartyIdentity(party || "") ===
+        normalizeContractPartyIdentity(contract.party_c || ""),
+    )
+  ) {
+    throw new ContractDomainError(
+      400,
+      "丙方单位不能与甲方单位或乙方单位相同",
+      "CONTRACT_PARTIES_IDENTICAL",
+    );
+  }
   validateAmountForRelation(contract.relation_type, contract.amount_delta);
   let inheritedRelationSubjectName: string | null = null;
   // 保留该显式变量名用于既有补充协议审批门禁审计测试。
@@ -4432,6 +4575,12 @@ export async function submitContractForApproval(
     let contract = await getLockedContract(client, contractId);
     if (contract.status !== "draft") {
       throw new ContractDomainError(409, "只有草拟中的合同可以提交审批");
+    }
+    if (contract.declared_subtype === "notary_fee") {
+      throw new ContractDomainError(
+        409,
+        "公证费付款通知必须由专用识别流程直接生效，不进入合同审批",
+      );
     }
     contract = await freezeSupplementAmountSnapshotForApproval(
       client,
@@ -5650,6 +5799,353 @@ async function assertFinancialRecordContractGroup(
   }
 }
 
+export interface ContractTargetAmountUpdateInput {
+  contractId: string;
+  expectedVersion: number;
+  targetAmount: number;
+  targetQuantity?: number | null;
+  unitPrice?: number | null;
+  confirmedQuantity?: number | null;
+  confirmedContractAmount?: number | null;
+  quantityUnit?: string | null;
+  reason?: string | null;
+  actorId: string;
+  actorRole: string;
+}
+
+export interface ContractTargetAmountChangeRow {
+  id: string;
+  contract_id: string;
+  change_no: number;
+  change_type: "initial" | "update";
+  old_target_amount: number | null;
+  new_target_amount: number;
+  old_target_quantity: number | null;
+  new_target_quantity: number | null;
+  old_unit_price: number | null;
+  new_unit_price: number | null;
+  reason: string;
+  changed_by: string;
+  changed_by_name?: string | null;
+  changed_at: string;
+}
+
+function normalizeTargetDecimal(
+  value: number | null | undefined,
+  scale: number,
+  label: string,
+): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  const factor = 10 ** scale;
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    !Number.isSafeInteger(Math.round(parsed * factor)) ||
+    Math.abs(parsed * factor - Math.round(parsed * factor)) > 1e-6
+  ) {
+    throw new ContractDomainError(
+      400,
+      `${label}格式不正确，最多保留${scale}位小数`,
+    );
+  }
+  return Math.round(parsed * factor) / factor;
+}
+
+/**
+ * 设置或变更按数量结算合同的目标金额。目标金额复用合同总额核算链，
+ * 当前确认金额独立保存，因此台账、看板和财务闭环使用同一目标分母。
+ */
+export async function updateContractTargetAmount(
+  input: ContractTargetAmountUpdateInput,
+  transactionClient?: PoolClient,
+): Promise<ContractRow> {
+  if (!CONTRACT_FINANCE_ROLES.has(input.actorRole)) {
+    throw new ContractDomainError(403, "只有管理员可以设置或变更合同目标金额");
+  }
+  const execute = async (client: PoolClient): Promise<ContractRow> => {
+    const current = await getLockedContract(client, input.contractId);
+    if (
+      current.relation_type !== "main" ||
+      current.root_contract_id !== current.id
+    ) {
+      throw new ContractDomainError(409, "目标金额只能设置在主合同上");
+    }
+    if (
+      !["draft", "effective", "executing", "completed"].includes(current.status)
+    ) {
+      throw new ContractDomainError(409, "当前合同状态不能变更目标金额");
+    }
+    if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new ContractDomainError(400, "必须提供有效的合同版本号");
+    }
+    if (current.version !== input.expectedVersion) {
+      throw new ContractDomainError(
+        409,
+        "合同已被其他操作更新，请刷新后重试",
+        "CONTRACT_VERSION_CONFLICT",
+      );
+    }
+
+    const targetAmount = normalizeTargetDecimal(
+      input.targetAmount,
+      2,
+      "目标金额",
+    );
+    const targetQuantity = normalizeTargetDecimal(
+      input.targetQuantity,
+      4,
+      "目标数量",
+    );
+    const unitPrice = normalizeTargetDecimal(input.unitPrice, 2, "单价");
+    const confirmedQuantity = normalizeTargetDecimal(
+      input.confirmedQuantity,
+      4,
+      "当前确认数量",
+    );
+    const confirmedContractAmount = normalizeTargetDecimal(
+      input.confirmedContractAmount,
+      2,
+      "当前确认金额",
+    );
+    const quantityUnit = String(input.quantityUnit || "").trim() || null;
+    const reason = String(input.reason || "").trim();
+    if (targetAmount == null || targetAmount <= 0) {
+      throw new ContractDomainError(400, "目标金额必须大于0");
+    }
+    if ((targetQuantity == null) !== (unitPrice == null)) {
+      throw new ContractDomainError(
+        400,
+        "目标数量与单价必须同时填写或同时留空",
+      );
+    }
+    if (targetQuantity != null && targetQuantity <= 0) {
+      throw new ContractDomainError(400, "目标数量必须大于0");
+    }
+    if (unitPrice != null && unitPrice <= 0) {
+      throw new ContractDomainError(400, "单价必须大于0");
+    }
+    if (
+      targetQuantity != null &&
+      unitPrice != null &&
+      toCents(targetQuantity * unitPrice) !== toCents(targetAmount)
+    ) {
+      throw new ContractDomainError(400, "目标金额必须等于目标数量乘以单价");
+    }
+    if (confirmedQuantity != null && targetQuantity == null) {
+      throw new ContractDomainError(400, "填写当前确认数量前必须设置目标数量");
+    }
+    if (
+      confirmedQuantity != null &&
+      targetQuantity != null &&
+      confirmedQuantity > targetQuantity
+    ) {
+      throw new ContractDomainError(400, "当前确认数量不能大于目标数量");
+    }
+    if (confirmedQuantity != null && !quantityUnit) {
+      throw new ContractDomainError(400, "填写数量时必须填写数量单位");
+    }
+    if (quantityUnit && quantityUnit.length > 20) {
+      throw new ContractDomainError(400, "数量单位不能超过20个字符");
+    }
+    if (
+      confirmedContractAmount != null &&
+      confirmedContractAmount > targetAmount
+    ) {
+      throw new ContractDomainError(400, "当前确认金额不能大于目标金额");
+    }
+
+    const totals = await client.query<{
+      invoice_total: string;
+      receipt_total: string;
+      payment_total: string;
+      external_payment_total: string;
+    }>(
+      `SELECT
+         COALESCE((SELECT SUM(record.amount) FROM contract_invoices record
+           JOIN contracts child ON child.id=record.contract_id
+           WHERE COALESCE(child.root_contract_id,child.id)=$1
+             AND record.status='confirmed'),0)::text AS invoice_total,
+         COALESCE((SELECT SUM(record.amount) FROM contract_receipts record
+           JOIN contracts child ON child.id=record.contract_id
+           WHERE COALESCE(child.root_contract_id,child.id)=$1
+             AND record.status='confirmed'),0)::text AS receipt_total,
+         COALESCE((SELECT SUM(record.amount) FROM contract_payments record
+           JOIN contracts child ON child.id=record.contract_id
+           WHERE COALESCE(child.root_contract_id,child.id)=$1
+             AND record.status='confirmed'),0)::text AS payment_total,
+         COALESCE((SELECT SUM(record.amount) FROM contract_external_payments record
+           JOIN contracts child ON child.id=record.contract_id
+           WHERE COALESCE(child.root_contract_id,child.id)=$1
+             AND record.status='confirmed'),0)::text AS external_payment_total`,
+      [current.id],
+    );
+    const financialFloor = Math.max(
+      Number(totals.rows[0]?.invoice_total || 0),
+      Number(totals.rows[0]?.receipt_total || 0),
+      Number(totals.rows[0]?.payment_total || 0),
+      Number(totals.rows[0]?.external_payment_total || 0),
+      Number(confirmedContractAmount || 0),
+    );
+    if (toCents(targetAmount) < toCents(financialFloor)) {
+      throw new ContractDomainError(
+        409,
+        `目标金额不能低于已开票、已回付款或当前确认金额${financialFloor.toFixed(2)}元`,
+      );
+    }
+
+    const initial =
+      current.pricing_mode !== "target" || current.target_amount == null;
+    const targetChanged =
+      initial ||
+      toCents(Number(current.target_amount || 0)) !== toCents(targetAmount) ||
+      Number(current.target_quantity ?? -1) !== Number(targetQuantity ?? -1) ||
+      toCents(Number(current.unit_price || 0)) !==
+        toCents(Number(unitPrice || 0));
+    const confirmationChanged =
+      Number(current.confirmed_quantity ?? -1) !==
+        Number(confirmedQuantity ?? -1) ||
+      toCents(Number(current.confirmed_contract_amount || 0)) !==
+        toCents(Number(confirmedContractAmount || 0)) ||
+      String(current.quantity_unit || "") !== String(quantityUnit || "");
+    if (!targetChanged && !confirmationChanged) return current;
+    if (!initial && targetChanged && !reason) {
+      throw new ContractDomainError(
+        400,
+        "变更目标金额、数量或单价时必须填写变更原因",
+      );
+    }
+    if (!initial && !targetChanged && confirmationChanged && !reason) {
+      throw new ContractDomainError(
+        400,
+        "更新当前确认数量或金额时必须填写依据说明",
+      );
+    }
+    if (reason.length > 500) {
+      throw new ContractDomainError(400, "变更原因不能超过500个字符");
+    }
+
+    const now = new Date().toISOString();
+    if (targetChanged) {
+      const latest = await client.query<{ max_change_no: number }>(
+        `SELECT COALESCE(MAX(change_no),-1)::int AS max_change_no
+         FROM contract_target_amount_changes WHERE contract_id=$1`,
+        [current.id],
+      );
+      const changeNo = initial
+        ? 0
+        : Number(latest.rows[0]?.max_change_no || 0) + 1;
+      await client.query(
+        `INSERT INTO contract_target_amount_changes(
+           id,contract_id,change_no,change_type,old_target_amount,
+           new_target_amount,old_target_quantity,new_target_quantity,
+           old_unit_price,new_unit_price,reason,changed_by,changed_at
+         ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [
+          nanoid(),
+          current.id,
+          changeNo,
+          initial ? "initial" : "update",
+          initial ? null : current.target_amount,
+          targetAmount,
+          initial ? null : current.target_quantity,
+          targetQuantity,
+          initial ? null : current.unit_price,
+          unitPrice,
+          initial ? reason || "首次设置合同目标金额" : reason,
+          input.actorId,
+          now,
+        ],
+      );
+    }
+    const updated = await client.query<ContractRow>(
+      `UPDATE contracts SET pricing_mode='target',target_amount=$2,
+         target_quantity=$3,unit_price=$4,confirmed_quantity=$5,
+         confirmed_contract_amount=$6,quantity_unit=$7,amount_delta=$2,
+         current_effective_amount=$2,updated_by=$8,updated_at=$9,
+         version=version+1
+       WHERE id=$1 RETURNING *`,
+      [
+        current.id,
+        targetAmount,
+        targetQuantity,
+        unitPrice,
+        confirmedQuantity,
+        confirmedContractAmount,
+        quantityUnit,
+        input.actorId,
+        now,
+      ],
+    );
+    await insertAudit(client, {
+      contractId: current.id,
+      action: targetChanged
+        ? initial
+          ? "target_amount_initialized"
+          : "target_amount_changed"
+        : "target_confirmation_updated",
+      actorId: input.actorId,
+      actorRole: input.actorRole,
+      fromStatus: current.status,
+      toStatus: current.status,
+      changes: {
+        previousTargetAmount: current.target_amount,
+        targetAmount,
+        previousTargetQuantity: current.target_quantity,
+        targetQuantity,
+        previousUnitPrice: current.unit_price,
+        unitPrice,
+        previousConfirmedQuantity: current.confirmed_quantity,
+        confirmedQuantity,
+        previousConfirmedContractAmount: current.confirmed_contract_amount,
+        confirmedContractAmount,
+        quantityUnit,
+        reason: reason || null,
+      },
+      comment: reason || (initial ? "首次设置合同目标金额" : null),
+      now,
+    });
+    let result = updated.rows[0]!;
+    if (["effective", "executing", "completed"].includes(result.status)) {
+      result = await recalculateContractExecutionStatus(
+        client,
+        result.id,
+        input.actorId,
+        input.actorRole,
+      );
+    }
+    await syncProjectContractTotal(client, result.project_id);
+    return result;
+  };
+  return transactionClient
+    ? execute(transactionClient)
+    : db.transaction((client) => execute(client));
+}
+
+export async function listContractTargetAmountChanges(
+  contractId: string,
+  transactionClient?: PoolClient,
+): Promise<ContractTargetAmountChangeRow[]> {
+  const execute = (client: PoolClient) =>
+    client.query<ContractTargetAmountChangeRow>(
+      `SELECT history.id,history.contract_id,history.change_no,
+         history.change_type,history.old_target_amount,
+         history.new_target_amount,history.old_target_quantity,
+         history.new_target_quantity,history.old_unit_price,
+         history.new_unit_price,history.reason,history.changed_by,
+         actor.name AS changed_by_name,history.changed_at
+       FROM contract_target_amount_changes history
+       LEFT JOIN users actor ON actor.id=history.changed_by
+       WHERE history.contract_id=$1
+       ORDER BY history.change_no DESC`,
+      [contractId],
+    );
+  const result = transactionClient
+    ? await execute(transactionClient)
+    : await db.transaction((client) => execute(client));
+  return result.rows;
+}
+
 /** 在财务记录新增或冲正后重算合同执行状态。调用方必须处于事务中。 */
 export async function recalculateContractExecutionStatus(
   client: PoolClient,
@@ -5815,6 +6311,10 @@ export async function rebuildContractFinancialRegistrationMatches(
     contractId: string;
     settlementKind: "receipt" | "payment";
     now: string;
+    matchIdFactory?: (input: {
+      invoiceRecordId: string;
+      settlementRecordId: string;
+    }) => string;
   },
 ): Promise<RebuiltContractFinancialMatches> {
   const settlementTable = financialTable(input.settlementKind);
@@ -5886,13 +6386,20 @@ export async function rebuildContractFinancialRegistrationMatches(
     allocatedAmount: allocation.allocatedAmount,
   }));
   for (const allocation of allocations) {
+    const invoiceRecordId =
+      invoiceItems.rows[allocation.invoiceIndex]!.record_id;
+    const settlementRecordId =
+      allocatableSettlementItems[allocation.settlementIndex]!.record_id;
     await client.query(
       `INSERT INTO contract_financial_registration_matches(
          id, registration_id, contract_id, invoice_item_id,
          settlement_item_id, allocated_amount, created_at
        ) VALUES($1,$2,$3,$4,$5,$6,$7)`,
       [
-        nanoid(),
+        input.matchIdFactory?.({
+          invoiceRecordId,
+          settlementRecordId,
+        }) || nanoid(),
         input.registrationId,
         input.contractId,
         invoiceItems.rows[allocation.invoiceIndex]!.item_id,
@@ -6073,7 +6580,7 @@ export async function postContractFinancialSettlements(
     );
   }
   const internalFundingContractSubject = resolveContractFinancialCompanySubject(
-    [root.party_a, root.party_b],
+    [root.party_a, root.party_b, root.party_c],
     CONTRACT_COMPANY_SUBJECTS,
   );
   const allowsEngineeringInternalFunding =
@@ -6097,23 +6604,49 @@ export async function postContractFinancialSettlements(
       (rootCategory === "main_business" &&
         input.financialDirection === "income" &&
         input.settlementKind === "receipt") ||
-      allowsEngineeringInternalFunding
+      allowsEngineeringInternalFunding ||
+      (allowsDirectAssetPaymentFirst({
+        category: rootCategory,
+        asset_funding_mode: root.asset_funding_mode,
+      }) &&
+        input.financialDirection === "cost" &&
+        input.settlementKind === "payment" &&
+        Boolean(internalFundingContractSubject) &&
+        registeredItems.rows.every(
+          (item) =>
+            normalizeContractPartyIdentity(item.payer || "") ===
+              normalizeContractPartyIdentity(
+                internalFundingContractSubject?.name || "",
+              ) &&
+            [root.party_a, root.party_b, root.party_c].some(
+              (party) =>
+                party &&
+                normalizeContractPartyIdentity(party) !==
+                  normalizeContractPartyIdentity(
+                    internalFundingContractSubject?.name || "",
+                  ) &&
+                normalizeContractPartyIdentity(party) ===
+                  normalizeContractPartyIdentity(item.payee || ""),
+            ),
+        ))
     )
   ) {
     throw new ContractDomainError(
       409,
-      "只有主营实际回款或工程咨询向签约公司的内部划拨可以未分配发票先行入账",
+      "未分配发票的结算必须符合主营回款、资产直接付款或内部划拨的主体与资金方式规则",
       "FINANCIAL_REGISTRATION_MATCH_AMOUNT_MISMATCH",
     );
   }
-  const categoryDirection =
-    financialDirectionFromContractCategory(rootCategory);
+  const categoryDirection = financialDirectionFromContractCategory(
+    rootCategory,
+    root.declared_subtype,
+  );
   if (input.financialDirection !== categoryDirection) {
     throw new ContractDomainError(
       409,
-      rootCategory === "asset"
-        ? "资产类合同只能登记支出凭证"
-        : "主营和非主营合同只能登记收入凭证",
+      categoryDirection === "cost"
+        ? "当前合同属于支出，只能登记进项发票和付款凭证"
+        : "当前合同属于收入，只能登记销项发票和回款回单",
       "FINANCIAL_DIRECTION_CONFLICT",
     );
   }
@@ -6972,14 +7505,16 @@ export async function confirmContractFinancialRegistrationInTransaction(
       "FINANCIAL_CONTRACT_CATEGORY_REQUIRED",
     );
   }
-  const categoryDirection =
-    financialDirectionFromContractCategory(rootCategory);
+  const categoryDirection = financialDirectionFromContractCategory(
+    rootCategory,
+    rootContract.declared_subtype,
+  );
   if (registration.financial_direction !== categoryDirection) {
     throw new ContractDomainError(
       409,
-      rootCategory === "asset"
-        ? "资产类合同只能确认支出登记"
-        : "主营和非主营合同只能确认收入登记",
+      categoryDirection === "cost"
+        ? "当前合同只能确认支出登记"
+        : "当前合同只能确认收入登记",
       "FINANCIAL_DIRECTION_CONFLICT",
     );
   }

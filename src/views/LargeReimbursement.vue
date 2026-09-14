@@ -1,21 +1,20 @@
 <template>
-  <div class="large-reimbursement-container">
+  <div class="large-reimbursement-container" :style="themeStyle">
     <el-card class="page-card">
-      <!-- 大额报销 - 橙色顶部色条 -->
-      <div class="page-type-bar page-type-bar--large"></div>
+      <div class="page-type-bar"></div>
 
       <template #header>
         <div class="card-header">
           <div class="page-title-area">
-            <span class="page-type-badge page-type-badge--large">大额</span>
-            <span class="page-title-text">大额报销</span>
+            <span class="page-type-badge">{{ typeConfig.shortLabel }}</span>
+            <span class="page-title-text">{{ typeConfig.label }}</span>
           </div>
           <el-button
             :icon="Plus"
-            class="action-btn action-btn--large"
+            class="action-btn"
             @click="handleCreate"
           >
-            新建大额报销单
+            新建{{ typeConfig.label }}单
           </el-button>
         </div>
       </template>
@@ -31,7 +30,7 @@
           class="alert-info"
         >
           <template #default>
-            <p>大额报销适用于发票总金额超过 1000 元的报销申请。</p>
+            <p>{{ typeConfig.description }}</p>
             <p>默认显示当月报销数据，可通过日期范围查询历史记录。</p>
           </template>
         </el-alert>
@@ -93,9 +92,9 @@
               {{ row.invoiceCategory || '-' }}
             </template>
           </el-table-column>
-          <el-table-column prop="reimbursementScope" label="报销范围/区域" min-width="130" align="center">
+          <el-table-column :label="scopeColumnLabel" min-width="130" align="center">
             <template #default="{ row }">
-              <span>{{ getScopeText(row.reimbursementScope) }}</span>
+              <span>{{ getRecordScopeText(row) }}</span>
             </template>
           </el-table-column>
           <el-table-column prop="amount" label="报销金额" min-width="100" align="center">
@@ -184,7 +183,7 @@
               <h4 class="section-title">报销单信息</h4>
               <el-descriptions :column="2" border>
                 <el-descriptions-item label="报销单号">{{ currentApprovalRecord.id }}</el-descriptions-item>
-                <el-descriptions-item label="报销类型">{{ currentApprovalRecord.category || '大额报销' }}</el-descriptions-item>
+                <el-descriptions-item label="报销类型">{{ currentApprovalRecord.category || typeConfig.label }}</el-descriptions-item>
                 <el-descriptions-item label="报销事由" :span="2">{{ normalizeReimbursementTitle(currentApprovalRecord.title) }}</el-descriptions-item>
                 <el-descriptions-item label="申请人">{{ currentApprovalRecord.applicant }}</el-descriptions-item>
                 <el-descriptions-item label="报销金额">
@@ -219,10 +218,22 @@
                   </div>
                 </el-timeline-item>
 
+                <el-timeline-item
+                  v-if="approvalSkipped"
+                  :timestamp="currentApprovalRecord.approveTime || currentApprovalRecord.submitTime"
+                  placement="top"
+                  type="success"
+                >
+                  <div class="timeline-content">
+                    <div class="timeline-title">免审批</div>
+                    <div class="timeline-desc">董事长账号免审批，提交后直接进入待付款</div>
+                  </div>
+                </el-timeline-item>
+
                 <!-- 2. 审批历史记录 -->
                 <template v-if="currentApprovalRecord.approvalHistory && currentApprovalRecord.approvalHistory.length > 0">
                   <el-timeline-item
-                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => r.action !== 'payment_uploaded' && r.action !== 'payment_confirmed')"
+                    v-for="record in currentApprovalRecord.approvalHistory.filter((r: any) => !['payment_uploaded', 'payment_confirmed', 'auto_approved', 'auto_approve', 'approval_skipped'].includes(r.action))"
                     :key="record.id"
                     :timestamp="record.actionTime"
                     placement="top"
@@ -245,7 +256,7 @@
                 </template>
 
                 <!-- 如果没有审批历史，显示当前状态 -->
-                <template v-else>
+                <template v-else-if="!approvalSkipped">
                   <el-timeline-item
                     v-if="['approved', 'payment_uploaded', 'completed'].includes(currentApprovalRecord.status)"
                     :timestamp="currentApprovalRecord.approveTime"
@@ -465,7 +476,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Search, Refresh, Document, ZoomIn } from '@element-plus/icons-vue'
@@ -474,6 +485,28 @@ import { usePendingStore } from '@/stores/pending'
 import { useAuthStore } from '@/stores/auth'
 import { normalizeReimbursementTitle } from '@/utils/reimbursement/date'
 import { toFileUrl } from '@/utils/file'
+import {
+  getReimbursementTypeConfig,
+  isApprovalSkipped,
+  type ReimbursementType,
+} from '@/utils/reimbursement/typeConfig'
+
+const props = withDefaults(defineProps<{
+  reimbursementType?: ReimbursementType
+}>(), {
+  reimbursementType: 'large',
+})
+
+const typeConfig = computed(() => getReimbursementTypeConfig(props.reimbursementType)!)
+const isWelfareReimbursement = computed(() =>
+  ['welfare_one', 'welfare_two'].includes(typeConfig.value.type),
+)
+const scopeColumnLabel = computed(() => isWelfareReimbursement.value ? '福利分类' : '报销范围/区域')
+const themeStyle = computed(() => ({
+  '--reimbursement-accent': typeConfig.value.accentColor,
+  '--reimbursement-accent-hover': typeConfig.value.accentHoverColor,
+  '--reimbursement-accent-active': typeConfig.value.accentActiveColor,
+}))
 
 const router = useRouter()
 const pendingStore = usePendingStore()
@@ -557,6 +590,9 @@ const reimbursementList = ref<any[]>([])
 // 审批过程弹窗
 const approvalDialogVisible = ref(false)
 const currentApprovalRecord = ref<any>(null)
+const approvalSkipped = computed(() =>
+  isApprovalSkipped(currentApprovalRecord.value),
+)
 
 // 确认收款状态
 const confirmingReceipt = ref(false)
@@ -626,13 +662,16 @@ const scopeMap = ref<Record<string, string>>({})
 // 从 API 获取报销范围配置，构建 value→name 映射
 const fetchScopeOptions = async () => {
   try {
-    const response = await api.get('/api/reimbursement-scope/list')
+    const response = await api.get(
+      typeConfig.value.scopeListEndpoint || '/api/reimbursement-scope/list',
+    )
     if (response.data.success) {
       const buildMap = (items: any[], parentName = '') => {
         for (const item of items) {
-          if (item.value) {
+          const itemValue = isWelfareReimbursement.value ? item.id || item.code : item.value
+          if (itemValue) {
             const fullName = parentName ? `${parentName} / ${item.name}` : item.name
-            scopeMap.value[item.value] = fullName
+            scopeMap.value[String(itemValue)] = fullName
           }
           if (item.children?.length) {
             buildMap(item.children, item.name)
@@ -652,6 +691,17 @@ const getScopeText = (scope: string | undefined) => {
   return scopeMap.value[scope] || scope
 }
 
+const getRecordScopeText = (row: Record<string, any>) => {
+  if (isWelfareReimbursement.value && row.welfareCategoryName) {
+    return row.welfareCategoryName
+  }
+  return getScopeText(
+    isWelfareReimbursement.value
+      ? row.welfareCategoryId || row.reimbursementScope
+      : row.reimbursementScope,
+  )
+}
+
 // 判断是否可以编辑（只有草稿和已驳回状态可以编辑）
 const canEdit = (status: string) => {
   return status === 'draft' || status === 'rejected'
@@ -667,7 +717,7 @@ const fetchList = async () => {
   loading.value = true
   try {
     const params = new URLSearchParams({
-      type: 'large',
+      type: typeConfig.value.type,
       page: pagination.page.toString(),
       pageSize: pagination.pageSize.toString(),
     })
@@ -714,8 +764,8 @@ const fetchList = async () => {
 // 新建报销单
 const handleCreate = () => {
   router.push({
-    path: '/large-reimbursement/create',
-    query: { from: '/large-reimbursement' }
+    path: typeConfig.value.createRoute,
+    query: { from: typeConfig.value.listRoute }
   })
 }
 
@@ -831,8 +881,8 @@ const handleGoToDetail = () => {
   if (!currentApprovalRecord.value) return
   approvalDialogVisible.value = false
   router.push({
-    path: `/large-reimbursement/${currentApprovalRecord.value.id}`,
-    query: { mode: 'view', from: '/large-reimbursement' }
+    path: `${typeConfig.value.listRoute}/${currentApprovalRecord.value.id}`,
+    query: { mode: 'view', from: typeConfig.value.listRoute }
   })
 }
 
@@ -927,8 +977,8 @@ const handleConfirmReceipt = async () => {
 // 编辑
 const handleEdit = (row: any) => {
   router.push({
-    path: `/large-reimbursement/${row.id}`,
-    query: { from: '/large-reimbursement' }
+    path: `${typeConfig.value.listRoute}/${row.id}`,
+    query: { from: typeConfig.value.listRoute }
   })
 }
 
@@ -962,7 +1012,7 @@ const handleWithdraw = (row: any) => {
 
 // 删除
 const handleDelete = (row: any) => {
-  ElMessageBox.confirm('确定要删除这条大额报销单吗？', '提示', {
+  ElMessageBox.confirm(`确定要删除这条${typeConfig.value.label}单吗？`, '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning',
@@ -1004,6 +1054,16 @@ onMounted(() => {
   fetchScopeOptions()
   fetchList()
 })
+
+watch(
+  () => props.reimbursementType,
+  () => {
+    pagination.page = 1
+    scopeMap.value = {}
+    reimbursementList.value = []
+    void Promise.all([fetchScopeOptions(), fetchList()])
+  },
+)
 </script>
 
 <style scoped>
@@ -1028,8 +1088,8 @@ onMounted(() => {
   height: 4px;
   width: 100%;
   flex-shrink: 0;
+  background-color: var(--reimbursement-accent);
 }
-.page-type-bar--large { background-color: #e6a23c; }
 
 /* 页面标题区域 */
 .page-title-area {
@@ -1054,20 +1114,18 @@ onMounted(() => {
   font-weight: 700;
   color: #fff;
   letter-spacing: 0.5px;
+  background-color: var(--reimbursement-accent);
 }
-.page-type-badge--large { background-color: #e6a23c; }
 
 /* 主操作按钮 */
 .action-btn {
   font-weight: 600;
-}
-.action-btn--large {
-  --el-button-bg-color: #e6a23c;
-  --el-button-border-color: #e6a23c;
-  --el-button-hover-bg-color: #ebb563;
-  --el-button-hover-border-color: #ebb563;
-  --el-button-active-bg-color: #cf9236;
-  --el-button-active-border-color: #cf9236;
+  --el-button-bg-color: var(--reimbursement-accent);
+  --el-button-border-color: var(--reimbursement-accent);
+  --el-button-hover-bg-color: var(--reimbursement-accent-hover);
+  --el-button-hover-border-color: var(--reimbursement-accent-hover);
+  --el-button-active-bg-color: var(--reimbursement-accent-active);
+  --el-button-active-border-color: var(--reimbursement-accent-active);
   --el-button-text-color: #fff;
 }
 

@@ -10,9 +10,13 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import sharp from "sharp";
 import type { PoolClient } from "pg";
-import { callPaddleOcr } from "./ocrDaemon.js";
+import {
+  callPaddleOcrDetailed,
+  type PaddleOcrLine,
+} from "./ocrDaemon.js";
 import {
   extractPaymentProofPartyAccounts,
+  hasPaymentProofPartyAccountStructure,
   parsePaymentProofText,
 } from "./paymentProofOcr.js";
 import { nanoid } from "nanoid";
@@ -486,8 +490,135 @@ function extractLayoutPartyNames(text: string): {
   });
   const parties = candidates.slice(-2);
   return {
-    payer: parties.length >= 2 ? parties[0]! : "",
-    payee: parties.length >= 2 ? parties[1]! : parties[0] || "",
+    payer: parties[0] || "",
+    payee: parties.length >= 2 ? parties[1]! : "",
+  };
+}
+
+interface ReceiptLineBounds {
+  centerX: number;
+  centerY: number;
+}
+
+function receiptLineBounds(line: PaddleOcrLine): ReceiptLineBounds | null {
+  const points = Array.isArray(line.box) ? line.box : [];
+  const xs = points.map((point) => Number(point?.[0])).filter(Number.isFinite);
+  const ys = points.map((point) => Number(point?.[1])).filter(Number.isFinite);
+  if (!xs.length || !ys.length) return null;
+  return {
+    centerX: (Math.min(...xs) + Math.max(...xs)) / 2,
+    centerY: (Math.min(...ys) + Math.max(...ys)) / 2,
+  };
+}
+
+function cleanReceiptPartyName(value: string): string {
+  const normalized = String(value || "")
+    .normalize("NFKC")
+    .replace(/[|｜"“”]/g, "")
+    .replace(/^(?:付款|收款)?(?:人|方|名称|户名)[：:]?/u, "")
+    .replace(/\s+/g, "")
+    .trim();
+  if (
+    normalized.length < 2 ||
+    normalized.length > 60 ||
+    !/[\u3400-\u9fff]/u.test(normalized) ||
+    /^(?:中国工商银行|网上银行电子回单|户名|付款|收款|账号|账户|开户银行|金额|摘要|用途|交易流水号|时间戳)$/u.test(
+      normalized,
+    ) ||
+    /(?:电子回单号码|验证码|打印日期|记账日期|人民币)/u.test(normalized)
+  ) {
+    return "";
+  }
+  return normalized;
+}
+
+function findReceiptColumnValue(
+  labels: PaddleOcrLine[],
+  candidates: PaddleOcrLine[],
+  index: number,
+): string {
+  const labelBounds = receiptLineBounds(labels[index]!);
+  if (!labelBounds) return "";
+  const nextLabelBounds = labels[index + 1]
+    ? receiptLineBounds(labels[index + 1]!)
+    : null;
+  const upperX = nextLabelBounds?.centerX ?? Number.POSITIVE_INFINITY;
+  return (
+    candidates
+      .map((line) => ({ line, bounds: receiptLineBounds(line) }))
+      .filter(
+        (
+          candidate,
+        ): candidate is {
+          line: PaddleOcrLine;
+          bounds: ReceiptLineBounds;
+        } => candidate.bounds !== null,
+      )
+      .filter(
+        (candidate) =>
+          candidate.bounds.centerX > labelBounds.centerX &&
+          candidate.bounds.centerX < upperX &&
+          Math.abs(candidate.bounds.centerY - labelBounds.centerY) <= 65,
+      )
+      .sort(
+        (left, right) =>
+          Math.abs(left.bounds.centerY - labelBounds.centerY) -
+            Math.abs(right.bounds.centerY - labelBounds.centerY) ||
+          left.bounds.centerX - right.bounds.centerX,
+      )[0]?.line.text || ""
+  );
+}
+
+function extractCoordinatePartyFields(lines: PaddleOcrLine[]): {
+  hasNameLayout: boolean;
+  hasAccountLayout: boolean;
+  payer: string;
+  payerAccount: string;
+  payee: string;
+  payeeAccount: string;
+} {
+  const byX = (left: PaddleOcrLine, right: PaddleOcrLine) =>
+    (receiptLineBounds(left)?.centerX || 0) -
+    (receiptLineBounds(right)?.centerX || 0);
+  const nameLabels = lines
+    .filter((line) => /^\s*户\s*名\s*$/u.test(line.text))
+    .sort(byX);
+  const accountLabels = lines
+    .filter((line) => /^\s*(?:账号|账户)\s*$/u.test(line.text))
+    .sort(byX);
+  const nameCandidates = lines.filter((line) =>
+    Boolean(cleanReceiptPartyName(line.text)),
+  );
+  const accountCandidates = lines.filter((line) =>
+    /^\d{12,25}$/u.test(
+      line.text.normalize("NFKC").replace(/[^0-9]/g, ""),
+    ),
+  );
+  const hasNameLayout = nameLabels.length >= 2;
+  const hasAccountLayout = accountLabels.length >= 2;
+  return {
+    hasNameLayout,
+    hasAccountLayout,
+    payer: hasNameLayout
+      ? cleanReceiptPartyName(
+          findReceiptColumnValue(nameLabels, nameCandidates, 0),
+        )
+      : "",
+    payee: hasNameLayout
+      ? cleanReceiptPartyName(
+          findReceiptColumnValue(nameLabels, nameCandidates, 1),
+        )
+      : "",
+    payerAccount: hasAccountLayout
+      ? findReceiptColumnValue(accountLabels, accountCandidates, 0)
+          .normalize("NFKC")
+          .replace(/[^0-9]/g, "")
+      : "",
+    payeeAccount: hasAccountLayout
+      ? findReceiptColumnValue(accountLabels, accountCandidates, 1)
+          .normalize("NFKC")
+          .replace(/[^0-9]/g, "")
+      : "",
   };
 }
 
@@ -506,23 +637,34 @@ function extractProofNo(text: string): string {
 export async function recognizeBankReceiptImage(
   imagePath: string,
 ): Promise<BankReceiptOcrResult> {
-  const text = await callPaddleOcr(imagePath);
+  const detailed = await callPaddleOcrDetailed(imagePath);
+  const text = detailed.fullText;
   const parsed = parsePaymentProofText(text);
   const structuredAccounts = extractPaymentProofPartyAccounts(text);
+  const coordinateParties = extractCoordinatePartyFields(detailed.lines);
+  const hasStructuredAccountLayout =
+    hasPaymentProofPartyAccountStructure(text);
   const payeeAccount =
-    structuredAccounts.payeeAccount ||
-    extractPayeeAccount(text) ||
-    parsed.payeeAccount;
+    coordinateParties.payeeAccount ||
+    (hasStructuredAccountLayout
+      ? structuredAccounts.payeeAccount
+      : extractPayeeAccount(text) || parsed.payeeAccount);
   const layoutParties = extractLayoutPartyNames(text);
   const parsedPayer = /^(?:付款|付款人|付款方)$/u.test(parsed.payer)
     ? ""
     : parsed.payer;
   return {
-    payer: layoutParties.payer || parsedPayer,
+    payer: coordinateParties.hasNameLayout
+      ? coordinateParties.payer
+      : layoutParties.payer || parsedPayer,
     payerAccount:
-      structuredAccounts.payerAccount ||
-      extractPayerAccount(text, payeeAccount),
-    payee: layoutParties.payee || parsed.payee || extractPayee(text),
+      coordinateParties.payerAccount ||
+      (hasStructuredAccountLayout
+        ? structuredAccounts.payerAccount
+        : extractPayerAccount(text, payeeAccount)),
+    payee: coordinateParties.hasNameLayout
+      ? coordinateParties.payee
+      : layoutParties.payee || parsed.payee || extractPayee(text),
     payeeAccount,
     amount: parsed.amount || extractAmount(text),
     remark: extractRemark(text),

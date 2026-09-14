@@ -8,6 +8,7 @@ import {
   FINANCIAL_ACCOUNT_CODES,
   type FinancialAccountCode,
   type MonthlyFinancialReportStatus,
+  type MonthlyFinancialMainBusinessTrendPoint,
   type MonthlyFinancialTrendData,
   type MonthlyFinancialTrendPoint,
   type MonthlyFinancialTrendWarning,
@@ -88,6 +89,7 @@ export function buildMonthlyFinancialTrendGap(
     month,
     status: null,
     valueState: null,
+    actualReceiptState: null,
     actualReceipt: null,
     settlementInflow: null,
     totalOutflow: null,
@@ -139,6 +141,7 @@ export function buildMonthlyFinancialTrendPoint(
     month: report.month,
     status: report.status,
     valueState: report.status === "closed" ? "closed" : "current",
+    actualReceiptState: report.status === "closed" ? "closed" : "current",
     actualReceipt: normalizeFinancialAmount(report.income.mainReceipt),
     settlementInflow,
     totalOutflow,
@@ -168,6 +171,9 @@ export function buildMonthlyFinancialTrendData(input: {
   to: string;
   availableYears: number[];
   reports: MonthlyFinancialTrendReportInput[];
+  actualReceipts?: Array<{ month: string; amount: string }>;
+  mainBusinessRegions?: string[];
+  mainBusinessPoints?: MonthlyFinancialMainBusinessTrendPoint[];
 }): MonthlyFinancialTrendData {
   const months = listMonthlyFinancialTrendMonths(input.from, input.to);
   const monthSet = new Set(months);
@@ -180,11 +186,81 @@ export function buildMonthlyFinancialTrendData(input: {
     reportByMonth.set(report.month, report);
   }
 
+  const mainBusinessRegions = [...new Set(input.mainBusinessRegions || [])]
+    .map((region) =>
+      String(region || "")
+        .normalize("NFKC")
+        .trim(),
+    )
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  const mainBusinessPointKeys = new Set<string>();
+  const mainBusinessPoints = (input.mainBusinessPoints || [])
+    .flatMap((point) => {
+      assertFinancialMonth(point.month);
+      const region = String(point.region || "")
+        .normalize("NFKC")
+        .trim();
+      if (!monthSet.has(point.month) || !region) return [];
+      if (
+        point.contractCount !== null &&
+        (!Number.isInteger(point.contractCount) || point.contractCount < 0)
+      ) {
+        throw new Error(`${point.month}${region}主营合同数量不正确`);
+      }
+      const key = `${point.month}\u0000${region}`;
+      if (mainBusinessPointKeys.has(key)) {
+        throw new Error(`${point.month}${region}存在重复主营趋势数据`);
+      }
+      mainBusinessPointKeys.add(key);
+      return [
+        {
+          month: point.month,
+          region,
+          actualReceipt:
+            point.actualReceipt === null
+              ? null
+              : normalizeFinancialAmount(point.actualReceipt),
+          contractAmount:
+            point.contractAmount === null
+              ? null
+              : normalizeFinancialAmount(point.contractAmount),
+          contractCount: point.contractCount,
+        },
+      ];
+    })
+    .sort(
+      (left, right) =>
+        left.month.localeCompare(right.month) ||
+        left.region.localeCompare(right.region, "zh-CN"),
+    );
+
+  const actualReceiptByMonth = new Map<string, string>();
+  for (const receipt of input.actualReceipts || []) {
+    assertFinancialMonth(receipt.month);
+    if (!monthSet.has(receipt.month)) continue;
+    if (actualReceiptByMonth.has(receipt.month)) {
+      throw new Error(`${receipt.month}存在重复的主营实际到账趋势来源`);
+    }
+    actualReceiptByMonth.set(
+      receipt.month,
+      normalizeFinancialAmount(receipt.amount),
+    );
+  }
   const points = months.map((month) => {
     const report = reportByMonth.get(month);
-    return report
+    const point = report
       ? buildMonthlyFinancialTrendPoint(report)
       : buildMonthlyFinancialTrendGap(month);
+    const actualReceipt = actualReceiptByMonth.get(month);
+    if (point.actualReceipt !== null || actualReceipt === undefined) {
+      return point;
+    }
+    return {
+      ...point,
+      actualReceipt,
+      actualReceiptState: "confirmed_source" as const,
+    };
   });
   const missingMonths = points
     .filter((point) => point.status === null)
@@ -192,11 +268,14 @@ export function buildMonthlyFinancialTrendData(input: {
   const currentMonths = points
     .filter((point) => point.valueState === "current")
     .map((point) => point.month);
+  const confirmedSourceMonths = points
+    .filter((point) => point.actualReceiptState === "confirmed_source")
+    .map((point) => point.month);
   const warningGroups = new Map<string, MonthlyFinancialTrendWarning>();
   if (missingMonths.length) {
     appendGroupedWarning(warningGroups, {
       code: "MONTHLY_FINANCE_TREND_MISSING_MONTHS",
-      message: `范围内有${missingMonths.length}个月尚未建立月度财务报表，趋势图已保留断点`,
+      message: `范围内有${missingMonths.length}个月尚未建立月度财务报表；有已确认合同回款的历史月份仅展示“主营实际到账”，其他指标及无回款月份保留断点`,
       months: missingMonths,
     });
   }
@@ -205,6 +284,13 @@ export function buildMonthlyFinancialTrendData(input: {
       code: "MONTHLY_FINANCE_TREND_CURRENT_MONTHS",
       message: `范围内有${currentMonths.length}个月尚未月结，当前显示未月结报表的当前精确工作值`,
       months: currentMonths,
+    });
+  }
+  if (confirmedSourceMonths.length) {
+    appendGroupedWarning(warningGroups, {
+      code: "MONTHLY_FINANCE_TREND_CONFIRMED_RECEIPT_SOURCE",
+      message: `范围内有${confirmedSourceMonths.length}个月尚未建立月报，仅“主营实际到账”按合同已确认回款展示，其他指标保持断点`,
+      months: confirmedSourceMonths,
     });
   }
   for (const report of input.reports) {
@@ -228,6 +314,8 @@ export function buildMonthlyFinancialTrendData(input: {
       .filter((year) => Number.isInteger(year) && year >= 0 && year <= 9999)
       .sort((left, right) => left - right),
     points,
+    mainBusinessRegions,
+    mainBusinessPoints,
     warnings: [...warningGroups.values()],
   };
 }

@@ -58,7 +58,7 @@ export function normalizePaddleOcrModelVersion(
 export function resolvePaddleOcrModel(
   value = process.env.OCR_MODEL,
 ): PaddleOcrModel {
-  const model = String(value || "v4_mobile").trim();
+  const model = String(value || "v6_medium").trim();
   if ((PADDLE_OCR_MODELS as readonly string[]).includes(model)) {
     return model as PaddleOcrModel;
   }

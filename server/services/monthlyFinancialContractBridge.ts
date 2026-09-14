@@ -96,6 +96,9 @@ interface CandidateInvoiceRow {
   invoice_document_status: string | null;
   invoice_direction: string | null;
   invoice_can_auto_post: boolean;
+  invoice_allocated_amount?: string | null;
+  contract_asset_category?: string | null;
+  root_asset_funding_mode?: string | null;
 }
 
 interface GroupedCandidate {
@@ -109,6 +112,9 @@ interface GroupedCandidate {
   businessContractNos: string[];
   regions: string[];
   invoices: CandidateInvoiceRow[];
+  invoiceAllocatedTotalCents: number;
+  assetCategory: string | null;
+  assetFundingMode: string | null;
 }
 
 export interface MonthlyContractBridgeResult {
@@ -118,6 +124,7 @@ export interface MonthlyContractBridgeResult {
   contractId?: string;
   registrationId?: string;
   receiptRecordId?: string;
+  paymentRecordId?: string;
   registrationConfirmed?: boolean;
   warnings: string[];
   createdEvidencePaths?: string[];
@@ -666,6 +673,22 @@ function disambiguateCandidateByProjectEvidence(
   return selectCandidateByAdministrativeRegion(candidates, transaction);
 }
 
+function disambiguateAssetPaymentCandidate(
+  candidates: GroupedCandidate[],
+  transaction: MonthlyBankTransaction,
+): CandidateSelection | null {
+  if (candidates.length === 1) {
+    return {
+      candidate: candidates[0]!,
+      matchMethod: "strict_unique",
+      matchedProjectName: null,
+      matchedProjectAnchor: null,
+      matchedRegion: null,
+    };
+  }
+  return disambiguateCandidateByProjectEvidence(candidates, transaction, true);
+}
+
 function validSha256(value: unknown): value is string {
   return /^[0-9a-f]{64}$/u.test(String(value || ""));
 }
@@ -724,6 +747,50 @@ function bridgeTransactionGateWarning(
   return null;
 }
 
+function assetPaymentBridgeGateWarning(
+  transaction: MonthlyBankTransaction,
+): string | null {
+  const normalizedReceiptNo = normalizeIdentifier(
+    transaction.electronic_receipt_no,
+  );
+  const rawSourceHash = String(transaction.raw_ocr_json?.sourceFileHash || "");
+  const rawTextHash = String(transaction.raw_ocr_json?.rawTextHash || "");
+  const expectedPayerAccount = MONTHLY_BANK_ACCOUNTS.general.accountNumber;
+  const onlyExpectedPendingWarnings = (transaction.warnings_json || []).every(
+    (warning) => warning.startsWith("MONTHLY_BANK_CONTRACT_MATCH_REQUIRED:"),
+  );
+  if (
+    !transaction.source_file_active ||
+    transaction.account_code !== "general" ||
+    transaction.direction !== "outflow" ||
+    !["asset_expense", "unclassified"].includes(transaction.category) ||
+    !["review_required", "pending_review"].includes(
+      transaction.recognition_status,
+    ) ||
+    transaction.currency !== "CNY" ||
+    !isValidDate(transaction.transaction_date) ||
+    !transaction.amount ||
+    toCents(transaction.amount) <= 0 ||
+    !normalizedReceiptNo ||
+    normalizeIdentifier(transaction.normalized_electronic_receipt_no) !==
+      normalizedReceiptNo ||
+    !normalizeIdentity(transaction.payer_name) ||
+    normalizeIdentifier(transaction.payer_account) !== expectedPayerAccount ||
+    !normalizeIdentity(transaction.payee_name) ||
+    !normalizeIdentifier(transaction.payee_account) ||
+    transaction.report_month !== transaction.transaction_date.slice(0, 7) ||
+    !validSha256(transaction.source_file_hash) ||
+    rawSourceHash !== transaction.source_file_hash ||
+    !validSha256(rawTextHash) ||
+    !transaction.crop_path ||
+    (transaction.anomalies_json || []).length > 0 ||
+    !onlyExpectedPendingWarnings
+  ) {
+    return "月报回单证据、一般账户归属或资产付款字段不完整，未自动补入合同";
+  }
+  return null;
+}
+
 function pending(
   transactionId: string,
   warning: string,
@@ -756,6 +823,9 @@ function groupCandidates(rows: CandidateInvoiceRow[]): GroupedCandidate[] {
       businessContractNos: [],
       regions: [],
       invoices: [],
+      invoiceAllocatedTotalCents: 0,
+      assetCategory: row.contract_asset_category || null,
+      assetFundingMode: row.root_asset_funding_mode || null,
     };
     const rootProjectName = String(row.root_project_name || "").trim();
     const contractProjectName = String(row.contract_project_name || "").trim();
@@ -810,6 +880,9 @@ function groupCandidates(rows: CandidateInvoiceRow[]): GroupedCandidate[] {
       }
     }
     candidate.invoices.push(row);
+    candidate.invoiceAllocatedTotalCents += toCents(
+      row.invoice_allocated_amount || "0",
+    );
     grouped.set(row.registration_id, candidate);
   }
   return [...grouped.values()];
@@ -1165,8 +1238,184 @@ async function loadMainBusinessContractCandidates(
       businessContractNos,
       regions: region ? [region] : [],
       invoices: [],
+      invoiceAllocatedTotalCents: 0,
+      assetCategory: null,
+      assetFundingMode: null,
     };
   });
+}
+
+async function loadAssetPaymentRegistrationCandidates(
+  client: PoolClient,
+  registrationId?: string,
+  lockRows = false,
+): Promise<GroupedCandidate[]> {
+  const result = await client.query<CandidateInvoiceRow>(
+    `SELECT registration.id AS registration_id,
+            registration.direction_invoice_record_id,
+            registration.contract_id,
+            contract.status AS contract_status,
+            root.status AS root_status,
+            COALESCE(root.declared_category, root.category,
+                     contract.declared_category, contract.category)
+              AS contract_category,
+            COALESCE(root.financial_direction, contract.financial_direction)
+              AS root_financial_direction,
+            COALESCE(root.party_a, contract.party_a) AS contract_party_a,
+            COALESCE(root.party_b, contract.party_b) AS contract_party_b,
+            contract.project_name AS contract_project_name,
+            root.project_name AS root_project_name,
+            contract.title AS contract_title,
+            root.title AS root_title,
+            contract.business_contract_no AS contract_business_contract_no,
+            root.business_contract_no AS root_business_contract_no,
+            contract_project.name AS contract_worklog_project_name,
+            root_project.name AS root_worklog_project_name,
+            contract.area AS contract_area,
+            root.area AS root_area,
+            COALESCE(root.asset_category, contract.asset_category)
+              AS contract_asset_category,
+            COALESCE(root.asset_funding_mode, contract.asset_funding_mode)
+              AS root_asset_funding_mode,
+            item.id AS invoice_item_id,
+            invoice.id AS invoice_record_id,
+            invoice.amount::text AS invoice_amount,
+            COALESCE((
+              SELECT SUM(match.allocated_amount)
+                FROM contract_financial_registration_matches match
+               WHERE match.registration_id = registration.id
+                 AND match.invoice_item_id = item.id
+            ),0)::text AS invoice_allocated_amount,
+            invoice.invoice_date,
+            invoice.buyer AS invoice_buyer,
+            invoice.seller AS invoice_seller,
+            invoice.status AS invoice_status,
+            job.status AS invoice_job_status,
+            job.validation_status AS invoice_validation_status,
+            job.document_status AS invoice_document_status,
+            job.direction AS invoice_direction,
+            job.can_auto_post AS invoice_can_auto_post
+       FROM contract_financial_registrations registration
+       JOIN contracts contract
+         ON contract.id = registration.contract_id
+        AND contract.is_deleted = FALSE
+       JOIN contracts root
+         ON root.id = COALESCE(contract.root_contract_id, contract.id)
+        AND root.is_deleted = FALSE
+       LEFT JOIN worklog_projects contract_project
+         ON contract_project.id = contract.project_id
+       LEFT JOIN worklog_projects root_project
+         ON root_project.id = root.project_id
+       JOIN contract_financial_registration_items item
+         ON item.registration_id = registration.id
+        AND item.item_kind = 'invoice'
+       JOIN contract_invoices invoice ON invoice.id = item.record_id
+       JOIN contract_financial_ocr_jobs job ON job.id = item.ocr_job_id
+      WHERE registration.status = 'draft'
+        AND registration.settlement_kind = 'payment'
+        AND registration.financial_direction = 'cost'
+        AND registration.direction_invoice_record_id IS NOT NULL
+        AND contract.status IN ('effective', 'executing', 'completed')
+        AND root.status IN ('effective', 'executing')
+        AND COALESCE(root.declared_category, root.category,
+                     contract.declared_category, contract.category) = 'asset'
+        AND COALESCE(root.asset_funding_mode, contract.asset_funding_mode)
+              = 'engineering_direct'
+        AND COALESCE(root.party_a, contract.party_a) IS NOT NULL
+        AND COALESCE(root.party_b, contract.party_b) IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM contracts termination
+           WHERE termination.root_contract_id = root.id
+             AND termination.relation_type = 'termination'
+             AND termination.is_deleted = FALSE
+             AND termination.status IN ('approving', 'pending_seal')
+        )
+        AND ($1::text IS NULL OR registration.id = $1)
+      ORDER BY registration.created_at, registration.id,
+               item.created_at, item.id
+      ${lockRows ? "FOR UPDATE OF registration, contract, root, item, invoice, job" : ""}`,
+    [registrationId || null],
+  );
+  return groupCandidates(result.rows);
+}
+
+function assetPaymentCandidateMatchesTransaction(
+  candidate: GroupedCandidate,
+  transaction: MonthlyBankTransaction,
+): boolean {
+  if (
+    candidate.category !== "asset" ||
+    candidate.assetFundingMode !== "engineering_direct" ||
+    normalizeIdentity(candidate.partyB) !==
+      normalizeIdentity(transaction.payer_name) ||
+    normalizeIdentity(candidate.partyA) !==
+      normalizeIdentity(transaction.payee_name) ||
+    candidate.invoices.length < 1
+  ) {
+    return false;
+  }
+  if (
+    candidate.invoices.some(
+      (invoice) =>
+        normalizeIdentity(invoice.invoice_buyer) !==
+          normalizeIdentity(transaction.payer_name) ||
+        normalizeIdentity(invoice.invoice_seller) !==
+          normalizeIdentity(transaction.payee_name) ||
+        !isValidDate(invoice.invoice_date) ||
+        invoice.invoice_date > transaction.transaction_date! ||
+        !["draft", "confirmed"].includes(invoice.invoice_status) ||
+        invoice.invoice_job_status !== "consumed" ||
+        invoice.invoice_validation_status !== "verified" ||
+        invoice.invoice_document_status !== "normal" ||
+        invoice.invoice_direction !== "input" ||
+        invoice.invoice_can_auto_post !== true,
+    )
+  ) {
+    return false;
+  }
+  const transactionCents = toCents(transaction.amount || "0");
+  if (
+    candidate.invoices.some((invoice) => {
+      const invoiceCents = toCents(invoice.invoice_amount);
+      const allocatedCents = toCents(invoice.invoice_allocated_amount || "0");
+      return allocatedCents < 0 || allocatedCents > invoiceCents;
+    })
+  ) {
+    return false;
+  }
+  const outstandingInvoices = candidate.invoices
+    .map((invoice) => ({
+      invoice,
+      outstandingCents:
+        toCents(invoice.invoice_amount) -
+        toCents(invoice.invoice_allocated_amount || "0"),
+    }))
+    .filter((entry) => entry.outstandingCents > 0);
+  return (
+    candidate.invoiceAllocatedTotalCents >= 0 &&
+    transactionCents > 0 &&
+    outstandingInvoices.length === 1 &&
+    transactionCents <= outstandingInvoices[0]!.outstandingCents
+  );
+}
+
+function uniqueOutstandingAssetInvoice(
+  candidate: GroupedCandidate,
+): CandidateInvoiceRow | null {
+  const outstandingInvoices = candidate.invoices.filter(
+    (invoice) =>
+      toCents(invoice.invoice_amount) -
+        toCents(invoice.invoice_allocated_amount || "0") >
+      0,
+  );
+  return outstandingInvoices.length === 1 ? outstandingInvoices[0]! : null;
+}
+
+function assetPaymentExpenseCategory(candidate: GroupedCandidate): string {
+  if (candidate.assetCategory === "house_rental") return "rent";
+  if (candidate.assetCategory === "vehicle_rental") return "car_rental";
+  if (candidate.assetCategory === "parking_space") return "parking";
+  return "other";
 }
 
 function contractCandidateMatchesTransaction(
@@ -2195,6 +2444,448 @@ export async function bridgeMonthlyBankTransactionToContractRegistration(
       contractId: candidate.contractId,
       registrationId,
       receiptRecordId,
+      registrationConfirmed,
+      warnings: closeWarning ? [closeWarning] : [],
+      createdEvidencePaths: evidence.created ? [evidence.absolutePath] : [],
+    };
+  } catch (error) {
+    if (evidence.created) {
+      await fs.promises
+        .rm(evidence.absolutePath, { force: true })
+        .catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+/**
+ * 将一般账户资产流出补入唯一的资产合同付款登记。
+ *
+ * 仅处理工程咨询公司直接向合同对方付款的资产合同。候选必须已有一笔唯一
+ * 的开放付款登记，合同双方、全部进项发票、未覆盖金额及月报完整账号均闭合；
+ * 工程咨询向其他签约公司的内部划拨继续走既有独立资金链，不在此处混用。
+ */
+export async function bridgeMonthlyBankAssetPaymentToContractRegistration(
+  client: PoolClient,
+  transactionId: string,
+  actorId: string,
+  actorRole: string,
+  now: string,
+): Promise<MonthlyContractBridgeResult> {
+  const transaction = await loadTransaction(client, transactionId);
+  if (!transaction) return pending(transactionId, "月报银行回单已失效或被替换");
+  const normalizedReceiptNo = normalizeIdentifier(
+    transaction.electronic_receipt_no,
+  );
+  const rawTextHash = String(transaction.raw_ocr_json?.rawTextHash || "");
+  const gateWarning = assetPaymentBridgeGateWarning(transaction);
+  if (gateWarning) return pending(transactionId, gateWarning);
+
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+       hashtextextended('monthly-contract-bridge:' || $1, 0)
+     )`,
+    [normalizedReceiptNo],
+  );
+  const candidates = (
+    await loadAssetPaymentRegistrationCandidates(client)
+  ).filter((candidate) =>
+    assetPaymentCandidateMatchesTransaction(candidate, transaction),
+  );
+  let selection = disambiguateAssetPaymentCandidate(candidates, transaction);
+  if (!selection) {
+    return pending(
+      transactionId,
+      candidates.length > 1
+        ? "月报资产付款命中多笔合同登记，回单摘要与项目名称或业务编号未形成唯一强匹配，未自动挂载"
+        : "月报资产付款未能根据合同双方、已验证发票和未覆盖金额唯一确定合同登记",
+    );
+  }
+  let candidate = selection.candidate;
+  await client.query(
+    `SELECT pg_advisory_xact_lock(
+       hashtextextended('monthly-contract-registration:' || $1, 0)
+     )`,
+    [candidate.contractId],
+  );
+  await lockInvoiceApplicationRoot(client, candidate.contractId);
+  const lockedContract = await client.query<{
+    id: string;
+    status: string;
+  }>(
+    `SELECT id, status FROM contracts
+      WHERE id = $1 AND is_deleted = FALSE
+      FOR UPDATE`,
+    [candidate.contractId],
+  );
+  if (!lockedContract.rows[0]) {
+    return pending(transactionId, "资产合同已失效，未自动挂载付款回单");
+  }
+  const lockedCandidate = (
+    await loadAssetPaymentRegistrationCandidates(
+      client,
+      candidate.registrationId,
+      true,
+    )
+  ).find((entry) =>
+    assetPaymentCandidateMatchesTransaction(entry, transaction),
+  );
+  if (!lockedCandidate) {
+    return pending(
+      transactionId,
+      "资产合同付款登记在同步期间发生变化，未自动挂载回单",
+    );
+  }
+  const refreshedCandidates = (
+    await loadAssetPaymentRegistrationCandidates(client)
+  ).filter((entry) =>
+    assetPaymentCandidateMatchesTransaction(entry, transaction),
+  );
+  const refreshedSelection = disambiguateAssetPaymentCandidate(
+    refreshedCandidates,
+    transaction,
+  );
+  if (
+    !refreshedSelection ||
+    refreshedSelection.candidate.contractId !== candidate.contractId ||
+    refreshedSelection.candidate.registrationId !== candidate.registrationId
+  ) {
+    return pending(
+      transactionId,
+      "资产合同候选在同步期间发生变化，未自动挂载回单",
+    );
+  }
+  selection = refreshedSelection;
+  candidate = lockedCandidate;
+  const outstandingInvoice = uniqueOutstandingAssetInvoice(candidate);
+  if (!outstandingInvoice) {
+    return pending(
+      transactionId,
+      "资产合同存在多张未覆盖发票，无法安全确定本次付款对应关系",
+    );
+  }
+  const existingCoverage = await client.query<{
+    payment_total: string;
+    allocated_total: string;
+  }>(
+    `SELECT
+       COALESCE((
+         SELECT SUM(payment.amount)
+           FROM contract_financial_registration_items settlement
+           JOIN contract_payments payment ON payment.id = settlement.record_id
+          WHERE settlement.registration_id = $1
+            AND settlement.item_kind = 'payment'
+            AND payment.status <> 'reversed'
+       ),0)::text AS payment_total,
+       COALESCE((
+         SELECT SUM(match.allocated_amount)
+           FROM contract_financial_registration_matches match
+           JOIN contract_financial_registration_items settlement
+             ON settlement.id = match.settlement_item_id
+            AND settlement.item_kind = 'payment'
+          WHERE match.registration_id = $1
+       ),0)::text AS allocated_total`,
+    [candidate.registrationId],
+  );
+  const existingPaymentTotalCents = toCents(
+    existingCoverage.rows[0]?.payment_total || "0",
+  );
+  const existingAllocatedTotalCents = toCents(
+    existingCoverage.rows[0]?.allocated_total || "0",
+  );
+  if (
+    existingPaymentTotalCents !== existingAllocatedTotalCents ||
+    existingAllocatedTotalCents !== candidate.invoiceAllocatedTotalCents
+  ) {
+    return pending(
+      transactionId,
+      "资产合同历史付款与发票对应金额不闭合，未自动补入本次回单",
+    );
+  }
+
+  let evidence: Awaited<ReturnType<typeof copyMonthlyEvidenceToContract>>;
+  try {
+    evidence = await copyMonthlyEvidenceToContract({
+      transaction,
+      contractId: candidate.contractId,
+      now,
+    });
+  } catch (error) {
+    return pending(
+      transactionId,
+      error instanceof Error ? error.message : "月报付款回单证据复制失败",
+    );
+  }
+  const businessHash = contractBankBusinessHash(transaction);
+  try {
+    if (
+      await hasDuplicateBankEvidence(
+        client,
+        normalizedReceiptNo,
+        businessHash,
+        evidence.fileHash,
+      )
+    ) {
+      if (evidence.created) {
+        await fs.promises
+          .rm(evidence.absolutePath, { force: true })
+          .catch(() => undefined);
+      }
+      return {
+        status: "already_exists",
+        changed: false,
+        transactionId,
+        warnings: ["该电子回单已存在合同财务记录，未重复补入"],
+      };
+    }
+
+    const fileId = nanoid();
+    const ocrJobId = nanoid();
+    const paymentRecordId = nanoid();
+    const settlementItemId = nanoid();
+    await client.query(
+      `INSERT INTO contract_files(
+         id, contract_id, file_type, file_name, file_path, file_size,
+         mime_type, file_hash, version, is_current, uploaded_by, created_at
+       ) VALUES($1,$2,'payment',$3,$4,$5,'image/jpeg',$6,1,TRUE,$7,$8)`,
+      [
+        fileId,
+        candidate.contractId,
+        evidence.fileName,
+        evidence.relativePath,
+        evidence.fileSize,
+        evidence.fileHash,
+        actorId,
+        now,
+      ],
+    );
+    await client.query(
+      `INSERT INTO contract_financial_file_hashes(
+         file_hash, file_id, contract_id, created_at
+       ) VALUES($1,$2,$3,$4)`,
+      [evidence.fileHash, fileId, candidate.contractId, now],
+    );
+    const snapshot = {
+      format: "image",
+      fields: {
+        payer: transaction.payer_name,
+        payerAccount: transaction.payer_account,
+        payee: transaction.payee_name,
+        payeeAccount: transaction.payee_account,
+        electronicReceiptNo: transaction.electronic_receipt_no,
+        transactionSerialNo: transaction.transaction_serial_no,
+        paymentTime: transaction.transaction_date,
+        amount: Number(transaction.amount),
+        currency: transaction.currency,
+      },
+      source: {
+        kind: "monthly_financial_bank_transaction",
+        transactionId: transaction.id,
+        bankFileId: transaction.current_file_id,
+        bankFileHash: transaction.source_file_hash,
+        pageNumber: transaction.page_number,
+        cropFileHash: evidence.fileHash,
+      },
+    };
+    await client.query(
+      `INSERT INTO contract_financial_ocr_jobs(
+         id, contract_id, file_id, file_hash, record_kind, document_kind,
+         status, validation_status, recognition_method, engine_version,
+         parser_version, evidence_text_hash, direction, document_status,
+         can_auto_post, snapshot_json, blocking_reasons_json, warnings_json,
+         requested_by, record_id, started_at, finished_at, consumed_at,
+         created_at, updated_at
+       ) VALUES(
+         $1,$2,$3,$4,'payment','bank_receipt','consumed','verified',
+         'monthly_bank_transaction',$5,$6,$7,'payment','normal',TRUE,
+         $8::jsonb,'[]'::jsonb,'[]'::jsonb,$9,$10,$11,$11,$11,$11,$11
+       )`,
+      [
+        ocrJobId,
+        candidate.contractId,
+        fileId,
+        evidence.fileHash,
+        BRIDGE_ENGINE_VERSION,
+        BRIDGE_PARSER_VERSION,
+        rawTextHash,
+        JSON.stringify(snapshot),
+        actorId,
+        paymentRecordId,
+        now,
+      ],
+    );
+    await client.query(
+      `INSERT INTO contract_payments(
+         id, contract_id, file_id, payment_date, payment_time, amount,
+         expense_category, payer, payer_account, payee, payee_account,
+         currency, electronic_receipt_no, transaction_serial_no, proof_no,
+         note, financial_ocr_job_id, status, created_by, created_at, updated_at
+       ) VALUES(
+         $1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+         'draft',$17,$18,$18
+       )`,
+      [
+        paymentRecordId,
+        candidate.contractId,
+        fileId,
+        transaction.transaction_date,
+        transaction.amount,
+        assetPaymentExpenseCategory(candidate),
+        transaction.payer_name,
+        transaction.payer_account,
+        transaction.payee_name,
+        transaction.payee_account,
+        transaction.currency,
+        transaction.electronic_receipt_no,
+        transaction.transaction_serial_no,
+        transaction.proof_no || transaction.electronic_receipt_no,
+        transaction.remark || transaction.summary || "月报资产付款自动补全",
+        ocrJobId,
+        actorId,
+        now,
+      ],
+    );
+    await client.query(
+      `INSERT INTO contract_financial_registration_items(
+         id, registration_id, contract_id, item_kind, ocr_job_id,
+         record_id, business_key_hash, created_at
+       ) VALUES($1,$2,$3,'payment',$4,$5,$6,$7)`,
+      [
+        settlementItemId,
+        candidate.registrationId,
+        candidate.contractId,
+        ocrJobId,
+        paymentRecordId,
+        businessHash,
+        now,
+      ],
+    );
+    await client.query(
+      `INSERT INTO contract_financial_registration_matches(
+         id, registration_id, contract_id, invoice_item_id,
+         settlement_item_id, allocated_amount, created_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        nanoid(),
+        candidate.registrationId,
+        candidate.contractId,
+        outstandingInvoice.invoice_item_id,
+        settlementItemId,
+        transaction.amount,
+        now,
+      ],
+    );
+    const transactionCents = toCents(transaction.amount || "0");
+    const rebuilt = {
+      invoiceTotalCents: candidateInvoiceTotalCents(candidate),
+      settlementTotalCents: existingPaymentTotalCents + transactionCents,
+      allocatedTotalCents: existingAllocatedTotalCents + transactionCents,
+      directionInvoiceRecordId: candidate.directionInvoiceRecordId,
+    };
+    const updated = await client.query<{ id: string }>(
+      `UPDATE contract_financial_registrations
+          SET financial_direction = 'cost',
+              direction_invoice_record_id = COALESCE(
+                direction_invoice_record_id, $2
+              ),
+              bank_ocr_job_id = COALESCE(bank_ocr_job_id, $3),
+              payment_record_id = COALESCE(payment_record_id, $4),
+              bank_business_key_hash = COALESCE(bank_business_key_hash, $5),
+              updated_at = $6
+        WHERE id = $1 AND contract_id = $7 AND status = 'draft'
+          AND settlement_kind = 'payment' AND financial_direction = 'cost'
+        RETURNING id`,
+      [
+        candidate.registrationId,
+        rebuilt.directionInvoiceRecordId,
+        ocrJobId,
+        paymentRecordId,
+        businessHash,
+        now,
+        candidate.contractId,
+      ],
+    );
+    if (!updated.rows[0]) {
+      throw new Error("合同财务草稿状态已变化，未自动补入付款回单");
+    }
+    await client.query(
+      `INSERT INTO contract_audit_logs(
+         id, contract_id, action, actor_id, actor_role, from_status,
+         to_status, changes_json, created_at
+       ) VALUES($1,$2,'monthly_bank_payment_attached',$3,$4,$5,$5,$6::jsonb,$7)`,
+      [
+        nanoid(),
+        candidate.contractId,
+        actorId,
+        actorRole,
+        lockedContract.rows[0]!.status,
+        JSON.stringify({
+          registrationId: candidate.registrationId,
+          paymentRecordId,
+          transactionId: transaction.id,
+          bankFileId: transaction.current_file_id,
+          bankFileHash: transaction.source_file_hash,
+          cropFileHash: evidence.fileHash,
+          electronicReceiptNo: transaction.electronic_receipt_no,
+          amount: Number(transaction.amount),
+          source: "monthly_bank_transaction",
+          matchMethod: selection.matchMethod,
+          projectMatchVersion: PROJECT_MATCH_VERSION,
+          matchedProjectName: selection.matchedProjectName,
+          matchedProjectAnchor: selection.matchedProjectAnchor,
+          regionFilterVersion: REGION_FILTER_VERSION,
+          matchedRegion: selection.matchedRegion,
+          currentInvoiceAmount: rebuilt.invoiceTotalCents / 100,
+          cumulativePaymentAmount: rebuilt.settlementTotalCents / 100,
+          allocatedAmount: rebuilt.allocatedTotalCents / 100,
+          pendingPaymentAmount:
+            Math.max(
+              0,
+              rebuilt.invoiceTotalCents - rebuilt.settlementTotalCents,
+            ) / 100,
+        }),
+        now,
+      ],
+    );
+    await postContractFinancialSettlements(client, {
+      contractId: candidate.contractId,
+      registrationId: candidate.registrationId,
+      settlementKind: "payment",
+      settlementRecordIds: [paymentRecordId],
+      financialDirection: "cost",
+      directionInvoiceRecordId: rebuilt.directionInvoiceRecordId,
+      actorId,
+      actorRole,
+      now,
+    });
+    const registrationCanClose =
+      rebuilt.invoiceTotalCents > 0 &&
+      rebuilt.invoiceTotalCents === rebuilt.settlementTotalCents &&
+      rebuilt.allocatedTotalCents === rebuilt.invoiceTotalCents;
+    let registrationConfirmed = false;
+    let closeWarning: string | null = null;
+    if (registrationCanClose) {
+      try {
+        await confirmContractFinancialRegistrationInTransaction(
+          client,
+          candidate.registrationId,
+          actorId,
+          actorRole,
+          candidate.contractId,
+        );
+        registrationConfirmed = true;
+      } catch (error) {
+        if (!isContractDomainError(error)) throw error;
+        closeWarning = `实际付款已确认，但发票验证链尚未满足整组关闭条件：${error.message}`;
+      }
+    }
+    return {
+      status: "created",
+      changed: true,
+      transactionId,
+      contractId: candidate.contractId,
+      registrationId: candidate.registrationId,
+      paymentRecordId,
       registrationConfirmed,
       warnings: closeWarning ? [closeWarning] : [],
       createdEvidencePaths: evidence.created ? [evidence.absolutePath] : [],

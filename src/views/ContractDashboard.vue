@@ -48,13 +48,28 @@
           clearable
           placeholder="全部合同分类"
           aria-label="筛选合同分类"
-          @change="applyDashboardFilters"
+          @change="handleDashboardCategoryChange"
         >
           <el-option
             v-for="(label, value) in CONTRACT_CATEGORY_LABELS"
             :key="value"
             :label="label"
             :value="value"
+          />
+        </el-select>
+        <el-select
+          v-if="selectedCategory === 'non_main'"
+          v-model="selectedDeclaredSubtype"
+          clearable
+          placeholder="全部非主营收支类型"
+          aria-label="筛选非主营收支类型"
+          @change="applyDashboardFilters"
+        >
+          <el-option
+            v-for="option in nonMainFilterOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
           />
         </el-select>
         <el-select
@@ -119,7 +134,7 @@
                 dashboard?.summary.effectiveIncomeContractAmount,
               )
             "
-            :note="`共 ${dashboard?.summary.effectiveIncomeContractCount || 0} 个主营或非主营有效合同组`"
+            :note="`共 ${dashboard?.summary.effectiveIncomeContractCount || 0} 个收入类有效合同组`"
             :icon="DataAnalysis"
             tone="cyan"
             badge="收入"
@@ -131,7 +146,7 @@
                 dashboard?.summary.effectiveExpenseContractAmount,
               )
             "
-            :note="`共 ${dashboard?.summary.effectiveExpenseContractCount || 0} 个资产类有效合同组`"
+            :note="`共 ${dashboard?.summary.effectiveExpenseContractCount || 0} 个资产或非主营支出有效合同组`"
             :icon="Money"
             tone="red"
             badge="支出"
@@ -201,7 +216,7 @@
           <ContractMetricCard
             label="期间支出"
             :value="formatContractMoney(dashboard?.summary.paidAmount)"
-            note="资产类合同有效付款"
+            note="资产及非主营支出合同有效付款"
             :icon="Money"
             tone="amber"
             badge="支出"
@@ -252,7 +267,53 @@
               <small>合同总额</small>
               <b>{{ formatContractMoney(item.totalAmount) }}</b>
             </div>
-            <div class="category-metrics">
+            <div v-if="item.category === 'non_main'" class="non-main-structure">
+              <section class="non-main-direction-card income">
+                <header>
+                  <strong>非主营业务收入合同</strong>
+                  <small>{{ item.incomeContractCount || 0 }} 份</small>
+                </header>
+                <div>
+                  <span>合同额</span>
+                  <b>{{ formatContractMoney(item.incomeContractAmount) }}</b>
+                </div>
+                <div>
+                  <span>期间回款</span>
+                  <b>{{ formatContractMoney(item.periodReceiptAmount) }}</b>
+                </div>
+                <div>
+                  <span>累计回款</span>
+                  <b>{{ formatContractMoney(item.cumulativeReceiptAmount) }}</b>
+                </div>
+                <div>
+                  <span>未回款</span>
+                  <b>{{ formatContractMoney(item.unreceivedAmount) }}</b>
+                </div>
+              </section>
+              <section class="non-main-direction-card expense">
+                <header>
+                  <strong>非主营业务支出合同</strong>
+                  <small>{{ item.expenseContractCount || 0 }} 份</small>
+                </header>
+                <div>
+                  <span>合同额</span>
+                  <b>{{ formatContractMoney(item.expenseContractAmount) }}</b>
+                </div>
+                <div>
+                  <span>期间付款</span>
+                  <b>{{ formatContractMoney(item.periodPaymentAmount) }}</b>
+                </div>
+                <div>
+                  <span>累计付款</span>
+                  <b>{{ formatContractMoney(item.cumulativePaymentAmount) }}</b>
+                </div>
+                <div>
+                  <span>未付款</span>
+                  <b>{{ formatContractMoney(item.unpaidAmount) }}</b>
+                </div>
+              </section>
+            </div>
+            <div v-else class="category-metrics">
               <div>
                 <span
                   >期间{{ item.category === "asset" ? "付款" : "回款" }}</span
@@ -411,13 +472,13 @@
                 }}</strong></span
               >
               <span
-                ><small>已回款</small
+                ><small>{{ settlementCompletedLabel }}</small
                 ><strong>{{
                   formatContractMoney(item.settledAmount)
                 }}</strong></span
               >
               <span
-                ><small>未付款</small
+                ><small>{{ settlementOutstandingLabel }}</small
                 ><strong>{{
                   formatContractMoney(item.outstandingAmount)
                 }}</strong></span
@@ -445,7 +506,7 @@
               }}
             </h2>
             <span
-              >各比较区间长度一致；收入为有效回单，支出为资产类有效付款</span
+              >各比较区间长度一致；收入为有效回款，支出为有效付款</span
             >
           </div>
           <div class="legend">
@@ -508,11 +569,11 @@
           <div class="section-heading">
             <div>
               <h2>所选期间月度收支趋势</h2>
-              <span>{{ selectedPeriodLabel }} 每月回单收入与资产付款对比</span>
+              <span>{{ selectedPeriodLabel }} 每月有效回款与有效付款对比</span>
             </div>
             <div class="legend">
-              <span><i class="income"></i>有效回单</span
-              ><span><i class="expense"></i>资产付款</span>
+              <span><i class="income"></i>有效回款</span
+              ><span><i class="expense"></i>有效付款</span>
             </div>
           </div>
           <div
@@ -530,12 +591,12 @@
                 <span
                   class="bar income"
                   :style="{ height: `${barHeight(item.income)}%` }"
-                  :title="`有效回单 ${formatContractMoney(item.income)}`"
+                  :title="`有效回款 ${formatContractMoney(item.income)}`"
                 ></span>
                 <span
                   class="bar expense"
                   :style="{ height: `${barHeight(item.expense)}%` }"
-                  :title="`资产付款 ${formatContractMoney(item.expense)}`"
+                  :title="`有效付款 ${formatContractMoney(item.expense)}`"
                 ></span>
               </div>
               <small>{{ formatPeriod(item.period) }}</small>
@@ -548,8 +609,8 @@
             <thead>
               <tr>
                 <th>月份</th>
-                <th>有效回单</th>
-                <th>资产付款</th>
+                <th>有效回款</th>
+                <th>有效付款</th>
               </tr>
             </thead>
             <tbody>
@@ -908,6 +969,7 @@ import type {
   ContractDashboardQuery,
   ContractDashboardResponse,
   ContractDashboardSettlementStatus,
+  ContractDeclaredSubtype,
   ContractMeta,
   ContractRateCode,
   ContractRateConfig,
@@ -951,7 +1013,46 @@ const selectedPeriodLabel = computed(() =>
     : `${selectedStartMonth.value} 至 ${selectedEndMonth.value}`,
 );
 const selectedCategory = ref<ContractCategory | "">("");
+const selectedDeclaredSubtype = ref<ContractDeclaredSubtype | "">("");
+const settlementScopeDirection = computed<"income" | "cost" | "mixed">(
+  () => {
+    if (
+      selectedCategory.value === "asset" ||
+      selectedDeclaredSubtype.value === "non_main_expense"
+    ) {
+      return "cost";
+    }
+    if (
+      selectedCategory.value === "main_business" ||
+      selectedDeclaredSubtype.value === "non_main_income"
+    ) {
+      return "income";
+    }
+    return "mixed";
+  },
+);
+const settlementCompletedLabel = computed(() =>
+  settlementScopeDirection.value === "income"
+    ? "已回款"
+    : settlementScopeDirection.value === "cost"
+      ? "已付款"
+      : "已结算",
+);
+const settlementOutstandingLabel = computed(() =>
+  settlementScopeDirection.value === "income"
+    ? "未回款"
+    : settlementScopeDirection.value === "cost"
+      ? "未付款"
+      : "未结算",
+);
 const selectedProjectId = ref("");
+const nonMainFilterOptions: Array<{
+  value: "non_main_income" | "non_main_expense";
+  label: string;
+}> = [
+  { value: "non_main_income", label: "非主营业务收入合同" },
+  { value: "non_main_expense", label: "非主营业务支出合同" },
+];
 const dashboard = ref<ContractDashboardResponse | null>(null);
 const periodInvoiceReceiptDifference = computed(
   () =>
@@ -1156,13 +1257,13 @@ const accountingSections = computed(() => {
     {
       key: "non_main" as const,
       label: "非主营项目合同",
-      description: "扣减财务成本与税费",
-      badge: "收入",
+      description: "收入与支出按上传前锁定的收支分类分别核算",
+      badge: "收支",
       available: Boolean(nonMain),
       lines: [
         {
-          label: "合同总额",
-          value: nonMain?.totalContractAmount,
+          label: "收入合同额",
+          value: nonMain?.incomeContractAmount,
           emphasized: false,
         },
         {
@@ -1186,6 +1287,26 @@ const accountingSections = computed(() => {
         { label: "财务成本", value: nonMain?.financialCost, emphasized: false },
         { label: "税费", value: nonMain?.tax, emphasized: false },
         { label: "核算基数", value: nonMain?.accountingBase, emphasized: true },
+        {
+          label: "支出合同额",
+          value: nonMain?.expenseContractAmount,
+          emphasized: false,
+        },
+        {
+          label: isSingleMonth.value ? "本月付款" : "所选期间付款",
+          value: nonMain?.periodPaymentAmount ?? nonMain?.monthPaymentAmount,
+          emphasized: false,
+        },
+        {
+          label: "累计付款",
+          value: nonMain?.cumulativePaymentAmount,
+          emphasized: false,
+        },
+        {
+          label: "未付款",
+          value: nonMain?.unpaidAmount,
+          emphasized: true,
+        },
       ],
     },
     {
@@ -1231,7 +1352,7 @@ const trendAriaLabel = computed(() =>
   trendItems.value
     .map(
       (item) =>
-        `${formatPeriod(item.period)}有效回单${formatContractMoney(item.income)}，资产付款${formatContractMoney(item.expense)}`,
+        `${formatPeriod(item.period)}有效回款${formatContractMoney(item.income)}，有效付款${formatContractMoney(item.expense)}`,
     )
     .join("；"),
 );
@@ -1494,14 +1615,22 @@ function normalizedDashboardRouteQuery(): Required<ContractDashboardQuery> {
     startMonth = `${endMonth.slice(0, 4)}-01`;
   }
   const category = queryText(route.query.category);
+  const normalizedCategory = (
+    ["main_business", "non_main", "asset"] as string[]
+  ).includes(category)
+    ? (category as ContractCategory)
+    : "";
+  const declaredSubtype = queryText(route.query.declaredSubtype);
+  const normalizedDeclaredSubtype =
+    normalizedCategory === "non_main" &&
+    ["non_main_income", "non_main_expense"].includes(declaredSubtype)
+      ? (declaredSubtype as ContractDeclaredSubtype)
+      : "";
   return {
     startMonth,
     endMonth,
-    category: (["main_business", "non_main", "asset"] as string[]).includes(
-      category,
-    )
-      ? (category as ContractCategory)
-      : "",
+    category: normalizedCategory,
+    declaredSubtype: normalizedDeclaredSubtype,
     projectId: queryText(route.query.projectId),
   };
 }
@@ -1511,6 +1640,7 @@ function dashboardRequestQuery(): ContractDashboardQuery {
     startMonth: selectedStartMonth.value,
     endMonth: selectedEndMonth.value,
     category: selectedCategory.value || undefined,
+    declaredSubtype: selectedDeclaredSubtype.value || undefined,
     projectId: selectedProjectId.value || undefined,
   };
 }
@@ -1522,6 +1652,7 @@ function dashboardRouteMatches(
     queryText(route.query.startMonth) === query.startMonth &&
     queryText(route.query.endMonth) === query.endMonth &&
     queryText(route.query.category) === query.category &&
+    queryText(route.query.declaredSubtype) === query.declaredSubtype &&
     queryText(route.query.projectId) === query.projectId
   );
 }
@@ -1534,6 +1665,7 @@ function replaceDashboardQuery(query: Required<ContractDashboardQuery>) {
     startMonth: query.startMonth,
     endMonth: query.endMonth,
     category: query.category || undefined,
+    declaredSubtype: query.declaredSubtype || undefined,
     projectId: query.projectId || undefined,
   };
   void router.replace({ query: nextQuery });
@@ -1544,6 +1676,7 @@ function applyDashboardFilters() {
     startMonth: selectedStartMonth.value,
     endMonth: selectedEndMonth.value,
     category: selectedCategory.value,
+    declaredSubtype: selectedDeclaredSubtype.value,
     projectId: selectedProjectId.value,
   } satisfies Required<ContractDashboardQuery>;
   if (dashboardRouteMatches(query)) {
@@ -1551,6 +1684,13 @@ function applyDashboardFilters() {
     return;
   }
   replaceDashboardQuery(query);
+}
+
+function handleDashboardCategoryChange() {
+  if (selectedCategory.value !== "non_main") {
+    selectedDeclaredSubtype.value = "";
+  }
+  applyDashboardFilters();
 }
 
 function handlePeriodChange() {
@@ -1584,6 +1724,7 @@ function selectFullYear() {
 function resetDashboardFilters() {
   selectedPeriod.value = [defaultStartMonth, defaultMonth];
   selectedCategory.value = "";
+  selectedDeclaredSubtype.value = "";
   selectedProjectId.value = "";
   applyDashboardFilters();
 }
@@ -1629,12 +1770,14 @@ watch(
     queryText(route.query.startMonth),
     queryText(route.query.endMonth),
     queryText(route.query.category),
+    queryText(route.query.declaredSubtype),
     queryText(route.query.projectId),
   ],
   () => {
     const query = normalizedDashboardRouteQuery();
     selectedPeriod.value = [query.startMonth, query.endMonth];
     selectedCategory.value = query.category;
+    selectedDeclaredSubtype.value = query.declaredSubtype;
     selectedProjectId.value = query.projectId;
     if (!dashboardRouteMatches(query)) {
       replaceDashboardQuery(query);
@@ -1926,6 +2069,50 @@ onMounted(loadMeta);
   color: #dcebed;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+.non-main-structure {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.non-main-direction-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgb(137 192 196 / 18%);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 4%);
+}
+.non-main-direction-card header,
+.non-main-direction-card > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.non-main-direction-card header {
+  padding-bottom: 5px;
+  border-bottom: 1px solid rgb(137 192 196 / 14%);
+}
+.non-main-direction-card header strong {
+  font-size: 12px;
+}
+.non-main-direction-card header small,
+.non-main-direction-card > div span {
+  color: #8198a6;
+  font-size: 10px;
+}
+.non-main-direction-card > div b {
+  color: #dcebed;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.non-main-direction-card.income header strong {
+  color: #72d1c2;
+}
+.non-main-direction-card.expense header strong {
+  color: #e9b56f;
 }
 .share-track {
   height: 6px;
@@ -2527,10 +2714,28 @@ onMounted(loadMeta);
   color: #174d55;
 }
 .category-metrics strong,
+.non-main-direction-card > div b,
 .accounting-lines strong,
 .settlement-card-metrics strong,
 .comparison-change-grid strong {
   color: #315261;
+}
+.non-main-direction-card {
+  border-color: #dde8eb;
+  background: #fff;
+}
+.non-main-direction-card header {
+  border-bottom-color: #e5ecee;
+}
+.non-main-direction-card header small,
+.non-main-direction-card > div span {
+  color: #748995;
+}
+.non-main-direction-card.income header strong {
+  color: #218b80;
+}
+.non-main-direction-card.expense header strong {
+  color: #b77835;
 }
 .share-track,
 .period-rate-grid > div {
@@ -2783,6 +2988,9 @@ onMounted(loadMeta);
     padding: 14px;
   }
   .metric-grid {
+    grid-template-columns: 1fr;
+  }
+  .non-main-structure {
     grid-template-columns: 1fr;
   }
   .comparison-chart,

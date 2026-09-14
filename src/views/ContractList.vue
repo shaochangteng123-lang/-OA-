@@ -45,14 +45,14 @@
       <ContractMetricCard
         label="有效收入合同额"
         :value="formatContractMoney(summary.effectiveIncomeContractAmount)"
-        :note="`共 ${summary.effectiveIncomeContractCount || 0} 个主营或非主营有效合同组，不含待签合同`"
+        :note="`共 ${summary.effectiveIncomeContractCount || 0} 个收入类有效合同组，不含待签合同`"
         :icon="TrendCharts"
         tone="navy"
       />
       <ContractMetricCard
         label="有效支出合同额"
         :value="formatContractMoney(summary.effectiveExpenseContractAmount)"
-        :note="`共 ${summary.effectiveExpenseContractCount || 0} 个资产类有效合同组，不含待签合同`"
+        :note="`共 ${summary.effectiveExpenseContractCount || 0} 个资产或非主营支出有效合同组，不含待签合同`"
         :icon="Money"
         tone="red"
       />
@@ -121,13 +121,31 @@
           collapse-tags-tooltip
           clearable
           placeholder="合同分类（多选）"
-          @change="handleFilterChange"
+          @change="handleCategoryFilterChange"
         >
           <el-option
             v-for="(label, value) in CONTRACT_CATEGORY_LABELS"
             :key="value"
             :label="label"
             :value="value"
+          />
+        </el-select>
+        <el-select
+          v-if="filters.categories.includes('non_main')"
+          v-model="filters.declaredSubtypes"
+          multiple
+          collapse-tags
+          collapse-tags-tooltip
+          clearable
+          placeholder="非主营二级分类（多选）"
+          aria-label="筛选非主营项目合同二级分类"
+          @change="handleFilterChange"
+        >
+          <el-option
+            v-for="option in NON_MAIN_LEDGER_SUBTYPE_OPTIONS"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
           />
         </el-select>
         <el-select
@@ -177,12 +195,13 @@
         <el-select
           v-model="filters.area"
           clearable
-          placeholder="区域"
+          placeholder="不限区域"
+          aria-label="筛选合同行政区域"
           @change="handleFilterChange"
         >
-          <el-option label="全部" value="" />
+          <el-option label="不限区域" value="" />
           <el-option
-            v-for="area in meta.areas.filter((item) => item !== '全部')"
+            v-for="area in meta.areas"
             :key="area"
             :label="area"
             :value="area"
@@ -451,7 +470,7 @@
           >
             <template #default="{ row }">
               <span
-                v-if="row.category !== 'asset'"
+                v-if="contractDirectionClass(row) === 'is-income'"
                 class="money-cell is-income"
                 >{{ formatContractMoney(row.receivedAmount) }}</span
               >
@@ -466,7 +485,7 @@
           >
             <template #default="{ row }">
               <span
-                v-if="row.category === 'asset'"
+                v-if="contractDirectionClass(row) === 'is-expense'"
                 class="money-cell is-expense"
                 >{{ formatContractMoney(row.paidAmount) }}</span
               >
@@ -810,7 +829,7 @@
           <el-table-column label="已收" align="center" header-align="center">
             <template #default="{ row }">
               <span
-                v-if="row.category !== 'asset'"
+                v-if="contractDirectionClass(row) === 'is-income'"
                 class="money-cell is-income"
               >
                 {{ formatContractMoney(row.receivedAmount) }}
@@ -821,7 +840,7 @@
           <el-table-column label="已付" align="center" header-align="center">
             <template #default="{ row }">
               <span
-                v-if="row.category === 'asset'"
+                v-if="contractDirectionClass(row) === 'is-expense'"
                 class="money-cell is-expense"
               >
                 {{ formatContractMoney(row.paidAmount) }}
@@ -1058,10 +1077,12 @@
               >{{ formatContractMoney(displayContractAmount(item)) }}</b
             >
             <span>
-              {{ item.category === "asset" ? "已付" : "已收" }}
+              {{
+                contractDirectionClass(item) === "is-expense" ? "已付" : "已收"
+              }}
               {{
                 formatContractMoney(
-                  item.category === "asset"
+                  contractDirectionClass(item) === "is-expense"
                     ? item.paidAmount
                     : item.receivedAmount,
                 )
@@ -1207,6 +1228,7 @@ import ContractStatusTag from "@/components/contracts/ContractStatusTag.vue";
 import { useAuthStore } from "@/stores/auth";
 import type {
   ContractCategory,
+  ContractDeclaredSubtype,
   ContractListItem,
   ContractListQuery,
   ContractListSummary,
@@ -1223,6 +1245,7 @@ import {
 import {
   clampPercent,
   CONTRACT_CATEGORY_LABELS,
+  CONTRACT_DECLARED_SUBTYPE_LABELS,
   CONTRACT_RELATION_LABELS,
   CONTRACT_STATUS_LABELS,
   escapeContractCsvCell,
@@ -1261,6 +1284,16 @@ const CONTRACT_SETTLEMENT_STATUS_LABELS: Record<
   partial: "已签合同部分结算",
   settled: "已签合同已结清",
 };
+const NON_MAIN_LEDGER_SUBTYPE_OPTIONS = [
+  {
+    value: "non_main_income",
+    label: CONTRACT_DECLARED_SUBTYPE_LABELS.non_main_income,
+  },
+  {
+    value: "non_main_expense",
+    label: CONTRACT_DECLARED_SUBTYPE_LABELS.non_main_expense,
+  },
+] as const;
 type ContractDateMode = "year" | "month" | "day";
 const contractDateModes: Array<{ label: string; value: ContractDateMode }> = [
   { label: "年", value: "year" },
@@ -1349,6 +1382,7 @@ const filters = reactive<{
   keyword: string;
   counterparty: string;
   categories: ContractCategory[];
+  declaredSubtypes: ContractDeclaredSubtype[];
   statuses: ContractStatus[];
   settlementStatus: ContractSettlementStatus | "";
   projectId: string;
@@ -1359,6 +1393,7 @@ const filters = reactive<{
   keyword: "",
   counterparty: "",
   categories: [],
+  declaredSubtypes: [],
   statuses: [],
   settlementStatus: "",
   projectId: "",
@@ -1412,6 +1447,7 @@ interface NormalizedContractListLocation {
   keyword: string;
   counterparty: string;
   categories: ContractCategory[];
+  declaredSubtypes: ContractDeclaredSubtype[];
   statuses: ContractStatus[];
   settlementStatus: ContractSettlementStatus | "";
   projectId: string;
@@ -1458,16 +1494,25 @@ function queryDate(value: unknown): string {
 function normalizedRouteQuery(): NormalizedContractListLocation {
   const rawPage = Number(queryText(route.query.page));
   const rawPageSize = Number(queryText(route.query.pageSize));
+  const categories = queryEnumList(route.query.category, [
+    "main_business",
+    "non_main",
+    "asset",
+  ] as const);
+  const declaredSubtypes = queryEnumList(route.query.declaredSubtype, [
+    "non_main_income",
+    "non_main_expense",
+  ] as const);
+  if (declaredSubtypes.length > 0 && !categories.includes("non_main")) {
+    categories.push("non_main");
+  }
   return {
     page: Number.isInteger(rawPage) && rawPage > 0 ? rawPage : 1,
     pageSize: [10, 20, 50].includes(rawPageSize) ? rawPageSize : 20,
     keyword: queryText(route.query.keyword).trim(),
     counterparty: queryText(route.query.counterparty).trim(),
-    categories: queryEnumList(route.query.category, [
-      "main_business",
-      "non_main",
-      "asset",
-    ] as const),
+    categories,
+    declaredSubtypes,
     statuses: queryEnumList(route.query.status, [
       "draft",
       "approving",
@@ -1498,6 +1543,7 @@ function currentLocationQuery(): NormalizedContractListLocation {
     keyword: filters.keyword.trim(),
     counterparty: filters.counterparty.trim(),
     categories: [...filters.categories],
+    declaredSubtypes: [...filters.declaredSubtypes],
     statuses: [...filters.statuses],
     settlementStatus: filters.settlementStatus,
     projectId: filters.projectId,
@@ -1514,6 +1560,9 @@ function currentQuery(): ContractListQuery {
     keyword: filters.keyword.trim() || undefined,
     counterparty: filters.counterparty.trim() || undefined,
     category: filters.categories.length ? filters.categories : undefined,
+    declaredSubtype: filters.declaredSubtypes.length
+      ? filters.declaredSubtypes
+      : undefined,
     status: filters.statuses.length ? filters.statuses : undefined,
     settlementStatus: filters.settlementStatus || undefined,
     projectId: filters.projectId || undefined,
@@ -1531,6 +1580,8 @@ function routeMatches(query: NormalizedContractListLocation): boolean {
     queryText(route.query.counterparty) === query.counterparty &&
     rawQueryList(route.query.category).join(",") ===
       query.categories.join(",") &&
+    rawQueryList(route.query.declaredSubtype).join(",") ===
+      query.declaredSubtypes.join(",") &&
     rawQueryList(route.query.status).join(",") === query.statuses.join(",") &&
     queryText(route.query.settlementStatus) === query.settlementStatus &&
     queryText(route.query.projectId) === query.projectId &&
@@ -1550,6 +1601,9 @@ function replaceRouteQuery(query: NormalizedContractListLocation) {
       counterparty: query.counterparty || undefined,
       category: query.categories.length
         ? query.categories.join(",")
+        : undefined,
+      declaredSubtype: query.declaredSubtypes.length
+        ? query.declaredSubtypes.join(",")
         : undefined,
       status: query.statuses.length ? query.statuses.join(",") : undefined,
       settlementStatus: query.settlementStatus || undefined,
@@ -1612,6 +1666,13 @@ function handleSearch() {
   applyFilters(true);
 }
 
+function handleCategoryFilterChange() {
+  if (!filters.categories.includes("non_main")) {
+    filters.declaredSubtypes = [];
+  }
+  handleFilterChange();
+}
+
 function handleFilterChange() {
   applyFilters(true);
 }
@@ -1632,6 +1693,7 @@ function resetFilters() {
   filters.keyword = "";
   filters.counterparty = "";
   filters.categories = [];
+  filters.declaredSubtypes = [];
   filters.statuses = [];
   filters.settlementStatus = "";
   filters.projectId = "";
@@ -1671,6 +1733,7 @@ function canApplyInvoice(item: ContractListItem): boolean {
     isEmployee.value &&
     item.relationType === "main" &&
     ["main_business", "non_main"].includes(item.category || "") &&
+    contractDirectionClass(item) === "is-income" &&
     ["effective", "executing", "completed"].includes(item.status) &&
     item.invoiceApplicationEligibility?.eligible === true
   );
@@ -1817,9 +1880,19 @@ function normalizeProgress(value?: number | null): number {
 }
 
 function contractDirectionClass(
-  item: Pick<ContractListItem, "category">,
+  item: Pick<
+    ContractListItem,
+    "category" | "declaredSubtype" | "financialDirection"
+  >,
 ): "is-income" | "is-expense" | "is-unclassified" {
-  if (item.category === "asset") return "is-expense";
+  if (
+    item.financialDirection === "cost" ||
+    item.category === "asset" ||
+    (item.category === "non_main" &&
+      item.declaredSubtype === "non_main_expense")
+  )
+    return "is-expense";
+  if (item.financialDirection === "income") return "is-income";
   if (item.category === "main_business" || item.category === "non_main") {
     return "is-income";
   }
@@ -1827,7 +1900,10 @@ function contractDirectionClass(
 }
 
 function contractDirectionLabel(
-  item: Pick<ContractListItem, "category">,
+  item: Pick<
+    ContractListItem,
+    "category" | "declaredSubtype" | "financialDirection"
+  >,
 ): "收入" | "支出" | "待确认" {
   const directionClass = contractDirectionClass(item);
   if (directionClass === "is-income") return "收入";
@@ -2054,6 +2130,7 @@ async function exportContracts() {
       "行政区域",
       "甲方",
       "乙方",
+      "丙方",
       "合同日期",
       "合同金额或协议调整额",
       "已收金额",
@@ -2070,10 +2147,13 @@ async function exportContracts() {
       item.area || "",
       item.partyA,
       item.partyB,
+      item.partyC || "",
       item.contractDate || "",
       displayContractAmount(item),
-      item.category === "asset" ? "" : item.receivedAmount || 0,
-      item.category === "asset" ? item.paidAmount || 0 : "",
+      contractDirectionClass(item) === "is-income"
+        ? item.receivedAmount || 0
+        : "",
+      contractDirectionClass(item) === "is-expense" ? item.paidAmount || 0 : "",
       contractOwnerLabel(item),
       CONTRACT_STATUS_LABELS[item.status],
     ]);
@@ -2110,6 +2190,7 @@ watch(
     route.query.keyword,
     route.query.counterparty,
     route.query.category,
+    route.query.declaredSubtype,
     route.query.status,
     route.query.settlementStatus,
     route.query.projectId,
@@ -2124,6 +2205,7 @@ watch(
     filters.keyword = query.keyword;
     filters.counterparty = query.counterparty;
     filters.categories = [...query.categories];
+    filters.declaredSubtypes = [...query.declaredSubtypes];
     filters.statuses = [...query.statuses];
     filters.settlementStatus = query.settlementStatus;
     filters.projectId = query.projectId;

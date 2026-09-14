@@ -46,6 +46,17 @@ describe("合同详情页面展示", () => {
     );
   });
 
+  it("非主营合同在详情中明确区分收入与支出二级分类", () => {
+    expect(detailSource).toContain("contractCategoryDisplayLabel");
+    expect(detailSource).toContain('contract.category === "non_main"');
+    expect(detailSource).toContain(
+      'contract.declaredSubtype === "non_main_expense"',
+    );
+    expect(detailSource).toContain(
+      "CONTRACT_DECLARED_SUBTYPE_LABELS.non_main_income",
+    );
+  });
+
   it("合同附件卡片类名独立且按角色选择原生或受控预览", () => {
     expect(detailSource).toContain('class="file-card-preview"');
     expect(detailSource).not.toContain('class="file-preview"');
@@ -250,13 +261,23 @@ describe("合同详情页面展示", () => {
     const auxiliaryItem = detailSource.indexOf(
       '<el-descriptions-item label="是否需要辅助材料">',
     );
+    const auxiliaryItemEnd = detailSource.indexOf(
+      "</el-descriptions-item>",
+      auxiliaryItem,
+    );
     expect(descriptionItem).toBeGreaterThan(-1);
     expect(auxiliaryItem).toBeGreaterThan(descriptionItem);
+    expect(auxiliaryItemEnd).toBeGreaterThan(auxiliaryItem);
     expect(
       detailSource
         .slice(descriptionItem, auxiliaryItem)
         .match(/<el-descriptions-item/g),
     ).toHaveLength(1);
+    const auxiliaryField = detailSource.slice(auxiliaryItem, auxiliaryItemEnd);
+    expect(auxiliaryField).toContain('<template v-if="canEdit">');
+    expect(auxiliaryField).toContain("inline-prompt");
+    expect(auxiliaryField).toMatch(/<\/template>\s*<span v-else>/);
+    expect(auxiliaryField).not.toMatch(/<\/small>\s*<span v-else>/);
   });
 
   it("主合同详情明确展示待生效补充协议的变更前后金额", () => {
@@ -375,7 +396,7 @@ describe("合同详情页面展示", () => {
     expect(detailSource).toContain(
       "canUploadTermination && !isRentalLifecycleContract",
     );
-    expect(detailSource).toContain("isAssetContract && !isRentalLease");
+    expect(detailSource).toContain("isCostContract && !isRentalLease");
   });
 
   it("补充协议详情展示五项金额链并正确标记仅付款方式变更", () => {

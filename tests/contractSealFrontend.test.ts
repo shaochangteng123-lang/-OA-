@@ -157,7 +157,8 @@ describe("盖章合同核验前端闭环", () => {
       path.resolve(process.cwd(), "src/views/ContractDetail.vue"),
       "utf8",
     );
-    expect(source).toContain('(["party_a", "party_b"] as const)');
+    expect(source).toContain("partyFields: SealPartyFieldKey[]");
+    expect(source).toContain('(["party_c"] as const)');
     expect(source).toContain(
       'type SealContentComparisonState = "match" | "mismatch" | "missing"',
     );

@@ -97,7 +97,7 @@
               保存草稿
             </el-button>
             <el-button type="primary" :loading="submitting" @click="handleSubmit">
-              提交审批
+              {{ submitButtonText }}
             </el-button>
           </div>
         </div>
@@ -107,7 +107,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { computed, ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -125,8 +125,13 @@ import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { calculateReimbursementMonth, formatReimbursementMonth } from '@/utils/reimbursement/date'
 import { buildCrossUploadInvoiceDuplicateMessage } from '@/utils/reimbursement/invoiceDuplicateMessage'
 import { showUploadError } from '@/utils/uploadError'
+import { useAuthStore } from '@/stores/auth'
 
 const router = useRouter()
+const authStore = useAuthStore()
+const submitButtonText = computed(() =>
+  authStore.user?.role === 'chairman' ? '提交报销' : '提交审批',
+)
 
 // 表单数据
 const formData = reactive({
@@ -403,7 +408,7 @@ const handleSubmit = async () => {
     const result = await response.json()
 
     if (result.success) {
-      ElMessage.success('提交成功')
+      ElMessage.success(result.message || '提交成功')
       router.push({ path: '/basic-reimbursement', query: { refresh: Date.now().toString() } })
     } else {
       ElMessage.error(result.message || '提交失败')

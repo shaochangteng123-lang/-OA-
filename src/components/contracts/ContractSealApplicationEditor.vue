@@ -49,6 +49,10 @@
             <dt>乙方单位</dt>
             <dd>{{ contract.partyB || "—" }}</dd>
           </div>
+          <div v-if="contract.partyC">
+            <dt>丙方单位</dt>
+            <dd>{{ contract.partyC }}</dd>
+          </div>
           <div v-if="!contract.isAssetContract">
             <dt>项目名称</dt>
             <dd>{{ contract.projectName || "—" }}</dd>
@@ -284,6 +288,7 @@ export interface ContractSealApplicationSummary {
   contractTitle?: string | null;
   partyA: string;
   partyB: string;
+  partyC?: string | null;
   projectName?: string | null;
   amount?: string | null;
   categoryLabel: string;

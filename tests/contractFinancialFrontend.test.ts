@@ -69,6 +69,30 @@ describe("合同财务双凭证登记前端闭环", () => {
     expect(ContractDetail).toBeTruthy();
   });
 
+  it("普通员工在合同区域权限内只读接收真实财务闭环和核算指标", () => {
+    const routeSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
+    const detailSource = fs.readFileSync(
+      path.resolve(process.cwd(), "src/views/ContractDetail.vue"),
+      "utf8",
+    );
+    const financialReadGate = routeSource.slice(
+      routeSource.indexOf("const canReadRootFinancials"),
+      routeSource.indexOf("const relationAreaVisibility"),
+    );
+    expect(financialReadGate).toContain("CONTRACT_LEDGER_READ_ROLES");
+    expect(financialReadGate).not.toContain("(READ_ROLES as readonly");
+    expect(routeSource).toContain("await assertContractReadScope(");
+    expect(detailSource).toContain(
+      'v-if="canManageFinancials && detail.contract.category"',
+    );
+    expect(detailSource).toContain("financialRegistrationCards.length");
+    expect(detailSource).toContain("detail.accounting?.unreceivedAmount");
+    expect(detailSource).toContain("detail.accounting?.basis");
+  });
+
   it("规范化财务记录状态并保留发票及收付款主体字段", async () => {
     (api.get as jest.Mock).mockResolvedValueOnce({
       data: {
@@ -1059,6 +1083,10 @@ describe("合同财务双凭证登记前端闭环", () => {
     expect(panelSource).toContain("invoiceBusinessDirection");
     expect(panelSource).toContain("发票购销方向与合同类型不一致，不能登记");
     expect(panelSource).toContain("categoryBusinessDirection");
+    expect(panelSource).toContain(
+      'props.declaredSubtype === "non_main_expense"',
+    );
+    expect(panelSource).toContain('props.category !== "asset"');
     expect(panelSource).toContain("invoiceContextReady");
     expect(panelSource).toContain(
       "appendContractFinancialRegistrationSettlements",
@@ -1378,6 +1406,116 @@ describe("合同财务双凭证登记前端闭环", () => {
     wrapper.unmount();
   });
 
+  it("资产直接付款无发票时可以先保存，且不误记为主营收入", async () => {
+    (api.get as jest.Mock).mockResolvedValueOnce({
+      data: { success: true, data: [] },
+    });
+    (api.post as jest.Mock)
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            id: "receipt-job-first",
+            fileId: "receipt-file-first",
+            recordKind: "payment",
+            direction: "payment",
+            canCreateDraft: true,
+            blockingReasons: [],
+            snapshot: {
+              fields: {
+                payer: "北京羽隶工程咨询有限公司",
+                payerAccount: "621700001",
+                payee: "北京市国信公证处",
+                payeeAccount: "0200303519000018418",
+                electronicReceiptNo: "FIRST-RECEIPT-001",
+                paymentTime: "2026-07-08",
+                amount: 220000,
+              },
+            },
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            registrationId: "registration-receipt-first",
+            invoiceRecordIds: [],
+            settlementRecordIds: ["receipt-record-first"],
+            invoiceRecordId: null,
+            settlementRecordId: "receipt-record-first",
+            matches: [],
+            status: "draft",
+          },
+        },
+      });
+
+    const wrapper = mount(ContractFinancialRegistrationPanel, {
+      props: {
+        contractId: "contract-receipt-first",
+        category: "asset",
+        assetFundingMode: "engineering_direct",
+      },
+      global: {
+        stubs: {
+          ElAlert: {
+            props: ["title", "description"],
+            template: "<div>{{ title }}{{ description }}<slot /></div>",
+          },
+          ElButton: {
+            props: ["disabled", "loading"],
+            emits: ["click"],
+            template:
+              '<button :disabled="disabled || loading" @click="$emit(\'click\')"><slot /></button>',
+          },
+          ElForm: true,
+          ElFormItem: true,
+          ElIcon: true,
+          ElInput: true,
+          ElTable: true,
+          ElTableColumn: true,
+          ElTag: { template: "<span><slot /></span>" },
+          ElUpload: interactiveUploadStub,
+        },
+      },
+    });
+    await flushPromises();
+
+    const uploads = wrapper.findAllComponents(interactiveUploadStub);
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1]!.attributes("data-disabled")).toBe("false");
+    await (
+      uploads[1]!.vm as unknown as { select: (file: File) => Promise<void> }
+    ).select(
+      new File(["receipt"], "receipt-first.pdf", {
+        type: "application/pdf",
+      }),
+    );
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("待补发票 ¥220,000.00");
+    expect(wrapper.text()).not.toContain("主营收入");
+    const saveButton = wrapper
+      .findAll("button")
+      .find((button) => button.text().includes("保存实际付款并标记待补发票"));
+    expect(saveButton).toBeTruthy();
+    expect(saveButton!.attributes("disabled")).toBeUndefined();
+    await saveButton!.trigger("click");
+    await flushPromises();
+
+    expect(api.post).toHaveBeenLastCalledWith(
+      "/api/contracts/contract-receipt-first/financial-registrations",
+      {
+        invoiceOcrJobIds: [],
+        bankOcrJobIds: ["receipt-job-first"],
+        note: undefined,
+      },
+      { timeout: 120_000 },
+    );
+    expect(wrapper.emitted("created")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("仅回款的既有登记展示待补发票并继续开放回单上传", async () => {
     (api.get as jest.Mock).mockResolvedValueOnce({
       data: { success: true, data: [] },
@@ -1610,7 +1748,7 @@ describe("合同财务双凭证登记前端闭环", () => {
     ]) {
       expect(panelSource).not.toContain(removedLabel);
     }
-    expect(panelSource).toContain("必传 · 选择后自动识别");
+    expect(panelSource).toContain("可先上传或后补 · 选择后自动识别");
     expect(panelSource).not.toContain(
       "使用 PP-OCRv6_medium（第六版中型模型）识别",
     );
@@ -1704,9 +1842,17 @@ describe("合同财务双凭证登记前端闭环", () => {
     );
     expect(rentalDetailSource).toContain('v-if="isHouseRentalLease"');
     expect(rentalDetailSource).toContain('class="rental-cost-groups"');
-    expect(rentalDetailSource).toContain('v-if="isVehicleRentalLease"');
-    expect(rentalDetailSource).toContain("合同总金额");
-    expect(rentalDetailSource).toContain("isVehicleRentalLease = computed");
+    expect(rentalDetailSource).toContain(
+      'v-if="isCostContract && !isHouseRentalLease"',
+    );
+    expect(rentalDetailSource).toContain("本月支出");
+    expect(rentalDetailSource).toContain('"工程已支出" : "已付款"');
+    expect(rentalDetailSource).toContain('"待工程划拨" : "未付款"');
+    expect(rentalDetailSource).not.toContain('v-if="isVehicleRentalLease"');
+    expect(rentalDetailSource).not.toContain("isVehicleRentalLease = computed");
+    expect(rentalDetailSource).not.toContain(
+      'class="accounting-summary vehicle-rental-accounting-summary"',
+    );
     expect(rentalDetailSource).toContain("isHouseRentalLease = computed");
     expect(rentalDetailSource).toContain(
       'declaredSubtype === "vehicle_rental"',
@@ -1726,7 +1872,7 @@ describe("合同财务双凭证登记前端闭环", () => {
       "!isRentalLease && relatedAccountingLines.length",
     );
     expect(rentalDetailSource).toContain(
-      'v-if="isAssetContract && !isRentalLease"',
+      'v-if="isCostContract && !isHouseRentalLease"',
     );
     expect(rentalDetailSource).toContain("relatedAccountingLines");
     expect(rentalDetailSource).toContain("暂无本合同相关支出记录");
@@ -1822,7 +1968,9 @@ describe("合同财务双凭证登记前端闭环", () => {
     );
     expect(panelSource).toContain("保存补充发票");
     expect(panelSource).toContain("发票已补充，仍待补发票");
-    expect(panelSource).toContain("发票与累计回款金额已全部对应");
+    expect(panelSource).toContain(
+      "发票与累计${settlementActionLabel.value}金额已全部对应",
+    );
     expect(panelSource).toContain("已进入合同核算");
     expect(panelSource).toContain("canSaveExternalPaymentOnly");
     expect(panelSource).toContain(
@@ -1877,8 +2025,12 @@ describe("合同财务双凭证登记前端闭环", () => {
     expect(source).toContain("financialCardRemainingAmount(card)");
     expect(source).toContain("invoiceCents !== settlementCents");
     expect(source).toContain("invoiceCents !== matchedCents");
-    expect(source).toContain('"发票与回款待闭环"');
-    expect(source).toContain('"回款登记·待补发票"');
+    expect(source).toContain(
+      "`发票与${financialCardSettlementAction(card)}待闭环`",
+    );
+    expect(source).toContain(
+      "`${financialCardSettlementAction(card)}登记·待补发票`",
+    );
     expect(source).toContain('"发票与回单财务登记"');
     expect(source).toContain("补充发票／回单");
     expect(source).toContain("确认整笔登记");

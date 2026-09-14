@@ -7,14 +7,60 @@
   >
     <header class="trend-heading">
       <div>
-        <span class="trend-kicker">年度资金趋势</span>
+        <span class="trend-kicker">{{
+          yearComparison ? "年度同比趋势" : "完整历史趋势"
+        }}</span>
         <h2 id="financial-trend-title">月度财务趋势</h2>
-        <p>按自然月对比选定年度与历史年度，缺失月份保留断点。</p>
+        <p>
+          {{
+            yearComparison
+              ? "连续时间轴叠加上年同期，拖动或滚轮时两条线同步跨年移动。"
+              : "按连续自然月展示完整历史，可拖动或滚轮查看更早月份。"
+          }}
+        </p>
       </div>
 
       <div class="trend-heading-actions">
         <div class="trend-selectors">
-          <label class="view-month-select">
+          <label v-if="!fullHistory" class="view-year-select">
+            <span>查看年度</span>
+            <el-select
+              :model-value="selectedYear"
+              :disabled="loading || selectedYearOptions.length === 0"
+              :teleported="!isFullscreen"
+              placeholder="选择年度"
+              aria-label="选择查看年度"
+              @change="handleSelectedYearChange"
+            >
+              <el-option
+                v-for="year in selectedYearOptions"
+                :key="year"
+                :label="`${year}年`"
+                :value="year"
+              />
+            </el-select>
+          </label>
+
+          <label v-if="isMainBusinessMetric" class="region-select">
+            <span>行政区</span>
+            <el-select
+              :model-value="activeRegion"
+              :teleported="!isFullscreen"
+              placeholder="选择行政区"
+              aria-label="选择主营业务行政区"
+              @change="handleRegionChange"
+            >
+              <el-option label="全部区域" value="all" />
+              <el-option
+                v-for="region in regionOptions"
+                :key="region"
+                :label="region"
+                :value="region"
+              />
+            </el-select>
+          </label>
+
+          <label v-if="!fullHistory" class="view-month-select">
             <span>查看月份</span>
             <el-select
               :model-value="
@@ -34,7 +80,7 @@
             </el-select>
           </label>
 
-          <label class="history-year-select">
+          <label v-if="!fullHistory" class="history-year-select">
             <span>历史对比</span>
             <el-select
               :model-value="comparisonYear"
@@ -53,6 +99,17 @@
             </el-select>
           </label>
         </div>
+
+        <button
+          type="button"
+          class="history-mode-toggle"
+          :class="{ 'is-active': yearComparison }"
+          :aria-pressed="yearComparison"
+          :aria-label="yearComparison ? '关闭年度对比' : '开启年度对比'"
+          @click="emit('year-comparison-change', !yearComparison)"
+        >
+          {{ yearComparison ? "关闭年度对比" : "年度对比" }}
+        </button>
 
         <button
           type="button"
@@ -91,15 +148,19 @@
       <div class="trend-legend" aria-label="折线图图例">
         <span>
           <i class="legend-line legend-line--selected" aria-hidden="true"></i>
-          {{ selectedYear }}年（选定年度）
+          {{ fullHistoryRangeLabel }}（实际月份）
         </span>
-        <span v-if="comparisonYear !== null">
+        <span v-if="yearComparison">
           <i class="legend-line legend-line--history" aria-hidden="true"></i>
-          {{ comparisonYear }}年（历史对比）
+          上年同期（随窗口同步移动）
         </span>
         <span class="current-value-legend">
           <i aria-hidden="true"></i>
           空心点表示当前值（未月结）
+        </span>
+        <span v-if="isMainBusinessMetric" class="confirmed-source-legend">
+          <i aria-hidden="true"></i>
+          {{ mainBusinessSourceLegend }}
         </span>
       </div>
       <p>{{ activeMetric.note }}</p>
@@ -126,210 +187,566 @@
         <i></i><i></i><i></i><i></i>
       </div>
       <strong>所选年度暂无{{ activeMetric.label }}数据</strong>
-      <p>生成并保存月度财务报表后，系统将在对应月份显示趋势点。</p>
+      <p>
+        {{
+          isMainBusinessMetric
+            ? "系统将在合同台账出现对应主营业务数据后显示趋势点。"
+            : "生成并保存月度财务报表后，系统将在对应月份显示趋势点。"
+        }}
+      </p>
     </div>
 
     <template v-else>
-      <div ref="canvasRef" class="trend-canvas">
-        <svg
-          class="trend-svg"
-          :viewBox="`0 0 ${viewWidth} ${viewHeight}`"
-          :style="{ height: `${viewHeight}px` }"
-          preserveAspectRatio="xMidYMid meet"
-          role="img"
-          :aria-label="chartAriaLabel"
-        >
-          <g class="grid-lines" aria-hidden="true">
-            <template v-for="tick in yTicks" :key="tick.value">
-              <line
-                :class="{ 'is-zero': isZero(tick.value) }"
-                :x1="plotLeft"
-                :x2="plotRight"
-                :y1="tick.y"
-                :y2="tick.y"
-                vector-effect="non-scaling-stroke"
-              />
-              <text :x="plotLeft - 10" :y="tick.y + 4" text-anchor="end">
-                {{ formatAxisAmount(tick.value) }}
-              </text>
-            </template>
-          </g>
-
-          <g class="month-labels" aria-hidden="true">
-            <text
-              v-for="monthIndex in visibleMonthIndexes"
-              :key="monthIndex"
-              :x="getX(monthIndex)"
-              :y="plotBottom + 28"
-              text-anchor="middle"
-            >
-              {{ monthIndex + 1 }}月
-            </text>
-          </g>
-
-          <g class="month-hit-areas" aria-hidden="true">
-            <rect
-              v-for="band in hoverBands"
-              :key="band.index"
-              :x="band.x"
-              :y="plotTop"
-              :width="band.width"
-              :height="plotBottom - plotTop"
-              @mouseenter="selectMonth(band.index)"
-              @click="selectMonth(band.index)"
-            />
-          </g>
-
-          <g v-if="activeMonthIndex !== null" class="active-month-guide">
-            <line
-              :x1="getX(activeMonthIndex)"
-              :x2="getX(activeMonthIndex)"
-              :y1="plotTop"
-              :y2="plotBottom"
-              vector-effect="non-scaling-stroke"
-            />
-            <rect
-              :x="getX(activeMonthIndex) - 22"
-              :y="plotBottom + 10"
-              width="44"
-              height="22"
-              rx="7"
-            />
-            <text
-              :x="getX(activeMonthIndex)"
-              :y="plotBottom + 25"
-              text-anchor="middle"
-            >
-              {{ activeMonthIndex + 1 }}月
-            </text>
-          </g>
-
-          <g
-            v-for="series in plottedSeries"
-            :key="series.key"
-            class="trend-series"
-            :class="{ 'is-history': series.history }"
+      <template v-if="fullHistory">
+        <div ref="canvasRef" class="full-history-shell">
+          <div
+            class="full-history-y-axis"
+            :style="{ height: `${viewHeight}px` }"
+            aria-hidden="true"
           >
-            <line
-              v-for="edge in series.edges"
-              :key="`${series.key}-${edge.fromIndex}-${edge.toIndex}`"
-              class="series-edge"
-              :x1="edge.x1"
-              :y1="edge.y1"
-              :x2="edge.x2"
-              :y2="edge.y2"
-              :stroke="series.color"
-              vector-effect="non-scaling-stroke"
-            />
-
-            <g
-              v-for="point in series.points"
-              :key="`${series.key}-${point.index}`"
-              class="series-point-group"
-              :class="{
-                'is-active': activeMonthIndex === point.index,
-                'is-current': point.isCurrent,
+            <span
+              v-for="tick in fullHistoryYTicks"
+              :key="tick.value"
+              :style="{ top: `${tick.y - 8}px` }"
+            >
+              {{ formatAxisValue(tick.value) }}
+            </span>
+          </div>
+          <div
+            ref="historyScrollRef"
+            class="full-history-scroll"
+            :class="{ 'is-dragging': historyDragging }"
+            role="region"
+            tabindex="0"
+            aria-label="完整历史月份横向浏览区，可拖动、滚轮或使用方向键查看"
+            @pointerdown="handleHistoryPointerDown"
+            @pointermove="handleHistoryPointerMove"
+            @pointerup="finishHistoryPointer"
+            @pointercancel="finishHistoryPointer"
+            @wheel="handleHistoryWheel"
+            @scroll="handleHistoryScroll"
+            @keydown="handleHistoryKeydown"
+          >
+            <svg
+              class="trend-svg full-history-svg"
+              :viewBox="`0 0 ${fullHistoryCanvasWidth} ${viewHeight}`"
+              :style="{
+                width: `${fullHistoryCanvasWidth}px`,
+                height: `${viewHeight}px`,
               }"
-              role="button"
-              tabindex="0"
-              :aria-label="pointAriaLabel(series, point)"
-              @mouseenter="selectMonth(point.index)"
-              @focus="selectMonth(point.index)"
-              @click="selectMonth(point.index)"
-              @keydown.enter.prevent="selectMonth(point.index)"
-              @keydown.space.prevent="selectMonth(point.index)"
+              preserveAspectRatio="none"
+              role="img"
+              :aria-label="fullHistoryAriaLabel"
             >
-              <circle
-                v-if="activeMonthIndex === point.index"
-                class="point-halo"
-                :cx="point.x"
-                :cy="point.y"
-                r="10"
-                :fill="series.color"
-              />
-              <circle
-                class="point-hit-area"
-                :cx="point.x"
-                :cy="point.y"
-                r="13"
-              />
-              <circle
-                class="series-point"
-                :cx="point.x"
-                :cy="point.y"
-                :r="activeMonthIndex === point.index ? 5.5 : 4.2"
-                :fill="point.isCurrent ? '#ffffff' : series.color"
-                :stroke="series.color"
-                vector-effect="non-scaling-stroke"
-              >
-                <title>{{ pointAriaLabel(series, point) }}</title>
-              </circle>
-            </g>
-          </g>
+              <g class="grid-lines" aria-hidden="true">
+                <line
+                  v-for="tick in fullHistoryYTicks"
+                  :key="tick.value"
+                  :class="{ 'is-zero': isZero(tick.value) }"
+                  :x1="fullHistoryPlotLeft"
+                  :x2="fullHistoryPlotRight"
+                  :y1="tick.y"
+                  :y2="tick.y"
+                  vector-effect="non-scaling-stroke"
+                />
+              </g>
 
-          <g class="point-value-label-layer" aria-hidden="true">
-            <g
-              v-for="label in pointValueLabels"
-              :key="label.key"
-              class="point-value-label-group"
-            >
+              <g class="full-history-month-grid" aria-hidden="true">
+                <template v-for="point in fullHistoryAxis" :key="point.month">
+                  <line
+                    :class="{ 'is-year-boundary': point.month.endsWith('-01') }"
+                    :x1="getFullHistoryX(point.index)"
+                    :x2="getFullHistoryX(point.index)"
+                    :y1="plotTop"
+                    :y2="plotBottom"
+                    vector-effect="non-scaling-stroke"
+                  />
+                  <text
+                    :x="getFullHistoryX(point.index)"
+                    :y="plotBottom + 28"
+                    text-anchor="middle"
+                  >
+                    {{ formatFullHistoryMonth(point.month) }}
+                  </text>
+                </template>
+              </g>
+
+              <g class="month-hit-areas" aria-hidden="true">
+                <rect
+                  v-for="point in fullHistoryAxis"
+                  :key="point.month"
+                  :x="getFullHistoryX(point.index) - 37"
+                  :y="plotTop"
+                  width="74"
+                  :height="plotBottom - plotTop"
+                  @click="selectFullHistoryMonth(point.month)"
+                />
+              </g>
+
+              <g v-if="fullHistoryActiveAxisPoint" class="active-month-guide">
+                <line
+                  :x1="getFullHistoryX(fullHistoryActiveAxisPoint.index)"
+                  :x2="getFullHistoryX(fullHistoryActiveAxisPoint.index)"
+                  :y1="plotTop"
+                  :y2="plotBottom"
+                  vector-effect="non-scaling-stroke"
+                />
+              </g>
+
+              <g
+                v-if="yearComparison"
+                class="trend-series is-history year-comparison-series"
+              >
+                <line
+                  v-for="edge in fullHistoryComparisonEdges"
+                  :key="`comparison-${edge.fromMonth}-${edge.toMonth}`"
+                  class="series-edge"
+                  :x1="edge.x1"
+                  :y1="edge.y1"
+                  :x2="edge.x2"
+                  :y2="edge.y2"
+                  stroke="#7686a1"
+                  vector-effect="non-scaling-stroke"
+                />
+                <g
+                  v-for="point in fullHistoryComparisonPlottedPoints"
+                  :key="`comparison-${point.month}`"
+                  class="series-point-group is-history"
+                  :class="{
+                    'is-active':
+                      fullHistoryActiveAxisPoint?.month === point.month,
+                  }"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="fullHistoryComparisonPointAriaLabel(point)"
+                  @click.stop="selectFullHistoryMonth(point.month)"
+                  @focus="selectFullHistoryMonth(point.month)"
+                  @keydown.enter.prevent="selectFullHistoryMonth(point.month)"
+                  @keydown.space.prevent="selectFullHistoryMonth(point.month)"
+                >
+                  <circle
+                    v-if="fullHistoryActiveAxisPoint?.month === point.month"
+                    class="point-halo"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="10"
+                    fill="#7686a1"
+                  />
+                  <circle
+                    class="point-hit-area"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="14"
+                  />
+                  <rect
+                    v-if="point.isConfirmedSource || point.isLedgerSource"
+                    class="series-point series-point--confirmed-source"
+                    :x="point.x - 4.5"
+                    :y="point.y - 4.5"
+                    width="9"
+                    height="9"
+                    rx="2"
+                    fill="#7686a1"
+                    stroke="#7686a1"
+                    vector-effect="non-scaling-stroke"
+                  />
+                  <circle
+                    v-else
+                    class="series-point"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="4.5"
+                    :fill="point.isCurrent ? '#ffffff' : '#7686a1'"
+                    stroke="#7686a1"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </g>
+              </g>
+
+              <g class="trend-series">
+                <line
+                  v-for="edge in fullHistoryEdges"
+                  :key="`${edge.fromMonth}-${edge.toMonth}`"
+                  class="series-edge"
+                  :x1="edge.x1"
+                  :y1="edge.y1"
+                  :x2="edge.x2"
+                  :y2="edge.y2"
+                  stroke="#167c84"
+                  vector-effect="non-scaling-stroke"
+                />
+                <g
+                  v-for="point in fullHistoryPlottedPoints"
+                  :key="point.month"
+                  class="series-point-group"
+                  :class="{
+                    'is-active':
+                      fullHistoryActiveAxisPoint?.month === point.month,
+                    'is-current': point.isCurrent,
+                    'is-confirmed-source': point.isConfirmedSource,
+                    'is-ledger-source': point.isLedgerSource,
+                  }"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="fullHistoryPointAriaLabel(point)"
+                  @click.stop="selectFullHistoryMonth(point.month)"
+                  @focus="selectFullHistoryMonth(point.month)"
+                  @keydown.enter.prevent="selectFullHistoryMonth(point.month)"
+                  @keydown.space.prevent="selectFullHistoryMonth(point.month)"
+                >
+                  <circle
+                    v-if="fullHistoryActiveAxisPoint?.month === point.month"
+                    class="point-halo"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="10"
+                    fill="#167c84"
+                  />
+                  <circle
+                    class="point-hit-area"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="14"
+                  />
+                  <rect
+                    v-if="point.isConfirmedSource || point.isLedgerSource"
+                    class="series-point series-point--confirmed-source"
+                    :x="point.x - 4.5"
+                    :y="point.y - 4.5"
+                    width="9"
+                    height="9"
+                    rx="2"
+                    fill="#167c84"
+                    stroke="#167c84"
+                    vector-effect="non-scaling-stroke"
+                  />
+                  <circle
+                    v-else
+                    class="series-point"
+                    :cx="point.x"
+                    :cy="point.y"
+                    r="4.5"
+                    :fill="point.isCurrent ? '#ffffff' : '#167c84'"
+                    stroke="#167c84"
+                    vector-effect="non-scaling-stroke"
+                  />
+                </g>
+              </g>
+
+              <g class="point-value-label-layer" aria-hidden="true">
+                <g
+                  v-for="label in fullHistoryPointValueLabels"
+                  :key="label.key"
+                  class="point-value-label-group full-history-point-value"
+                  :data-month="label.month"
+                  :data-series="label.series"
+                >
+                  <rect
+                    class="point-value-label-bg"
+                    :x="label.boxX"
+                    :y="label.boxY"
+                    :width="label.boxWidth"
+                    :height="label.boxHeight"
+                    :stroke="label.color"
+                    rx="5"
+                  />
+                  <text
+                    class="point-value-label"
+                    :class="{ 'is-history': label.history }"
+                    :x="label.x"
+                    :y="label.y"
+                    :text-anchor="label.anchor"
+                    :fill="label.color"
+                  >
+                    {{ label.text }}
+                  </text>
+                </g>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <p class="full-history-hint">
+          窗口始终显示连续 12
+          个月；按住鼠标左右拖动或使用滚轮可直接跨年浏览，松手后自动吸附到整月；键盘方向键逐月查看，Home（首位）／End（末位）跳到首尾月份。
+        </p>
+
+        <div
+          v-if="fullHistoryActiveAxisPoint"
+          class="month-inspector full-history-inspector"
+          :class="{ 'has-comparison': yearComparison }"
+          aria-live="polite"
+        >
+          <div class="inspector-heading">
+            <span>当前查看</span>
+            <strong>{{ fullHistoryActiveAxisPoint.month }}</strong>
+          </div>
+          <article>
+            <span>
+              <i style="background: #167c84" aria-hidden="true"></i>
+              本期 {{ fullHistoryActiveAxisPoint.month }} ·
+              {{ activeMetric.label }}
+            </span>
+            <strong>
+              {{ formatMetricValue(fullHistoryActiveAxisPoint.value) }}
+            </strong>
+            <small :class="fullHistoryActiveStateClass">
+              {{ fullHistoryActiveStateLabel }}
+            </small>
+          </article>
+          <article v-if="yearComparison" class="is-history">
+            <span>
+              <i style="background: #7686a1" aria-hidden="true"></i>
+              上年同期 {{ fullHistoryComparisonActiveMonth }} ·
+              {{ activeMetric.label }}
+            </span>
+            <strong>
+              {{
+                formatMetricValue(fullHistoryComparisonActiveAxisPoint?.value)
+              }}
+            </strong>
+            <small :class="fullHistoryComparisonActiveStateClass">
+              {{ fullHistoryComparisonActiveStateLabel }}
+            </small>
+          </article>
+        </div>
+      </template>
+
+      <template v-else>
+        <div ref="canvasRef" class="trend-canvas">
+          <svg
+            class="trend-svg"
+            :viewBox="`0 0 ${viewWidth} ${viewHeight}`"
+            :style="{ height: `${viewHeight}px` }"
+            preserveAspectRatio="xMidYMid meet"
+            role="img"
+            :aria-label="chartAriaLabel"
+          >
+            <g class="grid-lines" aria-hidden="true">
+              <template v-for="tick in yTicks" :key="tick.value">
+                <line
+                  :class="{ 'is-zero': isZero(tick.value) }"
+                  :x1="plotLeft"
+                  :x2="plotRight"
+                  :y1="tick.y"
+                  :y2="tick.y"
+                  vector-effect="non-scaling-stroke"
+                />
+                <text :x="plotLeft - 10" :y="tick.y + 4" text-anchor="end">
+                  {{ formatAxisValue(tick.value) }}
+                </text>
+              </template>
+            </g>
+
+            <g class="month-labels" aria-hidden="true">
+              <text
+                v-for="monthIndex in visibleMonthIndexes"
+                :key="monthIndex"
+                :x="getX(monthIndex)"
+                :y="plotBottom + 28"
+                text-anchor="middle"
+              >
+                {{ monthIndex + 1 }}月
+              </text>
+            </g>
+
+            <g class="month-hit-areas" aria-hidden="true">
               <rect
-                class="point-value-label-bg"
-                :x="label.boxX"
-                :y="label.boxY"
-                :width="label.boxWidth"
-                :height="label.boxHeight"
-                :stroke="label.color"
-                rx="5"
+                v-for="band in hoverBands"
+                :key="band.index"
+                :x="band.x"
+                :y="plotTop"
+                :width="band.width"
+                :height="plotBottom - plotTop"
+                @mouseenter="selectMonth(band.index)"
+                @click="selectMonth(band.index)"
+              />
+            </g>
+
+            <g v-if="activeMonthIndex !== null" class="active-month-guide">
+              <line
+                :x1="getX(activeMonthIndex)"
+                :x2="getX(activeMonthIndex)"
+                :y1="plotTop"
+                :y2="plotBottom"
+                vector-effect="non-scaling-stroke"
+              />
+              <rect
+                :x="getX(activeMonthIndex) - 22"
+                :y="plotBottom + 10"
+                width="44"
+                height="22"
+                rx="7"
               />
               <text
-                class="point-value-label"
-                :class="{ 'is-history': label.history }"
-                :x="label.x"
-                :y="label.y"
-                :text-anchor="label.anchor"
-                :fill="label.color"
+                :x="getX(activeMonthIndex)"
+                :y="plotBottom + 25"
+                text-anchor="middle"
               >
-                {{ label.text }}
+                {{ activeMonthIndex + 1 }}月
               </text>
             </g>
-          </g>
-        </svg>
-      </div>
 
-      <div v-if="activeMonthDetail" class="month-inspector" aria-live="polite">
-        <div class="inspector-heading">
-          <span>当前查看</span>
-          <strong>{{ activeMonthDetail.label }}</strong>
+            <g
+              v-for="series in plottedSeries"
+              :key="series.key"
+              class="trend-series"
+              :class="{ 'is-history': series.history }"
+            >
+              <line
+                v-for="edge in series.edges"
+                :key="`${series.key}-${edge.fromIndex}-${edge.toIndex}`"
+                class="series-edge"
+                :x1="edge.x1"
+                :y1="edge.y1"
+                :x2="edge.x2"
+                :y2="edge.y2"
+                :stroke="series.color"
+                vector-effect="non-scaling-stroke"
+              />
+
+              <g
+                v-for="point in series.points"
+                :key="`${series.key}-${point.index}`"
+                class="series-point-group"
+                :class="{
+                  'is-active': activeMonthIndex === point.index,
+                  'is-current': point.isCurrent,
+                  'is-confirmed-source': point.isConfirmedSource,
+                  'is-ledger-source': point.isLedgerSource,
+                }"
+                role="button"
+                tabindex="0"
+                :aria-label="pointAriaLabel(series, point)"
+                @mouseenter="selectMonth(point.index)"
+                @focus="selectMonth(point.index)"
+                @click="selectMonth(point.index)"
+                @keydown.enter.prevent="selectMonth(point.index)"
+                @keydown.space.prevent="selectMonth(point.index)"
+              >
+                <circle
+                  v-if="activeMonthIndex === point.index"
+                  class="point-halo"
+                  :cx="point.x"
+                  :cy="point.y"
+                  r="10"
+                  :fill="series.color"
+                />
+                <circle
+                  class="point-hit-area"
+                  :cx="point.x"
+                  :cy="point.y"
+                  r="13"
+                />
+                <rect
+                  v-if="point.isConfirmedSource || point.isLedgerSource"
+                  class="series-point series-point--confirmed-source"
+                  :x="point.x - (activeMonthIndex === point.index ? 5.5 : 4.5)"
+                  :y="point.y - (activeMonthIndex === point.index ? 5.5 : 4.5)"
+                  :width="activeMonthIndex === point.index ? 11 : 9"
+                  :height="activeMonthIndex === point.index ? 11 : 9"
+                  rx="2"
+                  :fill="series.color"
+                  :stroke="series.color"
+                  vector-effect="non-scaling-stroke"
+                >
+                  <title>{{ pointAriaLabel(series, point) }}</title>
+                </rect>
+                <circle
+                  v-else
+                  class="series-point"
+                  :cx="point.x"
+                  :cy="point.y"
+                  :r="activeMonthIndex === point.index ? 5.5 : 4.2"
+                  :fill="point.isCurrent ? '#ffffff' : series.color"
+                  :stroke="series.color"
+                  vector-effect="non-scaling-stroke"
+                >
+                  <title>{{ pointAriaLabel(series, point) }}</title>
+                </circle>
+              </g>
+            </g>
+
+            <g class="point-value-label-layer" aria-hidden="true">
+              <g
+                v-for="label in pointValueLabels"
+                :key="label.key"
+                class="point-value-label-group"
+              >
+                <rect
+                  class="point-value-label-bg"
+                  :x="label.boxX"
+                  :y="label.boxY"
+                  :width="label.boxWidth"
+                  :height="label.boxHeight"
+                  :stroke="label.color"
+                  rx="5"
+                />
+                <text
+                  class="point-value-label"
+                  :class="{ 'is-history': label.history }"
+                  :x="label.x"
+                  :y="label.y"
+                  :text-anchor="label.anchor"
+                  :fill="label.color"
+                >
+                  {{ label.text }}
+                </text>
+              </g>
+            </g>
+          </svg>
         </div>
-        <article
-          v-for="detail in activeMonthDetail.years"
-          :key="detail.year"
-          :class="{ 'is-history': detail.history }"
+
+        <div
+          v-if="activeMonthDetail"
+          class="month-inspector"
+          aria-live="polite"
         >
-          <span>
-            <i :style="{ background: detail.color }" aria-hidden="true"></i>
-            {{ detail.year }}年
-          </span>
-          <strong>{{ formatExactAmount(detail.value) }}</strong>
-          <small :class="`is-${detail.state}`">{{ detail.stateLabel }}</small>
-        </article>
-      </div>
+          <div class="inspector-heading">
+            <span>当前查看</span>
+            <strong>{{ activeMonthDetail.label }}</strong>
+          </div>
+          <article
+            v-for="detail in activeMonthDetail.years"
+            :key="detail.year"
+            :class="{ 'is-history': detail.history }"
+          >
+            <span>
+              <i :style="{ background: detail.color }" aria-hidden="true"></i>
+              {{ detail.year }}年
+            </span>
+            <strong>{{ formatMetricValue(detail.value) }}</strong>
+            <small :class="`is-${detail.state}`">{{ detail.stateLabel }}</small>
+          </article>
+        </div>
+      </template>
     </template>
 
     <footer class="trend-footer">
-      <span>金额明细来自服务端精确金额字符串，前端不做估算。</span>
-      <span>有效月份已在折线点旁标注精准金额，点选月份可查看完整状态。</span>
-      <span>缺失月份不按零金额参与连线。</span>
+      <span>趋势值来自服务端精准数据，前端不做估算。</span>
+      <span>当前窗口全部有效月份显示精准值，点选月份可查看完整状态。</span>
+      <span>明确零值参与连线，只有未知值保持断点。</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 import { FullScreen } from "@element-plus/icons-vue";
+import {
+  addFinancialAmountTexts,
+  formatMonthlyFinancialAmount,
+} from "@/utils/monthlyFinancialReportPresentation";
 import type {
   MonthlyFinancialAmount,
+  MonthlyFinancialMainBusinessTrendPoint,
   MonthlyFinancialTrendPoint,
   MonthlyFinancialTrendWarning,
 } from "@/types/monthlyFinancialReport";
@@ -339,12 +756,22 @@ type TrendMetricKey =
   | "actualReceipt"
   | "settlementInflow"
   | "totalOutflow"
-  | "netChange";
+  | "netChange"
+  | "mainContractAmount"
+  | "mainContractCount";
+
+type TrendDisplayState =
+  | "closed"
+  | "current"
+  | "confirmed_source"
+  | "ledger_source"
+  | null;
 
 interface TrendMetricOption {
   key: TrendMetricKey;
   label: string;
   note: string;
+  unit: "amount" | "count";
 }
 
 interface RawSeriesPoint {
@@ -352,6 +779,7 @@ interface RawSeriesPoint {
   value: MonthlyFinancialAmount;
   numericValue: number;
   source: MonthlyFinancialTrendPoint;
+  valueState: TrendDisplayState;
 }
 
 interface RawSeries {
@@ -366,6 +794,8 @@ interface PlottedSeriesPoint extends RawSeriesPoint {
   x: number;
   y: number;
   isCurrent: boolean;
+  isConfirmedSource: boolean;
+  isLedgerSource: boolean;
 }
 
 interface PlottedSeries extends Omit<RawSeries, "points"> {
@@ -392,25 +822,62 @@ interface PointValueLabelLayout {
   boxY: number;
   boxWidth: number;
   boxHeight: number;
+  month?: string;
+  series?: "current" | "comparison";
+}
+
+interface FullHistoryAxisPoint {
+  month: string;
+  index: number;
+  source: MonthlyFinancialTrendPoint;
+  value: MonthlyFinancialAmount | null;
+  numericValue: number | null;
+  valueState: TrendDisplayState;
+}
+
+interface FullHistoryPlottedPoint extends FullHistoryAxisPoint {
+  value: MonthlyFinancialAmount;
+  numericValue: number;
+  x: number;
+  y: number;
+  isCurrent: boolean;
+  isConfirmedSource: boolean;
+  isLedgerSource: boolean;
+}
+
+interface FullHistoryComparisonAxisPoint extends FullHistoryAxisPoint {
+  comparisonMonth: string;
+}
+
+interface FullHistoryComparisonPlottedPoint extends FullHistoryPlottedPoint {
+  comparisonMonth: string;
 }
 
 const props = withDefaults(
   defineProps<{
     selectedYear: number;
     selectedMonth?: string;
+    fullHistory?: boolean;
+    yearComparison?: boolean;
     comparisonYear?: number | null;
     availableYears?: number[];
     points?: MonthlyFinancialTrendPoint[];
     warnings?: MonthlyFinancialTrendWarning[];
+    mainBusinessRegions?: string[];
+    mainBusinessPoints?: MonthlyFinancialMainBusinessTrendPoint[];
     loading?: boolean;
     error?: string;
   }>(),
   {
     selectedMonth: "",
+    fullHistory: false,
+    yearComparison: false,
     comparisonYear: null,
     availableYears: () => [],
     points: () => [],
     warnings: () => [],
+    mainBusinessRegions: () => [],
+    mainBusinessPoints: () => [],
     loading: false,
     error: "",
   },
@@ -418,6 +885,9 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "comparison-year-change": [year: number | null];
+  "selected-year-change": [year: number];
+  "full-history-change": [enabled: boolean];
+  "year-comparison-change": [enabled: boolean];
   retry: [];
 }>();
 
@@ -426,34 +896,53 @@ const metricOptions: TrendMetricOption[] = [
     key: "closingTotal",
     label: "期末资金",
     note: "四账户期末余额合计；已月结月份显示月结值，未月结月份显示当前值（未月结）。",
+    unit: "amount",
   },
   {
     key: "actualReceipt",
     label: "主营实际到账",
-    note: "仅统计已确认的主营业务银行实际回款，不等同于四账户结算流入。",
+    note: "仅统计已确认的主营业务银行实际回款；历史月份即使尚未建立月报，也直接显示合同已确认回款，不等同于四账户结算流入。",
+    unit: "amount",
   },
   {
     key: "settlementInflow",
     label: "四账户结算流入",
     note: "一般、商务及两个福利账户的当月结算流入合计。",
+    unit: "amount",
   },
   {
     key: "totalOutflow",
     label: "四账户结算流出",
     note: "一般、商务及两个福利账户的当月结算流出合计。",
+    unit: "amount",
   },
   {
     key: "netChange",
     label: "四账户净变化",
     note: "四账户结算流入－四账户结算流出＝期末资金－期初资金；不等于主营实际到账－结算流出，也不代表利润。",
+    unit: "amount",
+  },
+  {
+    key: "mainContractAmount",
+    label: "新增主营合同额",
+    note: "按主合同签订月份汇总当前有效合同额；补充或终止会按当前合同台账重述历史月份。",
+    unit: "amount",
+  },
+  {
+    key: "mainContractCount",
+    label: "新增主营合同数",
+    note: "按主合同签订月份统计主合同链数量；补充及终止协议不重复计数。",
+    unit: "count",
   },
 ];
 
 const activeMetricKey = ref<TrendMetricKey>("closingTotal");
 const activeMonthIndex = ref<number | null>(null);
+const activeRegion = ref("all");
 const monthNumbers = Array.from({ length: 12 }, (_item, index) => index + 1);
 const cardRef = ref<HTMLElement | null>(null);
 const canvasRef = ref<HTMLElement | null>(null);
+const historyScrollRef = ref<HTMLElement | null>(null);
 const isFullscreen = ref(false);
 const fullscreenError = ref("");
 const viewWidth = ref(900);
@@ -463,6 +952,17 @@ const plotBottom = computed(() => viewHeight.value - 58);
 const tickCount = 5;
 let resizeObserver: InstanceType<typeof globalThis.ResizeObserver> | null =
   null;
+const historyDragging = ref(false);
+const historyFirstVisibleIndex = ref(0);
+let historyPointerId: number | null = null;
+let historyPointerStartX = 0;
+let historyPointerStartScrollLeft = 0;
+let historyPointerMoved = false;
+let historySuppressClick = false;
+let historyWheelSnapTimer: ReturnType<typeof globalThis.setTimeout> | null =
+  null;
+let historyFollowLatest = true;
+let historyPendingInitialScroll = false;
 
 const plotLeft = computed(() => (viewWidth.value < 520 ? 58 : 78));
 const plotRight = computed(() => Math.max(viewWidth.value - 24, 220));
@@ -473,20 +973,134 @@ const activeMetric = computed(
     metricOptions[0],
 );
 
+const mainBusinessMetricKeys: TrendMetricKey[] = [
+  "actualReceipt",
+  "mainContractAmount",
+  "mainContractCount",
+];
+const isMainBusinessMetric = computed(() =>
+  mainBusinessMetricKeys.includes(activeMetricKey.value),
+);
+const mainBusinessSourceLegend = computed(() => {
+  if (activeMetricKey.value === "actualReceipt") {
+    return activeRegion.value === "all"
+      ? "历史缺月仅取合同已确认回款"
+      : `${activeRegion.value}合同已确认回款`;
+  }
+  return "合同额和数量按当前合同台账重述";
+});
+const regionOptions = computed(() => {
+  const regions = props.mainBusinessRegions
+    .map((region) =>
+      String(region || "")
+        .normalize("NFKC")
+        .trim(),
+    )
+    .filter(Boolean);
+  return regions
+    .filter((region, index) => regions.indexOf(region) === index)
+    .sort((left, right) => left.localeCompare(right, "zh-CN"));
+});
+
 const historyYearOptions = computed(() =>
-  [...new Set(props.availableYears)]
+  [...new globalThis.Set(props.availableYears)]
     .filter((year) => Number.isInteger(year) && year < props.selectedYear)
     .sort((left, right) => right - left),
 );
+
+const selectedYearOptions = computed(() => {
+  const years = [...props.availableYears, props.selectedYear];
+  return years
+    .filter(
+      (year, index) =>
+        Number.isInteger(year) &&
+        year >= 1900 &&
+        year <= 9999 &&
+        years.indexOf(year) === index,
+    )
+    .sort((left, right) => right - left);
+});
 
 const pointsByMonth = computed(
   () => new Map(props.points.map((point) => [point.month, point])),
 );
 
+const mainBusinessPointsByMonth = computed(() => {
+  const grouped = new Map<string, MonthlyFinancialMainBusinessTrendPoint[]>();
+  for (const point of props.mainBusinessPoints) {
+    const rows = grouped.get(point.month) || [];
+    rows.push(point);
+    grouped.set(point.month, rows);
+  }
+  return grouped;
+});
+
 function yearPoint(year: number, monthIndex: number) {
   return pointsByMonth.value.get(
     `${year}-${String(monthIndex + 1).padStart(2, "0")}`,
   );
+}
+
+function trendPointValueState(
+  point: MonthlyFinancialTrendPoint,
+  metric: TrendMetricKey,
+): TrendDisplayState {
+  if (metric === "mainContractAmount" || metric === "mainContractCount") {
+    return trendMetricValue(point, metric) === null ? null : "ledger_source";
+  }
+  if (metric === "actualReceipt" && activeRegion.value !== "all") {
+    return trendMetricValue(point, metric) === null ? null : "confirmed_source";
+  }
+  return metric === "actualReceipt"
+    ? point.actualReceiptState
+    : point.valueState;
+}
+
+function selectedMainBusinessRows(month: string) {
+  const rows = mainBusinessPointsByMonth.value.get(month) || [];
+  return activeRegion.value === "all"
+    ? rows
+    : rows.filter((row) => row.region === activeRegion.value);
+}
+
+function aggregateMainBusinessAmount(
+  rows: MonthlyFinancialMainBusinessTrendPoint[],
+  field: "actualReceipt" | "contractAmount",
+): MonthlyFinancialAmount | null {
+  if (!rows.length || rows.some((row) => row[field] === null)) return null;
+  return rows.reduce(
+    (sum, row) => addFinancialAmountTexts(sum, String(row[field] || "0")),
+    "0",
+  );
+}
+
+function trendMetricValue(
+  point: MonthlyFinancialTrendPoint,
+  metric: TrendMetricKey,
+): MonthlyFinancialAmount | null {
+  if (metric === "actualReceipt") {
+    if (activeRegion.value === "all") return point.actualReceipt;
+    return aggregateMainBusinessAmount(
+      selectedMainBusinessRows(point.month),
+      "actualReceipt",
+    );
+  }
+  if (metric === "mainContractAmount") {
+    return aggregateMainBusinessAmount(
+      selectedMainBusinessRows(point.month),
+      "contractAmount",
+    );
+  }
+  if (metric === "mainContractCount") {
+    const rows = selectedMainBusinessRows(point.month);
+    if (!rows.length || rows.some((row) => row.contractCount === null)) {
+      return null;
+    }
+    return String(
+      rows.reduce((sum, row) => sum + Number(row.contractCount || 0), 0),
+    );
+  }
+  return point[metric];
 }
 
 function buildRawSeries(
@@ -498,11 +1112,17 @@ function buildRawSeries(
   for (let index = 0; index < 12; index += 1) {
     const source = yearPoint(year, index);
     if (!source) continue;
-    const value = source[activeMetricKey.value];
+    const value = trendMetricValue(source, activeMetricKey.value);
     if (value === null || value === undefined || !isAmountText(value)) continue;
     const numericValue = Number(value);
     if (!Number.isFinite(numericValue)) continue;
-    points.push({ index, value, numericValue, source });
+    points.push({
+      index,
+      value,
+      numericValue,
+      source,
+      valueState: trendPointValueState(source, activeMetricKey.value),
+    });
   }
   return {
     key: history ? `history-${year}` : `selected-${year}`,
@@ -525,13 +1145,297 @@ const rawSeries = computed<RawSeries[]>(() => {
   return series;
 });
 
+const fullHistoryAxis = computed<FullHistoryAxisPoint[]>(() => {
+  const sorted = [...props.points]
+    .filter((point) => /^\d{4}-(0[1-9]|1[0-2])$/u.test(point.month))
+    .sort((left, right) => left.month.localeCompare(right.month));
+  const mapped = sorted.map((source) => {
+    const value = trendMetricValue(source, activeMetricKey.value);
+    const valid =
+      value !== null &&
+      value !== undefined &&
+      isAmountText(String(value)) &&
+      Number.isFinite(Number(value));
+    return {
+      month: source.month,
+      index: 0,
+      source,
+      value: valid ? value : null,
+      numericValue: valid ? Number(value) : null,
+      valueState: trendPointValueState(source, activeMetricKey.value),
+    };
+  });
+  const first = mapped.findIndex((point) => point.value !== null);
+  const last = mapped.findLastIndex((point) => point.value !== null);
+  if (first < 0 || last < first) return [];
+  return mapped
+    .slice(first, last + 1)
+    .map((point, index) => ({ ...point, index }));
+});
+
+const fullHistoryRangeLabel = computed(() => {
+  const firstMonth = fullHistoryAxis.value[0]?.month;
+  const lastMonth = fullHistoryAxis.value.at(-1)?.month;
+  if (!firstMonth || !lastMonth) return `${props.selectedYear}年`;
+  const formatMonth = (month: string) => {
+    const [year, monthNumber] = month.split("-");
+    return `${year}年${Number(monthNumber)}月`;
+  };
+  return `${formatMonth(firstMonth)}—${formatMonth(lastMonth)}`;
+});
+
+const fullHistoryComparisonAxis = computed<FullHistoryComparisonAxisPoint[]>(
+  () => {
+    if (!props.yearComparison) return [];
+    return fullHistoryAxis.value.flatMap((target) => {
+      const comparisonMonth = shiftMonthKey(target.month, -12);
+      const source = pointsByMonth.value.get(comparisonMonth);
+      if (!source) return [];
+      const value = trendMetricValue(source, activeMetricKey.value);
+      const valid =
+        value !== null &&
+        value !== undefined &&
+        isAmountText(String(value)) &&
+        Number.isFinite(Number(value));
+      return [
+        {
+          month: target.month,
+          comparisonMonth,
+          index: target.index,
+          source,
+          value: valid ? value : null,
+          numericValue: valid ? Number(value) : null,
+          valueState: valid
+            ? trendPointValueState(source, activeMetricKey.value)
+            : null,
+        },
+      ];
+    });
+  },
+);
+
+const fullHistoryViewportWidth = computed(() =>
+  Math.max(viewWidth.value - 70, 280),
+);
+const fullHistoryMonthWidth = computed(() =>
+  Math.max(48, (fullHistoryViewportWidth.value - 54) / 11),
+);
+const fullHistoryCanvasWidth = computed(() =>
+  Math.max(
+    fullHistoryViewportWidth.value,
+    54 +
+      Math.max(fullHistoryAxis.value.length - 1, 0) *
+        fullHistoryMonthWidth.value,
+  ),
+);
+const fullHistoryPlotLeft = 20;
+const fullHistoryPlotRight = computed(() =>
+  Math.max(fullHistoryCanvasWidth.value - 34, fullHistoryPlotLeft + 1),
+);
+
+function getFullHistoryX(index: number) {
+  if (fullHistoryAxis.value.length <= 1) return fullHistoryPlotLeft;
+  return (
+    fullHistoryPlotLeft +
+    ((fullHistoryPlotRight.value - fullHistoryPlotLeft) * index) /
+      (fullHistoryAxis.value.length - 1)
+  );
+}
+
+const fullHistoryNumericValues = computed(() => [
+  ...fullHistoryAxis.value.flatMap((point) =>
+    point.numericValue === null ? [] : [point.numericValue],
+  ),
+  ...fullHistoryComparisonAxis.value.flatMap((point) =>
+    point.numericValue === null ? [] : [point.numericValue],
+  ),
+]);
+
+const fullHistoryAxisRange = computed(() => {
+  if (fullHistoryNumericValues.value.length === 0) return { min: 0, max: 1 };
+  const rawMinimum = Math.min(...fullHistoryNumericValues.value, 0);
+  const rawMaximum = Math.max(...fullHistoryNumericValues.value, 0);
+  const rawSpan = rawMaximum - rawMinimum;
+  const safeSpan =
+    rawSpan === 0
+      ? Math.max(Math.abs(rawMaximum), Math.abs(rawMinimum), 1)
+      : rawSpan;
+  const step = niceNumber((safeSpan * 1.08) / (tickCount - 1));
+  if (rawMinimum >= 0) return { min: 0, max: step * (tickCount - 1) };
+  if (rawMaximum <= 0) return { min: -step * (tickCount - 1), max: 0 };
+  let minimum = Math.floor(rawMinimum / step) * step;
+  let maximum = minimum + step * (tickCount - 1);
+  if (maximum < rawMaximum) {
+    maximum = Math.ceil(rawMaximum / step) * step;
+    minimum = maximum - step * (tickCount - 1);
+  }
+  return { min: minimum, max: maximum };
+});
+
+function getFullHistoryY(value: number) {
+  const { min, max } = fullHistoryAxisRange.value;
+  const ratio = (value - min) / Math.max(max - min, 1);
+  return plotBottom.value - ratio * (plotBottom.value - plotTop);
+}
+
+const fullHistoryYTicks = computed(() => {
+  const { min, max } = fullHistoryAxisRange.value;
+  return Array.from({ length: tickCount }, (_item, index) => {
+    const ratio = index / (tickCount - 1);
+    return {
+      value: max - (max - min) * ratio,
+      y: plotTop + (plotBottom.value - plotTop) * ratio,
+    };
+  });
+});
+
+const fullHistoryPlottedPoints = computed<FullHistoryPlottedPoint[]>(() =>
+  fullHistoryAxis.value.flatMap((point) => {
+    if (
+      point.value === null ||
+      point.numericValue === null ||
+      point.valueState === null
+    ) {
+      return [];
+    }
+    return [
+      {
+        ...point,
+        value: point.value,
+        numericValue: point.numericValue,
+        x: getFullHistoryX(point.index),
+        y: getFullHistoryY(point.numericValue),
+        isCurrent: point.valueState === "current",
+        isConfirmedSource: point.valueState === "confirmed_source",
+        isLedgerSource: point.valueState === "ledger_source",
+      },
+    ];
+  }),
+);
+
+const fullHistoryComparisonPlottedPoints = computed<
+  FullHistoryComparisonPlottedPoint[]
+>(() =>
+  fullHistoryComparisonAxis.value.flatMap((point) => {
+    if (
+      point.value === null ||
+      point.numericValue === null ||
+      point.valueState === null
+    ) {
+      return [];
+    }
+    return [
+      {
+        ...point,
+        value: point.value,
+        numericValue: point.numericValue,
+        x: getFullHistoryX(point.index),
+        y: getFullHistoryY(point.numericValue),
+        isCurrent: point.valueState === "current",
+        isConfirmedSource: point.valueState === "confirmed_source",
+        isLedgerSource: point.valueState === "ledger_source",
+      },
+    ];
+  }),
+);
+
+function buildFullHistoryEdges(points: FullHistoryPlottedPoint[]) {
+  const edges: Array<{
+    fromMonth: string;
+    toMonth: string;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  }> = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1]!;
+    const current = points[index]!;
+    if (current.index !== previous.index + 1) continue;
+    edges.push({
+      fromMonth: previous.month,
+      toMonth: current.month,
+      x1: previous.x,
+      y1: previous.y,
+      x2: current.x,
+      y2: current.y,
+    });
+  }
+  return edges;
+}
+
+const fullHistoryEdges = computed(() =>
+  buildFullHistoryEdges(fullHistoryPlottedPoints.value),
+);
+const fullHistoryComparisonEdges = computed(() =>
+  buildFullHistoryEdges(fullHistoryComparisonPlottedPoints.value),
+);
+
+const fullHistoryActiveMonth = ref<string | null>(null);
+const fullHistoryActiveAxisPoint = computed(
+  () =>
+    fullHistoryAxis.value.find(
+      (point) => point.month === fullHistoryActiveMonth.value,
+    ) ||
+    fullHistoryAxis.value.at(-1) ||
+    null,
+);
+const fullHistoryComparisonActiveAxisPoint = computed(
+  () =>
+    fullHistoryComparisonAxis.value.find(
+      (point) => point.month === fullHistoryActiveAxisPoint.value?.month,
+    ) || null,
+);
+const fullHistoryComparisonActiveMonth = computed(() => {
+  const month = fullHistoryActiveAxisPoint.value?.month;
+  return month ? shiftMonthKey(month, -12) : "未知月份";
+});
+
+function trendStateLabel(state: TrendDisplayState) {
+  if (state === "closed") return "月结值";
+  if (state === "current") return "当前值（未月结）";
+  if (state === "confirmed_source") return "合同已确认回款";
+  if (state === "ledger_source") return "合同台账当前值";
+  return "无数据";
+}
+
+function trendStateClass(state: TrendDisplayState) {
+  if (state === "closed") return "is-closed";
+  if (state === "current") return "is-current";
+  if (state === "confirmed_source") return "is-confirmed-source";
+  if (state === "ledger_source") return "is-ledger-source";
+  return "is-missing";
+}
+
+const fullHistoryActiveStateLabel = computed(() =>
+  trendStateLabel(fullHistoryActiveAxisPoint.value?.valueState || null),
+);
+
+const fullHistoryActiveStateClass = computed(() =>
+  trendStateClass(fullHistoryActiveAxisPoint.value?.valueState || null),
+);
+const fullHistoryComparisonActiveStateLabel = computed(() =>
+  trendStateLabel(
+    fullHistoryComparisonActiveAxisPoint.value?.valueState || null,
+  ),
+);
+const fullHistoryComparisonActiveStateClass = computed(() =>
+  trendStateClass(
+    fullHistoryComparisonActiveAxisPoint.value?.valueState || null,
+  ),
+);
+
 const numericValues = computed(() =>
   rawSeries.value.flatMap((series) =>
     series.points.map((point) => point.numericValue),
   ),
 );
 
-const hasData = computed(() => numericValues.value.length > 0);
+const hasData = computed(() =>
+  props.fullHistory
+    ? fullHistoryNumericValues.value.length > 0
+    : numericValues.value.length > 0,
+);
 
 const axisRange = computed(() => {
   if (!hasData.value) return { min: 0, max: 1 };
@@ -600,7 +1504,9 @@ const plottedSeries = computed<PlottedSeries[]>(() =>
       ...point,
       x: getX(point.index),
       y: getY(point.numericValue),
-      isCurrent: point.source.valueState === "current",
+      isCurrent: point.valueState === "current",
+      isConfirmedSource: point.valueState === "confirmed_source",
+      isLedgerSource: point.valueState === "ledger_source",
     }));
     const edges: PlottedSeries["edges"] = [];
     for (let index = 1; index < points.length; index += 1) {
@@ -678,7 +1584,7 @@ const pointValueLabels = computed<PointValueLabelLayout[]>(() => {
   const maximumY = plotBottom.value - 14;
 
   for (const { series, point } of seeds) {
-    const text = formatExactAmount(point.value);
+    const text = formatMetricValue(point.value);
     const anchor = pointValueLabelAnchor(point.index);
     const boxHeight = 20;
     const boxWidth = Math.max(48, text.length * 7 + 12);
@@ -738,9 +1644,120 @@ const pointValueLabels = computed<PointValueLabelLayout[]>(() => {
   return placed;
 });
 
+const fullHistoryVisibleStartIndex = computed(() =>
+  Math.min(
+    Math.max(fullHistoryAxis.value.length - 12, 0),
+    Math.max(historyFirstVisibleIndex.value, 0),
+  ),
+);
+const fullHistoryVisibleEndIndex = computed(() =>
+  Math.min(
+    fullHistoryAxis.value.length - 1,
+    fullHistoryVisibleStartIndex.value + 11,
+  ),
+);
+
+const fullHistoryPointValueLabels = computed<PointValueLabelLayout[]>(() => {
+  const startIndex = fullHistoryVisibleStartIndex.value;
+  const endIndex = fullHistoryVisibleEndIndex.value;
+  const seeds = [
+    ...fullHistoryPlottedPoints.value
+      .filter((point) => point.index >= startIndex && point.index <= endIndex)
+      .map((point) => ({ point, history: false, color: "#167c84" })),
+    ...fullHistoryComparisonPlottedPoints.value
+      .filter((point) => point.index >= startIndex && point.index <= endIndex)
+      .map((point) => ({ point, history: true, color: "#7686a1" })),
+  ].sort((left, right) => {
+    const activeIndex = fullHistoryActiveAxisPoint.value?.index;
+    const leftActive = left.point.index === activeIndex ? 0 : 1;
+    const rightActive = right.point.index === activeIndex ? 0 : 1;
+    if (leftActive !== rightActive) return leftActive - rightActive;
+    if (left.point.index !== right.point.index) {
+      return left.point.index - right.point.index;
+    }
+    return Number(left.history) - Number(right.history);
+  });
+  const allPoints = seeds.map((seed) => seed.point);
+  const placed: PointValueLabelLayout[] = [];
+  const minimumY = 18;
+  const maximumY = plotBottom.value - 14;
+
+  for (const { point, history, color } of seeds) {
+    const text = formatMetricValue(point.value);
+    const anchor =
+      point.index === startIndex
+        ? "start"
+        : point.index === endIndex
+          ? "end"
+          : "middle";
+    const boxHeight = 20;
+    const boxWidth = Math.max(48, text.length * 7 + 12);
+    const counterpart = seeds.find(
+      (candidate) =>
+        candidate.history !== history && candidate.point.index === point.index,
+    )?.point;
+    const preferredDirection =
+      !counterpart || Math.abs(point.y - counterpart.y) < 1
+        ? history
+          ? 1
+          : -1
+        : point.y < counterpart.y
+          ? -1
+          : 1;
+    const offsets = [24, 46, 68, 90, 112];
+    const preferredCandidates = [
+      ...offsets.map((offset) => point.y + preferredDirection * offset),
+      ...offsets.map((offset) => point.y - preferredDirection * offset),
+    ];
+    const scanCandidates = Array.from(
+      { length: Math.floor((maximumY - minimumY) / 18) + 1 },
+      (_item, index) => minimumY + index * 18,
+    ).sort((left, right) => {
+      const preferredY = point.y + preferredDirection * offsets[0];
+      return Math.abs(left - preferredY) - Math.abs(right - preferredY);
+    });
+    const yCandidates = [...preferredCandidates, ...scanCandidates]
+      .filter((value) => value >= minimumY && value <= maximumY)
+      .filter((value, index, values) => values.indexOf(value) === index);
+    const candidates = yCandidates.map<PointValueLabelLayout>((y) => ({
+      key: `full-${history ? "history" : "current"}-${point.month}`,
+      text,
+      color,
+      history,
+      x: point.x,
+      y,
+      anchor,
+      boxX: pointValueLabelBoxX(point.x, boxWidth, anchor),
+      boxY: y - 14,
+      boxWidth,
+      boxHeight,
+      month: point.month,
+      series: history ? "comparison" : "current",
+    }));
+    const cleanCandidate = candidates.find(
+      (candidate) =>
+        !placed.some((label) =>
+          pointValueLabelBoxesOverlap(candidate, label),
+        ) &&
+        !allPoints.some((candidatePoint) =>
+          pointValueLabelCoversPoint(candidate, candidatePoint),
+        ),
+    );
+    const fallbackCandidate = candidates.find(
+      (candidate) =>
+        !placed.some((label) => pointValueLabelBoxesOverlap(candidate, label)),
+    );
+    const selectedCandidate =
+      cleanCandidate || fallbackCandidate || candidates[0];
+    if (selectedCandidate) placed.push(selectedCandidate);
+  }
+
+  return placed;
+});
+
 const availableMonthIndexes = computed(
   () =>
-    new Set(
+    new globalThis.Set(
       rawSeries.value.flatMap((series) =>
         series.points.map((point) => point.index),
       ),
@@ -754,7 +1771,7 @@ watch(
       props.selectedMonth,
       props.selectedYear,
     );
-    if (monthIndex !== null) activeMonthIndex.value = monthIndex;
+    activeMonthIndex.value = monthIndex;
   },
   { immediate: true },
 );
@@ -767,6 +1784,46 @@ watch(
     activeMonthIndex.value = indexes.length > 0 ? Math.max(...indexes) : 0;
   },
   { immediate: true, deep: true },
+);
+
+watch(
+  [() => props.fullHistory, fullHistoryAxis, activeMetricKey],
+  ([enabled]) => {
+    if (!enabled) return;
+    const availableMonths = new globalThis.Set(
+      fullHistoryPlottedPoints.value.map((point) => point.month),
+    );
+    if (
+      !fullHistoryActiveMonth.value ||
+      !availableMonths.has(fullHistoryActiveMonth.value)
+    ) {
+      fullHistoryActiveMonth.value =
+        fullHistoryPlottedPoints.value.at(-1)?.month || null;
+    }
+    if (historyPendingInitialScroll || historyFollowLatest) {
+      scrollFullHistoryToLatest();
+    }
+  },
+  { immediate: true, deep: true },
+);
+
+watch(
+  () => props.fullHistory,
+  (enabled) => {
+    historyPendingInitialScroll = enabled;
+    if (enabled) activeMetricKey.value = "actualReceipt";
+  },
+  { immediate: true },
+);
+
+watch(
+  regionOptions,
+  (regions) => {
+    if (activeRegion.value !== "all" && !regions.includes(activeRegion.value)) {
+      activeRegion.value = "all";
+    }
+  },
+  { immediate: true },
 );
 
 const activeMonthDetail = computed(() => {
@@ -789,9 +1846,13 @@ const activeMonthDetail = computed(() => {
         ]),
   ].map((series) => {
     const point = yearPoint(series.year, index);
-    const value = point?.[activeMetricKey.value] ?? null;
+    const value = point ? trendMetricValue(point, activeMetricKey.value) : null;
     const available = value !== null && value !== undefined;
-    const valueState = available ? point?.valueState : null;
+    const valueState = available
+      ? point
+        ? trendPointValueState(point, activeMetricKey.value)
+        : null
+      : null;
     return {
       ...series,
       value,
@@ -800,13 +1861,21 @@ const activeMonthDetail = computed(() => {
           ? "closed"
           : valueState === "current"
             ? "current"
-            : "missing",
+            : valueState === "confirmed_source"
+              ? "confirmed-source"
+              : valueState === "ledger_source"
+                ? "ledger-source"
+                : "missing",
       stateLabel:
         valueState === "closed"
           ? "月结值"
           : valueState === "current"
             ? "当前值（未月结）"
-            : "无数据",
+            : valueState === "confirmed_source"
+              ? "合同已确认回款"
+              : valueState === "ledger_source"
+                ? "合同台账当前值"
+                : "无数据",
     };
   });
   return {
@@ -834,7 +1903,7 @@ const hoverBands = computed(() =>
 
 const warningText = computed(() => {
   const messages = [
-    ...new Set(props.warnings.map((warning) => warning.message)),
+    ...new globalThis.Set(props.warnings.map((warning) => warning.message)),
   ];
   if (messages.length === 0) return "";
   return messages.length > 2
@@ -850,9 +1919,158 @@ const chartAriaLabel = computed(() => {
   return `${props.selectedYear}年${activeMetric.value.label}月度折线图，${history}；缺失月份保持断点`;
 });
 
+const fullHistoryAriaLabel = computed(() => {
+  const first = fullHistoryAxis.value[0]?.month || "未知月份";
+  const last = fullHistoryAxis.value.at(-1)?.month || "未知月份";
+  const comparison = props.yearComparison ? "，并显示上年同期" : "";
+  return `${first}至${last}${activeMetric.value.label}完整历史折线图${comparison}，可横向浏览`;
+});
+
 function selectMonth(index: number) {
   if (!Number.isInteger(index) || index < 0 || index > 11) return;
   activeMonthIndex.value = index;
+}
+
+function selectFullHistoryMonth(month: string) {
+  if (historySuppressClick) return;
+  if (!fullHistoryAxis.value.some((point) => point.month === month)) return;
+  fullHistoryActiveMonth.value = month;
+}
+
+function scrollFullHistoryToLatest() {
+  void nextTick(() => {
+    const element = historyScrollRef.value;
+    if (!element) return;
+    element.scrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+    historyFollowLatest = true;
+    historyPendingInitialScroll = false;
+    handleHistoryScroll();
+  });
+}
+
+function snapFullHistoryScroll() {
+  const element = historyScrollRef.value;
+  if (!element || fullHistoryMonthWidth.value <= 0) return;
+  const maximum = Math.max(0, element.scrollWidth - element.clientWidth);
+  const snapped =
+    Math.round(element.scrollLeft / fullHistoryMonthWidth.value) *
+    fullHistoryMonthWidth.value;
+  element.scrollLeft = Math.min(maximum, Math.max(0, snapped));
+  handleHistoryScroll();
+}
+
+function handleHistoryScroll() {
+  const element = historyScrollRef.value;
+  if (!element) return;
+  const maximum = Math.max(0, element.scrollWidth - element.clientWidth);
+  const maximumStartIndex = Math.max(fullHistoryAxis.value.length - 12, 0);
+  historyFirstVisibleIndex.value = Math.min(
+    maximumStartIndex,
+    Math.max(0, Math.round(element.scrollLeft / fullHistoryMonthWidth.value)),
+  );
+  historyFollowLatest =
+    maximum - element.scrollLeft <= fullHistoryMonthWidth.value / 2;
+}
+
+function handleHistoryPointerDown(event: globalThis.PointerEvent) {
+  if (event.button !== 0) return;
+  const element = historyScrollRef.value;
+  if (!element) return;
+  historyPointerId = event.pointerId;
+  historyPointerStartX = event.clientX;
+  historyPointerStartScrollLeft = element.scrollLeft;
+  historyPointerMoved = false;
+  element.setPointerCapture?.(event.pointerId);
+}
+
+function handleHistoryPointerMove(event: globalThis.PointerEvent) {
+  if (historyPointerId !== event.pointerId) return;
+  const element = historyScrollRef.value;
+  if (!element) return;
+  const distance = event.clientX - historyPointerStartX;
+  if (!historyPointerMoved && Math.abs(distance) < 5) return;
+  historyPointerMoved = true;
+  historyDragging.value = true;
+  element.scrollLeft = historyPointerStartScrollLeft - distance;
+  handleHistoryScroll();
+}
+
+function finishHistoryPointer(event: globalThis.PointerEvent) {
+  if (historyPointerId !== event.pointerId) return;
+  const element = historyScrollRef.value;
+  if (element?.hasPointerCapture?.(event.pointerId)) {
+    element.releasePointerCapture(event.pointerId);
+  }
+  historyPointerId = null;
+  historyDragging.value = false;
+  if (historyPointerMoved) {
+    historySuppressClick = true;
+    globalThis.setTimeout(() => {
+      historySuppressClick = false;
+    }, 0);
+  }
+  snapFullHistoryScroll();
+}
+
+function handleHistoryWheel(event: globalThis.WheelEvent) {
+  if (event.ctrlKey || event.metaKey) return;
+  const element = historyScrollRef.value;
+  if (!element) return;
+  const delta =
+    Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.deltaY;
+  if (delta === 0) return;
+  const maximum = Math.max(0, element.scrollWidth - element.clientWidth);
+  if (
+    (delta < 0 && element.scrollLeft <= 0) ||
+    (delta > 0 && element.scrollLeft >= maximum)
+  ) {
+    return;
+  }
+  event.preventDefault();
+  element.scrollLeft = Math.min(
+    maximum,
+    Math.max(0, element.scrollLeft + delta),
+  );
+  handleHistoryScroll();
+  if (historyWheelSnapTimer !== null) {
+    globalThis.clearTimeout(historyWheelSnapTimer);
+  }
+  historyWheelSnapTimer = globalThis.setTimeout(() => {
+    historyWheelSnapTimer = null;
+    snapFullHistoryScroll();
+  }, 140);
+}
+
+function handleHistoryKeydown(event: KeyboardEvent) {
+  if (!fullHistoryAxis.value.length) return;
+  const currentIndex = Math.max(
+    0,
+    fullHistoryAxis.value.findIndex(
+      (point) => point.month === fullHistoryActiveAxisPoint.value?.month,
+    ),
+  );
+  let nextIndex = currentIndex;
+  if (event.key === "ArrowLeft") nextIndex -= 1;
+  else if (event.key === "ArrowRight") nextIndex += 1;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = fullHistoryAxis.value.length - 1;
+  else if (event.key === "PageUp") nextIndex -= 6;
+  else if (event.key === "PageDown") nextIndex += 6;
+  else return;
+  event.preventDefault();
+  nextIndex = Math.min(
+    fullHistoryAxis.value.length - 1,
+    Math.max(0, nextIndex),
+  );
+  fullHistoryActiveMonth.value = fullHistoryAxis.value[nextIndex]!.month;
+  const element = historyScrollRef.value;
+  if (element) {
+    const x = getFullHistoryX(nextIndex);
+    element.scrollLeft = Math.max(0, x - element.clientWidth / 2);
+    handleHistoryScroll();
+  }
 }
 
 function handleViewMonthChange(value: unknown) {
@@ -871,8 +2089,63 @@ function handleComparisonYearChange(value: unknown) {
   );
 }
 
+function handleSelectedYearChange(value: unknown) {
+  const year = Number(value);
+  if (!Number.isInteger(year) || !selectedYearOptions.value.includes(year)) {
+    return;
+  }
+  emit("selected-year-change", year);
+}
+
+function handleRegionChange(value: unknown) {
+  const region = String(value || "")
+    .normalize("NFKC")
+    .trim();
+  if (region === "all" || regionOptions.value.includes(region)) {
+    activeRegion.value = region;
+  }
+}
+
 function pointAriaLabel(series: PlottedSeries, point: PlottedSeriesPoint) {
-  return `${series.year}年${point.index + 1}月，${activeMetric.value.label}${formatExactAmount(point.value)}，${point.isCurrent ? "当前值（未月结）" : "月结值"}`;
+  const stateLabel = point.isConfirmedSource
+    ? "合同已确认回款"
+    : point.isLedgerSource
+      ? "合同台账当前值"
+      : point.isCurrent
+        ? "当前值（未月结）"
+        : "月结值";
+  return `${series.year}年${point.index + 1}月，${activeMetric.value.label}${formatMetricValue(point.value)}，${stateLabel}`;
+}
+
+function fullHistoryPointAriaLabel(point: FullHistoryPlottedPoint) {
+  const stateLabel = point.isConfirmedSource
+    ? "合同已确认回款"
+    : point.isLedgerSource
+      ? "合同台账当前值"
+      : point.isCurrent
+        ? "当前值（未月结）"
+        : "月结值";
+  return `${point.month}，${activeMetric.value.label}${formatMetricValue(point.value)}，${stateLabel}`;
+}
+
+function fullHistoryComparisonPointAriaLabel(
+  point: FullHistoryComparisonPlottedPoint,
+) {
+  const stateLabel = trendStateLabel(point.valueState);
+  return `横轴${point.month}，上年同期${point.comparisonMonth}，${activeMetric.value.label}${formatMetricValue(point.value)}，${stateLabel}`;
+}
+
+function formatFullHistoryMonth(month: string) {
+  const [year, monthNumber] = month.split("-");
+  return monthNumber === "01" ? `${year}/01` : `${Number(monthNumber)}月`;
+}
+
+function shiftMonthKey(month: string, offset: number) {
+  const [yearText, monthText] = month.split("-");
+  const absoluteMonth = Number(yearText) * 12 + Number(monthText) - 1 + offset;
+  const year = Math.floor(absoluteMonth / 12);
+  const monthNumber = (absoluteMonth % 12) + 1;
+  return `${year}-${String(monthNumber).padStart(2, "0")}`;
 }
 
 function monthIndexForYear(month: string, year: number): number | null {
@@ -886,12 +2159,15 @@ function isAmountText(value: string) {
 }
 
 function formatExactAmount(value: MonthlyFinancialAmount | null | undefined) {
-  if (value === null || value === undefined || value === "") return "—";
-  const text = String(value).trim();
-  const match = text.match(/^([+-]?)(\d+)(\.\d+)?$/);
-  if (!match) return text;
-  const integer = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return `¥${match[1]}${integer}${match[3] || ""}`;
+  return formatMonthlyFinancialAmount(value);
+}
+
+function formatMetricValue(value: MonthlyFinancialAmount | null | undefined) {
+  if (activeMetric.value.unit === "count") {
+    if (value === null || value === undefined || value === "") return "—";
+    return `${Number(value).toLocaleString("zh-CN")}组`;
+  }
+  return formatExactAmount(value);
 }
 
 function niceNumber(value: number) {
@@ -918,6 +2194,12 @@ function formatAxisAmount(value: number) {
   return trimAxisValue(value);
 }
 
+function formatAxisValue(value: number) {
+  return activeMetric.value.unit === "count"
+    ? trimAxisValue(value)
+    : formatAxisAmount(value);
+}
+
 function trimAxisValue(value: number) {
   return Number(value.toFixed(1)).toString();
 }
@@ -927,6 +2209,13 @@ function isZero(value: number) {
 }
 
 function updateCanvasSize(width: number) {
+  const historyElement = historyScrollRef.value;
+  const previousMonthWidth = fullHistoryMonthWidth.value;
+  const firstVisibleMonthIndex =
+    props.fullHistory && historyElement && previousMonthWidth > 0
+      ? Math.round(historyElement.scrollLeft / previousMonthWidth)
+      : null;
+  const shouldFollowLatest = historyFollowLatest;
   const normalizedWidth = Math.max(Math.round(width), 280);
   viewWidth.value = normalizedWidth;
   if (isFullscreen.value && typeof window !== "undefined") {
@@ -934,16 +2223,28 @@ function updateCanvasSize(width: number) {
       500,
       Math.min(Math.round(window.innerHeight - 420), 680),
     );
-    return;
+  } else {
+    viewHeight.value =
+      normalizedWidth < 520
+        ? 340
+        : normalizedWidth < 800
+          ? 390
+          : normalizedWidth < 1280
+            ? 440
+            : 500;
   }
-  viewHeight.value =
-    normalizedWidth < 520
-      ? 340
-      : normalizedWidth < 800
-        ? 390
-        : normalizedWidth < 1280
-          ? 440
-          : 500;
+  if (props.fullHistory && firstVisibleMonthIndex !== null) {
+    void nextTick(() => {
+      const element = historyScrollRef.value;
+      if (!element) return;
+      if (shouldFollowLatest) {
+        scrollFullHistoryToLatest();
+        return;
+      }
+      element.scrollLeft = firstVisibleMonthIndex * fullHistoryMonthWidth.value;
+      handleHistoryScroll();
+    });
+  }
 }
 
 function measureCanvas(element: HTMLElement) {
@@ -1018,6 +2319,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  if (historyWheelSnapTimer !== null) {
+    globalThis.clearTimeout(historyWheelSnapTimer);
+    historyWheelSnapTimer = null;
+  }
   resizeObserver?.disconnect();
   resizeObserver = null;
 });
@@ -1096,7 +2401,9 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.view-year-select,
 .view-month-select,
+.region-select,
 .history-year-select {
   display: grid;
   width: 150px;
@@ -1105,11 +2412,14 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.view-year-select :deep(.el-select),
 .view-month-select :deep(.el-select),
+.region-select :deep(.el-select),
 .history-year-select :deep(.el-select) {
   width: 100%;
 }
 
+.history-mode-toggle,
 .fullscreen-toggle {
   display: inline-flex;
   min-width: 104px;
@@ -1132,12 +2442,15 @@ onBeforeUnmount(() => {
     color 160ms ease;
 }
 
-.fullscreen-toggle:hover {
+.history-mode-toggle:hover,
+.fullscreen-toggle:hover,
+.history-mode-toggle.is-active {
   border-color: #167c84;
   background: #eef8f8;
   color: #125f66;
 }
 
+.history-mode-toggle:focus-visible,
 .fullscreen-toggle:focus-visible {
   outline: 3px solid rgb(22 124 132 / 18%);
   outline-offset: 2px;
@@ -1248,6 +2561,14 @@ onBeforeUnmount(() => {
   background: #ffffff;
 }
 
+.confirmed-source-legend i {
+  width: 9px;
+  height: 9px;
+  border: 2px solid #167c84;
+  border-radius: 3px;
+  background: #167c84;
+}
+
 .trend-warning {
   margin-top: 8px;
   padding: 9px 12px;
@@ -1342,6 +2663,85 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
   margin-top: 8px;
+}
+
+.full-history-shell {
+  display: grid;
+  min-width: 0;
+  margin-top: 8px;
+  grid-template-columns: 70px minmax(0, 1fr);
+}
+
+.full-history-y-axis {
+  position: relative;
+  z-index: 2;
+  border-right: 1px solid #dfe8e9;
+  background: #ffffff;
+}
+
+.full-history-y-axis span {
+  position: absolute;
+  right: 10px;
+  color: #81909a;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.full-history-scroll {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  cursor: grab;
+  overscroll-behavior-x: contain;
+  scrollbar-color: #a9c5c8 #eef4f4;
+  scrollbar-width: thin;
+  touch-action: pan-y;
+}
+
+.full-history-scroll.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.full-history-scroll:focus-visible {
+  outline: 3px solid rgb(22 124 132 / 18%);
+  outline-offset: 2px;
+}
+
+.full-history-svg {
+  max-width: none;
+  overflow: hidden;
+}
+
+.full-history-month-grid line {
+  stroke: #eff4f4;
+  stroke-width: 1;
+}
+
+.full-history-month-grid line.is-year-boundary {
+  stroke: #cbdcde;
+  stroke-width: 1.4;
+}
+
+.full-history-month-grid text {
+  fill: #81909a;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.full-history-hint {
+  margin: 8px 0 0 70px;
+  color: #71808b;
+  font-size: 12px;
+}
+
+.full-history-inspector {
+  grid-template-columns: minmax(140px, 0.7fr) minmax(220px, 1fr);
+}
+
+.full-history-inspector.has-comparison {
+  grid-template-columns: minmax(140px, 0.7fr) repeat(2, minmax(220px, 1fr));
 }
 
 .trend-svg {
@@ -1528,6 +2928,16 @@ onBeforeUnmount(() => {
   color: #9a6a09;
 }
 
+.month-inspector small.is-confirmed-source {
+  background: #e7f5f4;
+  color: #167c84;
+}
+
+.month-inspector small.is-ledger-source {
+  background: #eef0fb;
+  color: #4f5f9d;
+}
+
 .month-inspector small.is-missing {
   background: #edf1f3;
   color: #7b8790;
@@ -1592,11 +3002,14 @@ onBeforeUnmount(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .view-year-select,
   .view-month-select,
+  .region-select,
   .history-year-select {
     width: 100%;
   }
 
+  .history-mode-toggle,
   .fullscreen-toggle {
     width: 100%;
   }
@@ -1612,6 +3025,14 @@ onBeforeUnmount(() => {
 
   .month-inspector {
     grid-template-columns: 1fr;
+  }
+
+  .full-history-shell {
+    grid-template-columns: 58px minmax(0, 1fr);
+  }
+
+  .full-history-hint {
+    margin-left: 58px;
   }
 
   .inspector-heading {

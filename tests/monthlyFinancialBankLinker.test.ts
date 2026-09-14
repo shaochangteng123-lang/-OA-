@@ -470,18 +470,28 @@ describe("月报银行回单替换链接调用与合同预览契约", () => {
     expect(guard).not.toContain('"internal_transfer"');
   });
 
-  it("同月回单合计尚未闭合时仍逐笔挂载，不等待整组金额凑齐", () => {
+  it("主营回款和资产付款分别进入自动补全桥，不等待人工重复上传", () => {
     expect(monthlyBankLinkerSource).toContain(
       '(!groupResult || groupResult.status === "pending")',
     );
     expect(monthlyBankLinkerSource).toContain(
       "bridgeMonthlyBankTransactionToContractRegistration",
     );
+    expect(monthlyBankLinkerSource).toContain(
+      "bridgeMonthlyBankAssetPaymentToContractRegistration",
+    );
+    expect(monthlyBankLinkerSource).toContain(
+      'transaction.direction === "outflow"',
+    );
+    expect(monthlyBankLinkerSource).toContain(
+      '["asset_expense", "unclassified"].includes(transaction.category)',
+    );
+    expect(monthlyBankLinkerSource).toContain('"contract_payment"');
   });
 
   it("上传预检仅放行字段完整的一般账户未分类回单，并在业务命中后清理旧告警", () => {
-    expect(monthlyRouteSource).toContain(
-      'analysis.accountCode === "general" &&\n              transaction.category === "unclassified"',
+    expect(monthlyRouteSource).toMatch(
+      /analysis\.accountCode === "general" &&\s+transaction\.category === "unclassified"/u,
     );
     expect(monthlyRouteSource).toContain(
       "Boolean(transaction.normalizedElectronicReceiptNo)",
@@ -528,13 +538,13 @@ describe("月报银行回单替换链接调用与合同预览契约", () => {
     expect(contractRouteSource).toContain("AS canonical_bank_transaction_id");
     expect(contractRouteSource).toContain("canonicalReceiptPreviewUrl");
     expect(contractRouteSource).toContain(
-      '["admin", "general_manager"].includes(',
+      "canReadMonthlyFinancialReport(req.session.user?.role)",
     );
     expect(monthlyRouteSource).toContain(
       '"/bank-transactions/:transactionId/preview"',
     );
     expect(monthlyRouteSource).toContain(
-      "const canReadMonthlyReport = READ_ROLES.includes(actor.role)",
+      "const canReadMonthlyReport = canReadMonthlyFinancialReport(actor.role)",
     );
   });
 

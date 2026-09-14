@@ -52,6 +52,8 @@ interface ContractSnapshotRow {
   title: string | null;
   project_name: string | null;
   category: "main_business" | "non_main" | "asset" | null;
+  declared_subtype: string | null;
+  financial_direction: "income" | "cost" | null;
   area: string;
   party_a: string | null;
   status: string;
@@ -61,6 +63,8 @@ interface ContractSnapshotRow {
   amount_delta: number | null;
   is_deleted: boolean;
   has_archived_sealed: boolean;
+  has_current_sealed: boolean;
+  historical_imported: boolean;
 }
 
 interface InvoiceApplicationRow extends QueryResultRow {
@@ -506,10 +510,25 @@ async function loadContract(
     `SELECT contract.id, contract.contract_no, contract.business_contract_no,
             contract.title, contract.project_name,
             COALESCE(contract.category, contract.declared_category) AS category,
+            contract.declared_subtype, contract.financial_direction,
             contract.area, contract.party_a, contract.status,
             contract.relation_type, contract.current_effective_amount,
             contract.original_contract_amount, contract.amount_delta,
             contract.is_deleted,
+            EXISTS (
+              SELECT 1
+                FROM contract_files current_sealed_file
+               WHERE current_sealed_file.contract_id = contract.id
+                 AND current_sealed_file.file_type = 'sealed_contract'
+                 AND current_sealed_file.is_current = TRUE
+            ) AS has_current_sealed,
+            EXISTS (
+              SELECT 1
+                FROM contract_audit_logs historical_audit
+               WHERE historical_audit.contract_id =
+                     COALESCE(contract.root_contract_id, contract.id)
+                 AND historical_audit.action = 'historical_contract_imported'
+            ) AS historical_imported,
             EXISTS (
               SELECT 1
                 FROM contract_files sealed_file
@@ -581,18 +600,28 @@ function eligibilityReason(contract: ContractSnapshotRow): {
   if (
     !(["main_business", "non_main"] as const).includes(
       contract.category as never,
-    )
+    ) ||
+    contract.financial_direction === "cost" ||
+    (contract.category === "non_main" &&
+      contract.declared_subtype === "non_main_expense")
   )
     return {
       code: "INVOICE_APPLICATION_INCOME_CONTRACT_ONLY",
-      reason: "资产类合同属于支出合同，不允许申请开票",
+      reason: "支出类合同不允许申请开票",
     };
   if (!["effective", "executing", "completed"].includes(contract.status))
     return {
       code: "INVOICE_APPLICATION_CONTRACT_STATUS_INELIGIBLE",
       reason: "合同尚未生效或已经终止，不能申请开票",
     };
-  if (!contract.has_archived_sealed)
+  if (
+    !isInvoiceApplicationSealedArchiveReady({
+      status: contract.status,
+      hasArchivedSealed: contract.has_archived_sealed,
+      hasCurrentSealed: contract.has_current_sealed,
+      historicalImported: contract.historical_imported,
+    })
+  )
     return {
       code: "INVOICE_APPLICATION_SEALED_ARCHIVE_REQUIRED",
       reason: "盖章版合同完成核验归档后才能申请开票",
@@ -603,6 +632,20 @@ function eligibilityReason(contract: ContractSnapshotRow): {
       reason: "合同当前有效金额不足，不能申请开票",
     };
   return { code: null, reason: null };
+}
+
+export function isInvoiceApplicationSealedArchiveReady(input: {
+  status: string;
+  hasArchivedSealed: boolean;
+  hasCurrentSealed: boolean;
+  historicalImported: boolean;
+}): boolean {
+  return (
+    input.hasArchivedSealed ||
+    (input.historicalImported &&
+      input.hasCurrentSealed &&
+      ["effective", "executing", "completed"].includes(input.status))
+  );
 }
 
 async function capacityForContract(
@@ -664,19 +707,21 @@ async function capacityForContract(
 async function previousTriplicatePaymentAmount(
   client: Queryable,
   contractId: string,
-  excludedApplicationId?: string,
 ): Promise<number> {
-  const result = await client.query<{ amount: number }>(
-    `SELECT COALESCE(SUM(amount),0) AS amount
-       FROM invoice_applications
-      WHERE contract_id=$1
-        AND status IN (
-          'pending_approval','pending_seal','pending_invoice','completed'
-        )
-        AND ($2::text IS NULL OR id <> $2)`,
-    [contractId, excludedApplicationId || null],
+  return calculateInvoiceApplicationCommittedAmount(
+    await capacityForContract(client, contractId),
   );
-  return fromCents(Math.max(0, toCents(Number(result.rows[0]?.amount || 0))));
+}
+
+export function calculateInvoiceApplicationCommittedAmount(
+  amounts: Pick<InvoiceApplicationAmounts, "invoicedAmount" | "pendingAmount">,
+): number {
+  return fromCents(
+    Math.max(
+      0,
+      toCents(amounts.invoicedAmount) + toCents(amounts.pendingAmount),
+    ),
+  );
 }
 
 async function billingPrefill(
@@ -997,7 +1042,7 @@ export async function getInvoiceApplicationEligibility(
     amounts,
     triplicatePreviousPaymentAmount:
       contract.category === "main_business"
-        ? await previousTriplicatePaymentAmount(pool, contract.id)
+        ? calculateInvoiceApplicationCommittedAmount(amounts)
         : 0,
     billingPrefill: await billingPrefill(pool, display.partyA),
   };
@@ -1842,7 +1887,6 @@ async function validateSubmitMaterials(
       const currentPreviousPayment = await previousTriplicatePaymentAmount(
         client,
         application.contract_id,
-        application.id,
       );
       if (toCents(currentPreviousPayment) !== toCents(previous))
         throw new InvoiceApplicationError(
@@ -2885,11 +2929,8 @@ export async function generateMainBusinessTriplicate(
           409,
           "INVOICE_APPLICATION_AMOUNT_EXCEEDS_REMAINING",
         );
-      const previousPayment = await previousTriplicatePaymentAmount(
-        client,
-        rootId,
-        application.id,
-      );
+      const previousPayment =
+        calculateInvoiceApplicationCommittedAmount(capacity);
       const cumulativeCents =
         toCents(previousPayment) + toCents(currentPayment);
       if (cumulativeCents > toCents(contractAmount))
@@ -3212,6 +3253,99 @@ export async function deleteInvoiceApplicationMaterial(
     }
   }
   return getInvoiceApplication(actor, applicationId);
+}
+
+export async function deleteInvoiceApplicationDraft(
+  actor: InvoiceApplicationActor,
+  applicationId: string,
+  expectedVersion: number,
+): Promise<{ id: string; deleted: true }> {
+  const removablePaths: string[] = [];
+  await db.transaction(async (client) => {
+    const { application } = await lockApplicationAfterRoot(
+      client,
+      applicationId,
+    );
+    if (actor.role !== "user" || application.applicant_id !== actor.id)
+      throw new InvoiceApplicationError(
+        "仅申请人可以删除本人草稿",
+        403,
+        "INVOICE_APPLICATION_APPLICANT_ONLY",
+      );
+    if (application.status !== "draft")
+      throw new InvoiceApplicationError(
+        "只有尚未提交的草稿可以删除",
+        409,
+        "INVOICE_APPLICATION_DRAFT_DELETE_STATUS_INVALID",
+      );
+    if (application.version !== expectedVersion)
+      throw new InvoiceApplicationError(
+        "申请已发生变化，请刷新后重试",
+        409,
+        "INVOICE_APPLICATION_VERSION_CONFLICT",
+      );
+    const [materials, generatedFiles, allocations] = await Promise.all([
+      client.query<{ file_path: string }>(
+        `SELECT file_path FROM invoice_application_materials
+          WHERE application_id=$1`,
+        [application.id],
+      ),
+      client.query<{ file_path: string }>(
+        `SELECT file_path FROM invoice_application_generated_files
+          WHERE application_id=$1`,
+        [application.id],
+      ),
+      client.query<{ count: number }>(
+        `SELECT COUNT(*)::int AS count
+           FROM invoice_application_invoice_allocations
+          WHERE application_id=$1`,
+        [application.id],
+      ),
+    ]);
+    if (Number(allocations.rows[0]?.count || 0) > 0)
+      throw new InvoiceApplicationError(
+        "草稿存在正式发票匹配记录，不能删除",
+        409,
+        "INVOICE_APPLICATION_DRAFT_HAS_ALLOCATION",
+      );
+    removablePaths.push(
+      ...materials.rows.map((row) => row.file_path),
+      ...generatedFiles.rows.map((row) => row.file_path),
+      ...[
+        application.applicant_signature_snapshot_path,
+        application.approver_signature_snapshot_path,
+      ].filter((value): value is string => Boolean(value)),
+    );
+    await client.query(
+      `UPDATE invoice_applications
+          SET applicant_signed_file_id=NULL, approved_file_id=NULL
+        WHERE id=$1`,
+      [application.id],
+    );
+    await client.query(
+      `DELETE FROM invoice_application_audit_logs WHERE application_id=$1`,
+      [application.id],
+    );
+    const deleted = await client.query<{ id: string }>(
+      `DELETE FROM invoice_applications
+        WHERE id=$1 AND status='draft' RETURNING id`,
+      [application.id],
+    );
+    if (!deleted.rows[0])
+      throw new InvoiceApplicationError(
+        "草稿状态已发生变化，请刷新后重试",
+        409,
+        "INVOICE_APPLICATION_VERSION_CONFLICT",
+      );
+  });
+  for (const storedPath of new Set(removablePaths)) {
+    try {
+      fs.unlinkSync(absoluteStoredPath(storedPath, "开票申请草稿文件"));
+    } catch {
+      // 数据删除成功后，文件清理失败不能恢复已删除草稿。
+    }
+  }
+  return { id: applicationId, deleted: true };
 }
 
 export async function prepareInvoiceApplicationMaterial(

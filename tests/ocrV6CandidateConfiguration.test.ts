@@ -32,6 +32,14 @@ const productionComposeSource = fs.readFileSync(
   path.resolve(process.cwd(), "docker-compose.prod.yml"),
   "utf8",
 );
+const nginxSource = fs.readFileSync(
+  path.resolve(process.cwd(), "nginx.conf"),
+  "utf8",
+);
+const dockerIgnoreSource = fs.readFileSync(
+  path.resolve(process.cwd(), ".dockerignore"),
+  "utf8",
+);
 const contractRouteSource = fs.readFileSync(
   path.resolve(process.cwd(), "server/routes/contracts.ts"),
   "utf8",
@@ -48,14 +56,18 @@ describe("PP-OCRv6_medium（第六版中型模型）正式候选配置", () => {
     );
   });
 
-  it("仅开发容器默认使用第六版模型，生产与镜像仍保留第四版回退", () => {
+  it("开发、生产与镜像回退统一使用第六版模型", () => {
     expect(developmentComposeSource).toContain(
       "OCR_MODEL=${OCR_MODEL:-v6_medium}",
     );
     expect(productionComposeSource).toContain(
-      "OCR_MODEL=${OCR_MODEL:-v4_mobile}",
+      "OCR_MODEL=${OCR_MODEL:-v6_medium}",
     );
-    expect(dockerfileSource).toContain("OCR_MODEL=v4_mobile");
+    expect(dockerfileSource.match(/OCR_MODEL=v6_medium/g)).toHaveLength(2);
+    expect(resolvePaddleOcrModel(undefined)).toBe("v6_medium");
+    expect(workerSource).toContain(
+      'os.environ.get("OCR_MODEL") or "v6_medium"',
+    );
   });
 
   it("现有双模型接口不因生产枚举扩展而改变", () => {
@@ -111,6 +123,21 @@ describe("PP-OCRv6_medium（第六版中型模型）正式候选配置", () => {
     expect(dockerfileSource).toContain(
       "COPY --from=ocr-models /opt/paddleocr-v6-medium /opt/paddleocr-v6-medium",
     );
+  });
+
+  it("生产代理覆盖同步OCR长任务与批量上传上限且构建上下文排除环境文件", () => {
+    expect(nginxSource).toContain("location /api/");
+    expect(nginxSource).toContain("proxy_read_timeout 2400s;");
+    expect(nginxSource).toContain("proxy_send_timeout 2400s;");
+    expect(nginxSource).toContain("location = /api/bank-receipts/upload");
+    expect(nginxSource).toContain("location = /api/payroll/receipts");
+    expect(nginxSource).toContain(
+      "location ~ ^/api/monthly-financial-reports/[^/]+/bank-receipts$",
+    );
+    expect(nginxSource.match(/client_max_body_size 1g;/g)).toHaveLength(2);
+    expect(nginxSource).toContain("client_max_body_size 200m;");
+    expect(dockerIgnoreSource).toContain(".env\n");
+    expect(dockerIgnoreSource).toContain(".env.*\n");
   });
 
   it("模型版本只保存规范值并兼容旧测试标识", () => {

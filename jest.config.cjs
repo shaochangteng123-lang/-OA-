@@ -5,6 +5,8 @@ module.exports = {
   roots: ['<rootDir>/tests', '<rootDir>/src', '<rootDir>/server'],
   testMatch: ['**/*.test.ts', '**/*.spec.ts'],
   moduleNameMapper: {
+    // 测试侧使用同一语言包的兼容入口，浏览器仍使用标准模块入口。
+    '^element-plus/es/locale/lang/zh-cn$': '<rootDir>/node_modules/element-plus/lib/locale/lang/zh-cn.js',
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@server/(.*)$': '<rootDir>/server/$1',
     '^(\\.{1,2}/.*)\\.js$': '$1',

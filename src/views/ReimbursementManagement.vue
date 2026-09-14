@@ -3,11 +3,24 @@
     <el-card class="page-card">
       <template #header>
         <div class="card-header">
-          <el-button type="primary" :icon="Plus" @click="handleAdd">添加范围</el-button>
+          <el-button type="primary" :icon="Plus" @click="handleAdd">{{ addButtonLabel }}</el-button>
         </div>
       </template>
 
       <div class="content-wrapper">
+        <el-tabs v-model="activeScopeType" @tab-change="handleScopeTabChange">
+          <el-tab-pane label="报销范围" name="general" />
+          <el-tab-pane label="福利1分类" name="welfare_one" />
+          <el-tab-pane label="福利2分类" name="welfare_two" />
+        </el-tabs>
+        <el-alert
+          v-if="isWelfareScope"
+          :title="`${activeScopeLabel}独立维护，仅用于${activeScopeLabel.replace('分类', '报销')}`"
+          type="info"
+          :closable="false"
+          show-icon
+          class="scope-tip"
+        />
         <el-table
           :data="tableData"
           row-key="id"
@@ -26,7 +39,7 @@
           </el-table-column>
           <el-table-column label="操作" min-width="300" align="center" header-align="center">
             <template #default="{ row }">
-              <el-button link type="primary" size="small" @click="handleAddChild(row)">
+              <el-button v-if="!isWelfareScope" link type="primary" size="small" @click="handleAddChild(row)">
                 添加子项
               </el-button>
               <el-button link type="primary" size="small" @click="handleEdit(row)">
@@ -55,7 +68,7 @@
     >
       <el-form :model="formData" label-width="100px">
         <el-form-item label="名称">
-          <el-input v-model="formData.name" placeholder="请输入名称" />
+          <el-input v-model="formData.name" :placeholder="`请输入${isWelfareScope ? '分类' : '范围'}名称`" />
         </el-form-item>
         <el-form-item label="状态">
           <el-switch v-model="formData.isActive" active-text="启用" inactive-text="禁用" />
@@ -70,29 +83,50 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { api } from '@/utils/api'
+import { REIMBURSEMENT_TYPE_CONFIG } from '@/utils/reimbursement/typeConfig'
 
 interface ScopeItem {
   id: string
   parent_id: string | null
   name: string
   value: string
+  code?: string
   sort_order: number
   is_active: number
   children?: ScopeItem[]
+  sortOrder?: number
+  isActive?: boolean
 }
 
 // 数据
 const loading = ref(false)
+const activeScopeType = ref<'general' | 'welfare_one' | 'welfare_two'>('general')
 const tableData = ref<ScopeItem[]>([])
 const dialogVisible = ref(false)
 const dialogTitle = ref('')
 const submitting = ref(false)
 const currentParentId = ref<string | null>(null)
 const editingId = ref<string | null>(null)
+const isWelfareScope = computed(() => activeScopeType.value !== 'general')
+const activeScopeLabel = computed(() => {
+  if (activeScopeType.value === 'welfare_one') return '福利1分类'
+  if (activeScopeType.value === 'welfare_two') return '福利2分类'
+  return '报销范围'
+})
+const addButtonLabel = computed(() => `添加${activeScopeLabel.value}`)
+const managementBase = computed(() => {
+  if (activeScopeType.value === 'welfare_one') {
+    return REIMBURSEMENT_TYPE_CONFIG.welfare_one.scopeManagementBase!
+  }
+  if (activeScopeType.value === 'welfare_two') {
+    return REIMBURSEMENT_TYPE_CONFIG.welfare_two.scopeManagementBase!
+  }
+  return '/api/reimbursement-scope'
+})
 
 const formData = ref({
   name: '',
@@ -103,9 +137,16 @@ const formData = ref({
 const loadData = async () => {
   try {
     loading.value = true
-    const response = await api.get('/api/reimbursement-scope/admin/list')
+    const response = await api.get(`${managementBase.value}/admin/list`)
     if (response.data.success) {
-      tableData.value = response.data.data
+      const items = Array.isArray(response.data.data) ? response.data.data : []
+      tableData.value = items.map((item: ScopeItem) => ({
+        ...item,
+        parent_id: item.parent_id ?? null,
+        value: item.value || item.code || item.id,
+        sort_order: Number(item.sort_order ?? item.sortOrder ?? 0),
+        is_active: Number(item.is_active ?? item.isActive ?? 1),
+      }))
     }
   } catch (error) {
     console.error('加载数据失败:', error)
@@ -117,7 +158,7 @@ const loadData = async () => {
 
 // 添加顶级范围
 const handleAdd = () => {
-  dialogTitle.value = '添加报销范围'
+  dialogTitle.value = `添加${activeScopeLabel.value}`
   currentParentId.value = null
   editingId.value = null
   formData.value = {
@@ -141,7 +182,7 @@ const handleAddChild = (row: ScopeItem) => {
 
 // 编辑
 const handleEdit = (row: ScopeItem) => {
-  dialogTitle.value = '编辑报销范围'
+  dialogTitle.value = `编辑${activeScopeLabel.value}`
   currentParentId.value = row.parent_id
   editingId.value = row.id
   formData.value = {
@@ -197,18 +238,19 @@ const handleSubmit = async () => {
 
     if (editingId.value) {
       // 编辑
-      await api.put(`/api/reimbursement-scope/${editingId.value}`, {
+      await api.put(`${managementBase.value}/${editingId.value}`, {
         name: formData.value.name,
-        value: value,
+        ...(isWelfareScope.value ? {} : { value }),
         isActive: formData.value.isActive
       })
       ElMessage.success('更新成功')
     } else {
       // 新增
-      await api.post('/api/reimbursement-scope/create', {
-        parentId: currentParentId.value,
+      await api.post(`${managementBase.value}/create`, {
         name: formData.value.name,
-        value: value
+        ...(isWelfareScope.value
+          ? {}
+          : { parentId: currentParentId.value, value }),
       })
       ElMessage.success('添加成功')
     }
@@ -226,19 +268,26 @@ const handleSubmit = async () => {
 // 删除
 const handleDelete = async (row: ScopeItem) => {
   try {
-    await ElMessageBox.confirm('确定要删除该项吗？', '提示', {
+    await ElMessageBox.confirm(
+      isWelfareScope.value
+        ? `确定删除${activeScopeLabel.value}“${row.name}”吗？已被报销引用的分类无法删除。`
+        : '确定要删除该项吗？',
+      '提示', {
       confirmButtonText: '确定',
       cancelButtonText: '取消',
       type: 'warning'
     })
 
-    await api.delete(`/api/reimbursement-scope/${row.id}`)
-    ElMessage.success('删除成功')
+    const response = await api.delete(`${managementBase.value}/${row.id}`)
+    ElMessage.success(response.data.message || '删除成功')
     await loadData()
   } catch (error: any) {
     if (error !== 'cancel') {
       console.error('删除失败:', error)
-      ElMessage.error(error.response?.data?.message || '删除失败')
+      const conflictMessage = isWelfareScope.value && error.response?.status === 409
+        ? '该分类已被报销记录引用，无法删除'
+        : '删除失败'
+      ElMessage.error(error.response?.data?.message || conflictMessage)
     }
   }
 }
@@ -285,7 +334,7 @@ const handleMoveUp = async (row: ScopeItem) => {
   ]
 
   try {
-    await api.put('/api/reimbursement-scope/sort', { items })
+    await api.put(`${managementBase.value}/sort`, { items })
     ElMessage.success('移动成功')
     await loadData()
   } catch (error) {
@@ -311,7 +360,7 @@ const handleMoveDown = async (row: ScopeItem) => {
   ]
 
   try {
-    await api.put('/api/reimbursement-scope/sort', { items })
+    await api.put(`${managementBase.value}/sort`, { items })
     ElMessage.success('移动成功')
     await loadData()
   } catch (error) {
@@ -323,6 +372,11 @@ const handleMoveDown = async (row: ScopeItem) => {
 onMounted(() => {
   loadData()
 })
+
+function handleScopeTabChange() {
+  tableData.value = []
+  void loadData()
+}
 </script>
 
 <style scoped>

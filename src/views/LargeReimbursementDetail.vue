@@ -1,5 +1,5 @@
 <template>
-  <div class="reimbursement-detail-container">
+  <div class="reimbursement-detail-container" :style="themeStyle">
     <el-card class="page-card">
       <template #header>
         <div class="card-header">
@@ -62,7 +62,7 @@
               <el-input :model-value="reimbursementMonthDisplay || reimbursementMonth" disabled />
             </el-form-item>
 
-            <el-form-item label="报销范围/区域">
+            <el-form-item :label="scopeLabel">
               <el-input v-model="reimbursementScope" disabled />
             </el-form-item>
 
@@ -73,7 +73,7 @@
                     v-model="invoice.fileList.value"
                     :max-files="10"
                     :disabled="isReadonly"
-                    theme-color="#e6a23c"
+                    :theme-color="typeConfig.accentColor"
                     @file-change="handleFileChange"
                     @delete-file="handleDeleteFile"
                   />
@@ -85,7 +85,7 @@
                   <ReceiptUploader
                     v-model="receiptFileList"
                     :disabled="isReadonly"
-                    theme-color="#e6a23c"
+                    :theme-color="typeConfig.accentColor"
                     @file-change="handleReceiptChange"
                     @delete-file="handleDeleteReceipt"
                   />
@@ -98,9 +98,9 @@
               <InvoiceTable
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="isReadonly"
-                theme-color="#e6a23c"
-                :amount-threshold="LARGE_AMOUNT_THRESHOLD"
-                :show-threshold-warning="true"
+                :theme-color="typeConfig.accentColor"
+                :amount-threshold="typeConfig.minimumAmount || 0"
+                :show-threshold-warning="!isWelfareReimbursement"
                 :approval-deduction-amount="approvalDeductionAmount"
                 @delete="handleDeleteInvoice"
               />
@@ -125,7 +125,7 @@
                   保存草稿
                 </el-button>
                 <el-button type="primary" @click="handleSubmit" size="large" :loading="reimbursement.loading.value">
-                  提交审批
+                  {{ submitButtonText }}
                 </el-button>
               </div>
             </el-form-item>
@@ -217,24 +217,39 @@ import InvoiceTable from '@/components/reimbursement/InvoiceTable.vue'
 import { useRouter } from 'vue-router'
 import { useInvoice } from '@/composables/reimbursement/useInvoice'
 import { useReimbursement } from '@/composables/reimbursement/useReimbursement'
-import { LARGE_AMOUNT_THRESHOLD } from '@/utils/reimbursement/constants'
 import { api } from '@/utils/api'
 import { toFileUrl } from '@/utils/file'
+import { useAuthStore } from '@/stores/auth'
+import {
+  getReimbursementTypeConfig,
+  getReimbursementTypeRoute,
+  type ReimbursementType,
+} from '@/utils/reimbursement/typeConfig'
 
 const router = useRouter()
-
-// 报销类型到路由的映射
-const typeRouteMap: Record<string, string> = {
-  basic: '/basic-reimbursement',
-  business: '/business-reimbursement',
-  large: '/large-reimbursement',
-}
+const authStore = useAuthStore()
+const props = withDefaults(defineProps<{
+  reimbursementType?: ReimbursementType
+}>(), {
+  reimbursementType: 'large',
+})
+const typeConfig = computed(() => getReimbursementTypeConfig(props.reimbursementType)!)
+const isWelfareReimbursement = computed(() =>
+  ['welfare_one', 'welfare_two'].includes(typeConfig.value.type),
+)
+const scopeLabel = computed(() => isWelfareReimbursement.value ? '福利分类' : '报销范围/区域')
+const submitButtonText = computed(() =>
+  authStore.user?.role === 'chairman' ? '提交报销' : '提交审批',
+)
+const themeStyle = computed(() => ({
+  '--reimbursement-accent': typeConfig.value.accentColor,
+}))
 
 // 点击批次中的报销单跳转
 function handleBatchItemClick(item: any) {
   const currentId = reimbursement.reimbursementId.value
   if (item.id === currentId) return
-  const basePath = typeRouteMap[item.type] || '/large-reimbursement'
+  const basePath = getReimbursementTypeRoute(item.type) || typeConfig.value.listRoute
   router.push({
     path: `${basePath}/${item.id}`,
     query: { mode: 'view' }
@@ -243,7 +258,10 @@ function handleBatchItemClick(item: any) {
 
 // 使用 composables
 const invoice = useInvoice()
-const reimbursement = useReimbursement('large', '/large-reimbursement')
+const reimbursement = useReimbursement(
+  props.reimbursementType,
+  typeConfig.value.listRoute,
+)
 
 // 表单数据
 const formData = reactive({
@@ -290,6 +308,7 @@ const dataLoaded = ref(false)
 
 // 报销范围/区域
 const reimbursementScope = ref('')
+const reimbursementScopeValue = ref('')
 
 // 报销范围/区域映射（从 API 动态获取）
 const scopeMap = ref<Record<string, string>>({})
@@ -297,13 +316,16 @@ const scopeMap = ref<Record<string, string>>({})
 // 从 API 获取报销范围配置
 const fetchScopeOptions = async () => {
   try {
-    const response = await api.get('/api/reimbursement-scope/list')
+    const response = await api.get(
+      typeConfig.value.scopeListEndpoint || '/api/reimbursement-scope/list',
+    )
     if (response.data.success) {
       const buildMap = (items: any[], parentName = '') => {
         for (const item of items) {
-          if (item.value) {
+          const itemValue = isWelfareReimbursement.value ? item.id || item.code : item.value
+          if (itemValue) {
             const fullName = parentName ? `${parentName} / ${item.name}` : item.name
-            scopeMap.value[item.value] = fullName
+            scopeMap.value[String(itemValue)] = fullName
           }
           if (item.children?.length) {
             buildMap(item.children, item.name)
@@ -325,9 +347,9 @@ const { pageMode, isReadonly, reimbursementMonth } = reimbursement
 
 // 页面标题
 const pageTitle = computed(() => {
-  if (pageMode.value === 'view') return '查看大额报销单'
-  if (pageMode.value === 'edit') return '编辑大额报销单'
-  return '新建大额报销单'
+  if (pageMode.value === 'view') return `查看${typeConfig.value.label}单`
+  if (pageMode.value === 'edit') return `编辑${typeConfig.value.label}单`
+  return `新建${typeConfig.value.label}单`
 })
 
 // 是否已拒绝
@@ -438,8 +460,12 @@ async function validateForm(checkAmount: boolean = false): Promise<boolean> {
   }
 
   // 提交时校验金额是否达到大额报销标准
-  if (checkAmount && invoice.totalAmount.value < LARGE_AMOUNT_THRESHOLD) {
-    ElMessage.warning(`发票总金额 ¥${invoice.totalAmount.value} 不足 ${LARGE_AMOUNT_THRESHOLD} 元，不属于大额报销范围，请使用基础报销`)
+  if (
+    checkAmount &&
+    typeConfig.value.minimumAmount &&
+    invoice.totalAmount.value < typeConfig.value.minimumAmount
+  ) {
+    ElMessage.warning(`发票总金额 ¥${invoice.totalAmount.value} 不足 ${typeConfig.value.minimumAmount} 元，不属于${typeConfig.value.label}范围，请使用基础报销`)
     return false
   }
 
@@ -456,11 +482,14 @@ async function validateForm(checkAmount: boolean = false): Promise<boolean> {
 // 构建提交数据
 function buildSubmitData() {
   return {
-    type: 'large' as const,
-    category: formData.category || '大额报销',
-    title: reimbursement.generateTitle(formData.category, '大额报销'),
+    type: typeConfig.value.type,
+    category: formData.category || typeConfig.value.label,
+    title: reimbursement.generateTitle(formData.category, typeConfig.value.label),
     description: formData.description,
     invoices: invoice.getInvoicesForSubmit(),
+    ...(isWelfareReimbursement.value
+      ? { welfareCategoryId: reimbursementScopeValue.value }
+      : {}),
   }
 }
 
@@ -496,10 +525,14 @@ async function loadDetail(): Promise<void> {
     }
 
     // 设置报销范围/区域
-    if ((data as any).reimbursementScope) {
-      const scopeValue = (data as any).reimbursementScope
+    const scopeValue = isWelfareReimbursement.value
+      ? (data as any).welfareCategoryId || (data as any).reimbursementScope
+      : (data as any).reimbursementScope
+    if (scopeValue) {
+      reimbursementScopeValue.value = scopeValue
       // 先存原始值，scopeMap 可能还没加载完
-      reimbursementScope.value = scopeMap.value[scopeValue] || scopeValue
+      reimbursementScope.value =
+        (data as any).welfareCategoryName || scopeMap.value[scopeValue] || scopeValue
     }
 
     // 加载发票数据
@@ -610,8 +643,11 @@ onMounted(async () => {
         loadDetail(),
       ])
       // 两者都完成后，用 scopeMap 修正 scope 显示名称
-      if (reimbursementScope.value && scopeMap.value[reimbursementScope.value]) {
-        reimbursementScope.value = scopeMap.value[reimbursementScope.value]
+      if (
+        reimbursementScopeValue.value &&
+        scopeMap.value[reimbursementScopeValue.value]
+      ) {
+        reimbursementScope.value = scopeMap.value[reimbursementScopeValue.value]
       }
     } else {
       await fetchScopeOptions()
@@ -623,20 +659,22 @@ onMounted(async () => {
 
 // 监听路由参数变化（Vue Router 复用组件时 onMounted 不会再次触发）
 watch(
-  () => reimbursement.reimbursementId.value,
-  async (newId, oldId) => {
-    if (newId && newId !== oldId) {
+  () => [reimbursement.reimbursementId.value, props.reimbursementType] as const,
+  async ([newId], [oldId, oldType]) => {
+    if (newId && (newId !== oldId || props.reimbursementType !== oldType)) {
       invoice.clearInvoices()
       formData.category = ''
       formData.description = ''
       reimbursementMonthDisplay.value = ''
       reimbursementScope.value = ''
+      reimbursementScopeValue.value = ''
       rejectReason.value = ''
       approvalDeductionAmount.value = 0
       paymentProofPath.value = ''
       payTime.value = ''
       receiptFileList.value = []
-      await loadDetail()
+      scopeMap.value = {}
+      await Promise.all([fetchScopeOptions(), loadDetail()])
     }
   }
 )
@@ -703,7 +741,7 @@ watch(
   color: #303133;
   margin-bottom: 20px;
   padding-bottom: 10px;
-  border-bottom: 2px solid #e6a23c;
+  border-bottom: 2px solid var(--reimbursement-accent);
 }
 
 .large-alert {

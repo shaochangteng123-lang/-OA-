@@ -393,7 +393,7 @@ async function start() {
       `✅ Frontend URL: ${process.env.FRONTEND_URL || "http://localhost:8899"}`,
     );
     console.log(
-      `✅ Database: ${process.env.DATABASE_URL || `postgresql://${process.env.DB_HOST || "localhost"}:${process.env.DB_PORT || "5432"}/${process.env.DB_NAME || "yulilog_worklog"}`}`,
+      `✅ 数据库: ${process.env.DATABASE_URL ? "已配置（敏感信息不输出）" : "使用默认连接（敏感信息不输出）"}`,
     );
   });
 }

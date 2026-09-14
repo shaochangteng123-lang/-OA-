@@ -35,7 +35,7 @@ export function formatReimbursementMonth(monthStr: string): string {
  *       "2026年03月报销-基础报销" → "2026年03月-基础报销"
  */
 export function normalizeReimbursementTitle(title: string): string {
-  const match = title.match(/^(\d{4}年\d{2}月).*?(基础报销|大额报销|商务报销)$/)
+  const match = title.match(/^(\d{4}年\d{2}月).*?(基础报销|大额报销|商务报销|福利1报销|福利2报销)$/)
   if (match) {
     return `${match[1]}-${match[2]}`
   }

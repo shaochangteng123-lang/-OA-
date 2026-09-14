@@ -74,6 +74,16 @@
               >
                 下载
               </el-button>
+              <el-button
+                v-if="canManage"
+                link
+                type="danger"
+                :icon="Delete"
+                :aria-label="`删除${file.fileName}`"
+                @click="removeArchivedFile(item, file)"
+              >
+                删除
+              </el-button>
             </span>
           </div>
         </div>
@@ -85,7 +95,7 @@
       <div class="create-panel-heading">
         <h4>添加辅助材料</h4>
         <span>
-          三类材料均可多选；首次归档辅助合同至少1份，已有档案可直接追加发票或回单；本次已选择
+          四类材料均可多选且可独立归档；本次已选择
           {{ selectedFileCount }}/20 份
         </span>
       </div>
@@ -94,7 +104,7 @@
         show-icon
         :closable="false"
         title="辅助材料独立归档，不参与收入核算"
-        description="首次归档时辅助合同必传；已有档案后可只选择发票或回单追加保存。文件通过格式和安全校验后直接归档，不识别甲乙方、金额或其他内容。"
+        description="辅助合同、发票、回单或其他材料任选一份即可首次归档。文件通过格式、结构和安全校验后直接归档，不识别甲乙方、金额或其他内容。"
       />
       <div class="upload-blocks">
         <article
@@ -228,6 +238,7 @@ import type {
 import {
   appendContractAuxiliaryFiles,
   createContractAuxiliaryPackage,
+  deleteContractAuxiliaryFile,
   deleteContractAuxiliaryPackage,
   getContractAuxiliaryFileUrl,
   getContractAuxiliaryPackages,
@@ -273,6 +284,7 @@ interface AuxiliaryCreateFiles {
   contract: SelectedAuxiliaryFile[];
   invoice: SelectedAuxiliaryFile[];
   receipt: SelectedAuxiliaryFile[];
+  other: SelectedAuxiliaryFile[];
 }
 const MAX_AUXILIARY_FILES = 20;
 const MAX_AUXILIARY_FILE_BYTES = 30 * 1024 * 1024;
@@ -280,12 +292,14 @@ const createFiles = ref<AuxiliaryCreateFiles>({
   contract: [],
   invoice: [],
   receipt: [],
+  other: [],
 });
 const selectedFileCount = computed(
   () =>
     createFiles.value.contract.length +
     createFiles.value.invoice.length +
-    createFiles.value.receipt.length,
+    createFiles.value.receipt.length +
+    createFiles.value.other.length,
 );
 const appendTargetPackage = computed(() => packages.value[0] || null);
 const isAppendingToExistingPackage = computed(
@@ -293,36 +307,42 @@ const isAppendingToExistingPackage = computed(
     createFiles.value.contract.length === 0 &&
     Boolean(appendTargetPackage.value),
 );
-const canArchiveSelection = computed(
-  () =>
-    selectedFileCount.value > 0 &&
-    (createFiles.value.contract.length > 0 ||
-      Boolean(appendTargetPackage.value)),
-);
+const canArchiveSelection = computed(() => selectedFileCount.value > 0);
 
 const uploadOptions = [
   {
     kind: "contract" as const,
     label: "辅助合同",
-    description: "首次归档至少1份；已有档案后无需重复选择",
-    accept: ".pdf,.doc,.docx",
+    description: "可独立归档，不参与正式合同核算",
+    accept: ".pdf,.doc,.docx,.xlsx,.jpg,.jpeg,.png,.zip",
   },
   {
     kind: "invoice" as const,
     label: "发票",
     description: "仅作辅助档案，不生成正式发票流水",
-    accept: ".pdf,.jpg,.jpeg,.png",
+    accept: ".pdf,.doc,.docx,.xlsx,.jpg,.jpeg,.png,.zip",
   },
   {
     kind: "receipt" as const,
     label: "银行回单",
     description: "仅作辅助档案，不生成回款或付款流水",
-    accept: ".pdf,.jpg,.jpeg,.png",
+    accept: ".pdf,.doc,.docx,.xlsx,.jpg,.jpeg,.png,.zip",
+  },
+  {
+    kind: "other" as const,
+    label: "其他材料",
+    description: "报价单、工作量确认单、评审材料等只作留痕",
+    accept: ".pdf,.doc,.docx,.xlsx,.jpg,.jpeg,.png,.zip",
   },
 ];
 
 function fileKindLabel(kind: ContractAuxiliaryFileKind) {
-  return { contract: "合同", invoice: "发票", receipt: "回单" }[kind];
+  return {
+    contract: "合同",
+    invoice: "发票",
+    receipt: "回单",
+    other: "其他材料",
+  }[kind];
 }
 
 function openPreview(input: {
@@ -427,7 +447,7 @@ function toggleCreatePanel() {
 }
 
 function resetCreateForm() {
-  createFiles.value = { contract: [], invoice: [], receipt: [] };
+  createFiles.value = { contract: [], invoice: [], receipt: [], other: [] };
   createNote.value = "";
 }
 
@@ -507,14 +527,18 @@ async function createPackage() {
   try {
     const invoices = createFiles.value.invoice.map((item) => item.file);
     const receipts = createFiles.value.receipt.map((item) => item.file);
-    if (contracts.length === 0 && appendTargetPackage.value) {
+    const others = createFiles.value.other.map((item) => item.file);
+    const targetPackage =
+      contracts.length === 0 ? appendTargetPackage.value : null;
+    if (targetPackage) {
       await appendContractAuxiliaryFiles(
         props.contractId,
-        appendTargetPackage.value.id,
-        appendTargetPackage.value.version,
+        targetPackage.id,
+        targetPackage.version,
         {
           invoice: invoices,
           receipt: receipts,
+          other: others,
           note: createNote.value,
         },
       );
@@ -523,15 +547,14 @@ async function createPackage() {
         contract: contracts,
         invoice: invoices,
         receipt: receipts,
+        other: others,
         note: createNote.value,
       });
     }
     resetCreateForm();
     createPanelVisible.value = false;
     ElMessage.success(
-      contracts.length === 0
-        ? "发票或回单已追加并归档"
-        : "辅助材料已上传并归档",
+      targetPackage ? "辅助材料已追加并归档" : "辅助材料已上传并归档",
     );
     await loadPackages(false);
   } catch (error) {
@@ -541,10 +564,34 @@ async function createPackage() {
   }
 }
 
+async function removeArchivedFile(
+  item: ContractAuxiliaryPackage,
+  file: ContractAuxiliaryPackage["files"][number],
+) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除「${file.fileName}」？删除后数据库记录和本功能的独立文件副本将移除，操作仍保留审计记录。`,
+      "删除辅助材料",
+      { type: "warning", confirmButtonText: "确认删除" },
+    );
+    await deleteContractAuxiliaryFile(
+      props.contractId,
+      item.id,
+      file.id,
+      item.version,
+    );
+    ElMessage.success("辅助材料已删除");
+    await loadPackages(false);
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    ElMessage.error(getContractErrorMessage(error, "删除辅助材料失败"));
+  }
+}
+
 async function removePackage(item: ContractAuxiliaryPackage) {
   try {
     await ElMessageBox.confirm(
-      "删除后辅助合同、发票、回单及归档记录都会移除，是否继续？",
+      "删除后辅助合同、发票、回单、其他材料及归档记录都会移除，是否继续？",
       "删除辅助合同档案",
       { type: "warning", confirmButtonText: "确认删除" },
     );

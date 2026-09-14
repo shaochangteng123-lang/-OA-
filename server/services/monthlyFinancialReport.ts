@@ -9,6 +9,7 @@ import {
   type MonthlyFinancialManualItemInput,
   type MonthlyFinancialReportStatus,
   type MonthlyFinancialReportView,
+  type MonthlyFinancialWelfareOneExpenseCategory,
 } from "../types/monthly-financial-report.js";
 
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -49,6 +50,11 @@ export const MANUAL_CATEGORY_RULES: Record<
     accountCode: "general",
     direction: "expense",
     label: "一般账户跨行手续费",
+  },
+  general_tax_payment: {
+    accountCode: "general",
+    direction: "expense",
+    label: "一般账户实际税费支出",
   },
   business_bank_fee: {
     accountCode: "business",
@@ -115,7 +121,284 @@ export const MANUAL_CATEGORY_RULES: Record<
     direction: "expense",
     label: "体检",
   },
+  welfare_one_expense: {
+    accountCode: "welfare_one",
+    direction: "expense",
+    label: "福利账户一分类支出",
+  },
+  welfare_two_expense: {
+    accountCode: "welfare_two",
+    direction: "expense",
+    label: "福利账户二分类支出",
+  },
 };
+
+export const FIXED_WELFARE_ONE_EXPENSE_CATEGORIES = [
+  {
+    id: "welfare_one_drinking_water",
+    code: "drinking_water",
+    name: "饮用水",
+    sortOrder: 1,
+  },
+  {
+    id: "welfare_one_office",
+    code: "office",
+    name: "办公",
+    sortOrder: 2,
+  },
+  {
+    id: "welfare_one_electricity",
+    code: "electricity",
+    name: "电费",
+    sortOrder: 3,
+  },
+  {
+    id: "welfare_one_407_ai",
+    code: "407_ai",
+    name: "407-AI",
+    sortOrder: 4,
+  },
+  {
+    id: "welfare_one_8h_ai",
+    code: "8h_ai",
+    name: "8H-AI",
+    sortOrder: 5,
+  },
+] as const;
+
+export const FIXED_WELFARE_TWO_EXPENSE_CATEGORIES = [
+  {
+    id: "welfare_two_refreshment",
+    code: "refreshment",
+    name: "茶歇",
+    sortOrder: 1,
+  },
+  {
+    id: "welfare_two_team_building",
+    code: "team_building",
+    name: "团建",
+    sortOrder: 2,
+  },
+  {
+    id: "welfare_two_physical_exam",
+    code: "physical_exam",
+    name: "体检",
+    sortOrder: 3,
+  },
+] as const;
+
+const LEGACY_WELFARE_ONE_MANUAL_CATEGORY_CODES: Partial<
+  Record<MonthlyFinancialManualCategory, string>
+> = {
+  welfare_one_407: "office",
+  welfare_one_drinking_water: "drinking_water",
+  welfare_one_office: "office",
+  welfare_one_electricity: "electricity",
+  welfare_one_407_ai: "407_ai",
+  welfare_one_8h_ai: "8h_ai",
+};
+
+const LEGACY_WELFARE_TWO_MANUAL_CATEGORY_CODES: Partial<
+  Record<MonthlyFinancialManualCategory, string>
+> = {
+  welfare_two_refreshment: "refreshment",
+  welfare_two_team_building: "team_building",
+  welfare_two_physical_exam: "physical_exam",
+};
+
+function normalizedWelfareCategoryName(value: unknown): string {
+  return String(value || "")
+    .trim()
+    .normalize("NFKC")
+    .replace(/[\s_-]+/g, "")
+    .toLocaleLowerCase("zh-CN");
+}
+
+function buildWelfareExpenseCategories(
+  automaticCategories: NonNullable<
+    MonthlyFinancialAutomaticSnapshot["welfareOneExpenseCategories"]
+  >,
+  manualItems: MonthlyFinancialManualItemInput[],
+  fixedCategories: ReadonlyArray<{
+    id: string;
+    code: string;
+    name: string;
+    sortOrder: number;
+  }>,
+  dynamicCategory: "welfare_one_expense" | "welfare_two_expense",
+  legacyCategoryCodes: Partial<Record<MonthlyFinancialManualCategory, string>>,
+  useFixedFallback: boolean,
+): MonthlyFinancialWelfareOneExpenseCategory[] {
+  type WorkingCategory = MonthlyFinancialWelfareOneExpenseCategory & {
+    aliases: Set<string>;
+  };
+  const rows = new Map<string, WorkingCategory>();
+  const idToKey = new Map<string, string>();
+  const codeToKey = new Map<string, string>();
+  const nameToKey = new Map<string, string>();
+
+  const registerAliases = (key: string, row: WorkingCategory) => {
+    if (row.id) idToKey.set(row.id, key);
+    if (row.code) codeToKey.set(row.code, key);
+    const normalizedName = normalizedWelfareCategoryName(row.name);
+    if (normalizedName) nameToKey.set(normalizedName, key);
+    row.aliases.add(row.id);
+    row.aliases.add(row.code);
+    row.aliases.add(normalizedName);
+  };
+  const fixedByIdentity = (code: string, name: string) =>
+    fixedCategories.find(
+      (item) =>
+        item.code === code ||
+        normalizedWelfareCategoryName(item.name) ===
+          normalizedWelfareCategoryName(name),
+    );
+  const resolveKey = (id: string, code: string, name: string) => {
+    const fixed = fixedByIdentity(code, name);
+    if (fixed) return `fixed:${fixed.code}`;
+    return (
+      idToKey.get(id) ||
+      codeToKey.get(code) ||
+      nameToKey.get(normalizedWelfareCategoryName(name)) ||
+      `category:${id || code || normalizedWelfareCategoryName(name)}`
+    );
+  };
+
+  if (useFixedFallback) {
+    for (const fixed of fixedCategories) {
+      const key = `fixed:${fixed.code}`;
+      const row: WorkingCategory = {
+        ...fixed,
+        isActive: true,
+        automaticAmount: "0",
+        manualAmount: "0",
+        totalAmount: "0",
+        isFixed: true,
+        aliases: new Set<string>(),
+      };
+      rows.set(key, row);
+      registerAliases(key, row);
+    }
+  }
+
+  for (const source of automaticCategories) {
+    const key = resolveKey(source.id, source.code, source.name);
+    const fixed = fixedByIdentity(source.code, source.name);
+    const existing = rows.get(key);
+    const row: WorkingCategory = existing || {
+      id: source.id,
+      code: source.code,
+      name: source.name,
+      sortOrder: source.sortOrder,
+      isActive: source.isActive,
+      automaticAmount: "0",
+      manualAmount: "0",
+      totalAmount: "0",
+      isFixed: Boolean(fixed),
+      aliases: new Set<string>(),
+    };
+    row.automaticAmount = addFinancialAmounts(
+      row.automaticAmount,
+      normalizeFinancialAmount(source.amount),
+    );
+    row.isActive = row.isActive || source.isActive;
+    if (!row.isFixed) {
+      row.name = source.name;
+      row.sortOrder = Math.min(row.sortOrder, source.sortOrder);
+    }
+    rows.set(key, row);
+    registerAliases(key, row);
+    if (fixed) {
+      idToKey.set(source.id, key);
+      codeToKey.set(source.code, key);
+    }
+  }
+
+  for (const item of manualItems) {
+    let key: string | undefined;
+    if (item.category === dynamicCategory) {
+      const id = item.welfareCategoryId || "";
+      const name = item.welfareCategoryNameSnapshot || "未命名福利分类";
+      key =
+        idToKey.get(id) ||
+        nameToKey.get(normalizedWelfareCategoryName(name)) ||
+        resolveKey(id, "", name);
+      if (!rows.has(key)) {
+        const row: WorkingCategory = {
+          id,
+          code: `legacy_${id || normalizedWelfareCategoryName(name)}`,
+          name,
+          sortOrder: Number.MAX_SAFE_INTEGER,
+          isActive: false,
+          automaticAmount: "0",
+          manualAmount: "0",
+          totalAmount: "0",
+          isFixed: Boolean(fixedByIdentity("", name)),
+          aliases: new Set<string>(),
+        };
+        rows.set(key, row);
+        registerAliases(key, row);
+      }
+    } else {
+      const code = legacyCategoryCodes[item.category];
+      if (code) key = `fixed:${code}`;
+    }
+    if (!key) continue;
+    const row = rows.get(key);
+    if (!row) continue;
+    row.manualAmount = addFinancialAmounts(row.manualAmount, item.amount);
+  }
+
+  return [...rows.values()]
+    .map(({ aliases: _aliases, ...row }) => ({
+      ...row,
+      totalAmount: addFinancialAmounts(
+        row.automaticAmount,
+        row.manualAmount,
+      ),
+    }))
+    .filter(
+      (row) =>
+        row.isFixed ||
+        row.isActive ||
+        row.automaticAmount !== "0" ||
+        row.manualAmount !== "0",
+    )
+    .sort(
+      (left, right) =>
+        left.sortOrder - right.sortOrder ||
+        left.name.localeCompare(right.name, "zh-CN") ||
+        left.id.localeCompare(right.id),
+    );
+}
+
+function buildWelfareOneExpenseCategories(
+  automaticCategories: MonthlyFinancialAutomaticSnapshot["welfareOneExpenseCategories"],
+  manualItems: MonthlyFinancialManualItemInput[],
+): MonthlyFinancialWelfareOneExpenseCategory[] {
+  return buildWelfareExpenseCategories(
+    automaticCategories || [],
+    manualItems,
+    FIXED_WELFARE_ONE_EXPENSE_CATEGORIES,
+    "welfare_one_expense",
+    LEGACY_WELFARE_ONE_MANUAL_CATEGORY_CODES,
+    automaticCategories === undefined,
+  );
+}
+
+function buildWelfareTwoExpenseCategories(
+  automaticCategories: MonthlyFinancialAutomaticSnapshot["welfareTwoExpenseCategories"],
+  manualItems: MonthlyFinancialManualItemInput[],
+): MonthlyFinancialWelfareOneExpenseCategory[] {
+  return buildWelfareExpenseCategories(
+    automaticCategories || [],
+    manualItems,
+    FIXED_WELFARE_TWO_EXPENSE_CATEGORIES,
+    "welfare_two_expense",
+    LEGACY_WELFARE_TWO_MANUAL_CATEGORY_CODES,
+    automaticCategories === undefined,
+  );
+}
 
 function powerOfTen(scale: number): bigint {
   return 10n ** BigInt(scale);
@@ -191,7 +474,115 @@ export function subtractFinancialAmounts(
   left: string,
   ...rights: string[]
 ): string {
-  return addFinancialAmounts(left, ...rights.map((value) => `-${value}`));
+  return addFinancialAmounts(
+    left,
+    ...rights.map((value) => {
+      const decimal = parseDecimal(value);
+      return formatDecimal({ units: -decimal.units, scale: decimal.scale });
+    }),
+  );
+}
+
+/** 新分析维度随自动来源一起冻结；旧快照没有此字段仍兼容，已存在但损坏则拒绝。 */
+export function isValidFinancialAnalysisMetadata(
+  value: unknown,
+  sourceType: string,
+  detailAmount: string,
+): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const metadata = value as Record<string, unknown>;
+  if (metadata.schemaVersion !== 1) return false;
+  for (const key of [
+    "canonicalPersonId",
+    "reimbursementCategory",
+    "reimbursementScope",
+    "reimbursementScopeValue",
+    "reimbursementScopePath",
+    "reimbursementRegion",
+    "reimbursementRegionSource",
+    "reimbursementServiceTarget",
+    "welfareCategoryId",
+    "welfareCategoryCode",
+    "welfareCategoryName",
+    "contractRootId",
+    "partyA",
+    "contractRegion",
+  ]) {
+    const field = metadata[key];
+    if (
+      field !== undefined &&
+      field !== null &&
+      (typeof field !== "string" || field.length > 1000)
+    )
+      return false;
+  }
+  const regionKeys = [
+    "reimbursementScopeValue",
+    "reimbursementScopePath",
+    "reimbursementRegion",
+    "reimbursementRegionSource",
+  ];
+  if (regionKeys.some((key) => metadata[key] !== undefined)) {
+    if (sourceType !== "reimbursement") return false;
+    if (
+      metadata.reimbursementRegion &&
+      ![
+        "reimbursementScopeValue",
+        "reimbursementScopePath",
+        "reimbursementRegionSource",
+      ].every(
+        (key) =>
+          typeof metadata[key] === "string" &&
+          Boolean((metadata[key] as string).trim()),
+      )
+    )
+      return false;
+  }
+  if (
+    [
+      "welfareCategoryId",
+      "welfareCategoryCode",
+      "welfareCategoryName",
+    ].some((key) => metadata[key] !== undefined)
+  ) {
+    if (
+      sourceType !== "reimbursement" ||
+      !["welfareCategoryId", "welfareCategoryCode", "welfareCategoryName"].every(
+        (key) =>
+          typeof metadata[key] === "string" &&
+          Boolean((metadata[key] as string).trim()),
+      )
+    ) {
+      return false;
+    }
+  }
+  if (metadata.payrollParts !== undefined) {
+    if (
+      sourceType !== "payroll" ||
+      !metadata.payrollParts ||
+      typeof metadata.payrollParts !== "object" ||
+      Array.isArray(metadata.payrollParts)
+    )
+      return false;
+    const parts = metadata.payrollParts as Record<string, unknown>;
+    try {
+      const values = ["salary", "social", "housing", "adjustment"].map(
+        (key) => {
+          if (typeof parts[key] !== "string")
+            throw new Error("分项金额必须为字符串");
+          return normalizeFinancialAmount(parts[key], key === "adjustment");
+        },
+      );
+      return (
+        addFinancialAmounts(...values) ===
+        normalizeFinancialAmount(detailAmount)
+      );
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 export function isNegativeFinancialAmount(value: string): boolean {
@@ -286,9 +677,34 @@ export function validateManualItems(
     if (category === "general_other" && !description) {
       throw new Error(`第${index + 1}条其他支出必须填写说明`);
     }
+    const voucherReference = String(item.voucherReference || "").trim();
+    if (
+      category === "general_tax_payment" &&
+      (!description || !voucherReference)
+    ) {
+      throw new Error(`第${index + 1}条实际税费支出必须填写说明和凭证号`);
+    }
     const amount = normalizeFinancialAmount(item.amount);
     if (amount === "0") {
       throw new Error(`第${index + 1}条手工项目金额必须大于零`);
+    }
+    const welfareCategoryId = String(item.welfareCategoryId || "").trim();
+    const welfareCategoryNameSnapshot = String(
+      item.welfareCategoryNameSnapshot || "",
+    ).trim();
+    const isDynamicWelfareCategory =
+      category === "welfare_one_expense" || category === "welfare_two_expense";
+    if (
+      isDynamicWelfareCategory &&
+      (!welfareCategoryId || !welfareCategoryNameSnapshot)
+    ) {
+      throw new Error(`第${index + 1}条福利账户手工项目缺少费用分类`);
+    }
+    if (
+      !isDynamicWelfareCategory &&
+      (welfareCategoryId || welfareCategoryNameSnapshot)
+    ) {
+      throw new Error(`第${index + 1}条手工项目不能携带福利账户费用分类`);
     }
     return {
       id: item.id ? String(item.id) : undefined,
@@ -298,7 +714,9 @@ export function validateManualItems(
       amount,
       occurredOn,
       description: description || null,
-      voucherReference: String(item.voucherReference || "").trim() || null,
+      voucherReference: voucherReference || null,
+      welfareCategoryId: welfareCategoryId || null,
+      welfareCategoryNameSnapshot: welfareCategoryNameSnapshot || null,
     };
   });
 }
@@ -341,6 +759,21 @@ export function buildMonthlyFinancialReportView(input: {
   }
 
   const manual = input.manualItems;
+  const welfareOneExpenseCategories = buildWelfareOneExpenseCategories(
+    input.automatic.welfareOneExpenseCategories,
+    manual,
+  );
+  const welfareTwoExpenseCategories = buildWelfareTwoExpenseCategories(
+    input.automatic.welfareTwoExpenseCategories,
+    manual,
+  );
+  const welfareOneAmount = (code: string) =>
+    welfareOneExpenseCategories.find((item) => item.code === code)?.totalAmount ||
+    "0";
+  const legacyWelfareOne407 = sumManualCategory(manual, "welfare_one_407");
+  const welfareTwoAmount = (code: string) =>
+    welfareTwoExpenseCategories.find((item) => item.code === code)?.totalAmount ||
+    "0";
   const activeBankAccounts = new Set(
     input.automatic.bank?.activeAccounts || [],
   );
@@ -377,24 +810,19 @@ export function buildMonthlyFinancialReportView(input: {
       ? input.automatic.bank?.businessBankFee || "0"
       : sumManualCategory(manual, "business_bank_fee"),
     generalOtherExpense: sumManualCategory(manual, "general_other"),
-    welfareOne407: sumManualCategory(manual, "welfare_one_407"),
-    welfareOneDrinkingWater: sumManualCategory(
-      manual,
-      "welfare_one_drinking_water",
+    generalTaxPayment: sumManualCategory(manual, "general_tax_payment"),
+    welfareOne407: legacyWelfareOne407,
+    welfareOneDrinkingWater: welfareOneAmount("drinking_water"),
+    welfareOneOffice: subtractFinancialAmounts(
+      welfareOneAmount("office"),
+      legacyWelfareOne407,
     ),
-    welfareOneOffice: sumManualCategory(manual, "welfare_one_office"),
-    welfareOneElectricity: sumManualCategory(manual, "welfare_one_electricity"),
-    welfareOne407Ai: sumManualCategory(manual, "welfare_one_407_ai"),
-    welfareOne8hAi: sumManualCategory(manual, "welfare_one_8h_ai"),
-    welfareTwoRefreshment: sumManualCategory(manual, "welfare_two_refreshment"),
-    welfareTwoTeamBuilding: sumManualCategory(
-      manual,
-      "welfare_two_team_building",
-    ),
-    welfareTwoHealthCheck: sumManualCategory(
-      manual,
-      "welfare_two_physical_exam",
-    ),
+    welfareOneElectricity: welfareOneAmount("electricity"),
+    welfareOne407Ai: welfareOneAmount("407_ai"),
+    welfareOne8hAi: welfareOneAmount("8h_ai"),
+    welfareTwoRefreshment: welfareTwoAmount("refreshment"),
+    welfareTwoTeamBuilding: welfareTwoAmount("team_building"),
+    welfareTwoHealthCheck: welfareTwoAmount("physical_exam"),
   };
 
   const accountFlow: Record<
@@ -413,6 +841,7 @@ export function buildMonthlyFinancialReportView(input: {
         expenses.assetAdministration,
         expenses.generalBankFee,
         expenses.generalOtherExpense,
+        expenses.generalTaxPayment,
       ),
     },
     business: {
@@ -429,20 +858,13 @@ export function buildMonthlyFinancialReportView(input: {
     welfare_one: {
       income: income.welfareOneSupplementIncome,
       expense: addFinancialAmounts(
-        expenses.welfareOne407,
-        expenses.welfareOneDrinkingWater,
-        expenses.welfareOneOffice,
-        expenses.welfareOneElectricity,
-        expenses.welfareOne407Ai,
-        expenses.welfareOne8hAi,
+        ...welfareOneExpenseCategories.map((item) => item.totalAmount),
       ),
     },
     welfare_two: {
       income: income.welfareTwoSupplementIncome,
       expense: addFinancialAmounts(
-        expenses.welfareTwoRefreshment,
-        expenses.welfareTwoTeamBuilding,
-        expenses.welfareTwoHealthCheck,
+        ...welfareTwoExpenseCategories.map((item) => item.totalAmount),
       ),
     },
   };
@@ -481,6 +903,8 @@ export function buildMonthlyFinancialReportView(input: {
     income,
     expenses,
     manualItems: manual,
+    welfareOneExpenseCategories,
+    welfareTwoExpenseCategories,
     sources: input.automatic.sources,
     details: input.automatic.details,
     warnings,

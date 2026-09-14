@@ -208,6 +208,8 @@ interface PayrollRow {
   housing_fund_base: string;
   contribution_base: string;
   individual_income_tax: string;
+  withheld_actual_amount: string | null;
+  net_salary_actual_amount: string | null;
   updated_at: string;
 }
 
@@ -220,6 +222,8 @@ interface PayrollMonthSummary {
   companyHousingFund: number;
   personalHousingFund: number;
   individualIncomeTax: number;
+  withheldActualAmount: number;
+  netSalaryActualAmount: number;
   total: number;
 }
 
@@ -557,6 +561,12 @@ function buildPayrollMonthSummaries(
         contributionBase,
         individualIncomeTax,
       );
+      const withheldActualAmount = formatPayrollAmount(
+        row.withheld_actual_amount ?? breakdown.withheld_total,
+      );
+      const netSalaryActualAmount = formatPayrollAmount(
+        row.net_salary_actual_amount ?? breakdown.net_salary,
+      );
 
       return {
         monthly_salary: monthlySalary,
@@ -564,6 +574,8 @@ function buildPayrollMonthSummaries(
         contribution_base: contributionBase,
         individual_income_tax: individualIncomeTax,
         ...breakdown,
+        withheld_actual_amount: withheldActualAmount,
+        net_salary_actual_amount: netSalaryActualAmount,
       } satisfies Record<PayrollAmountField, string>;
     });
     const totals = calculatePayrollTotals(payrollRows);
@@ -577,6 +589,8 @@ function buildPayrollMonthSummaries(
       companyHousingFund: toAmount(totals.company_housing_fund),
       personalHousingFund: toAmount(totals.personal_housing_fund),
       individualIncomeTax: toAmount(totals.individual_income_tax),
+      withheldActualAmount: toAmount(totals.withheld_actual_amount),
+      netSalaryActualAmount: toAmount(totals.net_salary_actual_amount),
       total: toAmount(totals.cost_total),
     });
   }
@@ -628,6 +642,8 @@ async function loadPayrollRows(
        pr.housing_fund_base::text AS housing_fund_base,
        pr.contribution_base::text AS contribution_base,
        pr.individual_income_tax::text AS individual_income_tax,
+       pr.withheld_actual_amount::text AS withheld_actual_amount,
+       pr.net_salary_actual_amount::text AS net_salary_actual_amount,
        pr.updated_at
      FROM payroll_records pr
      JOIN employee_profiles ep ON ep.id = pr.employee_id
@@ -1485,6 +1501,8 @@ router.get("/summary", async (req, res) => {
           companyHousingFund: summary?.companyHousingFund ?? null,
           personalHousingFund: summary?.personalHousingFund ?? null,
           individualIncomeTax: summary?.individualIncomeTax ?? null,
+          withheldActualAmount: summary?.withheldActualAmount ?? null,
+          netSalaryActualAmount: summary?.netSalaryActualAmount ?? null,
           total: summary?.total ?? null,
           available: Boolean(summary),
         };

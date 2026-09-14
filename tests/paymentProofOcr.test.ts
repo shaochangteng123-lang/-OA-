@@ -75,6 +75,45 @@ ${nextField}
     });
   });
 
+  it("显式付款与收款账号位于标签下一行时仍由共享主链正确解析", () => {
+    const rawText = `
+中国工商银行 网上银行电子回单
+付款账号
+0200049609201258271
+收款账号
+6212260200012345678
+金额 ¥100.00元
+电子回单号码：0919-5825-5555-1100
+交易日期：2026-08-31
+`;
+
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "0200049609201258271",
+      payeeAccount: "6212260200012345678",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe(
+      "6212260200012345678",
+    );
+  });
+
+  it("单一付款角色与账号标签分行时保留付款账号且不复制到收款方", () => {
+    const rawText = `
+中国工商银行 网上银行电子回单
+付款
+账号
+0200049609201258271
+金额 ¥100.00元
+电子回单号码：0919-5825-5556-1100
+交易日期：2026-08-31
+`;
+
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "0200049609201258271",
+      payeeAccount: "",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe("");
+  });
+
   it("工商银行双列表格按付款、收款列配对账号并保留票面分位金额", () => {
     const rawText = `
 中国工商银行
@@ -123,6 +162,117 @@ ${nextField}
     expect(result.payeeAccount).toBe("110933697910902");
     expect(result.amount).toBe(79_818.36);
     expect(result.transactionDate).toBe("2026-05-25");
+  });
+
+  it("工商银行真实双栏 OCR 先输出付款账号再输出收款列时仍按双方顺序配对", () => {
+    const rawText = `
+中国工商银行
+网上银行电子回单
+电子回单号码：0919-5825-5553-1100
+户名
+北京羽隶工程咨询有限公司
+户名
+北京羽隶工程咨询有限公司
+付款
+321240100100245908
+收款
+账号
+账号
+0200049609201258271
+人
+人
+兴业银行股份有限公司北京金源支行
+开户银行
+工行北京海淀支行
+开户银行
+金额
+¥8,412.40元
+金额（大写）
+人民币捌仟肆佰壹拾贰元肆角
+摘要
+其他款项
+业务（产品）种类跨行收报
+用途
+交易流水号
+25919846
+时间戳
+2026-08-31-11.16.30.937429
+备注：其他款项
+`;
+
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "321240100100245908",
+      payeeAccount: "0200049609201258271",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe(
+      "0200049609201258271",
+    );
+  });
+
+  it("工商银行反向输出收款列时按角色顺序恢复双方账号", () => {
+    const rawText = `
+中国工商银行 网上银行电子回单
+收款
+6212260200012345678
+付款
+账号
+账号
+0200049609201258271
+金额 ¥1,000.00元
+电子回单号码：0919-5825-5554-1100
+交易日期：2026-08-31
+`;
+
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "0200049609201258271",
+      payeeAccount: "6212260200012345678",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe(
+      "6212260200012345678",
+    );
+  });
+
+  it("工商银行反向角色中显式收款账号优先并补齐付款账号", () => {
+    expect(
+      extractPaymentProofPartyAccounts(`
+收款账号：6212260200012345678
+收款
+付款
+账号
+0200049609201258271
+`),
+    ).toEqual({
+      payerAccount: "0200049609201258271",
+      payeeAccount: "6212260200012345678",
+    });
+  });
+
+  it("工商银行双栏只识别到一个无归属账号时不复制到交易双方", () => {
+    const rawText = `
+中国工商银行
+付款
+收款
+账号
+0200049609201258271
+账号
+`;
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "",
+      payeeAccount: "",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe("");
+  });
+
+  it("显式标签误把同一完整账号识别到双方时清空双方并要求复核", () => {
+    const rawText = `
+付款账号：0200049609201258271
+收款账号：0200049609201258271
+`;
+    expect(extractPaymentProofPartyAccounts(rawText)).toEqual({
+      payerAccount: "",
+      payeeAccount: "",
+    });
+    expect(parsePaymentProofText(rawText).payeeAccount).toBe("");
   });
 
   it("收费回单同时含票面金额十八元和应收二十元时取票面主金额", () => {

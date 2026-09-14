@@ -294,6 +294,32 @@ export function isContractDownloadAdminRole(
   );
 }
 
+type ContractDownloadTaskExecutorRole = "admin" | "super_admin";
+
+/** 合同下载任务只由普通管理员或超级管理员执行，董事长不参与该流程。 */
+function isContractDownloadTaskExecutorRole(
+  role: unknown,
+): role is ContractDownloadTaskExecutorRole {
+  return role === "admin" || role === "super_admin";
+}
+
+/**
+ * 普通管理员只看提交时分配给本人的已批准任务；超级管理员可认领任一
+ * 尚未认领的已批准任务。进入执行中后，两类角色都只能继续处理本人任务。
+ */
+function pendingExecutorSqlPredicate(
+  role: ContractDownloadTaskExecutorRole,
+  actorPlaceholder: string,
+  alias = "",
+): string {
+  const field = (name: string) => (alias ? `${alias}.${name}` : name);
+  const approvedAssignment =
+    role === "super_admin"
+      ? `${field("status")} = 'approved' AND ${field("executor_id")} IS NULL`
+      : `${field("status")} = 'approved' AND ${field("target_executor_id")} = ${actorPlaceholder} AND ${field("executor_id")} IS NULL`;
+  return `((${approvedAssignment}) OR (${field("status")} = 'processing' AND ${field("executor_id")} = ${actorPlaceholder}))`;
+}
+
 function rolePosition(role: string, actualPosition: string | null): string {
   if (role === "general_manager") return "总经理";
   if (isContractDownloadAdminRole(role)) return "管理员";
@@ -1931,15 +1957,23 @@ function assertRequestReadAccess(
     }
   }
   if (
-    isContractDownloadAdminRole(actor.role) &&
-    request.target_executor_id === actor.id &&
-    ["approved", "processing"].includes(request.status)
+    actor.role === "super_admin" &&
+    request.status === "approved" &&
+    request.executor_id === null
   ) {
     return;
   }
   if (
     actor.role === "admin" &&
-    request.status === "completed" &&
+    request.status === "approved" &&
+    request.target_executor_id === actor.id &&
+    request.executor_id === null
+  ) {
+    return;
+  }
+  if (
+    isContractDownloadTaskExecutorRole(actor.role) &&
+    ["processing", "completed"].includes(request.status) &&
     request.executor_id === actor.id
   ) {
     return;
@@ -2019,15 +2053,15 @@ async function requestChainHistory(
          (request.status IN ('approved', 'rejected', 'processing', 'completed')
           AND request.approver_id = $${params.length})
        )`;
-  } else if (actor?.role === "admin") {
+  } else if (actor && isContractDownloadTaskExecutorRole(actor.role)) {
     params.push(actor.id);
+    const actorPlaceholder = `$${params.length}`;
     chainVisibility = `
        AND (
-         (request.status IN ('approved', 'processing')
-          AND request.target_executor_id = $${params.length})
+         ${pendingExecutorSqlPredicate(actor.role, actorPlaceholder, "request")}
          OR
          (request.status = 'completed'
-          AND request.executor_id = $${params.length})
+          AND request.executor_id = ${actorPlaceholder})
        )`;
   }
   const result = await client.query<DownloadRequestChainAuditRow>(
@@ -2379,7 +2413,7 @@ export async function listContractDownloadRequests(
     params.push(actor.id);
     predicates.push(`approver_id = $${params.length}`);
   } else if (scope === "admin_history") {
-    if (actor.role !== "admin") {
+    if (!isContractDownloadTaskExecutorRole(actor.role)) {
       throw new ContractDownloadRequestError(
         "仅实际执行管理员可以查看本人合同下载处理历史",
         403,
@@ -2388,14 +2422,16 @@ export async function listContractDownloadRequests(
     params.push(actor.id);
     predicates.push(`executor_id = $${params.length}`);
   } else {
-    if (!isContractDownloadAdminRole(actor.role)) {
+    if (!isContractDownloadTaskExecutorRole(actor.role)) {
       throw new ContractDownloadRequestError(
         "仅管理员可以查看合同下载待办",
         403,
       );
     }
     params.push(actor.id);
-    predicates.push(`target_executor_id = $${params.length}`);
+    predicates.push(
+      pendingExecutorSqlPredicate(actor.role, `$${params.length}`),
+    );
   }
   if (status) {
     if (
@@ -2552,7 +2588,7 @@ async function exportContractDownloadHistory(
       "CONTRACT_DOWNLOAD_MANAGER_EXPORT_FORBIDDEN",
     );
   }
-  if (scope === "admin" && actor.role !== "admin") {
+  if (scope === "admin" && !isContractDownloadTaskExecutorRole(actor.role)) {
     throw new ContractDownloadRequestError(
       "仅实际执行管理员可以导出本人合同下载处理记录",
       403,
@@ -2734,12 +2770,12 @@ export async function getContractDownloadPendingCounts(
     return { ...empty, managerPending, total: managerPending };
   }
 
-  if (isContractDownloadAdminRole(actor.role)) {
+  if (isContractDownloadTaskExecutorRole(actor.role)) {
+    const actorPlaceholder = "$1";
     const result = await pool.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count
        FROM contract_download_requests
-       WHERE target_executor_id = $1
-         AND status IN ('approved', 'processing')`,
+       WHERE ${pendingExecutorSqlPredicate(actor.role, actorPlaceholder)}`,
       [actor.id],
     );
     const executorPending = Number(result.rows[0]?.count || 0);
@@ -3020,7 +3056,7 @@ export async function prepareApprovedContractFileDownload(
   requestId: string,
   requestFileId: string,
 ): Promise<PreparedContractDownloadFile> {
-  if (!isContractDownloadAdminRole(actor.role)) {
+  if (!isContractDownloadTaskExecutorRole(actor.role)) {
     throw new ContractDownloadRequestError(
       "仅管理员可以执行已批准的合同文件下载任务",
       403,
@@ -3041,15 +3077,29 @@ export async function prepareApprovedContractFileDownload(
         "CONTRACT_DOWNLOAD_REQUEST_NOT_APPROVED",
       );
     }
-    if (request.target_executor_id !== actor.id) {
+    if (
+      request.status === "approved" &&
+      actor.role === "admin" &&
+      request.target_executor_id !== actor.id
+    ) {
       throw new ContractDownloadRequestError(
         `此任务已指定由管理员 ${request.target_executor_name_snapshot} 执行`,
         403,
         "CONTRACT_DOWNLOAD_EXECUTOR_MISMATCH",
       );
     }
+    if (
+      (request.status === "approved" && request.executor_id !== null) ||
+      (request.status === "processing" && request.executor_id !== actor.id)
+    ) {
+      throw new ContractDownloadRequestError(
+        `此任务已由管理员 ${request.executor_name_snapshot || "其他管理员"} 开始执行`,
+        409,
+        "CONTRACT_DOWNLOAD_TASK_CLAIMED",
+      );
+    }
     const actorInfo = await actorSnapshot(client, actor.id, true);
-    if (!isContractDownloadAdminRole(actorInfo.role)) {
+    if (!isContractDownloadTaskExecutorRole(actorInfo.role)) {
       throw new ContractDownloadRequestError("当前账号已无管理员权限", 403);
     }
     const fileResult = await client.query<DownloadRequestFileRow>(
@@ -3081,12 +3131,6 @@ export async function prepareApprovedContractFileDownload(
          WHERE id = $1`,
         [request.id, actorInfo.id, actorInfo.name, "管理员", now],
       );
-    } else if (request.executor_id && request.executor_id !== actorInfo.id) {
-      throw new ContractDownloadRequestError(
-        `此任务已由管理员 ${request.executor_name_snapshot || "其他管理员"} 开始执行`,
-        409,
-        "CONTRACT_DOWNLOAD_TASK_CLAIMED",
-      );
     }
     prepared = {
       absolutePath,
@@ -3109,7 +3153,7 @@ export async function markApprovedContractFileDownloaded(
   requestId: string,
   requestFileId: string,
 ): Promise<void> {
-  if (!isContractDownloadAdminRole(actor.role)) {
+  if (!isContractDownloadTaskExecutorRole(actor.role)) {
     throw new ContractDownloadRequestError("仅管理员可以记录下载执行结果", 403);
   }
   await db.transaction(async (client) => {
@@ -3166,7 +3210,7 @@ export async function completeContractDownloadRequest(
   rawNote: unknown,
   expectedVersion: number,
 ): Promise<ContractDownloadRequestApi> {
-  if (!isContractDownloadAdminRole(actor.role)) {
+  if (!isContractDownloadTaskExecutorRole(actor.role)) {
     throw new ContractDownloadRequestError(
       "仅管理员可以标记合同下载申请已处理",
       403,
@@ -3184,13 +3228,6 @@ export async function completeContractDownloadRequest(
         "必须先下载申请中指定的文件，才能标记已处理",
         409,
         "CONTRACT_DOWNLOAD_FILES_NOT_DOWNLOADED",
-      );
-    }
-    if (request.target_executor_id !== actor.id) {
-      throw new ContractDownloadRequestError(
-        `此任务已指定由管理员 ${request.target_executor_name_snapshot} 执行`,
-        403,
-        "CONTRACT_DOWNLOAD_EXECUTOR_MISMATCH",
       );
     }
     if (request.version !== expectedVersion) {
@@ -3221,6 +3258,9 @@ export async function completeContractDownloadRequest(
       );
     }
     const actorInfo = await actorSnapshot(client, actor.id, true);
+    if (!isContractDownloadTaskExecutorRole(actorInfo.role)) {
+      throw new ContractDownloadRequestError("当前账号已无管理员权限", 403);
+    }
     const now = new Date().toISOString();
     await client.query(
       `UPDATE contract_download_requests SET

@@ -645,9 +645,9 @@ describe("合同经营看板前端适配", () => {
     expect(text).toContain("已签合同未结算");
     expect(text).toContain("已签合同部分结算");
     expect(text).toContain("已签合同已结清");
-    expect(text).toContain("已回款");
+    expect(text).toContain("已结算");
     expect(text).not.toContain("已回款／已付款");
-    expect(text).toContain("未付款");
+    expect(text).toContain("未结算");
     expect(text).not.toContain("未回款／未付款");
     expect(text).toContain("当前所选期间");
     expect(text).toContain("上一等长期间");
