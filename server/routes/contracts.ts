@@ -865,34 +865,40 @@ function requiresHouseRentalInvoiceLines(contract: ContractRow): boolean {
   );
 }
 
-function assertAssetPaymentParties(
-  fundingMode: ContractRow["asset_funding_mode"],
+function assertCostPaymentParties(
+  contract: Pick<ContractRow, "category" | "asset_funding_mode">,
   invoice: { buyer: string; seller: string },
   bank: { payer: string; payee: string },
   role: "expense" | "external_settlement" = "expense",
   contractCompanySubjectName?: string,
 ): void {
-  if (!fundingMode || fundingMode === "pending_review") {
+  const fundingMode = contract.asset_funding_mode;
+  if (
+    contract.category === "asset" &&
+    (!fundingMode || fundingMode === "pending_review")
+  ) {
     throw new ContractDomainError(
       409,
       "系统尚未识别出我方付款主体，请核对合同主体信息后刷新页面",
       "ASSET_FUNDING_MODE_REQUIRED",
     );
   }
+  const requiresEngineeringTransfer =
+    contract.category === "asset" &&
+    fundingMode === "engineering_to_technology" &&
+    role === "expense";
   const actualPayer = normalizeFinancialIdentity(bank.payer);
   const actualPayee = normalizeFinancialIdentity(bank.payee);
-  const expectedPayer =
-    fundingMode === "engineering_to_technology" && role === "expense"
-      ? normalizeFinancialIdentity("北京羽隶工程咨询有限公司")
-      : normalizeFinancialIdentity(invoice.buyer);
-  const expectedPayee =
-    fundingMode === "engineering_to_technology" && role === "expense"
-      ? normalizeFinancialIdentity(contractCompanySubjectName || invoice.buyer)
-      : normalizeFinancialIdentity(invoice.seller);
+  const expectedPayer = requiresEngineeringTransfer
+    ? normalizeFinancialIdentity("北京羽隶工程咨询有限公司")
+    : normalizeFinancialIdentity(invoice.buyer);
+  const expectedPayee = requiresEngineeringTransfer
+    ? normalizeFinancialIdentity(contractCompanySubjectName || invoice.buyer)
+    : normalizeFinancialIdentity(invoice.seller);
   if (actualPayer !== expectedPayer || actualPayee !== expectedPayee) {
     throw new ContractDomainError(
       422,
-      fundingMode === "engineering_to_technology" && role === "expense"
+      requiresEngineeringTransfer
         ? `工程咨询划拨回单必须由北京羽隶工程咨询有限公司付款、${contractCompanySubjectName || invoice.buyer}收款`
         : "最终付款的付款人、收款人必须与发票购销双方一致",
       "FINANCIAL_REGISTRATION_PARTY_MISMATCH",
@@ -11790,7 +11796,7 @@ export async function createFinancialRegistrationFromJobs(
     for (const invoice of partyValidationInvoices) {
       for (const bank of bankDocuments) {
         if (financialDirection === "cost") {
-          assertAssetPaymentParties(target.asset_funding_mode, invoice, bank);
+          assertCostPaymentParties(target, invoice, bank);
         } else if (!incomeReceiptPartiesMatch(invoice, bank)) {
           throw new ContractDomainError(
             422,
@@ -12607,8 +12613,8 @@ export async function appendFinancialRegistrationSettlementJobs(
     for (const invoice of allInvoicePartyRows) {
       for (const bank of allBankPartyRows) {
         if (registration.financial_direction === "cost") {
-          assertAssetPaymentParties(
-            target.asset_funding_mode,
+          assertCostPaymentParties(
+            target,
             invoice,
             bank,
             "expense",
@@ -13442,12 +13448,7 @@ async function appendExternalPaymentJobs(
       : [{ buyer: contractSubject.name, seller: contractCounterparty }];
     for (const invoice of partyValidationInvoices) {
       for (const bank of bankDocuments) {
-        assertAssetPaymentParties(
-          target.asset_funding_mode,
-          invoice,
-          bank,
-          "external_settlement",
-        );
+        assertCostPaymentParties(target, invoice, bank, "external_settlement");
       }
     }
     const newExternalCents = bankDocuments.reduce(
