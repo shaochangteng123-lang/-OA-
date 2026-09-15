@@ -48,6 +48,16 @@
     />
 
     <el-alert
+      v-if="mode === 'admin' && route.query.result === 'invoice-completed'"
+      class="pending-reminder"
+      type="success"
+      title="开票流程已完成"
+      description="正式发票已经足额登记，已有回款也已覆盖本次申请；该申请已从待处理列表移出。"
+      show-icon
+      :closable="false"
+    />
+
+    <el-alert
       v-if="mode === 'manager' && managerPendingCount > 0"
       class="pending-reminder"
       type="warning"
@@ -115,6 +125,41 @@
               历史申请
             </button>
           </div>
+          <div
+            v-if="mode === 'admin'"
+            class="employee-view-switch"
+            role="tablist"
+            aria-label="开票与用印任务处理视图"
+          >
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="adminView === 'pending'"
+              :class="{ active: adminView === 'pending' }"
+              @click="setAdminView('pending')"
+            >
+              待我处理
+            </button>
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="adminView === 'history'"
+              :class="{ active: adminView === 'history' }"
+              @click="setAdminView('history')"
+            >
+              处理记录
+            </button>
+          </div>
+          <el-input
+            v-if="mode === 'admin'"
+            v-model="keyword"
+            class="search-input"
+            clearable
+            :prefix-icon="Search"
+            placeholder="搜索合同、编号、甲方或申请人"
+            @keyup.enter="handleSearch"
+            @clear="handleSearch"
+          />
           <el-select
             v-if="mode !== 'mine' || employeeView === 'current'"
             v-model="statusFilter"
@@ -146,7 +191,7 @@
           class="application-item"
         >
           <span
-            v-if="mode === 'mine' || mode === 'manager'"
+            v-if="mode === 'mine' || mode === 'manager' || mode === 'admin'"
             class="application-serial"
             :aria-label="`序号 ${serialNumber(index)}`"
           >
@@ -210,6 +255,14 @@
                   managerDecisionLog(item)?.comment || "无审批意见"
                 }}
               </span>
+              <span
+                v-if="mode === 'admin' && adminView === 'history'"
+                class="manager-decision-line"
+              >
+                本人处理：{{ adminProcessingLabel(item) }} · 处理时间：{{
+                  dateTime(item.adminProcessing?.processedAt)
+                }}
+              </span>
             </span>
           </button>
           <div class="amount-block">
@@ -246,7 +299,11 @@
               >删除草稿</el-button
             >
             <el-button
-              v-if="mode === 'admin' && item.status === 'pending_seal'"
+              v-if="
+                mode === 'admin' &&
+                adminView === 'pending' &&
+                item.status === 'pending_seal'
+              "
               type="warning"
               @click="openAdminProcessing(item)"
               >盖章并交付</el-button
@@ -254,6 +311,7 @@
             <el-button
               v-if="
                 mode === 'admin' &&
+                adminView === 'pending' &&
                 item.status === 'pending_invoice' &&
                 !item.issuedAt
               "
@@ -264,13 +322,13 @@
             <el-button
               v-if="
                 mode === 'admin' &&
+                adminView === 'pending' &&
                 item.status === 'pending_invoice' &&
                 Boolean(item.issuedAt)
               "
               type="success"
-              plain
-              @click="openAdminProcessing(item)"
-              >查看开具记录</el-button
+              @click="openContractFinance(item)"
+              >上传正式发票</el-button
             >
           </div>
         </article>
@@ -335,7 +393,7 @@
           finish-status="success"
           align-center
         >
-          <el-step title="员工签字提交" />
+          <el-step title="申请人签字提交" />
           <el-step title="总经理审批签字" />
           <el-step
             v-if="selected.materialMode === 'material_need_seal'"
@@ -432,7 +490,7 @@
                 <el-icon><Document /></el-icon>
                 <span>
                   <strong>{{ material.fileName }}</strong>
-                  <small v-if="selected.category === 'main_business'">{{
+                  <small v-if="selected.requiresTriplicate">{{
                     material.isSystemGeneratedTriplicate
                       ? "系统生成第一联、第二联、第三联三页打印件"
                       : "历史三联单仅预览和打印“其他费用”工作表"
@@ -466,7 +524,7 @@
                   type="warning"
                   @click="printMaterial(selected, material.id)"
                   >{{
-                    selected.category === "main_business"
+                    selected.requiresTriplicate
                       ? material.isSystemGeneratedTriplicate
                         ? "打印三联单"
                         : "打印其他费用工作表"
@@ -481,6 +539,31 @@
             description="本次申请没有甲方材料"
             :image-size="64"
           />
+        </section>
+
+        <section
+          v-if="selected.deliveryHandler || selected.invoiceHandler"
+          class="detail-section"
+        >
+          <h3>管理员处理记录</h3>
+          <el-descriptions :column="1" border>
+            <el-descriptions-item
+              v-if="selected.deliveryHandler"
+              label="盖章交付"
+            >
+              {{ selected.deliveryHandler.name }} ·
+              {{ dateTime(selected.deliveryHandler.processedAt) }} ·
+              {{ selected.deliveryHandler.note || "无处理说明" }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="selected.invoiceHandler"
+              label="开具登记"
+            >
+              {{ selected.invoiceHandler.name }} ·
+              {{ dateTime(selected.invoiceHandler.processedAt) }} ·
+              {{ selected.invoiceHandler.note || "无处理说明" }}
+            </el-descriptions-item>
+          </el-descriptions>
         </section>
 
         <section
@@ -541,12 +624,18 @@
             :closable="false"
             show-icon
             title="只处理上方标记为“需要盖章”的材料"
-            description="主营项目只打印“其他费用”工作表，完整原始 Excel 仅留作审计，不用于盖章。"
+            :description="
+              selected.requiresTriplicate
+                ? '请打印三联单并盖章，历史表格只打印其他费用工作表。'
+                : '请按甲方要求处理需要盖章的材料，并上传盖章后的文件。'
+            "
           />
           <div class="sealed-triplicate-upload">
             <div>
-              <strong>盖章后三联单</strong>
-              <small>上传后将作为“三联单”归档并显示在合同附件中</small>
+              <strong>{{
+                selected.requiresTriplicate ? "盖章后三联单" : "盖章后材料"
+              }}</strong>
+              <small>上传后将归档并显示在合同附件中</small>
             </div>
             <el-upload
               :auto-upload="false"
@@ -555,7 +644,7 @@
               :on-change="selectSealedTriplicate"
             >
               <el-button type="primary" plain :icon="Upload">
-                选择盖章后三联单
+                选择盖章后材料
               </el-button>
             </el-upload>
           </div>
@@ -621,16 +710,14 @@
               v-if="selected.issuedAt"
               @click="openContractFinance(selected)"
             >
-              前往合同财务登记上传正式发票
+              前往本合同财务登记上传正式发票
             </el-button>
             <el-button
+              v-else
               type="primary"
               :loading="actionLoading"
-              :disabled="Boolean(selected.issuedAt)"
               @click="markIssued"
-              >{{
-                selected.issuedAt ? "已登记开具" : "确认已开具发票"
-              }}</el-button
+              >确认已开具并上传正式发票</el-button
             >
           </footer>
         </section>
@@ -683,6 +770,8 @@ import { ElMessage, ElMessageBox, type UploadFile } from "element-plus";
 import ContractReadOnlyPreview from "@/components/contracts/ContractReadOnlyPreview.vue";
 import type {
   InvoiceApplication,
+  InvoiceApplicationFinancialProgress,
+  InvoiceApplicationAdminView,
   InvoiceApplicationAuditLog,
   InvoiceApplicationEmployeeView,
   InvoiceApplicationManagerView,
@@ -695,6 +784,7 @@ import {
   deleteInvoiceApplicationDraft,
   deliverInvoiceApplication,
   getInvoiceApplication,
+  getInvoiceApplicationFinancialProgress,
   getInvoiceApplicationErrorMessage,
   getInvoiceApplicationMaterialDownloadUrl,
   getInvoiceApplicationMaterialPrintUrl,
@@ -733,6 +823,9 @@ const employeeView = computed<InvoiceApplicationEmployeeView>(() =>
 const managerView = computed<InvoiceApplicationManagerView>(() =>
   route.query.view === "history" ? "history" : "pending",
 );
+const adminView = computed<InvoiceApplicationAdminView>(() =>
+  route.query.view === "history" ? "history" : "pending",
+);
 const heading = computed(() => {
   if (mode.value === "manager" && managerView.value === "history")
     return {
@@ -745,17 +838,26 @@ const heading = computed(() => {
   if (mode.value === "manager")
     return {
       title: "开票申请审批",
-      description: "总经理审批员工提交的收入合同开票申请，并完成本人电子签名。",
+      description:
+        "总经理审批申请人提交的收入合同开票申请，并完成本人电子签名。",
       listTitle: "待我审批",
       listDescription: "按提交时间升序，最早提交优先",
       emptyText: "当前没有待审批的开票申请",
+    };
+  if (mode.value === "admin" && adminView.value === "history")
+    return {
+      title: "开票与用印待办",
+      description: "查看当前管理员本人完成过的盖章交付和发票开具登记。",
+      listTitle: "处理记录",
+      listDescription: "按本人最近处理时间倒序",
+      emptyText: "当前没有本人开票或用印处理记录",
     };
   if (mode.value === "admin")
     return {
       title: "开票与用印待办",
       description:
         "管理员不是审批人；只执行已批准申请的材料盖章交付和发票开具登记。",
-      listTitle: "管理员开票待办",
+      listTitle: "待我处理",
       listDescription: "",
       emptyText: "当前没有开票或用印待办",
     };
@@ -785,7 +887,9 @@ const availableStatuses = computed<InvoiceApplicationStatus[]>(() => {
       "completed",
     ];
   if (mode.value === "admin")
-    return ["pending_seal", "pending_invoice", "completed"];
+    return adminView.value === "history"
+      ? ["pending_invoice", "completed"]
+      : ["pending_seal", "pending_invoice"];
   if (employeeView.value === "history") return ["completed"];
   return [
     "draft",
@@ -883,6 +987,13 @@ function statusLabel(item: InvoiceApplication) {
   }
   return INVOICE_APPLICATION_STATUS_LABELS[item.status];
 }
+function adminProcessingLabel(item: InvoiceApplication) {
+  if (item.adminProcessing?.delivered && item.adminProcessing.issued)
+    return "已完成盖章交付和开具登记";
+  if (item.adminProcessing?.delivered) return "已完成盖章交付";
+  if (item.adminProcessing?.issued) return "已完成开具登记";
+  return "已处理";
+}
 function workflowStep(item: InvoiceApplication) {
   const requiresSeal = item.materialMode === "material_need_seal";
   if (item.status === "completed") return requiresSeal ? 5 : 4;
@@ -900,8 +1011,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   draft_updated: "更新草稿",
   material_uploaded: "上传申请材料",
   material_deleted: "删除申请材料",
-  submit: "员工提交",
-  withdraw: "员工撤回申请",
+  submit: "申请人提交",
+  withdraw: "申请人撤回申请",
   approve: "总经理审批通过",
   reject: "总经理审批驳回",
   deliver: "登记盖章材料交付",
@@ -941,7 +1052,9 @@ function approvalActionText(log: InvoiceApplicationAuditLog): string {
     auditLogs
       .slice(0, logIndex)
       .some((previousLog) => previousLog.action === "reject");
-  const action = isResubmission ? "员工重新提交" : auditActionLabel(log.action);
+  const action = isResubmission
+    ? "申请人重新提交"
+    : auditActionLabel(log.action);
   return log.comment ? `${action}：${log.comment}` : action;
 }
 
@@ -964,10 +1077,17 @@ async function loadApplications() {
             ? managerView.value === "history"
               ? "manager_processed"
               : "manager_pending"
-            : mode.value,
+            : mode.value === "admin"
+              ? adminView.value === "history"
+                ? "admin_processed"
+                : "admin_pending"
+              : "mine",
         view: mode.value === "mine" ? employeeView.value : undefined,
         status: mode.value === "manager" ? undefined : statusFilter.value,
-        keyword: mode.value === "manager" ? keyword.value.trim() : undefined,
+        keyword:
+          mode.value === "manager" || mode.value === "admin"
+            ? keyword.value.trim()
+            : undefined,
         page: page.value,
         pageSize,
       }),
@@ -1001,6 +1121,17 @@ function handleSearch() {
 }
 async function setManagerView(view: InvoiceApplicationManagerView) {
   if (managerView.value === view && route.query.view === view) return;
+  detailVisible.value = false;
+  resetWorkspace();
+  statusFilter.value = "";
+  keyword.value = "";
+  page.value = 1;
+  await router.replace({
+    query: { ...route.query, view },
+  });
+}
+async function setAdminView(view: InvoiceApplicationAdminView) {
+  if (adminView.value === view && route.query.view === view) return;
   detailVisible.value = false;
   resetWorkspace();
   statusFilter.value = "";
@@ -1138,11 +1269,11 @@ function selectSealedTriplicate(file: UploadFile) {
   const rawFile = file.raw;
   if (!rawFile) return;
   if (!/\.pdf$/i.test(rawFile.name)) {
-    ElMessage.warning("盖章后三联单仅支持 PDF 格式");
+    ElMessage.warning("盖章后材料仅支持 PDF（便携式文档）格式");
     return;
   }
   if (rawFile.size > 30 * 1024 * 1024) {
-    ElMessage.warning("盖章后三联单单个文件不能超过 30MB");
+    ElMessage.warning("盖章后材料单个文件不能超过 30MB");
     return;
   }
   sealedTriplicateFile.value = rawFile;
@@ -1156,8 +1287,7 @@ function clearSealedTriplicate() {
 function previewMaterial(item: InvoiceApplication, materialId: string) {
   const material = item.materials.find((entry) => entry.id === materialId);
   const useDownload =
-    item.category === "non_main" &&
-    isSpreadsheetMaterial(material?.mimeType || "");
+    !item.requiresTriplicate && isSpreadsheetMaterial(material?.mimeType || "");
   window.open(
     useDownload
       ? getInvoiceApplicationMaterialDownloadUrl(item.id, materialId)
@@ -1175,7 +1305,7 @@ function materialActionLabel(
   item: InvoiceApplication,
   mimeType: string,
 ): string {
-  return item.category === "non_main" && isSpreadsheetMaterial(mimeType)
+  return !item.requiresTriplicate && isSpreadsheetMaterial(mimeType)
     ? "下载查看"
     : "预览";
 }
@@ -1197,12 +1327,70 @@ function printMaterial(item: InvoiceApplication, materialId: string) {
     "noopener,noreferrer",
   );
 }
-function openContractFinance(item: InvoiceApplication) {
+async function openContractFinance(item: InvoiceApplication) {
+  if (item.issuedAt) {
+    try {
+      const progress = await getInvoiceApplicationFinancialProgress(item.id);
+      if (await routeInvoiceApplicationProgress(item, progress)) return;
+    } catch (error) {
+      ElMessage.error(
+        getInvoiceApplicationErrorMessage(
+          error,
+          "无法核对开票申请状态，请刷新后重试",
+        ),
+      );
+      return;
+    }
+  }
   detailVisible.value = false;
-  void router.push({
+  await router.push({
     path: `/contracts/${item.contractId}`,
-    query: { tab: "finance", action: "record" },
+    query: {
+      tab: "finance",
+      action: "record",
+      recordType: "invoice",
+      invoiceApplicationId: item.id,
+      from: "contract-tasks",
+      fromTab: "invoice",
+      returnTo: "/contract-tasks?tab=invoice&view=pending",
+    },
   });
+}
+
+async function routeInvoiceApplicationProgress(
+  item: InvoiceApplication,
+  progress: InvoiceApplicationFinancialProgress,
+): Promise<boolean> {
+  if (progress.contractId !== item.contractId) {
+    throw new Error("开票申请与当前合同不一致");
+  }
+  if (!progress.invoiceCompleted) return false;
+  if (progress.requiresReceiptUpload) {
+    ElMessage.success(
+      `开票流程已完成，已转入待上传回单，本合同待回款 ${money(progress.pendingReceiptAmount)}`,
+    );
+    await router.replace({
+      path: "/contract-tasks",
+      query: { tab: "receipt" },
+    });
+    return true;
+  }
+  ElMessage.success("开票流程已完成，发票与已有回款已经闭合");
+  await router.replace({
+    path: "/contract-tasks",
+    query: { tab: "invoice", view: "pending", result: "invoice-completed" },
+  });
+  await loadApplications();
+  return true;
+}
+
+async function routeCompletedInvoiceApplication(
+  item: InvoiceApplication,
+): Promise<void> {
+  const progress = await getInvoiceApplicationFinancialProgress(item.id);
+  if (!(await routeInvoiceApplicationProgress(item, progress))) {
+    throw new Error("开票申请完成状态尚未同步，请刷新后重试");
+  }
 }
 async function confirmManagerSignature() {
   signatureLoading.value = true;
@@ -1256,7 +1444,7 @@ async function submitDecision(decision: "approve" | "reject") {
 async function deliverMaterials() {
   if (!selected.value) return;
   if (!sealedTriplicateFile.value) {
-    ElMessage.warning("请先选择本次申请盖章后的三联单");
+    ElMessage.warning("请先选择本次申请盖章后的材料");
     return;
   }
   actionLoading.value = true;
@@ -1265,7 +1453,7 @@ async function deliverMaterials() {
       const uploaded = await uploadContractFile(
         selected.value.contractId,
         sealedTriplicateFile.value,
-        "triplicate",
+        selected.value.requiresTriplicate ? "triplicate" : "other",
       );
       sealedTriplicateUploadedFileId.value = uploaded.fileId;
     }
@@ -1275,7 +1463,7 @@ async function deliverMaterials() {
       selected.value.version,
       sealedTriplicateUploadedFileId.value,
     );
-    ElMessage.success("盖章后三联单已归档至合同附件，下一步由管理员开具发票");
+    ElMessage.success("盖章后材料已归档至合同附件，下一步由管理员开具发票");
     detailVisible.value = false;
     requestContractDownloadBadgeRefresh();
     await loadApplications();
@@ -1289,20 +1477,30 @@ async function deliverMaterials() {
 }
 async function markIssued() {
   if (!selected.value || selected.value.issuedAt) return;
+  let issuedRecorded = false;
   actionLoading.value = true;
   try {
-    await markInvoiceApplicationIssued(
+    const updated = await markInvoiceApplicationIssued(
       selected.value.id,
       actionNote.value.trim(),
       selected.value.version,
     );
-    ElMessage.success("已记录发票开具；请继续在合同财务登记上传正式发票");
-    detailVisible.value = false;
+    issuedRecorded = true;
     requestContractDownloadBadgeRefresh();
-    await loadApplications();
+    if (updated.status === "completed") {
+      await routeCompletedInvoiceApplication(updated);
+      return;
+    }
+    ElMessage.success("已记录发票开具，正在前往本合同财务登记");
+    await openContractFinance(updated);
   } catch (error) {
     ElMessage.error(
-      getInvoiceApplicationErrorMessage(error, "登记发票已开具失败"),
+      getInvoiceApplicationErrorMessage(
+        error,
+        issuedRecorded
+          ? "已登记发票开具，但后续状态核对失败，请刷新后查看"
+          : "登记发票已开具失败",
+      ),
     );
   } finally {
     actionLoading.value = false;
@@ -1317,7 +1515,7 @@ watch(
         ? employeeView.value
         : mode.value === "manager"
           ? managerView.value
-          : "current",
+          : adminView.value,
   ],
   () => {
     statusFilter.value = "";
@@ -1509,8 +1707,11 @@ onMounted(loadApplications);
 }
 .toolbar-actions {
   gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .employee-view-switch {
+  flex: 0 0 auto;
   gap: 3px;
   padding: 3px;
   border: 1px solid #dce6ea;
@@ -1525,6 +1726,7 @@ onMounted(loadApplications);
   background: transparent;
   cursor: pointer;
   font: inherit;
+  white-space: nowrap;
   transition:
     color 150ms ease,
     background 150ms ease,
@@ -1854,6 +2056,7 @@ onMounted(loadApplications);
   .approval-hero,
   .hero-actions,
   .card-heading,
+  .list-toolbar,
   .application-item {
     align-items: stretch;
     flex-direction: column;
@@ -1864,6 +2067,13 @@ onMounted(loadApplications);
   }
   .search-input {
     width: 100%;
+  }
+  .toolbar-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .status-filter {
+    width: min(220px, 100%);
   }
   .page-heading > div:last-child,
   .item-actions {

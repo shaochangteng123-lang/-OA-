@@ -8,12 +8,14 @@ import multer from "multer";
 import { requireAuth } from "../middleware/auth.js";
 import {
   addInvoiceApplicationMaterials,
+  canInitiateInvoiceApplication,
   createInvoiceApplication,
   decideInvoiceApplication,
   deleteInvoiceApplicationDraft,
   deleteInvoiceApplicationMaterial,
   deliverInvoiceApplicationMaterials,
   getInvoiceApplication,
+  getInvoiceApplicationFinancialProgress,
   getInvoiceApplicationEligibility,
   getInvoiceApplicationEligibilityBatch,
   getInvoiceApplicationPendingCounts,
@@ -34,6 +36,11 @@ import {
   inspectInvoiceApplicationMaterial,
   MAIN_TRIPLICATE_SHEET_NAME,
 } from "../services/invoiceApplicationMaterial.js";
+import {
+  findInvoiceReceiptTaskByRegistration,
+  InvoiceReceiptTaskError,
+  listInvoiceReceiptTasks,
+} from "../services/invoiceReceiptTask.js";
 import type {
   InvoiceApplicationActor,
   InvoiceApplicationEmployeeListView,
@@ -56,7 +63,10 @@ function actor(req: Request): InvoiceApplicationActor {
 }
 
 function sendError(res: Response, error: unknown, fallback: string) {
-  if (error instanceof InvoiceApplicationError)
+  if (
+    error instanceof InvoiceApplicationError ||
+    error instanceof InvoiceReceiptTaskError
+  )
     return res.status(error.statusCode).json({
       success: false,
       message: error.message,
@@ -136,11 +146,54 @@ router.get("/pending-counts", async (req, res) => {
   }
 });
 
+router.get("/pending-receipts", async (req, res) => {
+  try {
+    const currentActor = actor(req);
+    const data = await listInvoiceReceiptTasks(
+      currentActor.role,
+      Number(req.query.page || 1),
+      Number(req.query.pageSize || 20),
+      typeof req.query.keyword === "string" ? req.query.keyword : "",
+    );
+    res.json({ success: true, data });
+  } catch (error) {
+    sendError(res, error, "读取待上传回单失败");
+  }
+});
+
+router.get("/pending-receipts/:registrationId", async (req, res) => {
+  try {
+    const currentActor = actor(req);
+    const data = await findInvoiceReceiptTaskByRegistration(
+      currentActor.role,
+      req.params.registrationId,
+    );
+    res.json({ success: true, data });
+  } catch (error) {
+    sendError(res, error, "读取待上传回单进度失败");
+  }
+});
+
+router.get("/:id/financial-progress", async (req, res) => {
+  try {
+    const data = await getInvoiceApplicationFinancialProgress(
+      actor(req),
+      req.params.id,
+    );
+    res.json({ success: true, data });
+  } catch (error) {
+    sendError(res, error, "核对开票财务进度失败");
+  }
+});
+
 router.post("/triplicate-inspection", uploadTriplicate, async (req, res) => {
   try {
     const currentActor = actor(req);
-    if (currentActor.role !== "user")
-      throw new InvoiceApplicationError("仅普通员工可以检查开票三联单", 403);
+    if (!canInitiateInvoiceApplication(currentActor.role))
+      throw new InvoiceApplicationError(
+        "仅员工和管理员可以检查开票三联单",
+        403,
+      );
     const contractId = String(req.body?.contractId || "").trim();
     if (!contractId) throw new InvoiceApplicationError("合同编号不能为空");
     const eligibility = await getInvoiceApplicationEligibility(
@@ -153,9 +206,9 @@ router.post("/triplicate-inspection", uploadTriplicate, async (req, res) => {
         409,
         eligibility.reasonCode || "INVOICE_APPLICATION_NOT_ELIGIBLE",
       );
-    if (eligibility.contract?.category !== "main_business")
+    if (!eligibility.contract?.requiresTriplicate)
       throw new InvoiceApplicationError(
-        "只有主营项目合同使用固定三联单金额识别",
+        "仅甲方为国网北京市电力公司的主营项目使用固定三联单金额识别",
         409,
       );
     const file = req.file;
@@ -217,16 +270,18 @@ router.get("/", async (req, res) => {
           ? "approval"
           : rawScope === "manager_processed"
             ? "approval_history"
-            : rawScope === "admin"
+            : rawScope === "admin" || rawScope === "admin_pending"
               ? "admin"
-              : null;
+              : rawScope === "admin_processed"
+                ? "admin_history"
+                : null;
     if (!scope) throw new InvoiceApplicationError("开票申请列表范围不正确");
     const rawView = String(req.query.view || "current");
     if (
       scope === "mine" &&
       !("current,history".split(",") as string[]).includes(rawView)
     )
-      throw new InvoiceApplicationError("员工开票申请列表视图不正确");
+      throw new InvoiceApplicationError("本人开票申请列表视图不正确");
     const data = await listInvoiceApplications(
       actor(req),
       scope as InvoiceApplicationListScope,
@@ -302,8 +357,7 @@ router.post("/:id/materials", uploadMaterials, async (req, res) => {
     const storedFiles: StoredInvoiceApplicationMaterial[] = [];
     for (const file of files) {
       const inspection = await inspectInvoiceApplicationMaterial({
-        contractCategory:
-          application.category === "main_business" ? "main" : "non_main",
+        contractCategory: application.requiresTriplicate ? "main" : "non_main",
         materialMode: application.materialMode,
         file: { buffer: file.buffer, originalName: file.originalname },
       });
@@ -318,8 +372,7 @@ router.post("/:id/materials", uploadMaterials, async (req, res) => {
         fileName: inspection.originalName,
         mimeType: inspection.mimeType,
         fileHash: inspection.sha256,
-        requiresSeal:
-          application.category === "main_business" ? true : requestedSeal,
+        requiresSeal: application.requiresTriplicate ? true : requestedSeal,
         hasOtherExpenseSheet:
           inspection.preview?.sheetName === MAIN_TRIPLICATE_SHEET_NAME,
         recognizedApplicationAmount: inspection.recognizedApplicationAmount,
@@ -369,7 +422,7 @@ router.get("/:id/materials/:materialId/preview", async (req, res) => {
       req.params.materialId,
     );
     if (
-      material.category === "main_business" &&
+      material.requiresTriplicate &&
       material.mimeType !== "application/pdf"
     ) {
       const printable = await exportOtherExpensesPrintableFileFromPath(
@@ -426,7 +479,7 @@ router.get("/:id/materials/:materialId/print", async (req, res) => {
         409,
       );
     if (
-      material.category === "main_business" &&
+      material.requiresTriplicate &&
       material.mimeType !== "application/pdf"
     ) {
       const printable = await exportOtherExpensesPrintableFileFromPath(
@@ -442,7 +495,7 @@ router.get("/:id/materials/:materialId/print", async (req, res) => {
       return;
     }
     if (
-      material.category === "main_business" &&
+      material.requiresTriplicate &&
       material.mimeType === "application/pdf"
     ) {
       res.setHeader("Content-Type", "application/pdf");

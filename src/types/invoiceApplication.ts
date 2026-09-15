@@ -16,6 +16,8 @@ export type InvoiceApplicationEmployeeView = "current" | "history";
 
 export type InvoiceApplicationManagerView = "pending" | "history";
 
+export type InvoiceApplicationAdminView = "pending" | "history";
+
 export type InvoiceApplicationMaterialMode =
   | "material_need_seal"
   | "material_no_seal"
@@ -41,6 +43,7 @@ export interface InvoiceApplicationEligibility {
     contractNo?: string | null;
     category: ContractCategory | null;
     area?: string | null;
+    requiresTriplicate?: boolean;
     partyA?: string | null;
     status: ContractStatus;
   } | null;
@@ -110,6 +113,7 @@ export interface InvoiceApplication {
   category: ContractCategory;
   area?: string | null;
   partyA?: string | null;
+  requiresTriplicate?: boolean;
   contractStatus?: ContractStatus | null;
   contractAmount?: MoneyValue | null;
   amount: MoneyValue;
@@ -136,6 +140,23 @@ export interface InvoiceApplication {
   approverSignedAt?: string | null;
   deliveredAt?: string | null;
   completedAt?: string | null;
+  deliveryHandler?: {
+    id: string;
+    name: string;
+    processedAt: string;
+    note: string;
+  } | null;
+  invoiceHandler?: {
+    id: string;
+    name: string;
+    processedAt: string;
+    note: string;
+  } | null;
+  adminProcessing?: {
+    delivered: boolean;
+    issued: boolean;
+    processedAt: string;
+  } | null;
   applicantSignedFileId?: string | null;
   approvedFileId?: string | null;
   applicationFileName?: string | null;
@@ -149,6 +170,57 @@ export interface InvoiceApplication {
 export interface InvoiceApplicationListResponse {
   items: InvoiceApplication[];
   total: number;
+}
+
+export interface InvoiceReceiptTaskInvoice {
+  id: string;
+  invoiceNo: string;
+  invoiceDate: string;
+  amount: MoneyValue;
+  applicationAmount: MoneyValue;
+  matchedReceiptAmount: MoneyValue;
+  pendingReceiptAmount: MoneyValue;
+  itemName: string;
+}
+
+export interface InvoiceReceiptTask {
+  registrationId: string;
+  contractId: string;
+  contractNo: string;
+  businessContractNo: string;
+  contractTitle: string;
+  projectName: string;
+  partyA: string;
+  area: string;
+  applicationCount: number;
+  applicationNumbers: string[];
+  invoiceCount: number;
+  invoiceAmount: MoneyValue;
+  matchedReceiptAmount: MoneyValue;
+  pendingReceiptAmount: MoneyValue;
+  earliestInvoiceDate: string;
+  waitingDays: number;
+  receiptStatus: "awaiting" | "partial";
+  invoices: InvoiceReceiptTaskInvoice[];
+}
+
+export interface InvoiceReceiptTaskListResponse {
+  items: InvoiceReceiptTask[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface InvoiceApplicationFinancialProgress {
+  id: string;
+  contractId: string;
+  status: InvoiceApplicationStatus;
+  applicationAmount: MoneyValue;
+  allocatedInvoiceAmount: MoneyValue;
+  invoiceCompleted: boolean;
+  requiresReceiptUpload: boolean;
+  pendingReceiptAmount: MoneyValue;
+  registrationId?: string | null;
 }
 
 export interface InvoiceApplicationDraftPayload {

@@ -1193,8 +1193,39 @@
             :contract-id="contractId"
             @saved="handleCompletedInternalFundingSaved"
           />
+          <el-alert
+            v-if="contractTaskFinanceTargetChecking"
+            class="contract-task-finance-context"
+            type="info"
+            show-icon
+            :closable="false"
+            title="正在核对待回单财务登记"
+            description="核对完成前不会开放任何财务写入操作。"
+          />
+          <el-alert
+            v-if="contractTaskFinanceTargetError"
+            class="contract-task-finance-context"
+            type="error"
+            show-icon
+            :closable="false"
+            title="无法打开指定财务登记"
+            :description="contractTaskFinanceTargetError"
+          />
+          <el-alert
+            v-if="contractTaskFinanceContext"
+            class="contract-task-finance-context"
+            type="success"
+            show-icon
+            :closable="false"
+            :title="contractTaskFinanceContext.title"
+            :description="contractTaskFinanceContext.description"
+          />
           <ContractFinancialRegistrationPanel
-            v-if="canManageFinancials && detail.contract.category"
+            v-if="
+              canManageFinancials &&
+              detail.contract.category &&
+              !contractTaskFinanceTargetBlocked
+            "
             ref="financialRegistrationPanelRef"
             class="finance-registration-workspace"
             :contract-id="contractId"
@@ -1217,6 +1248,7 @@
             :registration-financial-direction="
               financialRegistrationTargetDirection
             "
+            :lock-registration-target="receiptTaskRegistrationLocked"
             @created="handleFinancialRegistrationCreated"
             @cancel-continuation="cancelFinancialRegistrationContinuation"
           />
@@ -1478,11 +1510,15 @@
                     </div>
                   </div>
                   <div
-                    v-if="canEdit"
+                    v-if="canManageFinancials && canOperateFinancialCard(card)"
                     class="record-actions registration-record-actions"
                   >
                     <el-button
-                      v-if="card.status === 'draft' && card.registrationId"
+                      v-if="
+                        card.status === 'draft' &&
+                        card.registrationId &&
+                        !receiptTaskRegistrationLocked
+                      "
                       link
                       type="primary"
                       :disabled="actionLoading"
@@ -2247,6 +2283,11 @@ import {
   uploadSealedContract,
   withdrawContractApproval,
 } from "@/utils/contractApi";
+import { requestContractDownloadBadgeRefresh } from "@/utils/contractDownloadApi";
+import {
+  getInvoiceApplicationFinancialProgress,
+  getInvoiceReceiptTask,
+} from "@/utils/invoiceApplicationApi";
 import {
   CONTRACT_CATEGORY_LABELS,
   CONTRACT_DECLARED_SUBTYPE_LABELS,
@@ -2315,6 +2356,9 @@ const detailReturnsToApprovalCenter = computed(
 const detailReturnsToLedger = computed(
   () => route.query.from === "contract-ledger",
 );
+const detailReturnsToContractTasks = computed(
+  () => route.query.from === "contract-tasks",
+);
 const detailHasPreviousPage = computed(() =>
   Boolean(routeQueryText(route.query.backContractId)),
 );
@@ -2327,19 +2371,71 @@ const detailLedgerReturnPath = computed(() => {
     ? returnTo
     : "/contracts";
 });
+const detailContractTaskReturnPath = computed(() =>
+  routeQueryText(route.query.fromTab) === "receipt"
+    ? "/contract-tasks?tab=receipt"
+    : "/contract-tasks?tab=invoice&view=pending",
+);
+const contractTaskFinanceTargetError = ref("");
+const contractTaskFinanceTargetValidated = ref(false);
+const contractTaskFinanceTargetChecking = ref(false);
+const receiptTaskRegistrationLocked = computed(
+  () =>
+    detailReturnsToContractTasks.value &&
+    routeQueryText(route.query.fromTab) === "receipt" &&
+    routeQueryText(route.query.recordType || route.query.type) === "receipt",
+);
+const invoiceApplicationFinanceIntent = computed(
+  () =>
+    detailReturnsToContractTasks.value &&
+    routeQueryText(route.query.recordType || route.query.type) === "invoice" &&
+    Boolean(routeQueryText(route.query.invoiceApplicationId)),
+);
+const contractTaskFinanceTargetBlocked = computed(
+  () =>
+    Boolean(contractTaskFinanceTargetError.value) ||
+    (receiptTaskRegistrationLocked.value &&
+      !contractTaskFinanceTargetValidated.value),
+);
+const contractTaskFinanceContext = computed(() => {
+  if (!detailReturnsToContractTasks.value || !canManageFinancials.value) {
+    return null;
+  }
+  const recordType = routeQueryText(route.query.recordType || route.query.type);
+  if (recordType === "receipt") {
+    if (!contractTaskFinanceTargetValidated.value) return null;
+    return {
+      title: "已定位待回单合同及未闭合财务登记",
+      description:
+        "请在回单区域补充实际到账凭证；保存后系统重新计算已匹配回款和剩余待回款。",
+    };
+  }
+  if (recordType === "invoice") {
+    return {
+      title: "已定位本次开票申请所属主合同",
+      description:
+        "请在发票区域上传正式发票；同一合同存在多次申请时，系统按申请提交顺序自动匹配。",
+    };
+  }
+  return null;
+});
 const detailBackPath = computed(() =>
   detailReturnsToApprovalCenter.value
     ? `/contract-approvals?tab=${detailApprovalSourceTab.value}`
-    : detailReturnsToLedger.value
-      ? detailLedgerReturnPath.value
-      : "/contracts",
+    : detailReturnsToContractTasks.value
+      ? detailContractTaskReturnPath.value
+      : detailReturnsToLedger.value
+        ? detailLedgerReturnPath.value
+        : "/contracts",
 );
 const detailBackLabel = computed(() =>
   detailHasPreviousPage.value
     ? "返回上一个页面"
     : detailReturnsToApprovalCenter.value
       ? "返回审批中心"
-      : "返回台账",
+      : detailReturnsToContractTasks.value
+        ? "返回合同待办"
+        : "返回台账",
 );
 
 function handleDetailBack() {
@@ -2354,6 +2450,15 @@ function handleDetailBack() {
       return;
     }
   }
+  if (detailReturnsToContractTasks.value) {
+    const historyBackPath = String(window.history.state?.back || "");
+    if (historyBackPath.startsWith("/contract-tasks")) {
+      router.back();
+      return;
+    }
+    void router.replace(detailBackPath.value);
+    return;
+  }
   void router.push(detailBackPath.value);
 }
 
@@ -2364,22 +2469,31 @@ function openRelatedContract(relatedContractId: string) {
     query: { backContractId: contractId.value },
   });
 }
+const baseCanManageFinancials = computed(() => {
+  const contract = detail.value?.contract;
+  if (!canEdit.value || !contract || contract.relationType !== "main") {
+    return false;
+  }
+  if (["effective", "executing"].includes(contract.status)) return true;
+  if (contract.status !== "completed") return false;
+  const hasOpenRegistration = financialRegistrationCards.value.some(
+    (card) => card.status === "draft",
+  );
+  const completedIncomeAllowed =
+    ["main_business", "non_main"].includes(contract.category || "") &&
+    contract.financialDirection === "income" &&
+    (hasOpenRegistration || invoiceApplicationFinanceIntent.value);
+  const completedAssetContinuation =
+    contract.category === "asset" &&
+    ["engineering_direct", "technology_direct"].includes(
+      contract.assetFundingMode || "",
+    ) &&
+    hasOpenRegistration;
+  return completedIncomeAllowed || completedAssetContinuation;
+});
 const canManageFinancials = computed(
   () =>
-    canEdit.value &&
-    Boolean(
-      detail.value &&
-      detail.value.contract.relationType === "main" &&
-      (["effective", "executing"].includes(detail.value.contract.status) ||
-        (detail.value.contract.status === "completed" &&
-          detail.value.contract.category === "asset" &&
-          ["engineering_direct", "technology_direct"].includes(
-            detail.value.contract.assetFundingMode || "",
-          ) &&
-          financialRegistrationCards.value.some(
-            (card) => card.status === "draft",
-          ))),
-    ),
+    baseCanManageFinancials.value && !contractTaskFinanceTargetBlocked.value,
 );
 const canUploadSupplement = computed(
   () =>
@@ -3006,7 +3120,7 @@ const sealedUploadRef = ref<UploadInstance>();
 const sealPageErrorRef = ref<HTMLElement | null>(null);
 const sealedLocalPreviewUrl = ref("");
 const financialRegistrationPanelRef = ref<{
-  focus: () => void;
+  focus: (target?: "invoice" | "receipt") => void;
   reset: () => void;
   reloadPendingUploads: () => Promise<void>;
 } | null>(null);
@@ -3989,6 +4103,22 @@ function financialCardPendingActionLabel(card: FinancialRegistrationCard) {
   return `尚待${financialCardSettlementAction(card)}，暂不可确认`;
 }
 
+function canOperateFinancialCard(card: FinancialRegistrationCard): boolean {
+  if (!receiptTaskRegistrationLocked.value) return true;
+  return (
+    contractTaskFinanceTargetValidated.value &&
+    !contractTaskFinanceTargetBlocked.value &&
+    Boolean(card.registrationId) &&
+    card.registrationId === routeQueryText(route.query.registrationId)
+  );
+}
+
+function ensureFinancialCardTaskTarget(card: FinancialRegistrationCard) {
+  if (canOperateFinancialCard(card)) return true;
+  ElMessage.warning("待回单入口只能操作已锁定的财务登记");
+  return false;
+}
+
 function hasConfirmedSettlement(card: FinancialRegistrationCard): boolean {
   return card.documents.some(
     (document) =>
@@ -4019,6 +4149,11 @@ function isAwaitingSettlement(card: FinancialRegistrationCard): boolean {
 
 async function continueFinancialRegistration(card: FinancialRegistrationCard) {
   if (!card.registrationId) return;
+  if (!ensureFinancialCardTaskTarget(card)) return;
+  if (receiptTaskRegistrationLocked.value) {
+    financialRegistrationPanelRef.value?.focus("receipt");
+    return;
+  }
   financialRegistrationPanelRef.value?.reset();
   financialRegistrationTargetId.value = card.registrationId;
   await nextTick();
@@ -4027,6 +4162,10 @@ async function continueFinancialRegistration(card: FinancialRegistrationCard) {
 }
 
 function cancelFinancialRegistrationContinuation() {
+  if (receiptTaskRegistrationLocked.value) {
+    void router.replace(detailContractTaskReturnPath.value);
+    return;
+  }
   financialRegistrationPanelRef.value?.reset();
   financialRegistrationTargetId.value = "";
   depositReceiptExpandedIds.value = [];
@@ -4237,21 +4376,38 @@ function routeQueryText(value: unknown): string {
   return typeof resolved === "string" ? resolved : "";
 }
 
-function applyRouteIntent() {
+async function applyRouteIntent() {
   if (!detail.value) return;
   const requestedTab = routeQueryText(route.query.tab);
   const requestedAction = routeQueryText(route.query.action);
   const requestedType = routeQueryText(
     route.query.type || route.query.recordType,
   );
+  const requestedRegistrationId = routeQueryText(route.query.registrationId);
+  const requestedApplicationId = routeQueryText(
+    route.query.invoiceApplicationId,
+  );
   const intentKey = [
     contractId.value,
     requestedTab,
     requestedAction,
     requestedType,
+    requestedRegistrationId,
+    requestedApplicationId,
   ].join(":");
-  if (intentKey === appliedRouteIntentKey) return;
+  const intentRouteFullPath = route.fullPath;
+  const revalidateReceiptTask = receiptTaskRegistrationLocked.value;
+  if (intentKey === appliedRouteIntentKey && !revalidateReceiptTask) return;
   appliedRouteIntentKey = intentKey;
+  const validationSequence = ++contractTaskFinanceValidationSequence;
+  contractTaskFinanceTargetError.value = "";
+  contractTaskFinanceTargetValidated.value = false;
+  contractTaskFinanceTargetChecking.value = revalidateReceiptTask;
+
+  const rejectReceiptTarget = (message: string) => {
+    contractTaskFinanceTargetError.value = message;
+    contractTaskFinanceTargetChecking.value = false;
+  };
 
   if (
     FINANCE_TABS.has(requestedTab) &&
@@ -4277,21 +4433,131 @@ function applyRouteIntent() {
     openSealedWorkspace();
     return;
   }
-  if (requestedAction !== "record") return;
-  activeTab.value = "finance";
-  if (!canManageFinancials.value) {
-    ElMessage.warning(
-      detail.value.contract.status === "completed"
-        ? "已完成合同不能新增财务记录"
-        : "当前合同状态不能新增财务记录",
+  if (receiptTaskRegistrationLocked.value && requestedAction !== "record") {
+    rejectReceiptTarget(
+      "待回单入口缺少财务登记操作参数，请返回合同待办刷新后重新进入。",
     );
     return;
   }
-  void nextTick(() => financialRegistrationPanelRef.value?.focus());
+  if (requestedAction !== "record") {
+    contractTaskFinanceTargetChecking.value = false;
+    return;
+  }
+  activeTab.value = "finance";
+  if (receiptTaskRegistrationLocked.value && !requestedRegistrationId) {
+    rejectReceiptTarget(
+      "待回单入口缺少财务登记编号，请返回合同待办刷新后重新进入。",
+    );
+    return;
+  }
+  if (!baseCanManageFinancials.value) {
+    const message =
+      detail.value.contract.status === "completed"
+        ? "当前已完成合同不符合继续登记条件"
+        : "当前合同状态不能新增财务记录";
+    if (receiptTaskRegistrationLocked.value) {
+      rejectReceiptTarget(`${message}，请返回合同待办刷新后重新进入。`);
+    } else {
+      contractTaskFinanceTargetChecking.value = false;
+    }
+    ElMessage.warning(message);
+    return;
+  }
+  const focusTarget =
+    requestedType === "invoice" || requestedType === "receipt"
+      ? requestedType
+      : undefined;
+  if (requestedRegistrationId) {
+    const requestedRegistration = financialRegistrationCards.value.find(
+      (card) =>
+        card.registrationId === requestedRegistrationId &&
+        card.status === "draft",
+    );
+    if (!requestedRegistration) {
+      rejectReceiptTarget(
+        "该待办已处理、已闭合或不属于当前合同，请返回合同待办刷新后重新进入。",
+      );
+      return;
+    }
+    if (receiptTaskRegistrationLocked.value) {
+      try {
+        const receiptTask = await getInvoiceReceiptTask(
+          requestedRegistrationId,
+        );
+        if (
+          contractTaskFinanceValidationSequence !== validationSequence ||
+          route.fullPath !== intentRouteFullPath
+        )
+          return;
+        if (
+          !receiptTask ||
+          receiptTask.registrationId !== requestedRegistrationId ||
+          receiptTask.contractId !== contractId.value
+        ) {
+          rejectReceiptTarget(
+            "该财务登记已不属于待上传回单，请返回合同待办刷新后重新进入。",
+          );
+          return;
+        }
+      } catch (error) {
+        if (
+          contractTaskFinanceValidationSequence !== validationSequence ||
+          route.fullPath !== intentRouteFullPath
+        )
+          return;
+        rejectReceiptTarget(
+          getContractErrorMessage(
+            error,
+            "无法核对待回单财务登记，请返回合同待办刷新后重试。",
+          ),
+        );
+        return;
+      }
+    }
+    contractTaskFinanceTargetValidated.value = true;
+    contractTaskFinanceTargetChecking.value = false;
+    financialRegistrationTargetId.value = requestedRegistrationId;
+    void nextTick(async () => {
+      if (
+        contractTaskFinanceValidationSequence !== validationSequence ||
+        route.fullPath !== intentRouteFullPath
+      ) {
+        return;
+      }
+      await financialRegistrationPanelRef.value?.reloadPendingUploads();
+      if (
+        contractTaskFinanceValidationSequence !== validationSequence ||
+        route.fullPath !== intentRouteFullPath
+      ) {
+        return;
+      }
+      await nextTick();
+      if (
+        contractTaskFinanceValidationSequence !== validationSequence ||
+        route.fullPath !== intentRouteFullPath
+      ) {
+        return;
+      }
+      financialRegistrationPanelRef.value?.focus(focusTarget);
+    });
+    return;
+  }
+  contractTaskFinanceTargetChecking.value = false;
+  void nextTick(() => {
+    if (
+      contractTaskFinanceValidationSequence !== validationSequence ||
+      route.fullPath !== intentRouteFullPath
+    ) {
+      return;
+    }
+    financialRegistrationPanelRef.value?.focus(focusTarget);
+  });
 }
 
 let detailLoadSequence = 0;
 let appliedRouteIntentKey = "";
+let contractTaskFinanceValidationSequence = 0;
+let financialRegistrationCompletionSequence = 0;
 
 function resetDetailViewState() {
   releaseSealedLocalPreview();
@@ -4310,6 +4576,8 @@ function resetDetailViewState() {
   detailApprovalWorkspaceSession.value += 1;
   detailApprovalNeedsRefresh.value = false;
   appliedRouteIntentKey = "";
+  contractTaskFinanceValidationSequence += 1;
+  financialRegistrationCompletionSequence += 1;
   sealedForm.file = null;
   sealVerification.value = null;
   sealLoading.value = false;
@@ -4320,6 +4588,9 @@ function resetDetailViewState() {
   sealDifferenceExplanation.value = "";
   financialRegistrationPanelRef.value?.reset();
   financialRegistrationTargetId.value = "";
+  contractTaskFinanceTargetError.value = "";
+  contractTaskFinanceTargetValidated.value = false;
+  contractTaskFinanceTargetChecking.value = false;
 }
 
 function hydrateSealVerification(next: ContractSealVerification | null) {
@@ -4500,6 +4771,13 @@ async function loadDetail() {
   const requestedContractId = contractId.value;
   if (!requestedContractId) return;
   const loadSequence = ++detailLoadSequence;
+  const revalidateReceiptTask = receiptTaskRegistrationLocked.value;
+  if (revalidateReceiptTask) {
+    contractTaskFinanceValidationSequence += 1;
+    contractTaskFinanceTargetError.value = "";
+    contractTaskFinanceTargetValidated.value = false;
+    contractTaskFinanceTargetChecking.value = true;
+  }
   loading.value = true;
   errorMessage.value = "";
   try {
@@ -4519,7 +4797,7 @@ async function loadDetail() {
       return;
     }
     liveStatus.value = "合同详情已更新";
-    applyRouteIntent();
+    await applyRouteIntent();
   } catch (error) {
     if (
       loadSequence !== detailLoadSequence ||
@@ -4528,6 +4806,11 @@ async function loadDetail() {
       return;
     }
     errorMessage.value = getContractErrorMessage(error, "无法获取合同详情");
+    if (revalidateReceiptTask) {
+      contractTaskFinanceTargetChecking.value = false;
+      contractTaskFinanceTargetError.value =
+        "无法重新核对待回单财务登记，请稍后刷新重试。";
+    }
     liveStatus.value = errorMessage.value;
   } finally {
     if (loadSequence === detailLoadSequence) loading.value = false;
@@ -4917,11 +5200,91 @@ async function archiveSealedVerification() {
 }
 
 async function handleFinancialRegistrationCreated() {
+  const completionSequence = ++financialRegistrationCompletionSequence;
+  const sourceContractId = contractId.value;
+  const sourceRouteFullPath = route.fullPath;
+  const isCurrentCompletionContext = () =>
+    completionSequence === financialRegistrationCompletionSequence &&
+    contractId.value === sourceContractId &&
+    route.fullPath === sourceRouteFullPath;
+  const invoiceApplicationId = routeQueryText(route.query.invoiceApplicationId);
+  const receiptRegistrationId = routeQueryText(route.query.registrationId);
+  const returnsToReceiptTasks =
+    detailReturnsToContractTasks.value &&
+    routeQueryText(route.query.fromTab) === "receipt";
   financialRegistrationTargetId.value = "";
+  requestContractDownloadBadgeRefresh();
   await loadDetail();
+  if (!isCurrentCompletionContext()) return;
+  if (invoiceApplicationId) {
+    try {
+      const progress =
+        await getInvoiceApplicationFinancialProgress(invoiceApplicationId);
+      if (!isCurrentCompletionContext()) return;
+      if (progress.contractId !== contractId.value) {
+        ElMessage.error("开票申请与当前合同不一致，请返回合同待办重新进入");
+        return;
+      }
+      if (progress.invoiceCompleted) {
+        if (progress.requiresReceiptUpload) {
+          ElMessage.success(
+            `开票流程已完成，已转入待上传回单，本合同待回款 ${formatContractMoney(progress.pendingReceiptAmount)}`,
+          );
+          await router.replace({
+            path: "/contract-tasks",
+            query: { tab: "receipt" },
+          });
+          return;
+        }
+        ElMessage.success("开票流程已完成，发票与已有回款已经闭合");
+        await router.replace({
+          path: "/contract-tasks",
+          query: {
+            tab: "invoice",
+            view: "pending",
+            result: "invoice-completed",
+          },
+        });
+        return;
+      }
+      ElMessage.warning("正式发票尚未足额覆盖本次申请，请继续补充发票");
+    } catch (error) {
+      if (!isCurrentCompletionContext()) return;
+      ElMessage.error(
+        getContractErrorMessage(error, "无法核对开票申请完成状态"),
+      );
+    }
+    return;
+  }
+  if (returnsToReceiptTasks) {
+    try {
+      const receiptTask = receiptRegistrationId
+        ? await getInvoiceReceiptTask(receiptRegistrationId)
+        : null;
+      if (!isCurrentCompletionContext()) return;
+      if (receiptTask) {
+        ElMessage.success(
+          `部分回款已保存，当前登记仍待回款 ${formatContractMoney(receiptTask.pendingReceiptAmount)}`,
+        );
+      } else {
+        ElMessage.success("回单已足额覆盖，待上传回单已完成");
+      }
+    } catch (error) {
+      if (!isCurrentCompletionContext()) return;
+      ElMessage.warning(
+        getContractErrorMessage(error, "回单已保存，请返回待办刷新状态"),
+      );
+    }
+    if (!isCurrentCompletionContext()) return;
+    await router.replace({
+      path: "/contract-tasks",
+      query: { tab: "receipt" },
+    });
+  }
 }
 
 async function confirmFinancialCard(card: FinancialRegistrationCard) {
+  if (!ensureFinancialCardTaskTarget(card)) return;
   const first = card.documents[0];
   if (!first) return;
   if (actionLoading.value) return;
@@ -4966,6 +5329,7 @@ async function confirmFinancialCard(card: FinancialRegistrationCard) {
 }
 
 async function deleteFinancialCard(card: FinancialRegistrationCard) {
+  if (!ensureFinancialCardTaskTarget(card)) return;
   const first = card.documents[0];
   if (!first) return;
   if (actionLoading.value) return;
@@ -5010,6 +5374,7 @@ async function deleteFinancialCard(card: FinancialRegistrationCard) {
 }
 
 async function reverseFinancialCard(card: FinancialRegistrationCard) {
+  if (!ensureFinancialCardTaskTarget(card)) return;
   const first = card.documents[0];
   if (!first) return;
   if (actionLoading.value) return;
@@ -5173,11 +5538,17 @@ watch(
     route.query.action,
     route.query.type,
     route.query.recordType,
+    route.query.registrationId,
+    route.query.invoiceApplicationId,
   ],
-  () => applyRouteIntent(),
+  () => {
+    financialRegistrationCompletionSequence += 1;
+    void applyRouteIntent();
+  },
 );
 
 onBeforeUnmount(() => {
+  financialRegistrationCompletionSequence += 1;
   releaseSealedLocalPreview();
 });
 </script>
@@ -6431,6 +6802,9 @@ onBeforeUnmount(() => {
   font-size: 16px;
 }
 .finance-registration-workspace {
+  margin-bottom: 14px;
+}
+.contract-task-finance-context {
   margin-bottom: 14px;
 }
 .asset-financial-chain {

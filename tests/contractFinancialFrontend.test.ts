@@ -85,9 +85,9 @@ describe("合同财务双凭证登记前端闭环", () => {
     expect(financialReadGate).toContain("CONTRACT_LEDGER_READ_ROLES");
     expect(financialReadGate).not.toContain("(READ_ROLES as readonly");
     expect(routeSource).toContain("await assertContractReadScope(");
-    expect(detailSource).toContain(
-      'v-if="canManageFinancials && detail.contract.category"',
-    );
+    expect(detailSource).toContain("canManageFinancials &&");
+    expect(detailSource).toContain("detail.contract.category &&");
+    expect(detailSource).toContain("!contractTaskFinanceTargetBlocked");
     expect(detailSource).toContain("financialRegistrationCards.length");
     expect(detailSource).toContain("detail.accounting?.unreceivedAmount");
     expect(detailSource).toContain("detail.accounting?.basis");

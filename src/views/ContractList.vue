@@ -25,7 +25,7 @@
           导出台账
         </el-button>
         <el-button
-          v-if="isEmployee"
+          v-if="canInitiateInvoice"
           @click="router.push('/contract-applications/mine')"
         >
           我的申请
@@ -80,18 +80,32 @@
       <ContractMetricCard
         label="待审批合同"
         :value="summary.pendingApprovalCount || 0"
-        note="全部合同业务审批统一由总经理处理"
+        :note="
+          isStatusMetricActive('approving')
+            ? '下方正显示审批中合同，再次点击恢复全部状态'
+            : '点击查看相关合同；合同业务审批仍由总经理处理'
+        "
         :icon="Stamp"
         tone="violet"
-        :clickable="canOpenApprovalCenter"
-        @activate="router.push('/contract-approvals')"
+        :badge="isStatusMetricActive('approving') ? '筛选中' : '点击查看'"
+        clickable
+        :aria-pressed="isStatusMetricActive('approving')"
+        @activate="toggleStatusMetric('approving')"
       />
       <ContractMetricCard
         label="待盖章归档"
         :value="summary.pendingSealCount || 0"
-        note="审批通过后等待盖章"
+        :note="
+          isStatusMetricActive('pending_seal')
+            ? '下方正显示待盖章合同，再次点击恢复全部状态'
+            : '点击查看审批通过后等待盖章的相关合同'
+        "
         :icon="DocumentChecked"
         tone="green"
+        :badge="isStatusMetricActive('pending_seal') ? '筛选中' : '点击查看'"
+        clickable
+        :aria-pressed="isStatusMetricActive('pending_seal')"
+        @activate="toggleStatusMetric('pending_seal')"
       />
     </section>
 
@@ -262,7 +276,12 @@
       </template>
     </el-alert>
 
-    <section v-loading="loading" class="ledger-card" :aria-busy="loading">
+    <section
+      ref="ledgerCardRef"
+      v-loading="loading"
+      class="ledger-card"
+      :aria-busy="loading"
+    >
       <div class="ledger-heading">
         <div>
           <strong>合同台账</strong>
@@ -634,7 +653,7 @@
                   >
                 </span>
                 <span
-                  v-if="isEmployee && canApplyInvoice(row)"
+                  v-if="canApplyInvoice(row)"
                   class="action-slot action-invoice"
                 >
                   <el-button
@@ -945,7 +964,7 @@
                   >申请下载</el-button
                 >
                 <el-button
-                  v-if="isEmployee && canApplyInvoice(row)"
+                  v-if="canApplyInvoice(row)"
                   type="primary"
                   link
                   @click.stop="openInvoiceApplication(row)"
@@ -1260,11 +1279,11 @@ const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
 const adminRoles = new Set(["super_admin", "chairman", "admin"]);
-const approvalCenterRoles = new Set(["general_manager"]);
 const canCreate = computed(() => adminRoles.has(authStore.user?.role || ""));
 const isEmployee = computed(() => authStore.user?.role === "user");
+const canInitiateInvoice = computed(() => isEmployee.value || canCreate.value);
 const contractActionColumnWidth = computed(() => {
-  if (canCreate.value) return 590;
+  if (canCreate.value) return 680;
   if (isEmployee.value) return 250;
   return 100;
 });
@@ -1272,9 +1291,6 @@ const canExportContracts = computed(
   () =>
     adminRoles.has(authStore.user?.role || "") ||
     authStore.user?.role === "general_manager",
-);
-const canOpenApprovalCenter = computed(() =>
-  approvalCenterRoles.has(authStore.user?.role || ""),
 );
 const CONTRACT_SETTLEMENT_STATUS_LABELS: Record<
   ContractSettlementStatus,
@@ -1361,6 +1377,7 @@ const visibleMobileItems = computed<ContractLedgerRow[]>(() =>
   ),
 );
 const summary = ref<ContractListSummary>({});
+const ledgerCardRef = ref<HTMLElement | null>(null);
 const total = ref(0);
 const page = ref(1);
 const pageSize = ref(20);
@@ -1677,6 +1694,19 @@ function handleFilterChange() {
   applyFilters(true);
 }
 
+function isStatusMetricActive(status: ContractStatus): boolean {
+  return filters.statuses.length === 1 && filters.statuses[0] === status;
+}
+
+function toggleStatusMetric(status: "approving" | "pending_seal") {
+  filters.statuses = isStatusMetricActive(status) ? [] : [status];
+  applyFilters(true);
+  ledgerCardRef.value?.scrollIntoView?.({
+    behavior: "smooth",
+    block: "start",
+  });
+}
+
 function handlePageChange(nextPage: number) {
   page.value = nextPage;
   applyFilters(false);
@@ -1730,7 +1760,7 @@ function openDownloadRequest(item: ContractListItem) {
 
 function canApplyInvoice(item: ContractListItem): boolean {
   return (
-    isEmployee.value &&
+    canInitiateInvoice.value &&
     item.relationType === "main" &&
     ["main_business", "non_main"].includes(item.category || "") &&
     contractDirectionClass(item) === "is-income" &&
@@ -2353,6 +2383,7 @@ onMounted(loadMeta);
   min-width: 0;
   overflow: hidden;
   margin-top: 16px;
+  scroll-margin-top: 84px;
   padding: 18px;
   border: 1px solid #e1e7ed;
   border-radius: 12px;

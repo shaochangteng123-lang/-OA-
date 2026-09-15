@@ -11,6 +11,11 @@ describe("开票申请前端流程", () => {
   const listSource = source("src/views/ContractList.vue");
   const createSource = source("src/views/InvoiceApplicationCreate.vue");
   const centerSource = source("src/views/InvoiceApplicationCenter.vue");
+  const receiptCenterSource = source("src/views/InvoiceReceiptTaskCenter.vue");
+  const detailSource = source("src/views/ContractDetail.vue");
+  const financialPanelSource = source(
+    "src/components/contracts/ContractFinancialRegistrationPanel.vue",
+  );
   const myApplicationsSource = source("src/views/MyContractApplications.vue");
   const apiSource = source("src/utils/invoiceApplicationApi.ts");
 
@@ -27,7 +32,9 @@ describe("开票申请前端流程", () => {
       routerSource.indexOf('path: "/invoice-applications/tasks"'),
       routerSource.indexOf('path: "/contract-dashboard"'),
     );
-    expect(createRoute).toContain('requiresRole: ["user"]');
+    expect(createRoute).toContain(
+      'requiresRole: ["user", "admin", "super_admin", "chairman"]',
+    );
     expect(managerRoute).toContain('requiresRole: ["general_manager"]');
     expect(adminRoute).toContain("requiresAdmin: true");
     expect(layoutSource).toContain('label="我的申请"');
@@ -68,7 +75,9 @@ describe("开票申请前端流程", () => {
     expect(routerSource).toContain('tab: "invoice"');
     expect(myApplicationsSource).toContain("合同下载申请");
     expect(myApplicationsSource).toContain("开票及用印申请");
-    expect(myApplicationsSource).toContain("v-if=\"activeTab === 'download'\"");
+    expect(myApplicationsSource).toContain(
+      "v-if=\"canRequestDownload && activeTab === 'download'\"",
+    );
     expect(myApplicationsSource).not.toContain("v-show");
     expect(myApplicationsSource).toContain("<InvoiceApplicationCenter v-else");
     expect(listSource).toContain("router.push('/contract-applications/mine')");
@@ -92,7 +101,7 @@ describe("开票申请前端流程", () => {
     );
     expect(centerSource).toContain('v-for="(item, index) in items"');
     expect(centerSource).toContain(
-      "v-if=\"mode === 'mine' || mode === 'manager'\"",
+      "v-if=\"mode === 'mine' || mode === 'manager' || mode === 'admin'\"",
     );
     expect(centerSource).toContain(
       "return (page.value - 1) * pageSize + index + 1",
@@ -126,15 +135,45 @@ describe("开票申请前端流程", () => {
     expect(centerSource).toContain("serialNumber(index)");
   });
 
-  it("合同台账仅根据服务端批量资格字段为普通员工显示收入主合同入口", () => {
+  it("管理员开票与用印待办区分待我处理和本人处理记录", () => {
+    expect(centerSource).toContain('aria-label="开票与用印任务处理视图"');
+    expect(centerSource).toContain("待我处理");
+    expect(centerSource).toContain("处理记录");
+    expect(centerSource).toContain("setAdminView('pending')");
+    expect(centerSource).toContain("setAdminView('history')");
+    expect(centerSource).toContain('? "admin_processed"');
+    expect(centerSource).toContain(': "admin_pending"');
+    expect(centerSource).toContain("adminView.value");
+    expect(centerSource).toContain(
+      "本人处理：{{ adminProcessingLabel(item) }}",
+    );
+    expect(centerSource).toContain("item.adminProcessing?.processedAt");
+    expect(centerSource).toContain("selected.deliveryHandler.name");
+    expect(centerSource).toContain("selected.invoiceHandler.name");
+    expect(centerSource).toContain("adminView === 'pending'");
+    expect(centerSource).toMatch(
+      /\.employee-view-switch button\s*\{[\s\S]*?white-space:\s*nowrap;/,
+    );
+    expect(centerSource).toMatch(
+      /@media \(max-width: 800px\)[\s\S]*?\.list-toolbar,[\s\S]*?flex-direction:\s*column;/,
+    );
+    expect(apiSource).toContain('"admin_pending"');
+    expect(apiSource).toContain('"admin_processed"');
+  });
+
+  it("合同台账根据服务端批量资格字段为员工和管理员显示收入主合同入口", () => {
     expect(listSource).toContain("function canApplyInvoice");
+    expect(listSource).toContain("canInitiateInvoice.value");
+    expect(listSource).not.toContain("isEmployee && canApplyInvoice(row)");
+    expect(myApplicationsSource).toContain('v-if="canRequestDownload"');
+    expect(myApplicationsSource).toContain("!canRequestDownload.value");
     expect(listSource).toContain('item.relationType === "main"');
     expect(listSource).toContain('["main_business", "non_main"]');
     expect(listSource).toContain('["effective", "executing", "completed"]');
     expect(listSource).toContain(
       "item.invoiceApplicationEligibility?.eligible === true",
     );
-    expect(listSource).toContain('v-if="isEmployee && canApplyInvoice(row)"');
+    expect(listSource).toContain('v-if="canApplyInvoice(row)"');
     expect(listSource).toContain('v-if="canApplyInvoice(item)"');
     expect(listSource).not.toContain(
       "getInvoiceApplicationEligibility(row.id)",
@@ -196,11 +235,11 @@ describe("开票申请前端流程", () => {
     expect(createSource).toContain('@click="generateOnlineTriplicate"');
     expect(createSource).toContain("generateMainBusinessTriplicate");
     expect(createSource).toContain(
-      'v-show="!isMainBusiness || triplicateAmountConfirmed"',
+      'v-show="!requiresTriplicate || triplicateAmountConfirmed"',
     );
-    expect(createSource).toContain(':multiple="!isMainBusiness"');
+    expect(createSource).toContain(':multiple="!requiresTriplicate"');
     expect(createSource).toContain(
-      "!isMainBusiness && form.materialMode !== 'no_material'",
+      "!requiresTriplicate && form.materialMode !== 'no_material'",
     );
     expect(createSource).toContain("总经理批准后由管理员打印并盖章");
     expect(createSource).toContain('value="material_need_seal"');
@@ -337,9 +376,9 @@ describe("开票申请前端流程", () => {
     );
     expect(centerSource).not.toContain("border-top: 1px solid #e4edef");
     expect(centerSource).not.toContain(".material-card-actions :deep(.el-tag)");
-    expect(centerSource).toContain("选择盖章后三联单");
+    expect(centerSource).toContain("选择盖章后材料");
     expect(centerSource).toContain('accept=".pdf,application/pdf"');
-    expect(centerSource).toContain("盖章后三联单仅支持 PDF 格式");
+    expect(centerSource).toContain("盖章后材料仅支持 PDF（便携式文档）格式");
     expect(centerSource).not.toContain("PDF、JPG、JPEG、PNG");
     expect(centerSource).toContain("sealedTriplicateFile");
     expect(centerSource).toContain("uploadContractFile(");
@@ -347,19 +386,24 @@ describe("开票申请前端流程", () => {
     expect(centerSource).toContain("uploaded.fileId");
     expect(centerSource).toContain(':disabled="!sealedTriplicateFile"');
     expect(centerSource).toContain(
-      "盖章后三联单已归档至合同附件，下一步由管理员开具发票",
+      "盖章后材料已归档至合同附件，下一步由管理员开具发票",
     );
-    expect(centerSource).toContain("确认已开具发票");
+    expect(centerSource).toContain("确认已开具并上传正式发票");
     expect(centerSource).toContain("已开具，待财务登记");
     expect(centerSource).toContain("!item.issuedAt");
     expect(centerSource).toContain("statusLabel(item)");
-    expect(centerSource).toContain("查看开具记录");
-    expect(centerSource).toContain(':disabled="Boolean(selected.issuedAt)"');
-    expect(centerSource).toContain("正式发票继续在合同详情的财务登记中上传");
-    expect(centerSource).toContain("前往合同财务登记上传正式发票");
-    expect(centerSource).toContain(
-      'query: { tab: "finance", action: "record" }',
+    expect(centerSource).toContain(">上传正式发票</el-button");
+    expect(centerSource).not.toContain(
+      ':disabled="Boolean(selected.issuedAt)"',
     );
+    expect(centerSource).toContain("正式发票继续在合同详情的财务登记中上传");
+    expect(centerSource).toContain("前往本合同财务登记上传正式发票");
+    expect(centerSource).toContain('recordType: "invoice"');
+    expect(centerSource).toContain("invoiceApplicationId: item.id");
+    expect(centerSource).toContain('from: "contract-tasks"');
+    expect(centerSource).toContain('updated.status === "completed"');
+    expect(centerSource).toContain("routeCompletedInvoiceApplication(updated)");
+    expect(centerSource).toContain('result: "invoice-completed"');
     expect(apiSource).toContain("/mark-issued");
     expect(apiSource).not.toContain("/complete");
     const sealWorkspace = centerSource.slice(
@@ -380,10 +424,10 @@ describe("开票申请前端流程", () => {
     expect(centerSource).toContain("approvalActorLabel(log)");
     expect(centerSource).toContain("approvalFlowLogs");
     expect(centerSource).toContain("HIDDEN_APPROVAL_FLOW_ACTIONS");
-    expect(centerSource).toContain('submit: "员工提交"');
+    expect(centerSource).toContain('submit: "申请人提交"');
     expect(centerSource).toContain('log.action === "submit"');
     expect(centerSource).toContain('previousLog.action === "reject"');
-    expect(centerSource).toContain('"员工重新提交"');
+    expect(centerSource).toContain('"申请人重新提交"');
     expect(centerSource).toContain('"draft_created"');
     expect(centerSource).toContain('"draft_updated"');
     expect(centerSource).toContain('"material_uploaded"');
@@ -398,6 +442,151 @@ describe("开票申请前端流程", () => {
     expect(centerSource).toContain("selected.value?.applicant?.department");
     expect(centerSource).not.toContain("<h3>签字记录</h3>");
     expect(centerSource).not.toContain("<h3>操作留痕</h3>");
+  });
+
+  it("待上传回单按未闭合登记展示并精确跳转", () => {
+    expect(receiptCenterSource).toContain("待上传回单");
+    expect(receiptCenterSource).toContain("开票流程已完成");
+    expect(receiptCenterSource).toContain("当前登记开票金额");
+    expect(receiptCenterSource).toContain("当前登记已匹配回款");
+    expect(receiptCenterSource).toContain("待上传回单金额");
+    expect(receiptCenterSource).toContain('recordType: "receipt"');
+    expect(receiptCenterSource).toContain(
+      "registrationId: item.registrationId",
+    );
+    expect(receiptCenterSource).toContain('fromTab: "receipt"');
+    expect(detailSource).toContain("requestedRegistrationId");
+    expect(detailSource).toContain(
+      "financialRegistrationTargetId.value = requestedRegistrationId",
+    );
+    expect(detailSource).toContain("contractTaskFinanceTargetError");
+    expect(detailSource).toContain("contractTaskFinanceTargetValidated");
+    expect(detailSource).toContain("contractTaskFinanceTargetChecking");
+    expect(detailSource).toContain(
+      "const receiptTask = await getInvoiceReceiptTask(",
+    );
+    expect(detailSource).toContain("requestedRegistrationId");
+    expect(detailSource).toContain("contractTaskFinanceValidationSequence");
+    expect(detailSource).toContain(":lock-registration-target=");
+    expect(detailSource).toContain(
+      '["main_business", "non_main"].includes(contract.category || "")',
+    );
+    expect(detailSource).toContain("getInvoiceApplicationFinancialProgress");
+    expect(detailSource).toContain("开票流程已完成，已转入待上传回单");
+    expect(financialPanelSource).toContain('target?: "invoice" | "receipt"');
+    expect(financialPanelSource).toContain("bankCardRef.value");
+    expect(financialPanelSource).toContain("!props.lockRegistrationTarget");
+    expect(detailSource).toContain("!receiptTaskRegistrationLocked");
+    expect(detailSource).toContain("canOperateFinancialCard(card)");
+  });
+
+  it("待回单路由刷新前立即阻断旧校验并统一锁定财务操作", () => {
+    const loadDetailSource = detailSource.slice(
+      detailSource.indexOf("async function loadDetail()"),
+      detailSource.indexOf(
+        "async function updateAuxiliaryMaterialRequirement",
+        detailSource.indexOf("async function loadDetail()"),
+      ),
+    );
+    const contractRequestIndex = loadDetailSource.indexOf(
+      "await getContract(requestedContractId)",
+    );
+    expect(contractRequestIndex).toBeGreaterThan(0);
+    for (const guard of [
+      "contractTaskFinanceValidationSequence += 1",
+      'contractTaskFinanceTargetError.value = ""',
+      "contractTaskFinanceTargetValidated.value = false",
+      "contractTaskFinanceTargetChecking.value = true",
+    ]) {
+      const guardIndex = loadDetailSource.indexOf(guard);
+      expect(guardIndex).toBeGreaterThan(0);
+      expect(guardIndex).toBeLessThan(contractRequestIndex);
+    }
+
+    const routeIntentSource = detailSource.slice(
+      detailSource.indexOf("async function applyRouteIntent()"),
+      detailSource.indexOf(
+        "let detailLoadSequence",
+        detailSource.indexOf("async function applyRouteIntent()"),
+      ),
+    );
+    expect(
+      routeIntentSource.match(
+        /contractTaskFinanceValidationSequence !== validationSequence/g,
+      ),
+    ).toHaveLength(6);
+    expect(
+      routeIntentSource.match(/route\.fullPath !== intentRouteFullPath/g),
+    ).toHaveLength(6);
+    expect(routeIntentSource).toMatch(
+      /await financialRegistrationPanelRef\.value\?\.reloadPendingUploads\(\);[\s\S]{0,260}contractTaskFinanceValidationSequence !== validationSequence[\s\S]{0,160}route\.fullPath !== intentRouteFullPath/,
+    );
+    expect(routeIntentSource).toContain(
+      "待回单入口缺少财务登记操作参数，请返回合同待办刷新后重新进入。",
+    );
+    expect(detailSource).toContain(
+      'v-if="canManageFinancials && canOperateFinancialCard(card)"',
+    );
+    expect(detailSource).toContain("function canOperateFinancialCard(");
+    expect(detailSource).toContain(
+      "card.registrationId === routeQueryText(route.query.registrationId)",
+    );
+    expect(
+      detailSource.match(
+        /if \(!ensureFinancialCardTaskTarget\(card\)\) return;/g,
+      ),
+    ).toHaveLength(4);
+  });
+
+  it("财务保存完成后的异步结果不能越过合同、路由和卸载边界", () => {
+    const completionSource = detailSource.slice(
+      detailSource.indexOf(
+        "async function handleFinancialRegistrationCreated()",
+      ),
+      detailSource.indexOf(
+        "async function confirmFinancialCard",
+        detailSource.indexOf(
+          "async function handleFinancialRegistrationCreated()",
+        ),
+      ),
+    );
+    expect(completionSource).toContain(
+      "const completionSequence = ++financialRegistrationCompletionSequence",
+    );
+    expect(completionSource).toContain(
+      "const sourceContractId = contractId.value",
+    );
+    expect(completionSource).toContain(
+      "const sourceRouteFullPath = route.fullPath",
+    );
+    expect(completionSource).toContain(
+      "completionSequence === financialRegistrationCompletionSequence",
+    );
+    expect(completionSource).toContain("contractId.value === sourceContractId");
+    expect(completionSource).toContain(
+      "route.fullPath === sourceRouteFullPath",
+    );
+    expect(
+      completionSource.match(/if \(!isCurrentCompletionContext\(\)\) return;/g),
+    ).toHaveLength(6);
+
+    const routeWatchSource = detailSource.slice(
+      detailSource.indexOf("watch(\n  () => [\n    route.query.tab"),
+      detailSource.indexOf(
+        "onBeforeUnmount",
+        detailSource.indexOf("watch(\n  () => [\n    route.query.tab"),
+      ),
+    );
+    expect(routeWatchSource).toContain(
+      "financialRegistrationCompletionSequence += 1",
+    );
+    const unmountSource = detailSource.slice(
+      detailSource.lastIndexOf("onBeforeUnmount"),
+      detailSource.indexOf("</script>"),
+    );
+    expect(unmountSource).toContain(
+      "financialRegistrationCompletionSequence += 1",
+    );
   });
 
   it("主营材料只通过派生预览和管理员打印接口处理其他费用工作表", () => {

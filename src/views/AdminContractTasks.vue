@@ -31,6 +31,19 @@
           </span>
         </template>
       </el-tab-pane>
+      <el-tab-pane name="receipt">
+        <template #label>
+          <span class="task-tab-label">
+            待上传回单
+            <el-badge
+              v-if="receiptPendingCount > 0"
+              :value="receiptPendingCount"
+              :max="99"
+              type="danger"
+            />
+          </span>
+        </template>
+      </el-tab-pane>
     </el-tabs>
 
     <main class="task-content">
@@ -39,7 +52,12 @@
         embedded
         center-mode="admin"
       />
-      <InvoiceApplicationCenter v-else embedded center-mode="admin" />
+      <InvoiceApplicationCenter
+        v-else-if="activeTab === 'invoice'"
+        embedded
+        center-mode="admin"
+      />
+      <InvoiceReceiptTaskCenter v-else />
     </main>
   </div>
 </template>
@@ -49,6 +67,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ContractDownloadRequestCenter from "@/views/ContractDownloadRequestCenter.vue";
 import InvoiceApplicationCenter from "@/views/InvoiceApplicationCenter.vue";
+import InvoiceReceiptTaskCenter from "@/views/InvoiceReceiptTaskCenter.vue";
 import { useAuthStore } from "@/stores/auth";
 import {
   CONTRACT_DOWNLOAD_BADGE_REFRESH_EVENT,
@@ -56,7 +75,7 @@ import {
 } from "@/utils/contractDownloadApi";
 import { getInvoiceApplicationPendingCounts } from "@/utils/invoiceApplicationApi";
 
-type TaskTab = "download" | "invoice";
+type TaskTab = "download" | "invoice" | "receipt";
 
 const route = useRoute();
 const router = useRouter();
@@ -67,32 +86,40 @@ const isDownloadExecutor = computed(
 );
 const downloadPendingCount = ref(0);
 const invoicePendingCount = ref(0);
+const receiptPendingCount = ref(0);
 const activeTab = computed<TaskTab>(() => {
-  if (!isDownloadExecutor.value) return "invoice";
-  return route.query.tab === "invoice" ? "invoice" : "download";
+  if (route.query.tab === "receipt") return "receipt";
+  if (route.query.tab === "invoice") return "invoice";
+  return isDownloadExecutor.value ? "download" : "invoice";
 });
 
 function selectTab(tab: TaskTab) {
   if (tab === activeTab.value) return;
   void router.replace({
     path: "/contract-tasks",
-    query: { ...route.query, tab },
+    query: {
+      ...route.query,
+      tab,
+      result: undefined,
+      view: tab === "invoice" ? route.query.view : undefined,
+    },
   });
 }
 
 function handleTabChange(tab: string | number) {
-  if (tab === "download" || tab === "invoice") selectTab(tab);
+  if (tab === "download" || tab === "invoice" || tab === "receipt") {
+    selectTab(tab);
+  }
 }
 
 async function refreshTaskCounts() {
   const tasks: Promise<void>[] = [
     getInvoiceApplicationPendingCounts()
       .then((counts) => {
-        invoicePendingCount.value = counts.adminPending;
+        invoicePendingCount.value = counts.pendingSeal + counts.pendingInvoice;
+        receiptPendingCount.value = counts.pendingReceipt;
       })
-      .catch(() => {
-        invoicePendingCount.value = 0;
-      }),
+      .catch(() => undefined),
   ];
   if (isDownloadExecutor.value) {
     tasks.push(
@@ -100,9 +127,7 @@ async function refreshTaskCounts() {
         .then((counts) => {
           downloadPendingCount.value = counts.executorPending;
         })
-        .catch(() => {
-          downloadPendingCount.value = 0;
-        }),
+        .catch(() => undefined),
     );
   }
   await Promise.all(tasks);
@@ -178,6 +203,15 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .task-tabs {
     padding: 0 10px;
+  }
+
+  .task-tabs :deep(.el-tabs__nav-scroll) {
+    overflow-x: auto;
+  }
+
+  .task-tabs :deep(.el-tabs__nav) {
+    float: none;
+    width: max-content;
   }
 }
 </style>

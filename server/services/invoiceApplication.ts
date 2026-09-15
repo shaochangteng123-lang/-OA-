@@ -26,6 +26,10 @@ import {
   toStoredUploadPath,
 } from "../utils/upload-date.js";
 import { inspectInvoiceApplicationMaterial } from "./invoiceApplicationMaterial.js";
+import {
+  countInvoiceReceiptTasks,
+  listInvoiceReceiptTasksForApplication,
+} from "./invoiceReceiptTask.js";
 import { renderMainBusinessTriplicatePdf } from "./invoiceTriplicate.js";
 
 export const INVOICE_APPLICATION_ADMIN_ROLES = [
@@ -34,6 +38,33 @@ export const INVOICE_APPLICATION_ADMIN_ROLES = [
   "chairman",
 ] as const;
 export const INVOICE_APPLICATION_MAX_MATERIALS = 20;
+
+/** 员工和管理员可作为申请人，审批职责仍只属于总经理。 */
+export function canInitiateInvoiceApplication(role: string): boolean {
+  return (
+    role === "user" ||
+    (INVOICE_APPLICATION_ADMIN_ROLES as readonly string[]).includes(role)
+  );
+}
+
+/** 仅精确匹配合同甲方全称，不将分公司或开票信息作为判断依据。 */
+export function requiresInvoiceTriplicate(
+  category: string | null,
+  partyA: string | null | undefined,
+): boolean {
+  return (
+    category === "main_business" && partyA?.trim() === "国网北京市电力公司"
+  );
+}
+
+function applicationRequiresTriplicate(
+  application: InvoiceApplicationRow,
+): boolean {
+  return requiresInvoiceTriplicate(
+    application.contract_category_snapshot,
+    application.party_a_snapshot,
+  );
+}
 
 type Queryable = Pick<PoolClient, "query"> | typeof pool;
 
@@ -289,6 +320,7 @@ export function statusAfterInvoiceAllocation(input: {
 
 export function assertInvoiceApplicationMaterialPolicy(input: {
   category: "main_business" | "non_main";
+  partyA?: string | null;
   materialMode: InvoiceApplicationMaterialMode;
   materials: Array<{
     requiresSeal: boolean;
@@ -299,7 +331,7 @@ export function assertInvoiceApplicationMaterialPolicy(input: {
     throw new InvoiceApplicationError(
       `单份开票申请最多上传${INVOICE_APPLICATION_MAX_MATERIALS}份材料`,
     );
-  if (input.category === "main_business") {
+  if (requiresInvoiceTriplicate(input.category, input.partyA)) {
     if (
       input.materialMode !== "material_need_seal" ||
       input.materials.length !== 1 ||
@@ -468,6 +500,7 @@ export function resolveInvoiceApplicationBillingInfo(
 function normalizeDraftInput(
   raw: InvoiceApplicationDraftInput,
   category: ContractSnapshotRow["category"],
+  partyA: string | null,
 ): Omit<InvoiceApplicationDraftInput, "billingInfo"> & {
   contractId: string;
   amount: number;
@@ -492,10 +525,9 @@ function normalizeDraftInput(
     invoiceContent: "",
     invoiceType,
     description: optionalText(raw.description, "开票说明", 2000),
-    materialMode:
-      category === "main_business"
-        ? "material_need_seal"
-        : (mode as InvoiceApplicationMaterialMode),
+    materialMode: requiresInvoiceTriplicate(category, partyA)
+      ? "material_need_seal"
+      : (mode as InvoiceApplicationMaterialMode),
     billingInfo: normalizeBillingInfo(raw.billingInfo || {}),
     confirmedBillingIdentity: raw.confirmedBillingIdentity === true,
   };
@@ -1009,6 +1041,110 @@ async function reconcileInTransaction(contractId: string): Promise<void> {
   });
 }
 
+export interface InvoiceApplicationFinancialProgress {
+  id: string;
+  contractId: string;
+  status: InvoiceApplicationStatus;
+  applicationAmount: number;
+  allocatedInvoiceAmount: number;
+  invoiceCompleted: boolean;
+  requiresReceiptUpload: boolean;
+  pendingReceiptAmount: number;
+  registrationId: string | null;
+}
+
+export function canReadInvoiceApplicationFinancialProgress(input: {
+  actorId: string;
+  applicantId: string;
+  status: InvoiceApplicationStatus;
+  issuedAt: string | null;
+}): boolean {
+  if (input.actorId === input.applicantId) return true;
+  return (
+    Boolean(input.issuedAt) &&
+    (["pending_invoice", "completed"] as InvoiceApplicationStatus[]).includes(
+      input.status,
+    )
+  );
+}
+
+export function summarizeInvoiceApplicationReceiptTasks(
+  tasks: Array<{ registrationId: string; pendingReceiptAmount: number }>,
+): {
+  requiresReceiptUpload: boolean;
+  pendingReceiptAmount: number;
+  registrationId: string | null;
+} {
+  return {
+    requiresReceiptUpload: tasks.length > 0,
+    pendingReceiptAmount:
+      tasks.reduce(
+        (sum, task) =>
+          sum + Math.round(Number(task.pendingReceiptAmount || 0) * 100),
+        0,
+      ) / 100,
+    registrationId: tasks.length === 1 ? tasks[0]!.registrationId : null,
+  };
+}
+
+/** 管理员跳转财务登记后只读取完成进度，不扩大完整申请详情的历史权限。 */
+export async function getInvoiceApplicationFinancialProgress(
+  actor: InvoiceApplicationActor,
+  applicationId: string,
+): Promise<InvoiceApplicationFinancialProgress> {
+  if (
+    !(INVOICE_APPLICATION_ADMIN_ROLES as readonly string[]).includes(actor.role)
+  ) {
+    throw new InvoiceApplicationError("仅管理员可以核对开票财务进度", 403);
+  }
+  const initial = await loadApplication(pool, applicationId);
+  if (
+    !canReadInvoiceApplicationFinancialProgress({
+      actorId: actor.id,
+      applicantId: initial.applicant_id,
+      status: initial.status,
+      issuedAt: initial.issued_at,
+    })
+  ) {
+    throw new InvoiceApplicationError("无权核对该开票申请财务进度", 403);
+  }
+  await reconcileInTransaction(initial.contract_id);
+  const result = await pool.query<{
+    id: string;
+    contract_id: string;
+    status: InvoiceApplicationStatus;
+    amount: number;
+    allocated_invoice_amount: number;
+  }>(
+    `SELECT application.id, application.contract_id, application.status,
+       application.amount,
+       COALESCE(SUM(allocation.allocated_amount), 0)
+         AS allocated_invoice_amount
+     FROM invoice_applications application
+     LEFT JOIN invoice_application_invoice_allocations allocation
+       ON allocation.application_id = application.id
+     WHERE application.id = $1
+     GROUP BY application.id`,
+    [applicationId],
+  );
+  const progress = result.rows[0];
+  if (!progress) throw new InvoiceApplicationError("开票申请不存在", 404);
+  const receiptTasks =
+    progress.status === "completed"
+      ? await listInvoiceReceiptTasksForApplication(actor.role, progress.id)
+      : [];
+  const receiptProgress = summarizeInvoiceApplicationReceiptTasks(receiptTasks);
+  return {
+    id: progress.id,
+    contractId: progress.contract_id,
+    status: progress.status,
+    applicationAmount: Number(progress.amount),
+    allocatedInvoiceAmount: Number(progress.allocated_invoice_amount || 0),
+    invoiceCompleted: progress.status === "completed",
+    ...receiptProgress,
+  };
+}
+
 export async function getInvoiceApplicationEligibility(
   actor: InvoiceApplicationActor,
   contractId: string,
@@ -1037,6 +1173,10 @@ export async function getInvoiceApplicationEligibility(
       category: contract.category,
       area: contract.area,
       partyA: display.partyA,
+      requiresTriplicate: requiresInvoiceTriplicate(
+        contract.category,
+        contract.party_a,
+      ),
       status: contract.status,
     },
     amounts,
@@ -1105,9 +1245,9 @@ export async function createInvoiceApplication(
   actor: InvoiceApplicationActor,
   rawInput: InvoiceApplicationDraftInput,
 ): Promise<InvoiceApplicationView> {
-  if (actor.role !== "user")
+  if (!canInitiateInvoiceApplication(actor.role))
     throw new InvoiceApplicationError(
-      "仅普通员工可以发起开票申请",
+      "仅员工和管理员可以发起开票申请",
       403,
       "INVOICE_APPLICATION_EMPLOYEE_ONLY",
     );
@@ -1122,7 +1262,11 @@ export async function createInvoiceApplication(
   const contract = await loadContract(pool, contractId);
   if (!contract || !eligibility.contract)
     throw new InvoiceApplicationError("合同不存在", 404, "CONTRACT_NOT_FOUND");
-  const input = normalizeDraftInput(rawInput, contract.category);
+  const input = normalizeDraftInput(
+    rawInput,
+    contract.category,
+    contract.party_a,
+  );
   const applicant = await actorSnapshot(pool, actor.id);
   const prefill = eligibility.billingPrefill;
   const billing = resolveInvoiceApplicationBillingInfo(
@@ -1256,11 +1400,24 @@ function assertApplicationAccess(
     actor.role === "general_manager" &&
     actor.id === application.approver_id &&
     Boolean(application.decided_at);
+  const adminRole = (
+    INVOICE_APPLICATION_ADMIN_ROLES as readonly string[]
+  ).includes(actor.role);
+  const adminCanReadPending =
+    adminRole &&
+    (["pending_seal", "pending_invoice"] as const).includes(
+      application.status as "pending_seal" | "pending_invoice",
+    );
+  const adminCanReadProcessed =
+    adminRole &&
+    (actor.id === application.delivered_by ||
+      actor.id === application.issued_by);
   if (
     actor.id !== application.applicant_id &&
     !managerCanReadPending &&
     !managerCanReadProcessed &&
-    !(INVOICE_APPLICATION_ADMIN_ROLES as readonly string[]).includes(actor.role)
+    !adminCanReadPending &&
+    !adminCanReadProcessed
   ) {
     throw new InvoiceApplicationError(
       "无权查看该开票申请",
@@ -1278,7 +1435,10 @@ export async function updateInvoiceApplication(
 ): Promise<InvoiceApplicationView> {
   await db.transaction(async (client) => {
     const application = await loadApplication(client, applicationId, true);
-    if (application.applicant_id !== actor.id || actor.role !== "user")
+    if (
+      application.applicant_id !== actor.id ||
+      !canInitiateInvoiceApplication(actor.role)
+    )
       throw new InvoiceApplicationError("仅申请人可以修改草稿", 403);
     if (!(["draft", "rejected"] as const).includes(application.status as never))
       throw new InvoiceApplicationError("当前状态不能修改", 409);
@@ -1290,11 +1450,15 @@ export async function updateInvoiceApplication(
       );
     const contract = await loadContract(client, application.contract_id, true);
     if (!contract) throw new InvoiceApplicationError("合同不存在", 404);
-    const input = normalizeDraftInput(rawInput, contract.category);
+    const input = normalizeDraftInput(
+      rawInput,
+      application.contract_category_snapshot,
+      application.party_a_snapshot,
+    );
     if (input.contractId !== application.contract_id)
       throw new InvoiceApplicationError("草稿不能更换所属合同");
     if (
-      application.contract_category_snapshot === "main_business" &&
+      applicationRequiresTriplicate(application) &&
       toCents(input.amount) !== toCents(application.amount)
     ) {
       const materials = await client.query<{ count: number }>(
@@ -1470,7 +1634,7 @@ export interface InvoiceApplicationPdfData {
   materialNames: string[];
   sealedMaterialNames: string[];
   billingInfo: InvoiceApplicationBillingInfo;
-  applicant: ActorSnapshot;
+  applicant: Omit<ActorSnapshot, "role"> & { role?: string };
   applicantSignedAt: string;
   applicantSignature: Buffer;
   approver: ActorSnapshot;
@@ -1799,7 +1963,7 @@ async function saveGeneratedApplicationFile(
     input.applicationId,
     "generated",
   );
-  const label = input.kind === "applicant_signed" ? "员工单签" : "审批双签";
+  const label = input.kind === "applicant_signed" ? "申请人单签" : "审批双签";
   const fileName = `${label}开票申请单-v${version}.pdf`;
   const absolutePath = path.join(
     directory,
@@ -1838,13 +2002,14 @@ async function validateSubmitMaterials(
   );
   assertInvoiceApplicationMaterialPolicy({
     category: application.contract_category_snapshot,
+    partyA: application.party_a_snapshot,
     materialMode: application.material_mode,
     materials: materials.rows.map((item) => ({
       requiresSeal: item.requires_seal,
       hasOtherExpenseSheet: item.has_other_expense_sheet,
     })),
   });
-  if (application.contract_category_snapshot === "main_business") {
+  if (applicationRequiresTriplicate(application)) {
     const material = materials.rows[0];
     const absolutePath = absoluteStoredPath(material.file_path, "主营三联单");
     const buffer = fs.readFileSync(absolutePath);
@@ -1919,7 +2084,7 @@ export async function submitInvoiceApplication(
   applicationId: string,
   expectedVersion: number,
 ): Promise<InvoiceApplicationView> {
-  if (actor.role !== "user")
+  if (!canInitiateInvoiceApplication(actor.role))
     throw new InvoiceApplicationError("仅申请人可以提交开票申请", 403);
   await db.transaction(async (client) => {
     const { application, rootId } = await lockApplicationAfterRoot(
@@ -2064,7 +2229,7 @@ export async function withdrawInvoiceApplication(
   applicationId: string,
   expectedVersion: number,
 ): Promise<InvoiceApplicationView> {
-  if (actor.role !== "user")
+  if (!canInitiateInvoiceApplication(actor.role))
     throw new InvoiceApplicationError(
       "仅申请人可以撤回开票申请",
       403,
@@ -2244,7 +2409,6 @@ export async function decideInvoiceApplication(
         applicant: {
           id: application.applicant_id,
           name: application.applicant_name_snapshot,
-          role: "user",
           department: application.applicant_department_snapshot || "",
           position: application.applicant_position_snapshot,
         },
@@ -2318,7 +2482,7 @@ export async function deliverInvoiceApplicationMaterials(
   const note = optionalText(rawNote, "交付说明", 1000);
   const sealedTriplicateFileId = requiredText(
     rawSealedTriplicateFileId,
-    "盖章后三联单文件",
+    "盖章后材料文件",
     100,
   );
   await db.transaction(async (client) => {
@@ -2339,21 +2503,26 @@ export async function deliverInvoiceApplicationMaterials(
       mime_type: string;
     }>(
       `SELECT id, mime_type FROM contract_files
-       WHERE id = $1 AND contract_id = $2 AND file_type = 'triplicate'
+       WHERE id = $1 AND contract_id = $2 AND file_type = $4
          AND uploaded_by = $3 AND is_current = TRUE
        FOR UPDATE`,
-      [sealedTriplicateFileId, application.contract_id, actor.id],
+      [
+        sealedTriplicateFileId,
+        application.contract_id,
+        actor.id,
+        applicationRequiresTriplicate(application) ? "triplicate" : "other",
+      ],
     );
     if (!sealedTriplicate.rows[0]) {
       throw new InvoiceApplicationError(
-        "请先上传本次申请盖章后的三联单",
+        "请先上传本次申请盖章后的材料",
         409,
         "INVOICE_APPLICATION_SEALED_TRIPLICATE_REQUIRED",
       );
     }
     if (sealedTriplicate.rows[0].mime_type !== "application/pdf") {
       throw new InvoiceApplicationError(
-        "盖章后三联单只允许上传 PDF 文件",
+        "盖章后材料只允许上传 PDF（便携式文档）文件",
         409,
         "INVOICE_APPLICATION_SEALED_TRIPLICATE_PDF_REQUIRED",
       );
@@ -2459,6 +2628,7 @@ function parseMetadata(value: unknown): Record<string, unknown> {
 async function toApplicationView(
   client: Queryable,
   application: InvoiceApplicationRow,
+  adminViewerId?: string,
 ): Promise<InvoiceApplicationView> {
   const [
     materialsResult,
@@ -2535,6 +2705,7 @@ async function toApplicationView(
     category: application.contract_category_snapshot,
     area: application.contract_area_snapshot,
     partyA: application.party_a_snapshot,
+    requiresTriplicate: applicationRequiresTriplicate(application),
     contractAmount: Number(application.contract_amount_snapshot),
     amount: Number(application.amount),
     triplicateProjectName: application.triplicate_project_name || "",
@@ -2584,6 +2755,42 @@ async function toApplicationView(
     issuedAt: application.issued_at,
     invoiceNote: application.issue_note || "",
     completedAt: application.completed_at,
+    deliveryHandler:
+      application.delivered_by && application.delivered_at
+        ? {
+            id: application.delivered_by,
+            name: application.delivered_by_name_snapshot || "管理员",
+            processedAt: application.delivered_at,
+            note: application.delivery_note || "",
+          }
+        : null,
+    invoiceHandler:
+      application.issued_by && application.issued_at
+        ? {
+            id: application.issued_by,
+            name: application.issued_by_name_snapshot || "管理员",
+            processedAt: application.issued_at,
+            note: application.issue_note || "",
+          }
+        : null,
+    adminProcessing: adminViewerId
+      ? {
+          delivered: application.delivered_by === adminViewerId,
+          issued: application.issued_by === adminViewerId,
+          processedAt:
+            [
+              application.delivered_by === adminViewerId
+                ? application.delivered_at
+                : null,
+              application.issued_by === adminViewerId
+                ? application.issued_at
+                : null,
+            ]
+              .filter((value): value is string => Boolean(value))
+              .sort()
+              .slice(-1)[0] || "",
+        }
+      : null,
     applicantSignedFileId: application.applicant_signed_file_id,
     approvedFileId: application.approved_file_id,
     applicationFileName: generatedFileResult.rows[0]?.file_name || null,
@@ -2625,6 +2832,7 @@ export async function getInvoiceApplication(
   assertApplicationAccess(actor, initial);
   await reconcileInTransaction(initial.contract_id);
   const current = await loadApplication(pool, applicationId);
+  assertApplicationAccess(actor, current);
   return toApplicationView(pool, current);
 }
 
@@ -2679,10 +2887,10 @@ export async function listInvoiceApplications(
   const conditions: string[] = [];
   const params: unknown[] = [];
   if (scope === "mine") {
-    if (actor.role !== "user")
-      throw new InvoiceApplicationError("仅普通员工可以查看本人申请", 403);
+    if (!canInitiateInvoiceApplication(actor.role))
+      throw new InvoiceApplicationError("仅员工和管理员可以查看本人申请", 403);
     if (!("current,history".split(",") as string[]).includes(employeeView))
-      throw new InvoiceApplicationError("员工开票申请列表视图不正确");
+      throw new InvoiceApplicationError("本人开票申请列表视图不正确");
     await reconcileApplicantInvoiceApplications(actor.id);
     params.push(actor.id);
     conditions.push(`application.applicant_id=$${params.length}`);
@@ -2712,9 +2920,17 @@ export async function listInvoiceApplications(
       )
     )
       throw new InvoiceApplicationError("仅管理员可以查看开票执行列表", 403);
-    conditions.push(
-      `application.status IN ('pending_seal','pending_invoice','completed')`,
-    );
+    if (scope === "admin_history") {
+      params.push(actor.id);
+      conditions.push(
+        `(application.delivered_by=$${params.length} OR application.issued_by=$${params.length})`,
+      );
+      conditions.push(`application.status IN ('pending_invoice','completed')`);
+    } else {
+      conditions.push(
+        `application.status IN ('pending_seal','pending_invoice')`,
+      );
+    }
   }
   if (rawStatus) {
     if (scope === "approval" && rawStatus !== "pending_approval")
@@ -2726,6 +2942,16 @@ export async function listInvoiceApplications(
       )
     )
       throw new InvoiceApplicationError("审批记录状态筛选值不正确", 403);
+    if (
+      scope === "admin" &&
+      !["pending_seal", "pending_invoice"].includes(rawStatus)
+    )
+      throw new InvoiceApplicationError("待我处理状态筛选值不正确", 403);
+    if (
+      scope === "admin_history" &&
+      !["pending_invoice", "completed"].includes(rawStatus)
+    )
+      throw new InvoiceApplicationError("处理记录状态筛选值不正确", 403);
     params.push(rawStatus);
     conditions.push(`application.status=$${params.length}`);
   }
@@ -2750,7 +2976,12 @@ export async function listInvoiceApplications(
       ? "application.submitted_at ASC NULLS LAST, application.id ASC"
       : scope === "approval_history"
         ? "application.decided_at DESC NULLS LAST, application.updated_at DESC, application.id DESC"
-        : "application.updated_at DESC, application.id DESC";
+        : scope === "admin_history"
+          ? `COALESCE(
+              CASE WHEN application.issued_by = $1 THEN application.issued_at END,
+              CASE WHEN application.delivered_by = $1 THEN application.delivered_at END
+            ) DESC NULLS LAST, application.id DESC`
+          : "application.updated_at DESC, application.id DESC";
   const result = await pool.query<InvoiceApplicationRow>(
     `SELECT application.* FROM invoice_applications application ${where}
       ORDER BY ${orderBy}
@@ -2760,6 +2991,14 @@ export async function listInvoiceApplications(
   const items = await Promise.all(
     result.rows.map(async (row) => {
       if (scope === "mine") return toApplicationView(pool, row);
+      // 管理员范围以列表查询时的状态与处理人快照为准，避免分页后校准状态
+      // 导致已完成记录越过本人处理范围。详情读取会再次校验最新权限。
+      if (scope === "admin" || scope === "admin_history")
+        return toApplicationView(
+          pool,
+          row,
+          scope === "admin_history" ? actor.id : undefined,
+        );
       await reconcileInTransaction(row.contract_id);
       return toApplicationView(pool, await loadApplication(pool, row.id));
     }),
@@ -2779,6 +3018,7 @@ export interface InvoiceApplicationPendingCounts {
   pendingIssue: number;
   pendingFinanceRegistration: number;
   pendingInvoice: number;
+  pendingReceipt: number;
   adminPending: number;
   total: number;
 }
@@ -2793,6 +3033,7 @@ export async function getInvoiceApplicationPendingCounts(
     pendingIssue: 0,
     pendingFinanceRegistration: 0,
     pendingInvoice: 0,
+    pendingReceipt: 0,
     adminPending: 0,
     total: 0,
   };
@@ -2829,38 +3070,47 @@ export async function getInvoiceApplicationPendingCounts(
   ) {
     throw new InvoiceApplicationError("当前账号不能读取合同开票待办数量", 403);
   }
-  const result = await pool.query<{
-    pending_seal: number;
-    pending_issue: number;
-    pending_finance_registration: number;
-    pending_invoice: number;
-  }>(
-    `SELECT
-       COUNT(*) FILTER (WHERE status = 'pending_seal')::int AS pending_seal,
-       COUNT(*) FILTER (
-         WHERE status = 'pending_invoice' AND issued_at IS NULL
-       )::int AS pending_issue,
-       COUNT(*) FILTER (
-         WHERE status = 'pending_invoice' AND issued_at IS NOT NULL
-       )::int AS pending_finance_registration,
-       COUNT(*) FILTER (WHERE status = 'pending_invoice')::int AS pending_invoice
-     FROM invoice_applications`,
-  );
+  const [result, pendingReceipt] = await Promise.all([
+    pool.query<{
+      applicant_rejected: number;
+      pending_seal: number;
+      pending_issue: number;
+      pending_finance_registration: number;
+      pending_invoice: number;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE applicant_id = $1 AND status = 'rejected')::int AS applicant_rejected,
+         COUNT(*) FILTER (WHERE status = 'pending_seal')::int AS pending_seal,
+         COUNT(*) FILTER (
+           WHERE status = 'pending_invoice' AND issued_at IS NULL
+         )::int AS pending_issue,
+         COUNT(*) FILTER (
+           WHERE status = 'pending_invoice' AND issued_at IS NOT NULL
+         )::int AS pending_finance_registration,
+         COUNT(*) FILTER (WHERE status = 'pending_invoice')::int AS pending_invoice
+       FROM invoice_applications`,
+      [actor.id],
+    ),
+    countInvoiceReceiptTasks(actor.role),
+  ]);
+  const employeeActionPending = Number(result.rows[0]?.applicant_rejected || 0);
   const pendingSeal = Number(result.rows[0]?.pending_seal || 0);
   const pendingIssue = Number(result.rows[0]?.pending_issue || 0);
   const pendingFinanceRegistration = Number(
     result.rows[0]?.pending_finance_registration || 0,
   );
   const pendingInvoice = Number(result.rows[0]?.pending_invoice || 0);
-  const adminPending = pendingSeal + pendingInvoice;
+  const adminPending = pendingSeal + pendingInvoice + pendingReceipt;
   return {
     ...emptyCounts,
+    employeeActionPending,
     pendingSeal,
     pendingIssue,
     pendingFinanceRegistration,
     pendingInvoice,
+    pendingReceipt,
     adminPending,
-    total: adminPending,
+    total: adminPending + employeeActionPending,
   };
 }
 
@@ -2869,6 +3119,7 @@ export async function getInvoiceApplicationAdminPendingCounts(
 ): Promise<{
   pendingSeal: number;
   pendingInvoice: number;
+  pendingReceipt: number;
   adminPending: number;
 }> {
   if (
@@ -2880,6 +3131,7 @@ export async function getInvoiceApplicationAdminPendingCounts(
   return {
     pendingSeal: counts.pendingSeal,
     pendingInvoice: counts.pendingInvoice,
+    pendingReceipt: counts.pendingReceipt,
     adminPending: counts.adminPending,
   };
 }
@@ -2890,7 +3142,7 @@ export async function generateMainBusinessTriplicate(
   rawInput: GenerateMainTriplicateInput,
   expectedVersion: number,
 ): Promise<InvoiceApplicationView> {
-  if (actor.role !== "user")
+  if (!canInitiateInvoiceApplication(actor.role))
     throw new InvoiceApplicationError("仅申请人可以生成三联单", 403);
   const projectName = requiredText(rawInput.projectName, "工程项目名称", 300);
   const currentPayment = parseAmount(rawInput.amount);
@@ -2914,9 +3166,9 @@ export async function generateMainBusinessTriplicate(
           409,
           "INVOICE_APPLICATION_VERSION_CONFLICT",
         );
-      if (application.contract_category_snapshot !== "main_business")
+      if (!applicationRequiresTriplicate(application))
         throw new InvoiceApplicationError(
-          "只有主营项目合同可以在线生成三联单",
+          "仅甲方为国网北京市电力公司的主营项目可以在线生成三联单",
           409,
         );
       const contract = await loadContract(client, rootId, false);
@@ -3083,7 +3335,10 @@ export async function addInvoiceApplicationMaterials(
   try {
     await db.transaction(async (client) => {
       const application = await loadApplication(client, applicationId, true);
-      if (actor.role !== "user" || application.applicant_id !== actor.id)
+      if (
+        !canInitiateInvoiceApplication(actor.role) ||
+        application.applicant_id !== actor.id
+      )
         throw new InvoiceApplicationError("仅申请人可以上传材料", 403);
       if (
         !(["draft", "rejected"] as const).includes(application.status as never)
@@ -3099,23 +3354,20 @@ export async function addInvoiceApplicationMaterials(
         throw new InvoiceApplicationError(
           `单份开票申请最多上传${INVOICE_APPLICATION_MAX_MATERIALS}份材料`,
         );
-      if (
-        application.contract_category_snapshot === "main_business" &&
-        materialCount !== 1
-      )
+      if (applicationRequiresTriplicate(application) && materialCount !== 1)
         throw new InvoiceApplicationError("主营项目合同只能上传一份固定三联单");
       const actorRow = await actorSnapshot(client, actor.id);
       const now = new Date().toISOString();
       for (const file of files) {
         if (
-          application.contract_category_snapshot === "main_business" &&
+          applicationRequiresTriplicate(application) &&
           (!file.requiresSeal || !file.hasOtherExpenseSheet)
         )
           throw new InvoiceApplicationError(
             "主营项目三联单必须包含“其他费用”工作表并选择盖章",
           );
         if (
-          application.contract_category_snapshot === "main_business" &&
+          applicationRequiresTriplicate(application) &&
           (file.recognizedApplicationAmount == null ||
             toCents(file.recognizedApplicationAmount) !==
               toCents(application.amount))
@@ -3208,7 +3460,10 @@ export async function deleteInvoiceApplicationMaterial(
   let removedPath: string | null = null;
   await db.transaction(async (client) => {
     const application = await loadApplication(client, applicationId, true);
-    if (actor.role !== "user" || application.applicant_id !== actor.id)
+    if (
+      !canInitiateInvoiceApplication(actor.role) ||
+      application.applicant_id !== actor.id
+    )
       throw new InvoiceApplicationError("仅申请人可以删除材料", 403);
     if (!(["draft", "rejected"] as const).includes(application.status as never))
       throw new InvoiceApplicationError("当前状态不能删除材料", 409);
@@ -3266,7 +3521,10 @@ export async function deleteInvoiceApplicationDraft(
       client,
       applicationId,
     );
-    if (actor.role !== "user" || application.applicant_id !== actor.id)
+    if (
+      !canInitiateInvoiceApplication(actor.role) ||
+      application.applicant_id !== actor.id
+    )
       throw new InvoiceApplicationError(
         "仅申请人可以删除本人草稿",
         403,
@@ -3358,6 +3616,7 @@ export async function prepareInvoiceApplicationMaterial(
   mimeType: string;
   requiresSeal: boolean;
   category: "main_business" | "non_main";
+  requiresTriplicate: boolean;
 }> {
   const application = await loadApplication(pool, applicationId);
   assertApplicationAccess(actor, application);
@@ -3385,6 +3644,7 @@ export async function prepareInvoiceApplicationMaterial(
     mimeType: material.mime_type,
     requiresSeal: material.requires_seal,
     category: application.contract_category_snapshot,
+    requiresTriplicate: applicationRequiresTriplicate(application),
   };
 }
 

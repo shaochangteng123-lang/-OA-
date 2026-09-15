@@ -325,9 +325,8 @@ describe("已完成合同内部划拨专项补录前端", () => {
     expect(detailSource).toContain(
       'detail.value.contract.assetFundingMode === "engineering_to_technology"',
     );
-    expect(detailSource).toContain(
-      'v-if="canManageFinancials && detail.contract.category"',
-    );
+    expect(detailSource).toContain("canManageFinancials &&");
+    expect(detailSource).toContain("!contractTaskFinanceTargetBlocked");
     expect(panelSource).not.toContain("ContractFinancialRegistrationPanel");
     expect(panelSource).not.toContain("ContractDepositReceiptInline");
     expect(panelSource).toContain("drag");

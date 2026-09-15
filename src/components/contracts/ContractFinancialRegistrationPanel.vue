@@ -35,7 +35,10 @@
       "
       :description="continuationDescription"
     />
-    <div v-if="registrationId" class="continuation-actions">
+    <div
+      v-if="registrationId && !props.lockRegistrationTarget"
+      class="continuation-actions"
+    >
       <el-button link type="primary" @click="emit('cancelContinuation')">
         返回新增发票登记
       </el-button>
@@ -62,6 +65,7 @@
 
     <div class="credential-grid">
       <article
+        ref="invoiceCardRef"
         class="credential-card invoice-card"
         :class="{ 'internal-invoice-card': requiresExternalPayment }"
       >
@@ -433,6 +437,7 @@
       </article>
 
       <article
+        ref="bankCardRef"
         class="credential-card bank-card"
         :class="{ 'funding-bank-card': requiresExternalPayment }"
       >
@@ -1210,6 +1215,7 @@ const props = defineProps<{
   registeredBankDocuments?: RegisteredBankDocument[];
   registeredExternalPayments?: RegisteredBankDocument[];
   registrationFinancialDirection?: "income" | "cost" | null;
+  lockRegistrationTarget?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -1218,6 +1224,8 @@ const emit = defineEmits<{
 }>();
 
 const panelRef = ref<HTMLElement | null>(null);
+const invoiceCardRef = ref<HTMLElement | null>(null);
+const bankCardRef = ref<HTMLElement | null>(null);
 const invoiceUploadRef = ref<UploadInstance>();
 const bankUploadRef = ref<UploadInstance>();
 const externalUploadRef = ref<UploadInstance>();
@@ -2665,8 +2673,18 @@ async function submitRegistration() {
   }
 }
 
-function focus() {
-  panelRef.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+function focus(target?: "invoice" | "receipt") {
+  const targetElement =
+    target === "invoice"
+      ? invoiceCardRef.value
+      : target === "receipt"
+        ? bankCardRef.value
+        : panelRef.value;
+  targetElement?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+    inline: "start",
+  });
   panelRef.value?.focus({ preventScroll: true });
 }
 

@@ -358,6 +358,46 @@ describe("主合同解除结算", () => {
       ),
     ).toBe(false);
   });
+
+  it.each([
+    ["提交审批", "submit"],
+    ["盖章归档", "archive"],
+  ] as const)("存在未闭合财务登记时阻断解除协议%s", async (_label, stage) => {
+    const root = mainContract();
+    const agreement = terminationAgreement(root.id, 100, 40, -60);
+    const client = settlementClient({ root, settledAmount: 40 });
+    const originalQuery = client.query.getMockImplementation()!;
+    client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM contract_financial_registrations")) {
+        return { rows: [{ id: "open-registration" }] };
+      }
+      return originalQuery(sql, params);
+    });
+
+    const operation =
+      stage === "submit"
+        ? freezeTerminationSettlementSnapshotForApproval(
+            client as never,
+            agreement as never,
+          )
+        : applyTerminationAgreementAtEffective(
+            client as never,
+            agreement as never,
+            "2026-08-18",
+            "2026-08-18T10:00:00.000Z",
+            "finance-1",
+            "admin",
+          );
+    await expect(operation).rejects.toMatchObject({
+      statusCode: 409,
+      code: "CONTRACT_TERMINATION_OPEN_FINANCIAL_REGISTRATION",
+    });
+    expect(
+      client.query.mock.calls.some(([sql]) =>
+        String(sql).includes("SET status = 'terminated'"),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("补充协议解除结算", () => {

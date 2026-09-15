@@ -111,7 +111,7 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/views/MyContractApplications.vue"),
         meta: {
           title: "我的申请",
-          requiresRole: ["user"],
+          requiresRole: ["user", "admin", "super_admin", "chairman"],
         },
       },
       {
@@ -171,7 +171,7 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/views/InvoiceApplicationCreate.vue"),
         meta: {
           title: "发起开票及用印申请",
-          requiresRole: ["user"],
+          requiresRole: ["user", "admin", "super_admin", "chairman"],
         },
       },
       {
@@ -183,7 +183,7 @@ const routes: RouteRecordRaw[] = [
         }),
         meta: {
           title: "我的申请",
-          requiresRole: ["user"],
+          requiresRole: ["user", "admin", "super_admin", "chairman"],
         },
       },
       {

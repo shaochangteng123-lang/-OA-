@@ -7,12 +7,16 @@ import {
   allocateInvoiceApplicationFacts,
   approvedInvoiceApplicationStatus,
   assertInvoiceApplicationMaterialPolicy,
+  requiresInvoiceTriplicate,
   calculateInvoiceApplicationCommittedAmount,
   calculateInvoiceApplicationCapacity,
+  canReadInvoiceApplicationFinancialProgress,
   createInvoiceApplication,
   deleteInvoiceApplicationDraft,
+  deliverInvoiceApplicationMaterials,
   generateMainBusinessTriplicate,
   getInvoiceApplicationAdminPendingCounts,
+  getInvoiceApplicationFinancialProgress,
   getInvoiceApplicationPendingCounts,
   isInvoiceApplicationSealedArchiveReady,
   listInvoiceApplications,
@@ -20,6 +24,7 @@ import {
   normalizeInvoiceApplicationType,
   resolveInvoiceApplicationBillingInfo,
   statusAfterInvoiceAllocation,
+  summarizeInvoiceApplicationReceiptTasks,
   withdrawInvoiceApplication,
 } from "../server/services/invoiceApplication.js";
 
@@ -33,6 +38,192 @@ const repositoryFile = (relativePath: string) =>
   fs.readFileSync(path.resolve(process.cwd(), relativePath), "utf8");
 
 describe("开票申请服务端主流程", () => {
+  test("财务进度只允许本人或已进入开具财务阶段的共享管理员读取", () => {
+    expect(
+      canReadInvoiceApplicationFinancialProgress({
+        actorId: "applicant",
+        applicantId: "applicant",
+        status: "draft",
+        issuedAt: null,
+      }),
+    ).toBe(true);
+    for (const status of [
+      "draft",
+      "rejected",
+      "pending_approval",
+      "pending_seal",
+    ] as const) {
+      expect(
+        canReadInvoiceApplicationFinancialProgress({
+          actorId: "other-admin",
+          applicantId: "applicant",
+          status,
+          issuedAt: null,
+        }),
+      ).toBe(false);
+    }
+    for (const status of ["pending_invoice", "completed"] as const) {
+      expect(
+        canReadInvoiceApplicationFinancialProgress({
+          actorId: "other-admin",
+          applicantId: "applicant",
+          status,
+          issuedAt: "2026-09-15T00:00:00.000Z",
+        }),
+      ).toBe(true);
+    }
+    expect(
+      canReadInvoiceApplicationFinancialProgress({
+        actorId: "other-admin",
+        applicantId: "applicant",
+        status: "pending_invoice",
+        issuedAt: null,
+      }),
+    ).toBe(false);
+  });
+
+  test("开票财务进度按当前申请的全部待回单登记汇总", () => {
+    expect(summarizeInvoiceApplicationReceiptTasks([])).toEqual({
+      requiresReceiptUpload: false,
+      pendingReceiptAmount: 0,
+      registrationId: null,
+    });
+    expect(
+      summarizeInvoiceApplicationReceiptTasks([
+        { registrationId: "registration-1", pendingReceiptAmount: 50 },
+      ]),
+    ).toEqual({
+      requiresReceiptUpload: true,
+      pendingReceiptAmount: 50,
+      registrationId: "registration-1",
+    });
+    expect(
+      summarizeInvoiceApplicationReceiptTasks([
+        { registrationId: "registration-1", pendingReceiptAmount: 50 },
+        { registrationId: "registration-2", pendingReceiptAmount: 20 },
+      ]),
+    ).toEqual({
+      requiresReceiptUpload: true,
+      pendingReceiptAmount: 70,
+      registrationId: null,
+    });
+    expect(
+      summarizeInvoiceApplicationReceiptTasks([
+        { registrationId: "registration-1", pendingReceiptAmount: 0.1 },
+        { registrationId: "registration-2", pendingReceiptAmount: 0.2 },
+      ]).pendingReceiptAmount,
+    ).toBe(0.3);
+  });
+
+  test("其他管理员可读取已开具申请的轻量进度并汇总多笔待回单登记", async () => {
+    const application = {
+      id: "application-1",
+      applicant_id: "applicant-admin",
+      contract_id: "contract-1",
+      status: "completed",
+      issued_at: "2026-09-15T00:00:00.000Z",
+    };
+    const query = pool.query as jest.Mock;
+    query.mockReset().mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT * FROM invoice_applications WHERE id")) {
+        return { rows: [application] };
+      }
+      if (sql.includes("SELECT application.id, application.contract_id")) {
+        return {
+          rows: [
+            {
+              id: application.id,
+              contract_id: application.contract_id,
+              status: "completed",
+              amount: 100,
+              allocated_invoice_amount: 100,
+            },
+          ],
+        };
+      }
+      if (sql.includes("pending_receipt_tasks AS")) {
+        return {
+          rows: [
+            {
+              registration_id: "registration-1",
+              contract_id: "contract-1",
+              contract_title: "测试合同",
+              project_name: "测试项目",
+              application_count: 1,
+              application_numbers: ["KP-001"],
+              invoice_count: 1,
+              invoice_amount: 60,
+              matched_receipt_amount: 10,
+              pending_receipt_amount: 50,
+              earliest_invoice_date: "2026-09-01",
+              waiting_days: 14,
+              invoices: [],
+              total_count: 1,
+            },
+            {
+              registration_id: "registration-2",
+              contract_id: "contract-1",
+              contract_title: "测试合同",
+              project_name: "测试项目",
+              application_count: 1,
+              application_numbers: ["KP-001"],
+              invoice_count: 1,
+              invoice_amount: 40,
+              matched_receipt_amount: 20,
+              pending_receipt_amount: 20,
+              earliest_invoice_date: "2026-09-02",
+              waiting_days: 13,
+              invoices: [],
+              total_count: 1,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+    const clientQuery = jest.fn(async (sql: string) => {
+      if (sql.includes("SELECT COALESCE(root_contract_id, id) AS root_id")) {
+        return { rows: [{ root_id: "contract-1" }] };
+      }
+      return { rows: [] };
+    });
+    const mutableDb = db as unknown as {
+      transaction?: (
+        callback: (client: { query: typeof clientQuery }) => Promise<unknown>,
+      ) => Promise<unknown>;
+    };
+    const previousTransaction = mutableDb.transaction;
+    mutableDb.transaction = async (callback) =>
+      callback({ query: clientQuery });
+    try {
+      await expect(
+        getInvoiceApplicationFinancialProgress(
+          { id: "other-admin", role: "admin" },
+          application.id,
+        ),
+      ).resolves.toEqual({
+        id: application.id,
+        contractId: "contract-1",
+        status: "completed",
+        applicationAmount: 100,
+        allocatedInvoiceAmount: 100,
+        invoiceCompleted: true,
+        requiresReceiptUpload: true,
+        pendingReceiptAmount: 70,
+        registrationId: null,
+      });
+      expect(
+        String(
+          query.mock.calls.find(([sql]) =>
+            String(sql).includes("pending_receipt_tasks AS"),
+          )?.[0],
+        ),
+      ).toContain("pending_application.application_id = $1");
+    } finally {
+      mutableDb.transaction = previousTransaction;
+    }
+  });
+
   test("正式发票按申请提交顺序进行 FIFO 分配", () => {
     const allocations = allocateInvoiceApplicationFacts(
       [
@@ -259,6 +450,46 @@ describe("开票申请服务端主流程", () => {
     ).toBe("pending_invoice");
   });
 
+  test.each([
+    ["国网北京市电力公司", true],
+    [" 国网北京市电力公司 ", true],
+    ["国网北京市电力公司朝阳供电公司", false],
+    ["国网北京市电力公司分公司", false],
+    ["其他甲方", false],
+    ["", false],
+    [null, false],
+  ])("主营三联单按甲方全称判断：%s", (partyA, required) => {
+    expect(requiresInvoiceTriplicate("main_business", partyA)).toBe(required);
+  });
+
+  test.each(["no_material", "material_no_seal", "material_need_seal"] as const)(
+    "其他甲方主营项目支持材料方式：%s",
+    (materialMode) => {
+      expect(() =>
+        assertInvoiceApplicationMaterialPolicy({
+          category: "main_business",
+          partyA: "其他甲方",
+          materialMode,
+          materials:
+            materialMode === "no_material"
+              ? []
+              : [
+                  {
+                    requiresSeal: materialMode === "material_need_seal",
+                    hasOtherExpenseSheet: false,
+                  },
+                ],
+        }),
+      ).not.toThrow();
+    },
+  );
+
+  test("非主营项目不会仅因甲方相同就强制三联单", () => {
+    expect(requiresInvoiceTriplicate("non_main", "国网北京市电力公司")).toBe(
+      false,
+    );
+  });
+
   test("非主营材料总数受单据级上限约束", () => {
     expect(() =>
       assertInvoiceApplicationMaterialPolicy({
@@ -276,6 +507,7 @@ describe("开票申请服务端主流程", () => {
     expect(() =>
       assertInvoiceApplicationMaterialPolicy({
         category: "main_business",
+        partyA: "国网北京市电力公司",
         materialMode: "material_need_seal",
         materials: [
           { requiresSeal: true, hasOtherExpenseSheet: true },
@@ -286,6 +518,7 @@ describe("开票申请服务端主流程", () => {
     expect(() =>
       assertInvoiceApplicationMaterialPolicy({
         category: "main_business",
+        partyA: "国网北京市电力公司",
         materialMode: "material_need_seal",
         materials: [{ requiresSeal: true, hasOtherExpenseSheet: true }],
       }),
@@ -323,6 +556,12 @@ describe("开票申请服务端主流程", () => {
         id: "employee",
         role: "user",
       }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      getInvoiceApplicationFinancialProgress(
+        { id: "employee", role: "user" },
+        "application",
+      ),
     ).rejects.toMatchObject({ statusCode: 403 });
     await expect(
       listInvoiceApplications({ id: "employee", role: "user" }, "admin"),
@@ -381,16 +620,19 @@ describe("开票申请服务端主流程", () => {
     );
     expect(query.mock.calls[0][1]).toEqual(["manager"]);
 
-    query.mockReset().mockResolvedValueOnce({
-      rows: [
-        {
-          pending_seal: 1,
-          pending_issue: 2,
-          pending_finance_registration: 4,
-          pending_invoice: 6,
-        },
-      ],
-    });
+    query
+      .mockReset()
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            pending_seal: 1,
+            pending_issue: 2,
+            pending_finance_registration: 4,
+            pending_invoice: 6,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [{ count: 2 }] });
     await expect(
       getInvoiceApplicationPendingCounts({ id: "admin", role: "admin" }),
     ).resolves.toMatchObject({
@@ -398,8 +640,9 @@ describe("开票申请服务端主流程", () => {
       pendingIssue: 2,
       pendingFinanceRegistration: 4,
       pendingInvoice: 6,
-      adminPending: 7,
-      total: 7,
+      pendingReceipt: 2,
+      adminPending: 9,
+      total: 9,
     });
     expect(String(query.mock.calls[0][0])).toContain(
       "COUNT(*) FILTER (WHERE status = 'pending_invoice')",
@@ -486,7 +729,7 @@ describe("开票申请服务端主流程", () => {
         20,
         "unknown" as never,
       ),
-    ).rejects.toMatchObject({ message: "员工开票申请列表视图不正确" });
+    ).rejects.toMatchObject({ message: "本人开票申请列表视图不正确" });
     expect(query).not.toHaveBeenCalled();
   });
 
@@ -539,19 +782,40 @@ describe("开票申请服务端主流程", () => {
     query
       .mockResolvedValueOnce({ rows: [{ count: 0 }] })
       .mockResolvedValueOnce({ rows: [] });
+    await listInvoiceApplications({ id: "admin-1", role: "admin" }, "admin");
+    const adminPendingSql = String(query.mock.calls[0][0]);
+    expect(adminPendingSql).toContain(
+      "application.status IN ('pending_seal','pending_invoice')",
+    );
+    expect(adminPendingSql).not.toContain("'completed'");
+
+    query.mockReset();
+    query
+      .mockResolvedValueOnce({ rows: [{ count: 0 }] })
+      .mockResolvedValueOnce({ rows: [] });
     await listInvoiceApplications(
       { id: "admin-1", role: "admin" },
-      "admin",
+      "admin_history",
       undefined,
-      1,
-      20,
-      "history",
+      2,
+      10,
+      "current",
+      "甲方",
     );
-    const adminSql = String(query.mock.calls[0][0]);
-    expect(adminSql).toContain(
-      "application.status IN ('pending_seal','pending_invoice','completed')",
+    const adminHistorySql = String(query.mock.calls[0][0]);
+    expect(adminHistorySql).toContain(
+      "(application.delivered_by=$1 OR application.issued_by=$1)",
     );
-    expect(adminSql).not.toContain("application.status <> 'completed'");
+    expect(adminHistorySql).toContain(
+      "application.status IN ('pending_invoice','completed')",
+    );
+    expect(adminHistorySql).toContain(
+      "application.contract_title_snapshot ILIKE $2",
+    );
+    expect(String(query.mock.calls[1][0])).toContain(
+      "CASE WHEN application.issued_by = $1 THEN application.issued_at END",
+    );
+    expect(query.mock.calls[1][1]).toEqual(["admin-1", "%甲方%", 10, 10]);
   });
 
   test("总经理详情权限区分当前待审批人和实际处理人", () => {
@@ -562,6 +826,53 @@ describe("开票申请服务端主流程", () => {
     expect(service).toContain("managerCanReadProcessed");
     expect(service).toContain("actor.id === application.approver_id");
     expect(service).toContain("Boolean(application.decided_at)");
+  });
+
+  test("管理员详情仅允许共享待办、本人申请或本人处理记录", () => {
+    const service = repositoryFile("server/services/invoiceApplication.ts");
+    expect(service).toContain("adminCanReadPending");
+    expect(service).toContain("adminCanReadProcessed");
+    expect(service).toContain("actor.id === application.delivered_by");
+    expect(service).toContain("actor.id === application.issued_by");
+    expect(service).not.toContain(
+      "!managerCanReadProcessed &&\n    !(INVOICE_APPLICATION_ADMIN_ROLES",
+    );
+    expect(service).toContain("assertApplicationAccess(actor, current)");
+    expect(service).toContain(
+      'if (scope === "admin" || scope === "admin_history")',
+    );
+  });
+
+  test("管理员两个列表范围拒绝越界状态筛选", async () => {
+    const query = pool.query as jest.Mock;
+    query.mockReset();
+    await expect(
+      listInvoiceApplications(
+        { id: "admin-1", role: "admin" },
+        "admin",
+        "completed",
+      ),
+    ).rejects.toMatchObject({ message: "待我处理状态筛选值不正确" });
+    await expect(
+      listInvoiceApplications(
+        { id: "admin-1", role: "admin" },
+        "admin_history",
+        "pending_seal",
+      ),
+    ).rejects.toMatchObject({ message: "处理记录状态筛选值不正确" });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  test("管理员本人处理记录使用盖章和开具人的部分索引", () => {
+    const database = repositoryFile("server/db/index.ts");
+    expect(database).toContain("idx_invoice_applications_delivery_handler");
+    expect(database).toContain(
+      "ON invoice_applications(delivered_by, delivered_at DESC, id DESC)",
+    );
+    expect(database).toContain("idx_invoice_applications_issue_handler");
+    expect(database).toContain(
+      "ON invoice_applications(issued_by, issued_at DESC, id DESC)",
+    );
   });
 
   test("管理员登记已开具为一次性审计动作", () => {
@@ -692,13 +1003,16 @@ describe("开票申请服务端主流程", () => {
     );
     expect(routes).toContain('rawScope === "mine"');
     expect(routes).toContain('"current,history".split(",")');
-    expect(routes).toContain("员工开票申请列表视图不正确");
+    expect(routes).toContain("本人开票申请列表视图不正确");
     expect(routes).toMatch(
       /scope === "mine"\s*\? rawView\s*: "current"\) as InvoiceApplicationEmployeeListView/,
     );
     expect(routes).toContain('rawScope === "manager_pending"');
     expect(routes).toContain('rawScope === "manager_processed"');
     expect(routes).toContain('? "approval_history"');
+    expect(routes).toContain('rawScope === "admin_pending"');
+    expect(routes).toContain('rawScope === "admin_processed"');
+    expect(routes).toContain('? "admin_history"');
   });
 
   test("合同开票待办覆盖员工退回、总经理审批和管理员后续处理", () => {
@@ -721,8 +1035,33 @@ describe("开票申请服务端主流程", () => {
       "COUNT(*) FILTER (WHERE status = 'pending_invoice')",
     );
     expect(service).toContain(
-      "const adminPending = pendingSeal + pendingInvoice",
+      "const adminPending = pendingSeal + pendingInvoice + pendingReceipt",
     );
+    expect(routes).toContain('router.get("/pending-receipts"');
+    expect(routes).toContain('router.get("/:id/financial-progress"');
+  });
+
+  test("已完成收入合同仅凭已登记开具的未完成申请开放首次正式发票", () => {
+    const contractRoutes = repositoryFile("server/routes/contracts.ts");
+    expect(contractRoutes).toContain("const completedIncomeContract =");
+    expect(contractRoutes).toContain(
+      '["main_business", "non_main"].includes(target.category || "")',
+    );
+    expect(contractRoutes).toContain(
+      "WHERE contract_id = $1 AND status = 'pending_invoice'",
+    );
+    expect(contractRoutes).toContain("AND issued_at IS NOT NULL");
+    expect(contractRoutes).toContain("allowsCompletedIssuedInvoice");
+    expect(contractRoutes).toContain(
+      '(kind === "receipt" && completedIncomeContract)',
+    );
+    expect(contractRoutes).not.toContain(
+      'kind !== "payment" && completedIncomeContract',
+    );
+    expect(contractRoutes).toContain(
+      "const appendedRecordKind: FinancialRecordKind = uniqueInvoiceJobIds.length",
+    );
+    expect(contractRoutes).toContain("contractId,\n      appendedRecordKind,");
   });
 
   test("主营三联单上传前识别金额且正式上传与提交再次核对", () => {
@@ -792,27 +1131,83 @@ describe("开票申请服务端主流程", () => {
     expect(service).toContain("new Set(removablePaths)");
   });
 
-  test("本人草稿删除在根合同锁内清理审计并返回删除结果", async () => {
+  test.each(["user", "admin", "super_admin", "chairman"])(
+    "本人草稿删除在根合同锁内清理审计并返回删除结果：%s",
+    async (role) => {
+      const application = {
+        id: "draft-application",
+        contract_id: "contract-1",
+        applicant_id: "employee-1",
+        status: "draft",
+        version: 3,
+        applicant_signature_snapshot_path: null,
+        approver_signature_snapshot_path: null,
+      };
+      const query = jest.fn(async (sql: string) => {
+        if (sql.includes("SELECT * FROM invoice_applications"))
+          return { rows: [application] };
+        if (sql.includes("SELECT COALESCE(root_contract_id, id) AS root_id"))
+          return { rows: [{ root_id: "contract-1" }] };
+        if (sql.includes("invoice_application_invoice_allocations"))
+          return { rows: [{ count: 0 }] };
+        if (sql.includes("SELECT file_path FROM invoice_application_"))
+          return { rows: [] };
+        if (sql.includes("DELETE FROM invoice_applications"))
+          return { rows: [{ id: application.id }] };
+        return { rows: [] };
+      });
+      const mutableDb = db as unknown as {
+        transaction?: (
+          callback: (client: { query: typeof query }) => Promise<unknown>,
+        ) => Promise<unknown>;
+      };
+      const previousTransaction = mutableDb.transaction;
+      mutableDb.transaction = async (callback) => callback({ query });
+      try {
+        await expect(
+          deleteInvoiceApplicationDraft(
+            { id: "employee-1", role },
+            application.id,
+            3,
+          ),
+        ).resolves.toEqual({ id: application.id, deleted: true });
+        expect(query).toHaveBeenCalledWith(
+          expect.stringContaining(
+            "DELETE FROM invoice_application_audit_logs WHERE application_id=$1",
+          ),
+          [application.id],
+        );
+      } finally {
+        mutableDb.transaction = previousTransaction;
+      }
+    },
+  );
+
+  test("系统生成三联单PDF直接内联预览打印且历史Excel继续转换", () => {
+    const routes = repositoryFile("server/routes/invoice-applications.ts");
+    expect(routes).toContain('material.mimeType !== "application/pdf"');
+    expect(routes).toContain('material.mimeType === "application/pdf"');
+    expect(routes).toContain("inlineDisposition(material.fileName)");
+  });
+
+  test.each([
+    ["国网北京市电力公司", "triplicate"],
+    ["国网北京市电力公司朝阳供电公司", "other"],
+    ["其他甲方", "other"],
+  ])("盖章交付按申请甲方快照核验附件类型：%s", async (partyA, fileType) => {
     const application = {
-      id: "draft-application",
+      id: "application-1",
       contract_id: "contract-1",
-      applicant_id: "employee-1",
-      status: "draft",
-      version: 3,
-      applicant_signature_snapshot_path: null,
-      approver_signature_snapshot_path: null,
+      status: "pending_seal",
+      version: 1,
+      contract_category_snapshot: "main_business",
+      party_a_snapshot: partyA,
     };
-    const query = jest.fn(async (sql: string) => {
+    const query = jest.fn(async (sql: string, _params?: unknown[]) => {
       if (sql.includes("SELECT * FROM invoice_applications"))
         return { rows: [application] };
       if (sql.includes("SELECT COALESCE(root_contract_id, id) AS root_id"))
         return { rows: [{ root_id: "contract-1" }] };
-      if (sql.includes("invoice_application_invoice_allocations"))
-        return { rows: [{ count: 0 }] };
-      if (sql.includes("SELECT file_path FROM invoice_application_"))
-        return { rows: [] };
-      if (sql.includes("DELETE FROM invoice_applications"))
-        return { rows: [{ id: application.id }] };
       return { rows: [] };
     });
     const mutableDb = db as unknown as {
@@ -824,31 +1219,31 @@ describe("开票申请服务端主流程", () => {
     mutableDb.transaction = async (callback) => callback({ query });
     try {
       await expect(
-        deleteInvoiceApplicationDraft(
-          { id: "employee-1", role: "user" },
+        deliverInvoiceApplicationMaterials(
+          { id: "admin-1", role: "admin" },
           application.id,
-          3,
+          "",
+          1,
+          "file-1",
         ),
-      ).resolves.toEqual({ id: application.id, deleted: true });
+      ).rejects.toMatchObject({
+        code: "INVOICE_APPLICATION_SEALED_TRIPLICATE_REQUIRED",
+      });
       expect(query).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "DELETE FROM invoice_application_audit_logs WHERE application_id=$1",
-        ),
-        [application.id],
+        expect.stringContaining("file_type = $4"),
+        ["file-1", "contract-1", "admin-1", fileType],
       );
+      expect(
+        query.mock.calls.some(([sql]) =>
+          sql.includes("SET status='pending_invoice'"),
+        ),
+      ).toBe(false);
     } finally {
       mutableDb.transaction = previousTransaction;
     }
   });
 
-  test("系统生成三联单PDF直接内联预览打印且历史Excel继续转换", () => {
-    const routes = repositoryFile("server/routes/invoice-applications.ts");
-    expect(routes).toContain('material.mimeType !== "application/pdf"');
-    expect(routes).toContain('material.mimeType === "application/pdf"');
-    expect(routes).toContain("inlineDisposition(material.fileName)");
-  });
-
-  test("管理员交付前必须上传盖章后三联单并归档为合同附件", () => {
+  test("管理员交付前必须按甲方要求归档盖章材料", () => {
     const routes = repositoryFile("server/routes/invoice-applications.ts");
     const service = repositoryFile("server/services/invoiceApplication.ts");
     const contractRoutes = repositoryFile("server/routes/contracts.ts");
@@ -860,7 +1255,10 @@ describe("开票申请服务端主流程", () => {
     expect(service).toContain(
       'sealedTriplicate.rows[0].mime_type !== "application/pdf"',
     );
-    expect(service).toContain("file_type = 'triplicate'");
+    expect(service).toContain("file_type = $4");
+    expect(service).toContain(
+      'applicationRequiresTriplicate(application) ? "triplicate" : "other"',
+    );
     expect(service).toContain("sealedTriplicateFileId");
     const versionedTypes = contractRoutes.slice(
       contractRoutes.indexOf("const versionedSingleCurrentFileTypes"),
@@ -890,7 +1288,9 @@ describe("开票申请服务端主流程", () => {
     const routes = repositoryFile("server/routes/contracts.ts");
     expect(routes).toContain("getInvoiceApplicationEligibilityBatch(");
     expect(routes).toContain("invoiceApplicationEligibility:");
-    expect(routes).toContain('currentActor.role === "user"');
+    expect(routes).toContain(
+      "canInitiateInvoiceApplication(currentActor.role)",
+    );
   });
 
   test("非主营支出合同不能绕过台账入口直接申请开票", () => {

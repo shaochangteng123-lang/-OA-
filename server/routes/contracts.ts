@@ -170,6 +170,7 @@ import {
 } from "../services/contractSealWorkflow.js";
 import {
   getInvoiceApplicationEligibilityBatch,
+  canInitiateInvoiceApplication,
   lockInvoiceApplicationRoot,
   lockInvoiceApplicationRootByFinancialSource,
   reconcileInvoiceApplicationAllocations,
@@ -3676,6 +3677,8 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       `(c.relation_type = 'main' OR NOT ${currentSealedContractFileExists("c")})`,
     ];
     const params: unknown[] = [];
+    let statusFilterSql = "";
+    let statusFilterParamIndex = -1;
     const restrictedAreaViewer = requiresRestrictedContractArea(
       currentActor.role,
     );
@@ -3731,7 +3734,9 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       addFilter("c.declared_subtype = ANY(?::text[])", storedDeclaredSubtypes);
     }
     if (statuses.length > 0) {
-      addFilter("c.status = ANY(?::text[])", statuses);
+      statusFilterSql = "c.status = ANY(?::text[])";
+      statusFilterParamIndex = params.length;
+      addFilter(statusFilterSql, statuses);
     }
     const settlementStatus = optionalQueryScalar(
       req.query.settlementStatus,
@@ -3899,6 +3904,16 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
       ...params,
     );
     const currentMonth = currentShanghaiDate().slice(0, 7);
+    const pendingStatusWhere = statusFilterSql
+      ? where.filter((condition) => condition !== statusFilterSql)
+      : where;
+    const pendingStatusParams =
+      statusFilterParamIndex >= 0
+        ? params.filter((_, index) => index !== statusFilterParamIndex)
+        : [];
+    const pendingStatusScopeSql = statusFilterSql
+      ? `SELECT c.* FROM contracts c WHERE ${pendingStatusWhere.join(" AND ")}`
+      : "SELECT * FROM filtered";
     const summaryRow = await db.get<{
       total_amount: number;
       all_contract_amount: number;
@@ -3919,6 +3934,8 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
     }>(
       `WITH filtered AS (
          SELECT c.* FROM contracts c WHERE ${where.join(" AND ")}
+       ), pending_status_scope AS (
+         ${pendingStatusScopeSql}
        ), selected_roots AS (
          SELECT DISTINCT COALESCE(root_contract_id, id) AS root_id
          FROM filtered
@@ -4007,9 +4024,11 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
          COALESCE(SUM(CASE WHEN root_metrics.financial_direction = 'income'
            THEN GREATEST(root_metrics.current_amount - financial_metrics.received_amount, 0)
            ELSE 0 END), 0) AS unreceived_amount,
-         (SELECT COUNT(*)::int FROM filtered WHERE status = 'approving')
+         (SELECT COUNT(DISTINCT COALESCE(root_contract_id, id))::int
+          FROM pending_status_scope WHERE status = 'approving')
            AS pending_approval_count,
-         (SELECT COUNT(*)::int FROM filtered WHERE status = 'pending_seal')
+         (SELECT COUNT(DISTINCT COALESCE(root_contract_id, id))::int
+          FROM pending_status_scope WHERE status = 'pending_seal')
            AS pending_seal_count,
          (SELECT COUNT(*)::int FROM filtered lease_source
           WHERE lease_source.lease_end_date IS NOT NULL
@@ -4036,6 +4055,7 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
        LEFT JOIN financial_metrics
          ON financial_metrics.root_id = root_metrics.root_id`,
       ...params,
+      ...pendingStatusParams,
       currentMonth,
     );
     const rootOrder =
@@ -4383,7 +4403,7 @@ router.get("/", requireContractLedgerRead, async (req, res) => {
             : null,
       };
     });
-    if (currentActor.role === "user") {
+    if (canInitiateInvoiceApplication(currentActor.role)) {
       const rootIds = items
         .filter((item) => item.relationType === "main")
         .map((item) => item.id);
@@ -10251,11 +10271,25 @@ async function lockFinancialContract(
     rootPartyC = root.rows[0].party_c;
     rootFundingMode = root.rows[0].asset_funding_mode;
   }
+  const completedIncomeContract =
+    target.status === "completed" &&
+    rootStatus === "completed" &&
+    rootFinancialDirection === "income" &&
+    ["main_business", "non_main"].includes(target.category || "");
+  let allowsCompletedIssuedInvoice = false;
+  if (kind === "invoice" && completedIncomeContract) {
+    const issuedApplication = await client.query<{ id: string }>(
+      `SELECT id FROM invoice_applications
+       WHERE contract_id = $1 AND status = 'pending_invoice'
+         AND issued_at IS NOT NULL
+       ORDER BY submitted_at, id LIMIT 1`,
+      [rootId],
+    );
+    allowsCompletedIssuedInvoice = Boolean(issuedApplication.rows[0]);
+  }
   const allowsCompletedIncomeContinuation =
     allowCompletedOpenIncomeRegistration &&
-    ((kind !== "payment" &&
-      target.category === "main_business" &&
-      rootFinancialDirection === "income") ||
+    ((kind === "receipt" && completedIncomeContract) ||
       (kind === "invoice" &&
         rootFinancialDirection === "cost" &&
         allowsDirectAssetPaymentFirst({
@@ -10267,7 +10301,8 @@ async function lockFinancialContract(
   if (
     (!["effective", "executing"].includes(target.status) ||
       !["effective", "executing"].includes(rootStatus)) &&
-    !allowsCompletedIncomeContinuation
+    !allowsCompletedIncomeContinuation &&
+    !allowsCompletedIssuedInvoice
   ) {
     throw new ContractDomainError(
       409,
@@ -12312,10 +12347,13 @@ export async function appendFinancialRegistrationSettlementJobs(
       );
     }
     // 根合同事务锁已先取得；随后统一按登记行、合同／凭证行顺序加锁。
+    const appendedRecordKind: FinancialRecordKind = uniqueInvoiceJobIds.length
+      ? "invoice"
+      : registration.settlement_kind;
     const target = await lockFinancialContract(
       client,
       contractId,
-      "invoice",
+      appendedRecordKind,
       (registration.financial_direction === "income" &&
         registration.settlement_kind === "receipt") ||
         (registration.financial_direction === "cost" &&

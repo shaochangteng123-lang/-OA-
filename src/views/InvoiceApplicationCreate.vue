@@ -53,7 +53,7 @@
         </el-descriptions>
 
         <div
-          v-show="!isMainBusiness || triplicateAmountConfirmed"
+          v-show="!requiresTriplicate || triplicateAmountConfirmed"
           class="amount-grid"
           aria-label="开票额度"
         >
@@ -88,15 +88,15 @@
         <el-form
           label-position="top"
           class="application-form"
-          :class="{ 'main-business-form': isMainBusiness }"
+          :class="{ 'main-business-form': requiresTriplicate }"
         >
           <section
-            v-show="!isMainBusiness || triplicateAmountConfirmed"
+            v-show="!requiresTriplicate || triplicateAmountConfirmed"
             class="form-section content-section"
           >
             <div class="section-heading">
               <div>
-                <b>{{ isMainBusiness ? "02" : "01" }}</b>
+                <b>{{ requiresTriplicate ? "02" : "01" }}</b>
                 <span
                   ><strong>开票申请内容</strong
                   ><small>填写本次拟向客户开票的信息</small></span
@@ -105,7 +105,7 @@
             </div>
             <div class="form-grid">
               <el-form-item
-                v-if="!isMainBusiness"
+                v-if="!requiresTriplicate"
                 label="本次申请开票金额"
                 required
               >
@@ -121,7 +121,11 @@
                   >由申请人根据本次实际业务金额填写，系统校验不得超过剩余可申请额度。</small
                 >
               </el-form-item>
-              <el-form-item v-if="!isMainBusiness" label="发票类型" required>
+              <el-form-item
+                v-if="!requiresTriplicate"
+                label="发票类型"
+                required
+              >
                 <el-select
                   v-model="form.invoiceType"
                   placeholder="请选择发票类型"
@@ -148,15 +152,15 @@
           <section class="form-section material-section">
             <div class="section-heading">
               <div>
-                <b>{{ isMainBusiness ? "01" : "02" }}</b>
+                <b>{{ requiresTriplicate ? "01" : "02" }}</b>
                 <span
                   ><strong>{{
-                    isMainBusiness
+                    requiresTriplicate
                       ? "在线生成三联单并确认用印"
                       : "甲方材料与用印"
                   }}</strong
                   ><small>{{
-                    isMainBusiness
+                    requiresTriplicate
                       ? "填写本次实际付款，系统自动计算合同金额与累计付款"
                       : "选择材料是否需要盖章"
                   }}</small></span
@@ -165,14 +169,14 @@
             </div>
 
             <el-alert
-              v-if="isMainBusiness"
+              v-if="requiresTriplicate"
               type="info"
               :closable="false"
               show-icon
-              title="主营项目合同：这一步同时申请三联单用印"
+              title="国网北京市电力公司：这一步同时申请三联单用印"
               description="工程项目名称可调整，本次付款由申请人根据本次实际付款填写；系统生成第一联、第二联、第三联三张A4三联单，总经理批准后由管理员打印并盖章。"
             />
-            <div v-if="isMainBusiness" class="online-triplicate">
+            <div v-if="requiresTriplicate" class="online-triplicate">
               <div class="triplicate-form-grid">
                 <el-form-item label="工程项目名称" required>
                   <el-input
@@ -308,15 +312,15 @@
             </el-radio-group>
 
             <div
-              v-if="!isMainBusiness && form.materialMode !== 'no_material'"
+              v-if="!requiresTriplicate && form.materialMode !== 'no_material'"
               class="material-upload"
             >
               <el-upload
                 v-model:file-list="uploadFiles"
                 drag
-                :multiple="!isMainBusiness"
+                :multiple="!requiresTriplicate"
                 :disabled="
-                  isMainBusiness &&
+                  requiresTriplicate &&
                   savedMaterials.length + uploadFiles.length >= 1
                 "
                 :auto-upload="false"
@@ -343,7 +347,7 @@
                     <el-checkbox
                       :model-value="pendingFileRequiresSeal(file)"
                       :disabled="
-                        isMainBusiness ||
+                        requiresTriplicate ||
                         form.materialMode === 'material_no_seal'
                       "
                       @change="togglePendingFileSeal(file)"
@@ -360,7 +364,7 @@
               </div>
 
               <el-alert
-                v-if="isMainBusiness && triplicateAmountConfirmed"
+                v-if="requiresTriplicate && triplicateAmountConfirmed"
                 type="success"
                 show-icon
                 :closable="false"
@@ -406,7 +410,7 @@
           </section>
 
           <section
-            v-show="!isMainBusiness || triplicateAmountConfirmed"
+            v-show="!requiresTriplicate || triplicateAmountConfirmed"
             class="form-section billing-section"
           >
             <div class="section-heading">
@@ -490,7 +494,7 @@
           </section>
 
           <section
-            v-show="!isMainBusiness || triplicateAmountConfirmed"
+            v-show="!requiresTriplicate || triplicateAmountConfirmed"
             class="form-section signature-section"
           >
             <div class="section-heading">
@@ -532,7 +536,7 @@
         </el-form>
 
         <footer
-          v-show="!isMainBusiness || triplicateAmountConfirmed"
+          v-show="!requiresTriplicate || triplicateAmountConfirmed"
           class="submit-bar"
         >
           <span>{{ submitHint }}</span>
@@ -637,14 +641,19 @@ const form = reactive<InvoiceApplicationDraftPayload>({
   confirmedBillingIdentity: false,
 });
 
-const isMainBusiness = computed(
-  () => eligibility.value?.contract?.category === "main_business",
+const requiresTriplicate = computed(
+  () =>
+    currentApplication.value?.requiresTriplicate ??
+    eligibility.value?.contract?.requiresTriplicate ??
+    false,
 );
 const categoryLabel = computed(() =>
-  isMainBusiness.value ? "主营项目合同" : "非主营项目合同",
+  eligibility.value?.contract?.category === "main_business"
+    ? "主营项目合同"
+    : "非主营项目合同",
 );
 const isSealApplication = computed(
-  () => isMainBusiness.value || form.materialMode === "material_need_seal",
+  () => requiresTriplicate.value || form.materialMode === "material_need_seal",
 );
 const flowTitle = computed(() =>
   isSealApplication.value ? "开票及用印申请" : "开票申请",
@@ -702,7 +711,7 @@ const legacyTriplicateMatchesForm = computed(
 );
 const triplicateAmountConfirmed = computed(
   () =>
-    !isMainBusiness.value ||
+    !requiresTriplicate.value ||
     legacyTriplicateMatchesForm.value ||
     generatedTriplicateMatchesForm.value,
 );
@@ -739,7 +748,7 @@ const draftFieldsValid = computed(
 );
 const canGenerateTriplicate = computed(
   () =>
-    isMainBusiness.value &&
+    requiresTriplicate.value &&
     canEditApplication.value &&
     Boolean(triplicateProjectName.value.trim()) &&
     cents(form.amount) > 0 &&
@@ -754,12 +763,12 @@ const canSaveDraft = computed(
     (eligibility.value?.eligible === true || Boolean(currentApplication.value)),
 );
 const materialAccept = computed(() =>
-  isMainBusiness.value
+  requiresTriplicate.value
     ? ".xls,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     : ".xls,.xlsx,.pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png",
 );
 const materialUploadTip = computed(() =>
-  isMainBusiness.value
+  requiresTriplicate.value
     ? "仅支持 xls、xlsx，必须保留完整原始三联单。"
     : "支持 xls、xlsx、PDF、JPG、JPEG、PNG，可一次选择多份。",
 );
@@ -788,7 +797,7 @@ const materialValid = computed(() => {
   const hasMaterial =
     savedMaterials.value.length + uploadFiles.value.length > 0;
   if (!hasMaterial) return false;
-  if (isMainBusiness.value) {
+  if (requiresTriplicate.value) {
     return (
       triplicateAmountConfirmed.value &&
       savedMaterials.value.length + uploadFiles.value.length === 1 &&
@@ -835,7 +844,7 @@ const submitHint = computed(() => {
     ) {
       return "已保存材料仍标记为需要盖章，请删除后按无需盖章方式重新上传";
     }
-    return isMainBusiness.value
+    return requiresTriplicate.value
       ? "请先在线生成三联单"
       : "请上传已选择的甲方材料";
   }
@@ -934,7 +943,7 @@ function handleMaterialModeChange(
 }
 
 async function handleFileChange(_file: UploadFile, files: UploadFiles) {
-  const allowedExtensions = isMainBusiness.value
+  const allowedExtensions = requiresTriplicate.value
     ? ["xls", "xlsx"]
     : ["xls", "xlsx", "pdf", "jpg", "jpeg", "png"];
   let validFiles = files.filter((file) => {
@@ -943,12 +952,12 @@ async function handleFileChange(_file: UploadFile, files: UploadFiles) {
   });
   if (validFiles.length !== files.length) {
     ElMessage.warning(
-      isMainBusiness.value
+      requiresTriplicate.value
         ? "主营三联单仅支持 xls、xlsx 文件"
         : "甲方材料仅支持 xls、xlsx、PDF、JPG、JPEG、PNG 文件",
     );
   }
-  if (isMainBusiness.value) {
+  if (requiresTriplicate.value) {
     if (savedMaterials.value.length) {
       ElMessage.warning(
         "主营项目只能保留一份三联单，请先删除已保存文件后再替换",
@@ -960,14 +969,14 @@ async function handleFileChange(_file: UploadFile, files: UploadFiles) {
     }
   }
   uploadFiles.value = validFiles;
-  if (isMainBusiness.value || form.materialMode === "material_need_seal") {
+  if (requiresTriplicate.value || form.materialMode === "material_need_seal") {
     pendingSealFileUids.value = new Set([
       ...pendingSealFileUids.value,
       ...validFiles.map(fileKey),
     ]);
   }
   markChangedAfterSignature();
-  if (isMainBusiness.value && validFiles.length === 1) {
+  if (requiresTriplicate.value && validFiles.length === 1) {
     const selectedFile = validFiles[0];
     const raw = selectedFile.raw as File | undefined;
     if (!raw) {
@@ -1015,7 +1024,7 @@ async function handleFileChange(_file: UploadFile, files: UploadFiles) {
 }
 
 function pendingFileRequiresSeal(file: UploadUserFile): boolean {
-  if (isMainBusiness.value) return true;
+  if (requiresTriplicate.value) return true;
   if (form.materialMode === "material_no_seal") return false;
   return pendingSealFileUids.value.has(fileKey(file));
 }
@@ -1025,7 +1034,8 @@ function fileKey(file: UploadUserFile): string {
 }
 
 function togglePendingFileSeal(file: UploadUserFile) {
-  if (isMainBusiness.value || form.materialMode === "material_no_seal") return;
+  if (requiresTriplicate.value || form.materialMode === "material_no_seal")
+    return;
   const next = new Set(pendingSealFileUids.value);
   const key = fileKey(file);
   if (next.has(key)) next.delete(key);
@@ -1040,7 +1050,7 @@ function removePendingFile(file: UploadUserFile) {
   const next = new Set(pendingSealFileUids.value);
   next.delete(key);
   pendingSealFileUids.value = next;
-  if (isMainBusiness.value) {
+  if (requiresTriplicate.value) {
     triplicateInspectionSequence += 1;
     triplicateInspection.value = null;
     triplicateInspecting.value = false;
@@ -1076,7 +1086,7 @@ function payload(): InvoiceApplicationDraftPayload {
     amount: form.amount.trim(),
     invoiceType: form.invoiceType,
     description: form.description.trim(),
-    materialMode: isMainBusiness.value
+    materialMode: requiresTriplicate.value
       ? "material_need_seal"
       : form.materialMode,
     billingInfo: Object.fromEntries(
@@ -1271,7 +1281,8 @@ function previewMaterial(materialId: string) {
   if (!currentApplication.value) return;
   const material = savedMaterials.value.find((item) => item.id === materialId);
   const useDownload =
-    !isMainBusiness.value && isSpreadsheetMaterial(material?.mimeType || "");
+    !requiresTriplicate.value &&
+    isSpreadsheetMaterial(material?.mimeType || "");
   window.open(
     useDownload
       ? getInvoiceApplicationMaterialDownloadUrl(
@@ -1292,7 +1303,7 @@ function isSpreadsheetMaterial(mimeType: string): boolean {
 }
 
 function materialActionLabel(mimeType: string): string {
-  return !isMainBusiness.value && isSpreadsheetMaterial(mimeType)
+  return !requiresTriplicate.value && isSpreadsheetMaterial(mimeType)
     ? "下载查看"
     : "预览";
 }
@@ -1318,7 +1329,10 @@ async function removeSavedMaterial(materialId: string) {
       materialId,
       currentApplication.value.version,
     );
-    if (isMainBusiness.value && !removedMaterial?.isSystemGeneratedTriplicate) {
+    if (
+      requiresTriplicate.value &&
+      !removedMaterial?.isSystemGeneratedTriplicate
+    ) {
       triplicateInspection.value = null;
       form.amount = "";
     }
@@ -1350,7 +1364,7 @@ async function loadPage() {
     if (!eligibility.value.contract) {
       throw new Error(eligibility.value.reason || "合同不存在或无权访问");
     }
-    if (eligibility.value.contract.category === "main_business") {
+    if (requiresTriplicate.value) {
       form.materialMode = "material_need_seal";
       if (!triplicateProjectName.value) {
         triplicateProjectName.value = eligibility.value.contract.title;

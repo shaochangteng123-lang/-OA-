@@ -15,7 +15,7 @@ import { api } from "@/utils/api";
 import { getContracts } from "@/utils/contractApi";
 import ContractList from "@/views/ContractList.vue";
 
-const { flushPromises, mount } =
+const { flushPromises, mount, shallowMount } =
   require("../node_modules/@vue/test-utils/dist/vue-test-utils.cjs.js") as typeof import("@vue/test-utils");
 
 const elementStubs = {
@@ -32,6 +32,64 @@ const elementStubs = {
   ElProgress: { template: "<span />" },
   ElSelect: { template: "<div><slot /></div>" },
 };
+
+const interactiveMetricCardStub = {
+  name: "InteractiveMetricCardStub",
+  inheritAttrs: false,
+  props: {
+    label: { type: String, default: "" },
+    value: { type: [String, Number], default: "" },
+    note: { type: String, default: "" },
+    badge: { type: String, default: "" },
+    clickable: Boolean,
+    ariaPressed: { type: Boolean, default: false },
+  },
+  emits: ["activate"],
+  template: `
+    <button
+      class="interactive-metric-card"
+      :data-label="label"
+      :data-value="String(value)"
+      :data-badge="badge"
+      :disabled="!clickable"
+      :aria-pressed="ariaPressed"
+      @click="$emit('activate')"
+    >{{ label }} {{ value }}</button>
+  `,
+};
+
+function mockMetricContractListApi() {
+  (api.get as jest.Mock).mockImplementation((url: string) => {
+    if (url === "/api/contracts/meta") {
+      return Promise.resolve({
+        data: {
+          success: true,
+          data: {
+            projects: [],
+            areas: ["海淀区"],
+            assetCategories: [],
+          },
+        },
+      });
+    }
+    if (url !== "/api/contracts") {
+      throw new Error(`测试未声明接口：${url}`);
+    }
+    return Promise.resolve({
+      data: {
+        success: true,
+        data: {
+          items: [],
+          total: 30,
+          summary: {
+            pendingApprovalCount: 2,
+            pendingSealCount: 3,
+          },
+        },
+      },
+    });
+  });
+}
 
 describe("合同台账前端筛选与动作", () => {
   beforeEach(() => {
@@ -194,8 +252,127 @@ describe("合同台账前端筛选与动作", () => {
     }
     expect(source).toContain("replaceRouteQuery");
     expect(source).toContain("normalizedRouteQuery");
+    expect(source).toContain("filters.statuses = [...query.statuses]");
+    expect(source).toContain("handlePageChange(nextPage: number)");
+    expect(source).toContain("applyFilters(false)");
     expect(source).toContain("{ immediate: true }");
     expect(source).toContain("multiple");
+  });
+
+  it("点击待审批与待盖章指标切换台账状态并保留其他筛选", async () => {
+    mockMetricContractListApi();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/contracts", component: ContractList }],
+    });
+    await router.push({
+      path: "/contracts",
+      query: {
+        page: "3",
+        pageSize: "10",
+        keyword: "项目甲",
+        area: "海淀区",
+      },
+    });
+    await router.isReady();
+    const wrapper = shallowMount(ContractList, {
+      global: {
+        plugins: [pinia, router],
+        components: { ElTable, ElTableColumn },
+        stubs: {
+          ...elementStubs,
+          ContractMetricCard: interactiveMetricCardStub,
+        },
+        directives: { loading: () => undefined },
+      },
+    });
+    await flushPromises();
+    await nextTick();
+
+    const metric = (label: string) =>
+      wrapper
+        .findAll(".interactive-metric-card")
+        .find((item) => item.attributes("data-label") === label);
+    expect(metric("待审批合同")?.attributes("data-value")).toBe("2");
+    expect(metric("待盖章归档")?.attributes("data-value")).toBe("3");
+
+    const component = wrapper.vm as unknown as {
+      filters: {
+        categories: string[];
+        statuses: string[];
+      };
+      page: number;
+    };
+    component.filters.categories = ["main_business"];
+    const replace = jest.spyOn(router, "replace").mockResolvedValue(undefined);
+    const metricComponent = (label: string) =>
+      wrapper
+        .findAllComponents({ name: "InteractiveMetricCardStub" })
+        .find((item) => item.props("label") === label);
+
+    metricComponent("待审批合同")!.vm.$emit("activate");
+    expect(component.filters.statuses).toEqual(["approving"]);
+    expect(component.page).toBe(1);
+    expect(replace).toHaveBeenNthCalledWith(1, {
+      query: expect.objectContaining({
+        page: "1",
+        pageSize: "10",
+        keyword: "项目甲",
+        category: "main_business",
+        area: "海淀区",
+        status: "approving",
+      }),
+    });
+
+    metricComponent("待盖章归档")!.vm.$emit("activate");
+    expect(component.filters.statuses).toEqual(["pending_seal"]);
+    expect(replace).toHaveBeenNthCalledWith(2, {
+      query: expect.objectContaining({ status: "pending_seal" }),
+    });
+
+    metricComponent("待盖章归档")!.vm.$emit("activate");
+    expect(component.filters.statuses).toEqual([]);
+    expect(replace).toHaveBeenNthCalledWith(3, {
+      query: expect.objectContaining({ status: undefined }),
+    });
+    wrapper.unmount();
+  });
+
+  it("服务端待办指标忽略状态筛选并按主合同链去重", () => {
+    const backendSource = fs.readFileSync(
+      path.resolve(process.cwd(), "server/routes/contracts.ts"),
+      "utf8",
+    );
+    const listRouteSource = backendSource.slice(
+      backendSource.indexOf(
+        'router.get("/", requireContractLedgerRead, async (req, res)',
+      ),
+      backendSource.indexOf('router.get("/dashboard"'),
+    );
+
+    expect(listRouteSource).toContain('let statusFilterSql = ""');
+    expect(listRouteSource).toContain(
+      "where.filter((condition) => condition !== statusFilterSql)",
+    );
+    expect(listRouteSource).toContain(
+      "params.filter((_, index) => index !== statusFilterParamIndex)",
+    );
+    expect(listRouteSource).toContain("pending_status_scope AS");
+    expect(listRouteSource).toMatch(
+      /COUNT\(DISTINCT COALESCE\(root_contract_id, id\)\)::int\s+FROM pending_status_scope WHERE status = 'approving'/,
+    );
+    expect(listRouteSource).toMatch(
+      /COUNT\(DISTINCT COALESCE\(root_contract_id, id\)\)::int\s+FROM pending_status_scope WHERE status = 'pending_seal'/,
+    );
+    expect(listRouteSource).toContain("...pendingStatusParams");
+    expect(listRouteSource).not.toContain(
+      "COUNT(*)::int FROM filtered WHERE status = 'approving'",
+    );
+    expect(listRouteSource).not.toContain(
+      "COUNT(*)::int FROM filtered WHERE status = 'pending_seal'",
+    );
   });
 
   it("台账将不限区域与行政区全部区分并透传全部区域筛选", async () => {
@@ -484,7 +661,7 @@ describe("合同台账前端筛选与动作", () => {
     );
   });
 
-  it("台账展示财务与责任字段，并将审批处理统一收口到审批中心", () => {
+  it("台账展示财务与责任字段，并通过顶部指标下钻待办状态", () => {
     const source = fs.readFileSync(
       path.resolve(process.cwd(), "src/views/ContractList.vue"),
       "utf8",
@@ -516,7 +693,14 @@ describe("合同台账前端筛选与动作", () => {
     expect(source).not.toContain("canApproveItem");
     expect(source).not.toContain("openPendingApproval");
     expect(source).not.toContain(">待审批</el-button");
-    expect(source).toContain("router.push('/contract-approvals')");
+    expect(source).not.toContain("router.push('/contract-approvals')");
+    expect(source).toContain("@activate=\"toggleStatusMetric('approving')\"");
+    expect(source).toContain(
+      "@activate=\"toggleStatusMetric('pending_seal')\"",
+    );
+    expect(source).toContain(
+      "filters.statuses = isStatusMetricActive(status) ? [] : [status]",
+    );
     expect(source).toContain("v-else-if=\"row.status === 'pending_seal'\"");
     expect(source).toContain("openFinancialRegistration(row)");
     expect(source).toContain("row.relationType === 'main'");

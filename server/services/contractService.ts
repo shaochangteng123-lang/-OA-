@@ -997,6 +997,25 @@ function terminationSnapshotMatchesContract(
   );
 }
 
+async function assertTerminationHasNoOpenFinancialRegistration(
+  client: PoolClient,
+  rootContractId: string,
+): Promise<void> {
+  const openRegistration = await client.query<{ id: string }>(
+    `SELECT id FROM contract_financial_registrations
+     WHERE contract_id = $1 AND status = 'draft'
+     ORDER BY created_at, id LIMIT 1`,
+    [rootContractId],
+  );
+  if (openRegistration.rows[0]) {
+    throw new ContractDomainError(
+      409,
+      "合同仍有未闭合财务登记，请先补齐或冲正后再办理解除",
+      "CONTRACT_TERMINATION_OPEN_FINANCIAL_REGISTRATION",
+    );
+  }
+}
+
 /** 提交审批前确认解除结算快照没有被新增、冲正的财务凭证改变。 */
 export async function freezeTerminationSettlementSnapshotForApproval(
   client: PoolClient,
@@ -1015,6 +1034,10 @@ export async function freezeTerminationSettlementSnapshotForApproval(
     contract.termination_target_contract_id,
     contract.contract_date,
     true,
+  );
+  await assertTerminationHasNoOpenFinancialRegistration(
+    client,
+    snapshot.rootContractId,
   );
   if (!terminationSnapshotMatchesContract(contract, snapshot)) {
     throw new ContractDomainError(
@@ -1051,6 +1074,10 @@ export async function applyTerminationAgreementAtEffective(
     contract.termination_target_contract_id,
     effectiveDate,
     true,
+  );
+  await assertTerminationHasNoOpenFinancialRegistration(
+    client,
+    snapshot.rootContractId,
   );
   if (!terminationSnapshotMatchesContract(contract, snapshot)) {
     throw new ContractDomainError(

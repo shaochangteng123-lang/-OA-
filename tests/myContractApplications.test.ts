@@ -1,3 +1,6 @@
+const mockAuth = { user: { role: "user" } };
+jest.mock("@/stores/auth", () => ({ useAuthStore: () => mockAuth }));
+
 jest.mock("@/views/ContractDownloadRequestCenter.vue", () => ({
   __esModule: true,
   default: {
@@ -23,7 +26,11 @@ import MyContractApplications from "@/views/MyContractApplications.vue";
 const { flushPromises, mount } =
   require("../node_modules/@vue/test-utils/dist/vue-test-utils.cjs.js") as typeof import("@vue/test-utils");
 
-describe("员工我的申请聚合页", () => {
+describe("员工与管理员我的申请聚合页", () => {
+  beforeEach(() => {
+    mockAuth.user.role = "user";
+  });
+
   it("使用顶部文字页签和蓝色下划线，不展示大标题卡或大块分段按钮", () => {
     const source = require("fs").readFileSync(
       require("path").resolve(
@@ -94,4 +101,31 @@ describe("员工我的申请聚合页", () => {
     expect(wrapper.find(".invoice-center").exists()).toBe(true);
     wrapper.unmount();
   });
+  it.each(["admin", "super_admin", "chairman"])(
+    "管理员访问下载页签地址仍只挂载开票申请：%s",
+    async (role) => {
+      mockAuth.user.role = role;
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          {
+            path: "/contract-applications/mine",
+            component: MyContractApplications,
+          },
+        ],
+      });
+      await router.push("/contract-applications/mine?tab=download");
+      await router.isReady();
+      const wrapper = mount(MyContractApplications, {
+        global: {
+          plugins: [router],
+          components: { ElTabs, ElTabPane },
+        },
+      });
+      expect(wrapper.find(".download-center").exists()).toBe(false);
+      expect(wrapper.find(".invoice-center").exists()).toBe(true);
+      expect(wrapper.findAll(".el-tabs__item")).toHaveLength(1);
+      wrapper.unmount();
+    },
+  );
 });

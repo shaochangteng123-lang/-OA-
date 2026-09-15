@@ -5,12 +5,19 @@
       class="application-tabs"
       @tab-change="handleTabChange"
     >
-      <el-tab-pane label="合同下载申请" name="download" />
+      <el-tab-pane
+        v-if="canRequestDownload"
+        label="合同下载申请"
+        name="download"
+      />
       <el-tab-pane label="开票及用印申请" name="invoice" />
     </el-tabs>
 
     <main class="application-content">
-      <ContractDownloadRequestCenter v-if="activeTab === 'download'" embedded />
+      <ContractDownloadRequestCenter
+        v-if="canRequestDownload && activeTab === 'download'"
+        embedded
+      />
       <InvoiceApplicationCenter v-else embedded />
     </main>
   </div>
@@ -18,6 +25,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { useAuthStore } from "@/stores/auth";
 import { useRoute, useRouter } from "vue-router";
 import ContractDownloadRequestCenter from "@/views/ContractDownloadRequestCenter.vue";
 import InvoiceApplicationCenter from "@/views/InvoiceApplicationCenter.vue";
@@ -26,8 +34,12 @@ type ApplicationTab = "download" | "invoice";
 
 const route = useRoute();
 const router = useRouter();
+const authStore = useAuthStore();
+const canRequestDownload = computed(() => authStore.user?.role === "user");
 const activeTab = computed<ApplicationTab>(() =>
-  route.query.tab === "invoice" ? "invoice" : "download",
+  !canRequestDownload.value || route.query.tab === "invoice"
+    ? "invoice"
+    : "download",
 );
 
 function selectTab(tab: ApplicationTab) {

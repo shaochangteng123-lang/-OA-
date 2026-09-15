@@ -5,7 +5,10 @@ import type {
   InvoiceApplicationDraftPayload,
   InvoiceApplicationEligibility,
   InvoiceApplicationEmployeeView,
+  InvoiceApplicationFinancialProgress,
   InvoiceApplicationListResponse,
+  InvoiceReceiptTask,
+  InvoiceReceiptTaskListResponse,
   MainTriplicateInspection,
   InvoiceApplicationStatus,
 } from "@/types/invoiceApplication";
@@ -88,6 +91,7 @@ function normalizeEligibility(value: unknown): InvoiceApplicationEligibility {
             ? (category as "main_business" | "non_main" | "asset")
             : null,
           area: nullableText(contract.area),
+          requiresTriplicate: contract.requiresTriplicate === true,
           partyA: nullableText(contract.partyA ?? contract.party_a),
           status: text(contract.status) as NonNullable<
             InvoiceApplicationEligibility["contract"]
@@ -139,6 +143,7 @@ function normalizeApplication(value: unknown): InvoiceApplication {
     contractNo: nullableText(source.contractNo ?? source.contract_no),
     category,
     area: nullableText(source.area),
+    requiresTriplicate: source.requiresTriplicate === true,
     partyA: nullableText(source.partyA ?? source.party_a),
     contractStatus: (nullableText(
       source.contractStatus ?? source.contract_status,
@@ -229,6 +234,37 @@ function normalizeApplication(value: unknown): InvoiceApplication {
     deliveredAt: nullableText(source.deliveredAt ?? source.delivered_at),
     issuedAt: nullableText(source.issuedAt ?? source.issued_at),
     completedAt: nullableText(source.completedAt ?? source.completed_at),
+    deliveryHandler: (() => {
+      const handler = record(source.deliveryHandler ?? source.delivery_handler);
+      if (!Object.keys(handler).length) return null;
+      return {
+        id: text(handler.id),
+        name: text(handler.name),
+        processedAt: text(handler.processedAt ?? handler.processed_at),
+        note: text(handler.note),
+      };
+    })(),
+    invoiceHandler: (() => {
+      const handler = record(source.invoiceHandler ?? source.invoice_handler);
+      if (!Object.keys(handler).length) return null;
+      return {
+        id: text(handler.id),
+        name: text(handler.name),
+        processedAt: text(handler.processedAt ?? handler.processed_at),
+        note: text(handler.note),
+      };
+    })(),
+    adminProcessing: (() => {
+      const processing = record(
+        source.adminProcessing ?? source.admin_processing,
+      );
+      if (!Object.keys(processing).length) return null;
+      return {
+        delivered: Boolean(processing.delivered),
+        issued: Boolean(processing.issued),
+        processedAt: text(processing.processedAt ?? processing.processed_at),
+      };
+    })(),
     applicantSignedFileId: nullableText(
       source.applicantSignedFileId ?? source.applicant_signed_file_id,
     ),
@@ -286,7 +322,9 @@ export async function getInvoiceApplications(params: {
     | "approval"
     | "manager_pending"
     | "manager_processed"
-    | "admin";
+    | "admin"
+    | "admin_pending"
+    | "admin_processed";
   view?: InvoiceApplicationEmployeeView;
   status?: InvoiceApplicationStatus | "";
   keyword?: string;
@@ -308,6 +346,139 @@ export async function getInvoiceApplications(params: {
   };
 }
 
+function normalizeInvoiceReceiptTask(value: unknown): InvoiceReceiptTask {
+  const source = record(value);
+  const rawInvoices = source.invoices;
+  const rawApplicationNumbers =
+    source.applicationNumbers ?? source.application_numbers;
+  return {
+    registrationId: text(source.registrationId ?? source.registration_id),
+    contractId: text(source.contractId ?? source.contract_id),
+    contractNo: text(source.contractNo ?? source.contract_no),
+    businessContractNo: text(
+      source.businessContractNo ?? source.business_contract_no,
+    ),
+    contractTitle: text(source.contractTitle ?? source.contract_title),
+    projectName: text(source.projectName ?? source.project_name),
+    partyA: text(source.partyA ?? source.party_a),
+    area: text(source.area),
+    applicationCount: Number(
+      source.applicationCount ?? source.application_count ?? 0,
+    ),
+    applicationNumbers: Array.isArray(rawApplicationNumbers)
+      ? rawApplicationNumbers.map(text)
+      : [],
+    invoiceCount: Number(source.invoiceCount ?? source.invoice_count ?? 0),
+    invoiceAmount: Number(source.invoiceAmount ?? source.invoice_amount ?? 0),
+    matchedReceiptAmount: Number(
+      source.matchedReceiptAmount ?? source.matched_receipt_amount ?? 0,
+    ),
+    pendingReceiptAmount: Number(
+      source.pendingReceiptAmount ?? source.pending_receipt_amount ?? 0,
+    ),
+    earliestInvoiceDate: text(
+      source.earliestInvoiceDate ?? source.earliest_invoice_date,
+    ),
+    waitingDays: Number(source.waitingDays ?? source.waiting_days ?? 0),
+    receiptStatus:
+      (source.receiptStatus ?? source.receipt_status) === "partial"
+        ? "partial"
+        : "awaiting",
+    invoices: (Array.isArray(rawInvoices) ? rawInvoices : []).map((item) => {
+      const invoice = record(item);
+      return {
+        id: text(invoice.id),
+        invoiceNo: text(invoice.invoiceNo ?? invoice.invoice_no),
+        invoiceDate: text(invoice.invoiceDate ?? invoice.invoice_date),
+        amount: Number(invoice.amount || 0),
+        applicationAmount: Number(
+          invoice.applicationAmount ?? invoice.application_amount ?? 0,
+        ),
+        matchedReceiptAmount: Number(
+          invoice.matchedReceiptAmount ?? invoice.matched_receipt_amount ?? 0,
+        ),
+        pendingReceiptAmount: Number(
+          invoice.pendingReceiptAmount ?? invoice.pending_receipt_amount ?? 0,
+        ),
+        itemName: text(invoice.itemName ?? invoice.item_name),
+      };
+    }),
+  };
+}
+
+export async function getInvoiceReceiptTasks(
+  params: {
+    page?: number;
+    pageSize?: number;
+    keyword?: string;
+  } = {},
+): Promise<InvoiceReceiptTaskListResponse> {
+  const result = record(
+    unwrap(
+      await api.get<ApiEnvelope<unknown>>(
+        "/api/invoice-applications/pending-receipts",
+        { params },
+      ),
+    ),
+  );
+  return {
+    items: (Array.isArray(result.items) ? result.items : []).map(
+      normalizeInvoiceReceiptTask,
+    ),
+    total: Number(result.total || 0),
+    page: Number(result.page || params.page || 1),
+    pageSize: Number(
+      result.pageSize || result.page_size || params.pageSize || 20,
+    ),
+  };
+}
+
+export async function getInvoiceReceiptTask(
+  registrationId: string,
+): Promise<InvoiceReceiptTask | null> {
+  const data = unwrap(
+    await api.get<ApiEnvelope<unknown>>(
+      `/api/invoice-applications/pending-receipts/${encodeURIComponent(registrationId)}`,
+    ),
+  );
+  return data ? normalizeInvoiceReceiptTask(data) : null;
+}
+
+export async function getInvoiceApplicationFinancialProgress(
+  id: string,
+): Promise<InvoiceApplicationFinancialProgress> {
+  const result = record(
+    unwrap(
+      await api.get<ApiEnvelope<unknown>>(
+        `/api/invoice-applications/${encodeURIComponent(id)}/financial-progress`,
+      ),
+    ),
+  );
+  return {
+    id: text(result.id),
+    contractId: text(result.contractId ?? result.contract_id),
+    status: text(result.status) as InvoiceApplicationStatus,
+    applicationAmount: Number(
+      result.applicationAmount ?? result.application_amount ?? 0,
+    ),
+    allocatedInvoiceAmount: Number(
+      result.allocatedInvoiceAmount ?? result.allocated_invoice_amount ?? 0,
+    ),
+    invoiceCompleted: Boolean(
+      result.invoiceCompleted ?? result.invoice_completed,
+    ),
+    requiresReceiptUpload: Boolean(
+      result.requiresReceiptUpload ?? result.requires_receipt_upload,
+    ),
+    pendingReceiptAmount: Number(
+      result.pendingReceiptAmount ?? result.pending_receipt_amount ?? 0,
+    ),
+    registrationId: nullableText(
+      result.registrationId ?? result.registration_id,
+    ),
+  };
+}
+
 export interface InvoiceApplicationPendingCounts {
   employeeActionPending: number;
   managerPending: number;
@@ -315,6 +486,7 @@ export interface InvoiceApplicationPendingCounts {
   pendingIssue: number;
   pendingFinanceRegistration: number;
   pendingInvoice: number;
+  pendingReceipt: number;
   adminPending: number;
   total: number;
 }
@@ -343,8 +515,13 @@ export async function getInvoiceApplicationPendingCounts(): Promise<InvoiceAppli
   const pendingInvoice = Number(
     result.pendingInvoice ?? result.pending_invoice ?? 0,
   );
+  const pendingReceipt = Number(
+    result.pendingReceipt ?? result.pending_receipt ?? 0,
+  );
   const adminPending = Number(
-    result.adminPending ?? result.admin_pending ?? pendingSeal + pendingInvoice,
+    result.adminPending ??
+      result.admin_pending ??
+      pendingSeal + pendingInvoice + pendingReceipt,
   );
   return {
     employeeActionPending,
@@ -353,10 +530,15 @@ export async function getInvoiceApplicationPendingCounts(): Promise<InvoiceAppli
     pendingIssue,
     pendingFinanceRegistration,
     pendingInvoice,
+    pendingReceipt,
     adminPending,
     total: Number(
       result.total ??
-        employeeActionPending + managerPending + pendingSeal + pendingInvoice,
+        employeeActionPending +
+          managerPending +
+          pendingSeal +
+          pendingInvoice +
+          pendingReceipt,
     ),
   };
 }
@@ -364,12 +546,14 @@ export async function getInvoiceApplicationPendingCounts(): Promise<InvoiceAppli
 export async function getInvoiceApplicationAdminPendingCounts(): Promise<{
   pendingSeal: number;
   pendingInvoice: number;
+  pendingReceipt: number;
   adminPending: number;
 }> {
   const counts = await getInvoiceApplicationPendingCounts();
   return {
     pendingSeal: counts.pendingSeal,
     pendingInvoice: counts.pendingInvoice,
+    pendingReceipt: counts.pendingReceipt,
     adminPending: counts.adminPending,
   };
 }

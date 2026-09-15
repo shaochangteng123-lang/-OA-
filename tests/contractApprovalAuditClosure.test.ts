@@ -337,7 +337,13 @@ describe("合同审批流程与内部安全留痕", () => {
     expect(approvalSource).toContain("处理后状态");
     expect(listSource).not.toContain("canApproveItem");
     expect(listSource).not.toContain("openPendingApproval");
-    expect(listSource).toContain("router.push('/contract-approvals')");
+    expect(listSource).not.toContain("router.push('/contract-approvals')");
+    expect(listSource).toContain(
+      "@activate=\"toggleStatusMetric('approving')\"",
+    );
+    expect(listSource).toContain(
+      "@activate=\"toggleStatusMetric('pending_seal')\"",
+    );
     expect(detailSource).not.toContain('name="audit"');
     expect(detailSource).not.toContain("getContractAuditLogs");
     expect(detailSource).not.toContain("操作审计");

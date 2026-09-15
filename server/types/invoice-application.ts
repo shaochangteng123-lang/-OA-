@@ -51,6 +51,7 @@ export interface InvoiceApplicationEligibility {
     contractNo: string;
     category: "main_business" | "non_main" | "asset" | null;
     area: string;
+    requiresTriplicate?: boolean;
     partyA: string;
     status: string;
   } | null;
@@ -99,6 +100,7 @@ export interface InvoiceApplicationView {
   category: "main_business" | "non_main";
   area: string;
   partyA: string;
+  requiresTriplicate?: boolean;
   contractAmount: number;
   amount: number;
   triplicateProjectName: string;
@@ -126,6 +128,23 @@ export interface InvoiceApplicationView {
   issuedAt: string | null;
   invoiceNote: string;
   completedAt: string | null;
+  deliveryHandler: {
+    id: string;
+    name: string;
+    processedAt: string;
+    note: string;
+  } | null;
+  invoiceHandler: {
+    id: string;
+    name: string;
+    processedAt: string;
+    note: string;
+  } | null;
+  adminProcessing: {
+    delivered: boolean;
+    issued: boolean;
+    processedAt: string;
+  } | null;
   applicantSignedFileId: string | null;
   approvedFileId: string | null;
   applicationFileName: string | null;
@@ -153,7 +172,8 @@ export type InvoiceApplicationListScope =
   | "mine"
   | "approval"
   | "approval_history"
-  | "admin";
+  | "admin"
+  | "admin_history";
 
 export type InvoiceApplicationEmployeeListView = "current" | "history";
 

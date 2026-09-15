@@ -11,8 +11,12 @@ import { api } from "@/utils/api";
 import {
   deleteInvoiceApplicationDraft,
   getInvoiceApplicationEligibility,
+  getInvoiceApplication,
+  getInvoiceApplicationFinancialProgress,
   getInvoiceApplicationMaterialPrintUrl,
   getInvoiceApplicationPendingCounts,
+  getInvoiceReceiptTask,
+  getInvoiceReceiptTasks,
   getInvoiceApplicationPreviewUrl,
   getInvoiceApplications,
   inspectMainTriplicate,
@@ -69,6 +73,23 @@ const application = {
     remainingAmount: 70000,
   },
   allocatedInvoiceAmount: 0,
+  deliveryHandler: {
+    id: "admin-a",
+    name: "管理员甲",
+    processedAt: "2026-08-20T09:00:00.000Z",
+    note: "已交付",
+  },
+  invoiceHandler: {
+    id: "admin-b",
+    name: "管理员乙",
+    processedAt: "2026-08-21T09:00:00.000Z",
+    note: "已开具",
+  },
+  adminProcessing: {
+    delivered: true,
+    issued: false,
+    processedAt: "2026-08-20T09:00:00.000Z",
+  },
   materials: [
     {
       id: "material-1",
@@ -88,6 +109,32 @@ const application = {
 
 describe("开票申请前端 API 适配", () => {
   beforeEach(() => jest.clearAllMocks());
+
+  it.each([true, false])(
+    "保留服务端三联单要求，不按主营分类重新推断：%s",
+    async (requiresTriplicate) => {
+      (api.get as jest.Mock).mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            eligible: true,
+            contract: {
+              id: "contract-1",
+              category: "main_business",
+              requiresTriplicate,
+            },
+          },
+        },
+      });
+      const eligibility = await getInvoiceApplicationEligibility("contract-1");
+      expect(eligibility.contract?.requiresTriplicate).toBe(requiresTriplicate);
+      (api.get as jest.Mock).mockResolvedValueOnce({
+        data: { success: true, data: { ...application, requiresTriplicate } },
+      });
+      const detail = await getInvoiceApplication(application.id);
+      expect(detail.requiresTriplicate).toBe(requiresTriplicate);
+    },
+  );
 
   it("显式归一化合同资格及历史开票信息", async () => {
     (api.get as jest.Mock).mockResolvedValueOnce({
@@ -153,6 +200,13 @@ describe("开票申请前端 API 适配", () => {
       applicantSignedAt: "2026-08-19T10:00:00.000Z",
       applicant: { department: "项目部", position: "报批报建专员" },
       allocatedInvoiceAmount: 0,
+      deliveryHandler: { id: "admin-a", name: "管理员甲" },
+      invoiceHandler: { id: "admin-b", name: "管理员乙" },
+      adminProcessing: {
+        delivered: true,
+        issued: false,
+        processedAt: "2026-08-20T09:00:00.000Z",
+      },
       materials: [{ id: "material-1", requiresSeal: true }],
       submittedAmounts: { remainingAmount: 70000 },
     });
@@ -218,6 +272,31 @@ describe("开票申请前端 API 适配", () => {
     });
   });
 
+  it.each(["admin_pending", "admin_processed"] as const)(
+    "管理员列表查询传递独立范围和服务端搜索词：%s",
+    async (scope) => {
+      (api.get as jest.Mock).mockResolvedValueOnce({
+        data: { success: true, data: { items: [], total: 0 } },
+      });
+
+      await getInvoiceApplications({
+        scope,
+        keyword: "客户公司",
+        page: 2,
+        pageSize: 10,
+      });
+
+      expect(api.get).toHaveBeenCalledWith("/api/invoice-applications", {
+        params: {
+          scope,
+          keyword: "客户公司",
+          page: 2,
+          pageSize: 10,
+        },
+      });
+    },
+  );
+
   it("统一归一化各角色合同开票待办数量", async () => {
     (api.get as jest.Mock).mockResolvedValueOnce({
       data: {
@@ -229,8 +308,9 @@ describe("开票申请前端 API 适配", () => {
           pending_issue: 4,
           pending_finance_registration: 5,
           pending_invoice: 9,
-          admin_pending: 12,
-          total: 12,
+          pending_receipt: 2,
+          admin_pending: 14,
+          total: 15,
         },
       },
     });
@@ -242,12 +322,125 @@ describe("开票申请前端 API 适配", () => {
       pendingIssue: 4,
       pendingFinanceRegistration: 5,
       pendingInvoice: 9,
-      adminPending: 12,
-      total: 12,
+      pendingReceipt: 2,
+      adminPending: 14,
+      total: 15,
     });
     expect(api.get).toHaveBeenCalledWith(
       "/api/invoice-applications/pending-counts",
     );
+  });
+
+  it("归一化待上传回单列表和开票财务进度", async () => {
+    (api.get as jest.Mock)
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            registrationId: "registration-1",
+            contractId: "contract-1",
+            pendingReceiptAmount: 70,
+            receiptStatus: "partial",
+            invoices: [],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            items: [
+              {
+                registration_id: "registration-1",
+                contract_id: "contract-1",
+                contract_no: "HT-001",
+                business_contract_no: "YW-001",
+                contract_title: "测试合同",
+                project_name: "测试项目",
+                party_a: "甲方公司",
+                area: "海淀区",
+                application_count: 1,
+                application_numbers: ["KP-001"],
+                invoice_count: 1,
+                invoice_amount: "100",
+                matched_receipt_amount: "30",
+                pending_receipt_amount: "70",
+                earliest_invoice_date: "2026-09-01",
+                waiting_days: 14,
+                receipt_status: "partial",
+                invoices: [
+                  {
+                    id: "invoice-1",
+                    invoice_no: "FP-001",
+                    invoice_date: "2026-09-01",
+                    amount: "100",
+                    application_amount: "100",
+                    matched_receipt_amount: "30",
+                    pending_receipt_amount: "70",
+                    item_name: "咨询服务",
+                  },
+                ],
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 10,
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          success: true,
+          data: {
+            id: "application-1",
+            contract_id: "contract-1",
+            status: "completed",
+            application_amount: "100",
+            allocated_invoice_amount: "100",
+            invoice_completed: true,
+            requires_receipt_upload: true,
+            pending_receipt_amount: "70",
+            registration_id: "registration-1",
+          },
+        },
+      });
+
+    await expect(
+      getInvoiceReceiptTask("registration-1"),
+    ).resolves.toMatchObject({
+      registrationId: "registration-1",
+      pendingReceiptAmount: 70,
+      receiptStatus: "partial",
+    });
+    await expect(
+      getInvoiceReceiptTasks({ page: 1, pageSize: 10, keyword: "FP-001" }),
+    ).resolves.toMatchObject({
+      total: 1,
+      items: [
+        {
+          registrationId: "registration-1",
+          pendingReceiptAmount: 70,
+          receiptStatus: "partial",
+          invoices: [
+            {
+              invoiceNo: "FP-001",
+              applicationAmount: 100,
+              matchedReceiptAmount: 30,
+              pendingReceiptAmount: 70,
+            },
+          ],
+        },
+      ],
+    });
+    await expect(
+      getInvoiceApplicationFinancialProgress("application-1"),
+    ).resolves.toMatchObject({
+      contractId: "contract-1",
+      invoiceCompleted: true,
+      requiresReceiptUpload: true,
+      pendingReceiptAmount: 70,
+      registrationId: "registration-1",
+    });
   });
 
   it("材料上传传递逐文件盖章分组且管理员使用专用打印地址", async () => {

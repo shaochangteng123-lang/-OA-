@@ -5338,6 +5338,12 @@ async function initContractDomainSchema(): Promise<void> {
       ON invoice_applications(target_approver_id, status, submitted_at);
     CREATE INDEX IF NOT EXISTS idx_invoice_applications_admin
       ON invoice_applications(status, decided_at);
+    CREATE INDEX IF NOT EXISTS idx_invoice_applications_delivery_handler
+      ON invoice_applications(delivered_by, delivered_at DESC, id DESC)
+      WHERE delivered_by IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_invoice_applications_issue_handler
+      ON invoice_applications(issued_by, issued_at DESC, id DESC)
+      WHERE issued_by IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_invoice_application_materials_application
       ON invoice_application_materials(application_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_invoice_application_generated_application
@@ -6288,6 +6294,10 @@ async function initContractDomainSchema(): Promise<void> {
       WHERE external_payment_record_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_contract_financial_registrations_contract
       ON contract_financial_registrations(contract_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_contract_financial_pending_income_receipt
+      ON contract_financial_registrations(contract_id, created_at, id)
+      WHERE status = 'draft' AND financial_direction = 'income'
+        AND settlement_kind = 'receipt';
     CREATE INDEX IF NOT EXISTS idx_contract_financial_registration_items_registration
       ON contract_financial_registration_items(registration_id, item_kind, created_at);
     DO $$

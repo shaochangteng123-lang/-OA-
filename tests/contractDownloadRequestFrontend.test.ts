@@ -40,7 +40,7 @@ describe("合同下载申请前端权限与流程", () => {
     expect(contractListRoute).toContain('"user"');
     expect(approvalRoute).toContain('requiresRole: ["general_manager"]');
     expect(approvalRoute).not.toContain('"user"');
-    expect(layoutSource).toContain('v-if="isProjectUser"');
+    expect(layoutSource).toContain('v-if="isProjectUser || isAdmin"');
     expect(layoutSource).toContain('label="我的申请"');
     expect(layoutSource).not.toContain('label="我的下载申请"');
     expect(layoutSource).toContain('label="下载申请审批"');

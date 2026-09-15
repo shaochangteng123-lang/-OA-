@@ -366,7 +366,7 @@
               badge-type="danger"
             />
             <SidebarMenuItem
-              v-if="isProjectUser"
+              v-if="isProjectUser || isAdmin"
               path="/contract-applications/mine"
               label="我的申请"
               :icon="Tickets"
@@ -842,12 +842,15 @@ const contractGroupBadge = computed(() => {
     return (
       contractPendingSealCount.value +
       contractDownloadExecutorPendingCount.value +
-      invoiceApplicationAdminPendingCount.value
+      invoiceApplicationAdminPendingCount.value +
+      invoiceApplicationEmployeeActionPendingCount.value
     );
   }
   if (isAdmin.value)
     return (
-      contractPendingSealCount.value + invoiceApplicationAdminPendingCount.value
+      contractPendingSealCount.value +
+      invoiceApplicationAdminPendingCount.value +
+      invoiceApplicationEmployeeActionPendingCount.value
     );
   if (isProjectUser.value) return myContractApplicationPendingCount.value;
   return 0;

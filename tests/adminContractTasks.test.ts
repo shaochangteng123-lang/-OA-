@@ -14,6 +14,12 @@ jest.mock("@/views/InvoiceApplicationCenter.vue", () => ({
       '<div class="invoice-task-center">开票待办-{{ centerMode }}</div>',
   },
 }));
+jest.mock("@/views/InvoiceReceiptTaskCenter.vue", () => ({
+  __esModule: true,
+  default: {
+    template: '<div class="receipt-task-center">回单待办</div>',
+  },
+}));
 jest.mock("@/utils/api", () => ({
   api: { get: jest.fn(), post: jest.fn() },
 }));
@@ -75,7 +81,12 @@ describe("管理员合同待办聚合页", () => {
           success: true,
           data: url.includes("contract-download-requests")
             ? { executorPending: 2 }
-            : { adminPending: 4 },
+            : {
+                pendingSeal: 1,
+                pendingInvoice: 3,
+                pendingReceipt: 2,
+                adminPending: 6,
+              },
         },
       }),
     );
@@ -97,7 +108,7 @@ describe("管理员合同待办聚合页", () => {
     expect(source).not.toContain("button.active::after");
   });
 
-  it("普通管理员按需切换合同下载与开票用印待办并强制管理员模式", async () => {
+  it("普通管理员按需切换下载、开票用印和回单待办", async () => {
     const { wrapper, router } = await setup("admin");
     await flushPromises();
     expect(wrapper.findAll(".task-tab-label")[0].text()).toContain(
@@ -105,6 +116,9 @@ describe("管理员合同待办聚合页", () => {
     );
     expect(wrapper.findAll(".task-tab-label")[1].text()).toContain(
       "开票与用印待办 4",
+    );
+    expect(wrapper.findAll(".task-tab-label")[2].text()).toContain(
+      "待上传回单 2",
     );
     expect(wrapper.find(".download-task-center").text()).toContain("admin");
     expect(wrapper.find(".invoice-task-center").exists()).toBe(false);
@@ -115,19 +129,28 @@ describe("管理员合同待办聚合页", () => {
     expect(router.currentRoute.value.query.tab).toBe("invoice");
     expect(wrapper.find(".download-task-center").exists()).toBe(false);
     expect(wrapper.find(".invoice-task-center").text()).toContain("admin");
+
+    await wrapper.findAll(".el-tabs__item")[2].trigger("click");
+    await flushPromises();
+    await nextTick();
+    expect(router.currentRoute.value.query.tab).toBe("receipt");
+    expect(wrapper.find(".receipt-task-center").exists()).toBe(true);
     wrapper.unmount();
   });
 
-  it("超级管理员与普通管理员同享合同下载和开票用印待办", async () => {
+  it("超级管理员与普通管理员同享三类合同待办", async () => {
     const { wrapper } = await setup("super_admin");
     await flushPromises();
 
-    expect(wrapper.findAll(".el-tabs__item")).toHaveLength(2);
+    expect(wrapper.findAll(".el-tabs__item")).toHaveLength(3);
     expect(wrapper.findAll(".task-tab-label")[0].text()).toContain(
       "合同下载待办 2",
     );
     expect(wrapper.findAll(".task-tab-label")[1].text()).toContain(
       "开票与用印待办 4",
+    );
+    expect(wrapper.findAll(".task-tab-label")[2].text()).toContain(
+      "待上传回单 2",
     );
     expect(wrapper.find(".download-task-center").text()).toContain("admin");
     expect(wrapper.find(".invoice-task-center").exists()).toBe(false);
@@ -137,12 +160,17 @@ describe("管理员合同待办聚合页", () => {
     wrapper.unmount();
   });
 
-  it("董事长沿用原权限只显示开票与用印待办", async () => {
+  it("董事长显示开票用印与待上传回单，不显示合同下载待办", async () => {
     const { wrapper } = await setup("chairman");
     expect(wrapper.find(".task-tabs").exists()).toBe(true);
-    expect(wrapper.findAll(".el-tabs__item")).toHaveLength(1);
+    expect(wrapper.findAll(".el-tabs__item")).toHaveLength(2);
     await flushPromises();
-    expect(wrapper.find(".el-tabs__item").text()).toContain("开票与用印待办 4");
+    expect(wrapper.findAll(".el-tabs__item")[0].text()).toContain(
+      "开票与用印待办 4",
+    );
+    expect(wrapper.findAll(".el-tabs__item")[1].text()).toContain(
+      "待上传回单 2",
+    );
     expect(wrapper.find(".download-task-center").exists()).toBe(false);
     expect(wrapper.find(".invoice-task-center").text()).toContain("admin");
     wrapper.unmount();
