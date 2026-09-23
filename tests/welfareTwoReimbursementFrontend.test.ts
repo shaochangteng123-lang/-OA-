@@ -53,7 +53,7 @@ describe("福利2报销前端接入", () => {
     expect(createSource).toContain("['welfare_one', 'welfare_two']");
     expect(createSource).toContain("welfareCategoryId: selectedScope");
     expect(detailSource).toContain("welfareCategoryName");
-    expect(detailSource).toContain("!isWelfareReimbursement");
+    expect(detailSource).not.toContain("show-threshold-warning");
   });
 
   it("审批中心、统计、范围筛选与紫色之外的标签色支持福利2", () => {

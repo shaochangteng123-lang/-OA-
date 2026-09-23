@@ -74,21 +74,27 @@
           :show-file-list="false"
           :limit="5"
           multiple
-          :accept="'.jpg,.jpeg,.png,.pdf'"
+          :accept="'.jpg,.jpeg,.png,.webp,.pdf'"
+          :on-change="handleAttachmentFileChange"
           :on-exceed="handleExceed"
         >
           <el-button type="primary" plain size="small">选择文件</el-button>
         </el-upload>
         <span class="attachment-hint">
-          {{ originalRequest.leave_type_code === 'sick' ? '病假需上传证明文件（必须）' : '可选上传证明材料' }}
+          {{ attachmentHint }}
         </span>
       </div>
       <LeaveFileCards :items="selectedFileCards" @remove="removeSelectedFile" />
+      <div class="attachment-format-tip">支持 JPG / PNG / WEBP / PDF，每个不超过 5MB</div>
 
       <div v-if="existingAttachmentsLoading" class="attachment-loading">正在读取已上传附件...</div>
-      <div v-else-if="existingAttachmentCards.length > 0" class="existing-attachments">
+      <div v-else-if="existingAttachments.length > 0" class="existing-attachments">
         <div class="attachment-subtitle">已上传附件</div>
-        <LeaveFileCards :items="existingAttachmentCards" />
+        <LeaveFileCards :items="existingAttachmentCards" @remove="removeExistingAttachment" />
+        <div v-if="removedAttachmentIds.length > 0" class="attachment-removal-tip">
+          已标记移除 {{ removedAttachmentIds.length }} 个当前草稿附件，提交成功后生效；取消编辑不会删除。
+          <el-button link type="primary" @click="undoExistingAttachmentRemoval">撤销移除</el-button>
+        </div>
       </div>
     </el-form-item>
 
@@ -106,15 +112,23 @@ import { Loading } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules, UploadUserFile } from 'element-plus'
 import LeaveDatePicker from './LeaveDatePicker.vue'
 import LeaveFileCards from './LeaveFileCards.vue'
+import { getLeaveAttachmentSizeError } from '@/utils/leaveAttachment'
 import {
   calculateDays,
   getAttachmentUrl,
+  getLeaveTypes,
   getRequestDetail,
   resubmitRequest as apiResubmit,
   type LeaveAttachment,
   type LeaveRequest,
 } from '@/utils/leaveApi'
-import { formatLocalDateValue, isLeaveEndDateDisabled, isPastLeaveDateDisabled } from '@/utils/leaveDate'
+import {
+  formatLocalDateValue,
+  isFutureLeaveDateDisabled,
+  isLeaveEndDateDisabled,
+  isPastLeaveDateDisabled,
+  isReturnSupplementEndDateDisabled,
+} from '@/utils/leaveDate'
 
 const props = defineProps<{
   originalRequest: LeaveRequest
@@ -132,19 +146,33 @@ const calculating = ref(false)
 const fileList = ref<UploadUserFile[]>([])
 const existingAttachments = ref<LeaveAttachment[]>([])
 const existingAttachmentsLoading = ref(false)
+const removedAttachmentIds = ref<string[]>([])
+const requiresAttachment = ref(props.originalRequest.leave_type_code === 'sick')
 let calcTimer: ReturnType<typeof setTimeout> | null = null
 
 const isDraft = computed(() => props.originalRequest.status === 'draft')
 const isSupplement = computed(() => props.originalRequest.application_kind === 'supplement')
+const isStandaloneReturnSupplement = computed(() => (
+  isSupplement.value && props.originalRequest.parent_request_id === null
+))
 const isCombinedExtension = computed(() => (
   props.originalRequest.application_kind === 'extension' &&
   Boolean(props.originalRequest.combination_group_id)
 ))
-const formNotice = computed(() => isDraft.value
-  ? `该申请已撤回并保存为草稿，重新提交后将进入审批。申请编号：${props.originalRequest.request_no}`
-  : `原申请已被驳回，请修改后重新提交。原申请编号：${props.originalRequest.request_no}`
-)
-const submitButtonText = computed(() => isDraft.value ? '提交草稿' : '重新提交')
+const formNotice = computed(() => {
+  if (isStandaloneReturnSupplement.value) {
+    return `这是返岗补假申请，只能补录今天或过去的日期。申请编号：${props.originalRequest.request_no}`
+  }
+  return isDraft.value
+    ? `该申请已撤回并保存为草稿，提交后将进入审批。申请编号：${props.originalRequest.request_no}`
+    : `原申请已被驳回，请修改后重新提交。原申请编号：${props.originalRequest.request_no}`
+})
+const submitButtonText = computed(() => {
+  if (isStandaloneReturnSupplement.value) {
+    return isDraft.value ? '提交返岗补假申请' : '重新提交返岗补假'
+  }
+  return isDraft.value ? '提交申请' : '重新提交'
+})
 const selectedFileCards = computed(() => fileList.value.map((file, index) => ({
   key: getUploadFileKey(file, index),
   name: file.name,
@@ -153,13 +181,20 @@ const selectedFileCards = computed(() => fileList.value.map((file, index) => ({
   previewUrl: file.raw ? undefined : file.url,
   removable: true,
 })))
-const existingAttachmentCards = computed(() => existingAttachments.value.map(attachment => ({
-  key: attachment.id,
-  name: attachment.file_name,
-  size: attachment.file_size,
-  previewUrl: getAttachmentUrl(attachment.id),
-  downloadUrl: getAttachmentUrl(attachment.id),
-})))
+const existingAttachmentCards = computed(() => existingAttachments.value
+  .filter(attachment => !removedAttachmentIds.value.includes(attachment.id))
+  .map(attachment => ({
+    key: attachment.id,
+    name: attachment.file_name,
+    size: attachment.file_size,
+    previewUrl: getAttachmentUrl(attachment.id),
+    downloadUrl: getAttachmentUrl(attachment.id),
+    removable: isDraft.value && attachment.leave_request_id === props.originalRequest.id,
+  })))
+const attachmentHint = computed(() => requiresAttachment.value
+  ? '该假期类型需上传证明文件（必须）'
+  : '可选上传证明材料'
+)
 
 const today = formatLocalDateValue()
 const initialStartDate = isSupplement.value ||
@@ -198,10 +233,14 @@ const rules: FormRules = {
 }
 
 function disableStartDate(time: Date): boolean {
+  if (isStandaloneReturnSupplement.value) return isFutureLeaveDateDisabled(time)
   return isSupplement.value ? false : isPastLeaveDateDisabled(time)
 }
 
 function disableEndDate(time: Date): boolean {
+  if (isStandaloneReturnSupplement.value) {
+    return isReturnSupplementEndDateDisabled(time, form.value.startDate)
+  }
   if (isSupplement.value) {
     const date = formatLocalDateValue(time)
     return Boolean(form.value.startDate && date < form.value.startDate)
@@ -217,8 +256,32 @@ function removeSelectedFile(key: string | number) {
   fileList.value = fileList.value.filter((file, index) => getUploadFileKey(file, index) !== String(key))
 }
 
+function removeExistingAttachment(key: string | number) {
+  const attachmentId = String(key)
+  const attachment = existingAttachments.value.find(item => item.id === attachmentId)
+  if (
+    !isDraft.value ||
+    !attachment ||
+    attachment.leave_request_id !== props.originalRequest.id
+  ) return
+  if (!removedAttachmentIds.value.includes(attachmentId)) {
+    removedAttachmentIds.value = [...removedAttachmentIds.value, attachmentId]
+  }
+}
+
+function undoExistingAttachmentRemoval() {
+  removedAttachmentIds.value = []
+}
+
 function handleExceed() {
   ElMessage.warning('最多上传5个文件')
+}
+
+function handleAttachmentFileChange(file: UploadUserFile) {
+  const error = getLeaveAttachmentSizeError(file.name, file.size ?? file.raw?.size)
+  if (!error) return
+  fileList.value = fileList.value.filter(item => item.uid !== file.uid)
+  ElMessage.error(error)
 }
 
 async function loadExistingAttachments() {
@@ -226,10 +289,21 @@ async function loadExistingAttachments() {
   try {
     const detail = await getRequestDetail(props.originalRequest.id)
     existingAttachments.value = detail.attachments || []
+    removedAttachmentIds.value = []
   } catch {
     existingAttachments.value = []
   } finally {
     existingAttachmentsLoading.value = false
+  }
+}
+
+async function loadAttachmentRequirement() {
+  try {
+    const types = await getLeaveTypes()
+    const type = types.find(item => item.code === props.originalRequest.leave_type_code)
+    if (type) requiresAttachment.value = type.requires_attachment
+  } catch {
+    // 类型配置读取失败时保留病假的兼容必传规则。
   }
 }
 
@@ -257,11 +331,22 @@ function onDateChange() {
 
 // 初始计算
 onDateChange()
-onMounted(loadExistingAttachments)
+onMounted(() => {
+  void loadExistingAttachments()
+  void loadAttachmentRequirement()
+})
 
 async function handleSubmit() {
   await formRef.value?.validate(async (valid) => {
     if (!valid) return
+    if (
+      requiresAttachment.value &&
+      fileList.value.length === 0 &&
+      existingAttachmentCards.value.length === 0
+    ) {
+      ElMessage.warning('该假期类型需要至少保留或重新上传一个证明文件')
+      return
+    }
     submitting.value = true
     try {
       const formData = new FormData()
@@ -270,11 +355,14 @@ async function handleSubmit() {
       formData.append('endDate', form.value.endDate)
       formData.append('endHalf', form.value.endHalf)
       formData.append('reason', form.value.reason)
+      if (removedAttachmentIds.value.length > 0) {
+        formData.append('removedAttachmentIds', JSON.stringify(removedAttachmentIds.value))
+      }
       for (const file of fileList.value) {
         if (file.raw) formData.append('attachments', file.raw)
       }
       await apiResubmit(props.originalRequest.id, formData)
-      ElMessage.success('已重新提交，等待审批')
+      ElMessage.success(isDraft.value ? '请假申请已提交，等待审批' : '已重新提交，等待审批')
       emit('submitted')
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.message || '提交失败')
@@ -309,6 +397,11 @@ async function handleSubmit() {
   font-size: 12px;
   line-height: 18px;
 }
+.attachment-format-tip {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+}
 .attachment-loading {
   margin-top: 10px;
   color: #909399;
@@ -322,5 +415,11 @@ async function handleSubmit() {
   color: #606266;
   font-size: 12px;
   line-height: 18px;
+}
+.attachment-removal-tip {
+  margin-top: 8px;
+  color: #e6a23c;
+  font-size: 12px;
+  line-height: 24px;
 }
 </style>

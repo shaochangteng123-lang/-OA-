@@ -32,7 +32,8 @@ docker compose down
 
 ## 镜像信息
 
-- 开发镜像：yulilog-worklog-yulilog-dev:latest (2.35GB)
-- 生产镜像：yulilog-worklog-yulilog:latest (1.28GB)
+- 开发镜像：`yulilog-dev-yulilog-dev:latest`
+- 当前固定生产镜像：`yulilog-prod-yulilog:large-reimbursement-no-limit-20260922-v1`
+- 生产候选镜像必须使用唯一标签构建，生产运行不依赖 `latest（最新）`标签
 
 详细文档请查看 [DOCKER.md](DOCKER.md)

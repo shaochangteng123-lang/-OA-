@@ -187,6 +187,72 @@ export const FIXED_WELFARE_TWO_EXPENSE_CATEGORIES = [
   },
 ] as const;
 
+export interface MonthlyFinancialWelfareCategoryCatalogRow {
+  id: string;
+  code: string;
+  name: string;
+  sort_order: number;
+  is_active: boolean;
+}
+
+/**
+ * 开放月报只实时合并分类主数据；已保存自动金额仍取原快照，避免一次普通读取重算业务金额。
+ * 已从主数据删除但快照仍有非零金额的分类继续以停用项保留，防止历史金额消失。
+ */
+export function mergeMonthlyFinancialAutomaticWelfareCatalog(
+  stored:
+    | MonthlyFinancialAutomaticSnapshot["welfareOneExpenseCategories"]
+    | undefined,
+  catalog: readonly MonthlyFinancialWelfareCategoryCatalogRow[],
+): NonNullable<
+  MonthlyFinancialAutomaticSnapshot["welfareOneExpenseCategories"]
+> {
+  const storedById = new Map((stored || []).map((row) => [row.id, row]));
+  const currentIds = new Set(catalog.map((row) => row.id));
+  return [
+    ...catalog.map((row) => ({
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      sortOrder: row.sort_order,
+      isActive: row.is_active,
+      amount: storedById.get(row.id)?.amount || "0",
+    })),
+    ...(stored || [])
+      .filter(
+        (row) =>
+          !currentIds.has(row.id) && addFinancialAmounts(row.amount) !== "0",
+      )
+      .map((row) => ({ ...row, isActive: false })),
+  ].sort(
+    (left, right) =>
+      left.sortOrder - right.sortOrder ||
+      left.name.localeCompare(right.name, "zh-CN") ||
+      left.id.localeCompare(right.id),
+  );
+}
+
+/** 已月结快照必须原样返回；仅开放状态允许叠加实时分类主数据。 */
+export function mergeOpenMonthlyFinancialWelfareCatalogs(
+  status: MonthlyFinancialReportStatus,
+  stored: MonthlyFinancialAutomaticSnapshot,
+  welfareOneCatalog: readonly MonthlyFinancialWelfareCategoryCatalogRow[],
+  welfareTwoCatalog: readonly MonthlyFinancialWelfareCategoryCatalogRow[],
+): MonthlyFinancialAutomaticSnapshot {
+  if (status === "closed") return stored;
+  return {
+    ...stored,
+    welfareOneExpenseCategories: mergeMonthlyFinancialAutomaticWelfareCatalog(
+      stored.welfareOneExpenseCategories,
+      welfareOneCatalog,
+    ),
+    welfareTwoExpenseCategories: mergeMonthlyFinancialAutomaticWelfareCatalog(
+      stored.welfareTwoExpenseCategories,
+      welfareTwoCatalog,
+    ),
+  };
+}
+
 const LEGACY_WELFARE_ONE_MANUAL_CATEGORY_CODES: Partial<
   Record<MonthlyFinancialManualCategory, string>
 > = {

@@ -1,5 +1,13 @@
 <template>
   <div class="leave-admin-panel">
+    <el-alert
+      v-if="ccUnreadCount > 0"
+      class="cc-notice-alert"
+      type="info"
+      show-icon
+      :closable="false"
+      :title="`您有 ${ccUnreadCount} 条未读请假抄送，点击“查看”了解详情后将自动标记为已读`"
+    />
     <!-- 抄送记录工具栏 -->
     <div v-if="activeSubTab === 'requests'" class="toolbar">
       <el-input
@@ -31,6 +39,7 @@
         @change="fetchRequests(1)"
       />
       <el-button type="primary" plain @click="fetchRequests(1)">查询</el-button>
+      <el-checkbox v-if="!isChairman" v-model="onlyUnread" @change="fetchRequests(1)">只看未读</el-checkbox>
       <el-button @click="handleExport">
         <el-icon><Download /></el-icon>
         导出CSV
@@ -46,6 +55,12 @@
 
       <!-- 管理员抄送记录 -->
       <el-tab-pane v-if="!isChairman" label="抄送记录" name="requests">
+        <template #label>
+          <span class="cc-tab-label">
+            抄送记录
+            <el-badge v-if="ccUnreadCount > 0" :value="ccUnreadCount" :max="99" />
+          </span>
+        </template>
         <el-table
           v-loading="requestsLoading"
           :data="requestList"
@@ -53,13 +68,18 @@
           size="small"
           empty-text="暂无记录"
         >
-          <el-table-column label="序号" type="index" width="60" align="center" :index="(i) => (requestPage - 1) * requestPageSize + i + 1" />
-          <el-table-column label="申请编号" prop="request_no" width="160" align="center" />
+          <el-table-column label="序号" type="index" width="60" align="center" :index="requestRowIndex" />
+          <el-table-column label="申请编号" prop="request_no" width="185" align="center">
+            <template #default="{ row }">
+              <span>{{ row.request_no }}</span>
+              <el-tag v-if="row.cc_notice_unread" class="cc-unread-tag" size="small" type="danger" effect="plain">未读</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="员工" width="90" align="center">
             <template #default="{ row }">{{ row.applicant_name || row.user_name }}</template>
           </el-table-column>
           <el-table-column label="部门" prop="applicant_department" width="90" align="center" />
-          <el-table-column label="假期类型" width="100" align="center">
+          <el-table-column label="假期类型" width="130" align="center">
             <template #default="{ row }">
               <div>{{ row.leave_type_name }}</div>
               <el-tag
@@ -143,9 +163,13 @@
           </el-button>
         </div>
         <el-table v-loading="typesLoading" :data="allLeaveTypes" border size="small" style="margin-top:10px">
-          <el-table-column label="序号" type="index" width="60" align="center" :index="(i) => i + 1" />
+          <el-table-column label="序号" type="index" width="60" align="center" :index="oneBasedRowIndex" />
           <el-table-column label="假期名称" prop="name" width="110" align="center" />
-          <el-table-column label="默认天数" prop="default_days" width="90" align="center" />
+          <el-table-column label="默认天数" width="90" align="center">
+            <template #default="{ row }">
+              {{ row.requires_balance_check ? row.default_days : '不限额度' }}
+            </template>
+          </el-table-column>
           <el-table-column label="需要余额" width="90" align="center">
             <template #default="{ row }">
               <el-tag :type="row.requires_balance_check ? 'success' : 'info'" size="small">
@@ -195,7 +219,7 @@
         </div>
 
         <el-table v-loading="balancesLoading" :data="balanceUsers" border size="small" style="margin-top:8px">
-          <el-table-column label="序号" type="index" width="60" align="center" :index="(i) => i + 1" fixed />
+          <el-table-column label="序号" type="index" width="60" align="center" :index="oneBasedRowIndex" fixed />
           <el-table-column label="员工编号" prop="employeeNo" width="120" fixed align="center">
             <template #default="{ row }">{{ row.employeeNo || '-' }}</template>
           </el-table-column>
@@ -307,7 +331,13 @@
           <el-input v-model="editTypeForm.name" maxlength="20" />
         </el-form-item>
         <el-form-item label="默认天数" prop="default_days">
-          <el-input-number v-model="editTypeForm.default_days" :min="0" :max="365" :step="0.5" :precision="1" />
+          <el-input-number
+            v-model="editTypeForm.default_days"
+            :min="0"
+            :max="365"
+            :step="0.5"
+            :precision="1"
+          />
           <span style="font-size:12px;color:#909399;margin-left:8px">天</span>
         </el-form-item>
         <el-form-item label="需要余额检查">
@@ -370,7 +400,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft, Download, Edit, Plus } from '@element-plus/icons-vue'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -378,16 +408,28 @@ import LeaveApprovalTimeline from './LeaveApprovalTimeline.vue'
 import LeavePendingList from './LeavePendingList.vue'
 import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
+import { getLeaveApplicationKindLabel as applicationKindLabel } from '@/utils/leaveApplication'
 import {
   getLeaveTypes, adminGetTypes, adminCreateType, adminUpdateType, adminDeleteType,
   adminGetRequests, adminGetBalances, adminAdjustBalance, getRequestDetail, getExportUrl,
+  markLeaveCcNoticeRead,
   type LeaveTypeConfig, type LeaveRequest, type LeaveRequestDetail
 } from '@/utils/leaveApi'
 
 const authStore = useAuthStore()
+const props = withDefaults(defineProps<{ active?: boolean; ccNoticeKey?: string }>(), {
+  active: true,
+  ccNoticeKey: '',
+})
 const pendingStore = usePendingStore()
 const isChairman = computed(() => authStore.user?.role === 'chairman')
+const ccUnreadCount = computed(() =>
+  authStore.user?.role === 'admin' || authStore.user?.role === 'super_admin'
+    ? pendingStore.counts.leaveCcUnread || 0
+    : 0
+)
 const activeSubTab = ref(isChairman.value ? 'approval' : 'requests')
+const onlyUnread = ref(false)
 const leaveTypes = ref<LeaveTypeConfig[]>([])
 
 // ---- 全员请假记录 ----
@@ -396,6 +438,15 @@ const requestsLoading = ref(false)
 const requestTotal = ref(0)
 const requestPage = ref(1)
 const requestPageSize = ref(20)
+let requestFetchSequence = 0
+
+function requestRowIndex(index: number): number {
+  return (requestPage.value - 1) * requestPageSize.value + index + 1
+}
+
+function oneBasedRowIndex(index: number): number {
+  return index + 1
+}
 const filters = ref({ keyword: '', leaveTypeCode: '', status: '', dateRange: null as [string, string] | null })
 const drawerVisible = ref(false)
 const detailRequest = ref<LeaveRequestDetail | null>(null)
@@ -458,7 +509,6 @@ const balanceEditForm = ref({
 const FIXED_BALANCE_TYPE_CODES = new Set([
   'annual',
   'personal',
-  'sick',
   'bereavement',
   'compensatory',
   'marriage',
@@ -478,24 +528,6 @@ function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'dan
     draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return m[status] || undefined
-}
-
-function applicationKindLabel(
-  request: Pick<LeaveRequest, 'application_kind' | 'combination_group_id'>
-): string {
-  if (request.combination_group_id && request.application_kind === 'extension') {
-    return '组合续假'
-  }
-  if (request.combination_group_id && request.application_kind === 'supplement') {
-    return '组合补假'
-  }
-  const labels: Record<LeaveRequest['application_kind'], string> = {
-    normal: '普通',
-    combined: '组合',
-    extension: '续假',
-    supplement: '补假',
-  }
-  return labels[request.application_kind] || '普通'
 }
 
 function applicationKindTagType(
@@ -532,10 +564,12 @@ function remainingDaysLabel(request: LeaveRequest): string {
 }
 
 async function fetchRequests(page?: number) {
+  const sequence = ++requestFetchSequence
   if (page) requestPage.value = page
   requestsLoading.value = true
   try {
     const result = await adminGetRequests({
+      unreadOnly: onlyUnread.value || undefined,
       leaveTypeCode: filters.value.leaveTypeCode || undefined,
       status: filters.value.status || undefined,
       startDate: filters.value.dateRange?.[0] || undefined,
@@ -543,12 +577,14 @@ async function fetchRequests(page?: number) {
       page: requestPage.value,
       pageSize: requestPageSize.value,
     })
-    requestList.value = result.list
-    requestTotal.value = result.total
+    if (sequence === requestFetchSequence) {
+      requestList.value = result.list
+      requestTotal.value = result.total
+    }
   } catch {
-    ElMessage.error('获取申请记录失败')
+    if (sequence === requestFetchSequence) ElMessage.error('获取申请记录失败')
   } finally {
-    requestsLoading.value = false
+    if (sequence === requestFetchSequence) requestsLoading.value = false
   }
 }
 
@@ -620,17 +656,26 @@ async function saveBalance() {
 }
 
 async function handleViewRequest(row: LeaveRequest) {
+  if (detailLoading.value) return
   drawerVisible.value = true
   detailHistory.value = []
   detailRequest.value = null
   detailLoading.value = true
+  let viewedDetail: LeaveRequestDetail | null = null
   try {
-    detailRequest.value = await getRequestDetail(row.id)
+    const detail = await getRequestDetail(row.id)
+    if (!drawerVisible.value) return
+    detailRequest.value = detail
+    viewedDetail = detail
   } catch {
     ElMessage.error('获取详情失败')
     drawerVisible.value = false
   } finally {
     detailLoading.value = false
+  }
+  await nextTick()
+  if (viewedDetail && drawerVisible.value && detailRequest.value?.id === viewedDetail.id) {
+    await markViewedCcNotice(viewedDetail)
   }
 }
 
@@ -638,14 +683,32 @@ async function handleViewRelatedRequest(id: string) {
   if (!detailRequest.value || detailRequest.value.id === id || detailLoading.value) return
   const currentRequest = detailRequest.value
   detailLoading.value = true
+  let viewedDetail: LeaveRequestDetail | null = null
   try {
     const relatedRequest = await getRequestDetail(id)
+    if (!drawerVisible.value) return
     detailHistory.value.push(currentRequest)
     detailRequest.value = relatedRequest
+    viewedDetail = relatedRequest
   } catch {
     ElMessage.error('获取关联申请详情失败')
   } finally {
     detailLoading.value = false
+  }
+  await nextTick()
+  if (viewedDetail && drawerVisible.value && detailRequest.value?.id === viewedDetail.id) {
+    await markViewedCcNotice(viewedDetail)
+  }
+}
+
+async function markViewedCcNotice(detail: LeaveRequestDetail) {
+  if (!detail.cc_notice_unread || !detail.cc_notice_revision) return
+  try {
+    pendingStore.counts.leaveCcUnread = await markLeaveCcNoticeRead(detail.id, detail.cc_notice_revision)
+    // 重新读取服务端状态，查看期间若产生了新通知，不能把它误显示为已读。
+    await fetchRequests()
+  } catch {
+    ElMessage.warning('详情已打开，但未读状态更新失败，请稍后重新查看')
   }
 }
 
@@ -743,9 +806,26 @@ onMounted(async () => {
   if (!isChairman.value) tasks.push(fetchRequests(1))
   await Promise.all(tasks)
 })
+
+watch(() => props.ccNoticeKey, key => {
+  if (!key || isChairman.value) return
+  activeSubTab.value = 'requests'
+  onlyUnread.value = true
+  void fetchRequests(1)
+}, { immediate: true })
+
+watch([ccUnreadCount, () => props.active, activeSubTab], ([count, active, tab], [previousCount, wasActive, previousTab]) => {
+  if (!isChairman.value && active && tab === 'requests' && (count > previousCount || !wasActive || previousTab !== tab)) {
+    void fetchRequests()
+  }
+})
 </script>
 
 <style scoped>
+.cc-notice-alert { margin-bottom: 12px; }
+.cc-tab-label { display: inline-flex; align-items: center; gap: 8px; }
+.cc-tab-label :deep(.el-badge__content) { position: static; transform: none; }
+.cc-unread-tag { margin-left: 6px; }
 .return-info {
   display: flex;
   flex-direction: column;

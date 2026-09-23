@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1050" viewBox="0 0 1400 1050">
+  <defs>
+    <style>
+      .h1 { font:700 38px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#111827; }
+      .h2 { font:700 28px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#1F2937; }
+      .body { font:400 24px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#374151; }
+      .small { font:400 21px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#6B7280; }
+      .table-h { font:700 22px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#FFFFFF; }
+      .table { font:400 21px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#1F2937; }
+      .button { font:700 23px 'Arial Unicode MS','FangSong_GB2312',sans-serif; }
+    </style>
+  </defs>
+  <rect width="1400" height="1050" fill="#F3F4F6"/>
+  <rect x="40" y="32" width="1320" height="986" rx="16" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="2"/>
+  <text x="82" y="90" class="h1">确认本合同办理范围</text>
+  <text x="82" y="128" class="small">将合同服务分项映射到项目手续节点，人工确认后生成正式范围版本</text>
+
+  <line x1="125" y1="184" x2="1275" y2="184" stroke="#CBD5E1" stroke-width="4"/>
+  <circle cx="150" cy="184" r="24" fill="#2563EB"/><text x="150" y="192" text-anchor="middle" class="table-h">1</text>
+  <circle cx="500" cy="184" r="24" fill="#2563EB"/><text x="500" y="192" text-anchor="middle" class="table-h">2</text>
+  <circle cx="850" cy="184" r="24" fill="#2563EB"/><text x="850" y="192" text-anchor="middle" class="table-h">3</text>
+  <circle cx="1200" cy="184" r="24" fill="#94A3B8"/><text x="1200" y="192" text-anchor="middle" class="table-h">4</text>
+  <text x="150" y="232" text-anchor="middle" class="small">提取合同条款</text>
+  <text x="500" y="232" text-anchor="middle" class="small">匹配项目与事项</text>
+  <text x="850" y="232" text-anchor="middle" class="small">人工确认</text>
+  <text x="1200" y="232" text-anchor="middle" class="small">同步项目范围</text>
+
+  <rect x="78" y="268" width="600" height="206" rx="12" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="105" y="307" class="h2">合同原文依据</text>
+  <text x="105" y="345" class="body">技术服务报酬总额  180,000.00元</text>
+  <text x="105" y="382" class="body">识别到4类交付事项  数量合计7个</text>
+  <text x="105" y="419" class="body">变更条款  无法完成时签订补充协议</text>
+  <text x="105" y="451" class="small">来源页码和原文截图保留在核对记录中</text>
+
+  <rect x="710" y="268" width="612" height="206" rx="12" fill="#FFF7ED" stroke="#FB923C" stroke-width="2"/>
+  <text x="740" y="307" class="h2">识别与校验</text>
+  <text x="740" y="345" class="body">已匹配模板节点 4项  待人工确认 1项</text>
+  <rect x="740" y="370" width="550" height="76" rx="10" fill="#FEE2E2" stroke="#DC2626" stroke-width="2"/>
+  <text x="760" y="402" class="small" fill="#991B1B">合同总额与可见分项合计不一致</text>
+  <text x="760" y="432" class="small" fill="#991B1B">请对照原件确认计价口径，确认前不得生成正式范围</text>
+
+  <rect x="78" y="506" width="1244" height="58" fill="#1F4E78"/>
+  <text x="105" y="542" class="table-h">页码</text>
+  <text x="218" y="542" class="table-h">合同交付事项</text>
+  <text x="585" y="542" class="table-h">工程分项</text>
+  <text x="765" y="542" class="table-h">数量</text>
+  <text x="865" y="542" class="table-h">分项含税价</text>
+  <text x="1055" y="542" class="table-h">匹配节点</text>
+  <text x="1220" y="542" class="table-h">状态</text>
+
+  <g stroke="#D1D5DB" stroke-width="1">
+    <rect x="78" y="564" width="1244" height="76" fill="#FFFFFF"/>
+    <rect x="78" y="640" width="1244" height="76" fill="#F8FAFC"/>
+    <rect x="78" y="716" width="1244" height="76" fill="#FFFFFF"/>
+    <rect x="78" y="792" width="1244" height="76" fill="#F8FAFC"/>
+  </g>
+  <g class="table">
+    <text x="105" y="610">第8页</text><text x="218" y="598">建设工程规划许可证</text><text x="218" y="626">送电工程</text><text x="610" y="610">送电工程</text><text x="785" y="610">1个</text><text x="875" y="610">50,000元</text><text x="1065" y="610">已匹配</text><text x="1220" y="610" fill="#B45309">待确认</text>
+    <text x="105" y="686">第8页</text><text x="218" y="674">临时建设工程规划许可证</text><text x="218" y="702">变电站工程</text><text x="610" y="686">变电站工程</text><text x="785" y="686">1个</text><text x="875" y="686">50,000元</text><text x="1065" y="686">已匹配</text><text x="1220" y="686" fill="#B45309">待确认</text>
+    <text x="105" y="762">第9页</text><text x="218" y="750">建筑工程施工许可证</text><text x="218" y="778">送电工程</text><text x="610" y="762">送电工程</text><text x="785" y="762">4个</text><text x="875" y="762">120,000元</text><text x="1065" y="762">已匹配</text><text x="1220" y="762" fill="#B45309">待确认</text>
+    <text x="105" y="838">第9页</text><text x="218" y="826">规划核验备案意见</text><text x="218" y="854">送电工程</text><text x="610" y="838">送电工程</text><text x="785" y="838">1个</text><text x="875" y="838">50,000元</text><text x="1065" y="838">已匹配</text><text x="1220" y="838" fill="#B45309">待确认</text>
+  </g>
+
+  <rect x="78" y="890" width="800" height="84" rx="10" fill="#EFF6FF" stroke="#93C5FD"/>
+  <text x="102" y="925" class="small">前置事项默认生成“待确认来源”的核验记录</text>
+  <text x="102" y="957" class="small">不自动认定为本项目办理，也不自动计入合同交付或价款</text>
+  <rect x="930" y="902" width="126" height="52" rx="9" fill="#FFFFFF" stroke="#94A3B8"/>
+  <text x="993" y="936" text-anchor="middle" class="button" fill="#334155">保存草稿</text>
+  <rect x="1070" y="902" width="116" height="52" rx="9" fill="#FFFFFF" stroke="#94A3B8"/>
+  <text x="1128" y="936" text-anchor="middle" class="button" fill="#334155">退回修订</text>
+  <rect x="1200" y="902" width="122" height="52" rx="9" fill="#2563EB"/>
+  <text x="1261" y="936" text-anchor="middle" class="button" fill="#FFFFFF">确认同步</text>
+</svg>

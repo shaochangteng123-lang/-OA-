@@ -433,6 +433,35 @@ export interface ContractFile {
   createdAt?: string | null;
 }
 
+export interface ContractInvoiceApplicationMaterialFile {
+  id: string;
+  fileId: string;
+  sourceType: "application_material" | "contract_file";
+  materialKind:
+    | "system_generated_triplicate"
+    | "uploaded_triplicate"
+    | "application_material"
+    | "sealed_triplicate"
+    | "sealed_material";
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  requiresSeal: boolean;
+  isSystemGeneratedTriplicate: boolean;
+  createdAt: string;
+}
+
+export interface ContractInvoiceApplicationMaterialGroup {
+  applicationId: string;
+  applicationNo: string;
+  status: "pending_approval" | "pending_seal" | "pending_invoice" | "completed";
+  amount: MoneyValue;
+  applicantName: string;
+  submittedAt: string | null;
+  createdAt: string;
+  files: ContractInvoiceApplicationMaterialFile[];
+}
+
 export type ContractSealApplicationSealType = "company" | "contract";
 
 export interface ContractSealApplicationFields {
@@ -910,6 +939,7 @@ export interface ContractDetailResponse {
     contractCompanySubjectName?: string | null;
   };
   files: ContractFile[];
+  invoiceApplicationMaterialGroups?: ContractInvoiceApplicationMaterialGroup[];
   ocrJob: ContractOcrJob | null;
   ocrFields: ContractOcrField[];
   approvals: ContractApprovalRecord[];

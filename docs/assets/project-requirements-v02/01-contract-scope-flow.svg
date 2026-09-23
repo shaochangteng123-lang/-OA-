@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1450" viewBox="0 0 1400 1450">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#475569"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#B45309"/>
+    </marker>
+    <style>
+      .title { font: 700 46px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#0F172A; }
+      .subtitle { font: 400 28px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#475569; }
+      .node-title { font: 700 31px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#0F172A; }
+      .node-text { font: 400 27px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#334155; }
+      .small { font: 400 25px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#475569; }
+      .arrow { stroke:#475569; stroke-width:4; fill:none; marker-end:url(#arrow); }
+      .return { stroke:#B45309; stroke-width:4; stroke-dasharray:12 10; fill:none; marker-end:url(#arrowOrange); }
+    </style>
+  </defs>
+  <rect width="1400" height="1450" fill="#FFFFFF"/>
+  <text x="700" y="68" text-anchor="middle" class="title">合同范围驱动的项目手续实例生成逻辑</text>
+  <text x="700" y="112" text-anchor="middle" class="subtitle">流程模板是候选事项全集，不等于项目实际办理范围</text>
+
+  <rect x="345" y="150" width="710" height="104" rx="16" fill="#F1F5F9" stroke="#94A3B8" stroke-width="2"/>
+  <text x="700" y="190" text-anchor="middle" class="node-title">完整流程模板</text>
+  <text x="700" y="226" text-anchor="middle" class="node-text">保存全部候选手续、依赖关系和成果要求</text>
+
+  <path d="M700 254 L700 296" class="arrow"/>
+  <rect x="345" y="300" width="710" height="112" rx="16" fill="#DBEAFE" stroke="#2563EB" stroke-width="3"/>
+  <text x="700" y="343" text-anchor="middle" class="node-title">读取合同服务范围</text>
+  <text x="700" y="382" text-anchor="middle" class="node-text">目标成果  工程分项  数量  价款  变更条款</text>
+
+  <path d="M700 412 L700 454" class="arrow"/>
+  <rect x="345" y="458" width="710" height="118" rx="16" fill="#DBEAFE" stroke="#2563EB" stroke-width="3"/>
+  <text x="700" y="502" text-anchor="middle" class="node-title">人工确认合同交付清单</text>
+  <text x="700" y="542" text-anchor="middle" class="node-text">金额与分项核对  节点映射  生成范围版本</text>
+
+  <path d="M700 576 L700 618" class="arrow"/>
+  <rect x="345" y="622" width="710" height="112" rx="16" fill="#CCFBF1" stroke="#0F766E" stroke-width="3"/>
+  <text x="700" y="664" text-anchor="middle" class="node-title">反向展开必要前置条件</text>
+  <text x="700" y="704" text-anchor="middle" class="node-text">只保留合同目标的有效依赖路径</text>
+
+  <path d="M700 734 L700 776" class="arrow"/>
+  <rect x="118" y="784" width="1164" height="210" rx="18" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="700" y="826" text-anchor="middle" class="node-title">逐项指定前置成果来源和处理方式</text>
+  <rect x="150" y="858" width="250" height="96" rx="14" fill="#CCFBF1" stroke="#0F766E" stroke-width="2"/>
+  <text x="275" y="898" text-anchor="middle" class="node-title">本项目办理</text>
+  <text x="275" y="932" text-anchor="middle" class="small">生成正式任务</text>
+  <rect x="420" y="858" width="250" height="96" rx="14" fill="#EDE9FE" stroke="#7C3AED" stroke-width="2"/>
+  <text x="545" y="898" text-anchor="middle" class="node-title">我方历史成果</text>
+  <text x="545" y="932" text-anchor="middle" class="small">引用并核验</text>
+  <rect x="690" y="858" width="250" height="96" rx="14" fill="#E0F2FE" stroke="#0369A1" stroke-width="2"/>
+  <text x="815" y="898" text-anchor="middle" class="node-title">甲方或第三方</text>
+  <text x="815" y="932" text-anchor="middle" class="small">提供并核验</text>
+  <rect x="960" y="858" width="290" height="96" rx="14" fill="#FEF3C7" stroke="#B45309" stroke-width="2"/>
+  <text x="1105" y="898" text-anchor="middle" class="node-title">待提供或待确认</text>
+  <text x="1105" y="932" text-anchor="middle" class="small">保持前置受限</text>
+
+  <path d="M700 994 L700 1036" class="arrow"/>
+  <polygon points="700,1040 890,1126 700,1212 510,1126" fill="#FFFFFF" stroke="#475569" stroke-width="3"/>
+  <text x="700" y="1117" text-anchor="middle" class="node-title">有效证据</text>
+  <text x="700" y="1154" text-anchor="middle" class="node-title">是否齐全并核验</text>
+  <text x="900" y="1116" class="small">否</text>
+  <text x="706" y="1244" class="small">是</text>
+
+  <path d="M890 1126 L1110 1126" class="arrow"/>
+  <rect x="1110" y="1064" width="230" height="124" rx="16" fill="#FEE2E2" stroke="#B91C1C" stroke-width="3"/>
+  <text x="1225" y="1114" text-anchor="middle" class="node-title">前置受限</text>
+  <text x="1225" y="1154" text-anchor="middle" class="small">待补文件或依据</text>
+
+  <path d="M700 1212 L700 1260" class="arrow"/>
+  <rect x="120" y="1264" width="350" height="118" rx="16" fill="#DBEAFE" stroke="#2563EB" stroke-width="3"/>
+  <text x="295" y="1312" text-anchor="middle" class="node-title">合同交付清单</text>
+  <text x="295" y="1350" text-anchor="middle" class="small">验收和计价范围</text>
+  <rect x="525" y="1264" width="350" height="118" rx="16" fill="#CCFBF1" stroke="#0F766E" stroke-width="3"/>
+  <text x="700" y="1312" text-anchor="middle" class="node-title">实际办理清单</text>
+  <text x="700" y="1350" text-anchor="middle" class="small">本次真实任务</text>
+  <rect x="930" y="1264" width="350" height="118" rx="16" fill="#EDE9FE" stroke="#7C3AED" stroke-width="3"/>
+  <text x="1105" y="1312" text-anchor="middle" class="node-title">前置核验清单</text>
+  <text x="1105" y="1350" text-anchor="middle" class="small">来源和有效性证据</text>
+
+  <rect x="60" y="438" width="220" height="134" rx="14" fill="#FEF3C7" stroke="#B45309" stroke-width="2" stroke-dasharray="10 8"/>
+  <text x="170" y="484" text-anchor="middle" class="node-title">补充协议</text>
+  <text x="170" y="521" text-anchor="middle" class="small">生效后生成</text>
+  <text x="170" y="551" text-anchor="middle" class="small">新范围版本</text>
+  <path d="M170 438 C170 332 255 302 345 344" class="return"/>
+  <text x="116" y="388" class="small" fill="#B45309">范围变更回路</text>
+</svg>

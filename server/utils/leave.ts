@@ -1,6 +1,7 @@
 import { formatLocalDate } from './date.js'
 
 const MAX_LEAVE_RANGE_DAYS = 366
+const MAX_REMOVED_LEAVE_ATTACHMENTS = 5
 
 export function isValidLeaveDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
@@ -40,6 +41,46 @@ export function validateLeavePeriod(
   if (calendarDays > MAX_LEAVE_RANGE_DAYS) return `单次请假区间不能超过 ${MAX_LEAVE_RANGE_DAYS} 天`
 
   return null
+}
+
+export function resolveStandaloneLeaveApplicationKind(
+  value: unknown,
+  mode: 'single' | 'combined'
+): 'normal' | 'combined' | 'supplement' | null {
+  const fallback = mode === 'single' ? 'normal' : 'combined'
+  const normalized = value === undefined || value === null || value === ''
+    ? fallback
+    : String(value)
+  const allowed = mode === 'single'
+    ? ['normal', 'supplement']
+    : ['combined', 'supplement']
+  return allowed.includes(normalized) ? normalized as 'normal' | 'combined' | 'supplement' : null
+}
+
+export function validateReturnSupplementPeriod(
+  startDate: unknown,
+  endDate: unknown,
+  today = formatLocalDate()
+): string | null {
+  if (typeof startDate !== 'string' || typeof endDate !== 'string') return null
+  if (startDate > today || endDate > today) return '返岗补假日期不能晚于今天'
+  return null
+}
+
+export function parseRemovedLeaveAttachmentIds(value: unknown): string[] | null {
+  if (value === undefined || value === null || value === '') return []
+
+  let parsed: unknown
+  try {
+    parsed = typeof value === 'string' ? JSON.parse(value) : value
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed) || parsed.length > MAX_REMOVED_LEAVE_ATTACHMENTS) return null
+
+  const ids = parsed.map(item => typeof item === 'string' ? item.trim() : '')
+  if (ids.some(id => !id) || new Set(ids).size !== ids.length) return null
+  return ids
 }
 
 /**

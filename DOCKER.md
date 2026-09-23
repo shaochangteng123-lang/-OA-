@@ -55,14 +55,16 @@ npm run docker:stop  # 停止数据库容器
 ### 生产模式
 
 ```bash
-npm run docker:prod      # 启动生产环境
+npm run docker:prod # 启动或恢复配置中固定的生产镜像，不现场构建
+npm run docker:prod:build -- yulilog-prod-yulilog:release-YYYYMMDD-name # 只构建唯一标签候选镜像，不部署
 npm run docker:prod:stop # 停止生产环境
 npm run docker:prod:logs # 查看生产环境日志
 ```
 
 开发与生产使用独立数据库卷、网络和上传目录，可以同时运行。`npm run mode:dev` 与
 `npm run mode:prod` 只启动或更新目标环境，不会停止另一套环境。
-生产构建前会自动执行 `npm run release:check`，前后端类型或完整回归测试失败时不会继续上线。
+生产应用镜像由 `docker-compose.prod.yml` 显式固定；日常生产入口强制使用 `--no-build`，不会把当前工作区中的未提交内容构建进生产。镜像缺失时会直接失败，不会自动拉取同名镜像。
+候选镜像构建与部署已经拆分：`docker:prod:build` 会先执行 `npm run release:check`，拒绝 `latest（最新）`、空标签、已存在标签、低于 12 吉字节的可用空间以及默认情况下的未提交工作区；构建成功后也不会自动部署。验收通过后，应把生产编排中的固定镜像标签更新为候选标签，再执行 `npm run docker:prod`。
 生产容器启动后还会校验并重载 Nginx（反向代理）配置，并确认人事档案自动识别路由的收发等待时间均为 2400 秒。`nginx.conf` 使用绑定挂载，文件更新不会让既有工作进程自动采用新配置，因此生产更新应统一使用 `npm run docker:prod` 或 `npm run mode:prod`，不要只重建应用容器。
 开发与生产容器默认统一使用 `OCR_MODEL=v6_medium`（第六版中型识别模型）；生产旧容器若缺少第六版模型目录，必须通过完整重建镜像升级，不能只修改环境变量。`v4_mobile`（第四版移动模型）继续作为显式回滚配置保留。
 生产 Nginx（反向代理）的全部 `/api/`（应用程序接口）请求统一使用 2400 秒读写等待时间，覆盖同步发票、支付截图、付款回单、押金条及月报银行回单 OCR（光学字符识别），避免开发直连成功但生产代理提前返回超时。
@@ -75,8 +77,9 @@ npm run docker:prod:logs # 查看生产环境日志
 docker-compose.yml         # 开发环境（推荐）
 docker-compose.dev.yml     # 兼容旧命令，直接引用开发环境唯一配置
 docker-compose.simple.yml  # 仅 PostgreSQL（轻量级）
-docker-compose.prod.yml    # 生产环境
+docker-compose.prod.yml    # 生产运行环境，固定当前已验证镜像且禁止现场构建
 Dockerfile                 # 开发与生产共用的多阶段构建文件
+scripts/build-production-image.sh # 生产候选镜像的独立安全构建入口
 ```
 
 ## 访问地址

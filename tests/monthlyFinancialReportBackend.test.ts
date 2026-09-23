@@ -64,6 +64,8 @@ import {
   buildMonthlyFinancialReportView,
   centsToFinancialAmount,
   isValidFinancialDate,
+  mergeMonthlyFinancialAutomaticWelfareCatalog,
+  mergeOpenMonthlyFinancialWelfareCatalogs,
   normalizeFinancialAmount,
   normalizeOpeningBalances,
   previousFinancialMonth,
@@ -144,6 +146,114 @@ function findRoute(
 }
 
 describe("月度财务报表精确金额与分类规则", () => {
+  it("开放月报实时合并福利分类主数据但保留已存自动金额", () => {
+    const stored = [
+      {
+        id: "welfare_one_407_ai",
+        code: "407_ai",
+        name: "407-AI旧名称",
+        sortOrder: 9,
+        isActive: false,
+        amount: "12.340000000001",
+      },
+      {
+        id: "deleted-with-history",
+        code: "deleted",
+        name: "已删除历史分类",
+        sortOrder: 10,
+        isActive: true,
+        amount: "5",
+      },
+      {
+        id: "deleted-empty",
+        code: "deleted_empty",
+        name: "已删除空分类",
+        sortOrder: 11,
+        isActive: true,
+        amount: "0",
+      },
+    ];
+    const original = JSON.stringify(stored);
+    expect(
+      mergeMonthlyFinancialAutomaticWelfareCatalog(stored, [
+        {
+          id: "new-category",
+          code: "new",
+          name: "新分类",
+          sort_order: 1,
+          is_active: true,
+        },
+        {
+          id: "welfare_one_407_ai",
+          code: "407_ai",
+          name: "407-AI",
+          sort_order: 4,
+          is_active: true,
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "new-category",
+        code: "new",
+        name: "新分类",
+        sortOrder: 1,
+        isActive: true,
+        amount: "0",
+      },
+      {
+        id: "welfare_one_407_ai",
+        code: "407_ai",
+        name: "407-AI",
+        sortOrder: 4,
+        isActive: true,
+        amount: "12.340000000001",
+      },
+      {
+        id: "deleted-with-history",
+        code: "deleted",
+        name: "已删除历史分类",
+        sortOrder: 10,
+        isActive: false,
+        amount: "5",
+      },
+    ]);
+    expect(JSON.stringify(stored)).toBe(original);
+  });
+
+  it("已月结自动快照不受实时福利分类启停变化影响", () => {
+    const stored: MonthlyFinancialAutomaticSnapshot = {
+      ...emptyAutomaticSnapshot(),
+      welfareOneExpenseCategories: [
+        {
+          id: "welfare_one_407_ai",
+          code: "407_ai",
+          name: "冻结407-AI",
+          sortOrder: 4,
+          isActive: false,
+          amount: "12.34",
+        },
+      ],
+    };
+    const result = mergeOpenMonthlyFinancialWelfareCatalogs(
+      "closed",
+      stored,
+      [
+        {
+          id: "welfare_one_407_ai",
+          code: "407_ai",
+          name: "实时407-AI",
+          sort_order: 1,
+          is_active: true,
+        },
+      ],
+      [],
+    );
+    expect(result).toBe(stored);
+    expect(result.welfareOneExpenseCategories).toEqual(
+      stored.welfareOneExpenseCategories,
+    );
+  });
+
   it("福利账户一已付款报销按付款业务日期形成分类自动来源", async () => {
     (db.all as jest.Mock).mockImplementation(async (sql: string) => {
       if (sql.includes("FROM welfare_one_expense_categories")) {
@@ -968,6 +1078,116 @@ describe("月度财务报表月结、重开与快照安全", () => {
       ...input,
     };
   }
+
+  it("开放月报读取实时分类名称顺序和启用状态且不重算已存金额", async () => {
+    const automatic: MonthlyFinancialAutomaticSnapshot = {
+      ...emptyAutomaticSnapshot(),
+      welfareOneExpenseCategories: [
+        {
+          id: "welfare_one_407_ai",
+          code: "407_ai",
+          name: "旧407名称",
+          sortOrder: 9,
+          isActive: false,
+          amount: "12.340000000001",
+        },
+        {
+          id: "welfare_one_8h_ai",
+          code: "8h_ai",
+          name: "旧8H名称",
+          sortOrder: 10,
+          isActive: false,
+          amount: "0",
+        },
+      ],
+      welfareTwoExpenseCategories: [
+        {
+          id: "welfare_two_refreshment",
+          code: "refreshment",
+          name: "旧茶歇名称",
+          sortOrder: 9,
+          isActive: false,
+          amount: "3.21",
+        },
+      ],
+    };
+    const original = JSON.stringify(automatic);
+    (db.get as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM monthly_financial_reports report"))
+        return reportRow({ automatic_snapshot_json: automatic });
+      return undefined;
+    });
+    (db.all as jest.Mock).mockImplementation(async (sqlValue: string) => {
+      const sql = String(sqlValue);
+      if (sql.includes("FROM welfare_one_expense_categories"))
+        return [
+          {
+            id: "welfare_one_407_ai",
+            code: "407_ai",
+            name: "407-AI",
+            sort_order: 4,
+            is_active: true,
+          },
+          {
+            id: "welfare_one_8h_ai",
+            code: "8h_ai",
+            name: "8H-AI",
+            sort_order: 5,
+            is_active: true,
+          },
+        ];
+      if (sql.includes("FROM welfare_two_expense_categories"))
+        return [
+          {
+            id: "welfare_two_refreshment",
+            code: "refreshment",
+            name: "茶歇",
+            sort_order: 1,
+            is_active: true,
+          },
+        ];
+      return [];
+    });
+    const route = findRoute("/:month", "get");
+    const response = responseMock();
+
+    await route.stack.at(-1)!.handle(requestMock("2026-08"), response);
+
+    expect(response.status).not.toHaveBeenCalled();
+    const report = response.json.mock.calls[0][0].data;
+    expect(report.welfareOneExpenseCategories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "welfare_one_407_ai",
+          name: "407-AI",
+          sortOrder: 4,
+          isActive: true,
+          automaticAmount: "12.340000000001",
+          totalAmount: "12.340000000001",
+        }),
+        expect.objectContaining({
+          id: "welfare_one_8h_ai",
+          name: "8H-AI",
+          sortOrder: 5,
+          isActive: true,
+          automaticAmount: "0",
+          totalAmount: "0",
+        }),
+      ]),
+    );
+    expect(report.welfareTwoExpenseCategories).toEqual([
+      expect.objectContaining({
+        id: "welfare_two_refreshment",
+        name: "茶歇",
+        sortOrder: 1,
+        isActive: true,
+        automaticAmount: "3.21",
+        totalAmount: "3.21",
+      }),
+    ]);
+    expect(JSON.stringify(automatic)).toBe(original);
+  });
 
   it("顶部收入按主营业务银行实际到账总额展示而非税后账户分配额", async () => {
     const automatic = {

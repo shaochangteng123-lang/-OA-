@@ -994,13 +994,13 @@
 
         <el-tab-pane
           v-if="detail.contract.relationType === 'main'"
-          :label="`合同附件（${displayedContractFiles.length}）`"
+          :label="`合同附件（${contractAttachmentCount}）`"
           name="files"
         >
           <section class="content-card">
             <div class="card-heading">
               <div>
-                <h2>合同文件归档</h2>
+                <h2>合同与业务材料归档</h2>
                 <span>{{
                   canDirectDownload
                     ? "点击文件可在线预览或下载"
@@ -1018,7 +1018,10 @@
                 申请下载
               </el-button>
             </div>
-            <div v-if="contractFileGroups.length" class="attachment-groups">
+            <div
+              v-if="contractFileGroups.length || canEdit"
+              class="attachment-groups"
+            >
               <section
                 v-for="group in contractFileGroups"
                 :key="group.key"
@@ -1118,6 +1121,118 @@
                     </article>
                   </div>
                 </section>
+              </section>
+              <section
+                v-if="canEdit"
+                class="attachment-group invoice-application-materials"
+              >
+                <div class="attachment-group-heading">
+                  <h3>
+                    开票申请材料（{{ invoiceApplicationMaterialFileCount }}）
+                  </h3>
+                  <span
+                    >共
+                    {{ invoiceApplicationMaterialGroups.length }} 笔申请</span
+                  >
+                </div>
+                <template v-if="invoiceApplicationMaterialGroups.length">
+                  <section
+                    v-for="application in invoiceApplicationMaterialGroups"
+                    :key="application.applicationId"
+                    class="attachment-source-group"
+                  >
+                    <div class="attachment-source-heading">
+                      <div class="invoice-application-material-title">
+                        <h4 :title="application.applicationNo">
+                          开票申请 {{ application.applicationNo }}（{{
+                            application.files.length
+                          }}）
+                        </h4>
+                        <el-tag
+                          size="small"
+                          :type="
+                            invoiceApplicationArchiveStatusType(
+                              application.status,
+                            )
+                          "
+                          effect="plain"
+                          >{{
+                            invoiceApplicationArchiveStatusLabel(
+                              application.status,
+                            )
+                          }}</el-tag
+                        >
+                      </div>
+                      <span
+                        class="invoice-application-material-meta"
+                        :title="`申请人 ${application.applicantName || '—'} · ${formatContractMoney(application.amount)} · ${formatContractDateTime(application.submittedAt || application.createdAt)}`"
+                      >
+                        申请人 {{ application.applicantName || "—" }} ·
+                        {{ formatContractMoney(application.amount) }} ·
+                        {{
+                          formatContractDateTime(
+                            application.submittedAt || application.createdAt,
+                          )
+                        }}
+                      </span>
+                    </div>
+                    <div v-if="application.files.length" class="file-grid">
+                      <article
+                        v-for="file in application.files"
+                        :key="file.id"
+                        class="file-card"
+                      >
+                        <button
+                          type="button"
+                          class="file-card-preview"
+                          @click="openInvoiceApplicationMaterial(file)"
+                        >
+                          <span class="file-icon"
+                            ><el-icon><Document /></el-icon
+                          ></span>
+                          <span
+                            ><strong :title="file.fileName">{{
+                              file.fileName
+                            }}</strong
+                            ><small
+                              >{{ invoiceApplicationMaterialKindLabel(file) }} ·
+                              {{
+                                formatContractDateTime(file.createdAt)
+                              }}</small
+                            ></span
+                          >
+                        </button>
+                        <div class="file-actions">
+                          <el-button
+                            link
+                            :icon="View"
+                            @click="openInvoiceApplicationMaterial(file)"
+                            >{{
+                              invoiceApplicationMaterialOpenLabel(file)
+                            }}</el-button
+                          >
+                          <el-button
+                            v-if="canDirectDownload"
+                            link
+                            :icon="Download"
+                            @click="downloadInvoiceApplicationMaterial(file)"
+                            >下载</el-button
+                          >
+                        </div>
+                      </article>
+                    </div>
+                    <el-empty
+                      v-else
+                      description="本次申请未上传或生成材料"
+                      :image-size="56"
+                    />
+                  </section>
+                </template>
+                <el-empty
+                  v-else
+                  description="暂无开票申请材料"
+                  :image-size="72"
+                />
               </section>
             </div>
             <el-empty v-else description="暂无合同附件" />
@@ -2272,6 +2387,7 @@ import {
   getContractErrorCode,
   getContractErrorMessage,
   getContractFileUrl,
+  getContractInvoiceApplicationMaterialUrl,
   getLatestSealedContractVerification,
   reapproveSealedContractDifference,
   retrySealedContractVerification,
@@ -2877,6 +2993,9 @@ const assetContractCounterparty = computed(() => {
   );
 });
 type CentralizedContractFile = ContractDetailResponse["files"][number];
+type InvoiceApplicationArchiveFile = NonNullable<
+  ContractDetailResponse["invoiceApplicationMaterialGroups"]
+>[number]["files"][number];
 function sourceContractId(file: CentralizedContractFile): string {
   return (
     file.sourceContractId || file.contractId || detail.value?.contract.id || ""
@@ -3001,6 +3120,20 @@ const contractFileGroups = computed(() => {
     })
     .filter((group) => group.files.length > 0);
 });
+const invoiceApplicationMaterialGroups = computed(
+  () => detail.value?.invoiceApplicationMaterialGroups || [],
+);
+const invoiceApplicationMaterialFileCount = computed(() =>
+  invoiceApplicationMaterialGroups.value.reduce(
+    (sum, application) => sum + application.files.length,
+    0,
+  ),
+);
+const contractAttachmentCount = computed(
+  () =>
+    displayedContractFiles.value.length +
+    invoiceApplicationMaterialFileCount.value,
+);
 const loading = ref(false);
 const actionLoading = ref(false);
 const targetAmountDialogVisible = ref(false);
@@ -5435,6 +5568,86 @@ async function reverseFinancialCard(card: FinancialRegistrationCard) {
   }
 }
 
+function invoiceApplicationArchiveStatusLabel(status: string): string {
+  return (
+    {
+      pending_approval: "审批中",
+      pending_seal: "待盖章",
+      pending_invoice: "待开票",
+      completed: "已完成",
+    }[status] || status
+  );
+}
+
+function invoiceApplicationArchiveStatusType(status: string) {
+  return ({
+    pending_approval: "warning",
+    pending_seal: "warning",
+    pending_invoice: "info",
+    completed: "success",
+  }[status] || "info") as "success" | "warning" | "info";
+}
+
+function invoiceApplicationMaterialKindLabel(
+  file: InvoiceApplicationArchiveFile,
+): string {
+  return (
+    {
+      system_generated_triplicate: "系统生成三联单",
+      uploaded_triplicate: "申请上传三联单",
+      application_material: file.requiresSeal
+        ? "申请上传材料·需盖章"
+        : "申请上传材料",
+      sealed_triplicate: "盖章后三联单",
+      sealed_material: "盖章后申请材料",
+    }[file.materialKind] || "开票申请材料"
+  );
+}
+
+function invoiceApplicationMaterialOpenLabel(
+  file: InvoiceApplicationArchiveFile,
+): string {
+  const browserPreviewable =
+    file.sourceType === "contract_file" ||
+    file.materialKind === "uploaded_triplicate" ||
+    file.mimeType === "application/pdf" ||
+    file.mimeType.startsWith("image/");
+  return browserPreviewable ? "预览" : "下载查看";
+}
+
+function invoiceApplicationMaterialUrl(
+  file: InvoiceApplicationArchiveFile,
+  download = false,
+): string {
+  return file.sourceType === "contract_file"
+    ? getContractFileUrl(file.fileId, download)
+    : getContractInvoiceApplicationMaterialUrl(
+        contractId.value,
+        file.fileId,
+        download,
+      );
+}
+
+function openInvoiceApplicationMaterial(file: InvoiceApplicationArchiveFile) {
+  window.open(
+    invoiceApplicationMaterialUrl(file),
+    "_blank",
+    "noopener,noreferrer",
+  );
+  liveStatus.value = `已打开开票申请材料“${file.fileName}”`;
+}
+
+function downloadInvoiceApplicationMaterial(
+  file: InvoiceApplicationArchiveFile,
+) {
+  if (!canDirectDownload.value) return;
+  window.open(
+    invoiceApplicationMaterialUrl(file, true),
+    "_blank",
+    "noopener,noreferrer",
+  );
+}
+
 function openFile(fileId: string) {
   const file = detail.value?.files.find((item) => item.id === fileId);
   if (!file) return;
@@ -6430,17 +6643,30 @@ onBeforeUnmount(() => {
   background: #f2f7f8;
 }
 .attachment-source-heading h4 {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   margin: 0;
   color: #356078;
   font-size: 13px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.attachment-source-heading span {
+.attachment-source-heading > span {
   overflow: hidden;
   color: #7e909e;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.invoice-application-material-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.invoice-application-material-title h4 {
+  flex: 1;
 }
 .file-grid {
   display: grid;
@@ -6974,6 +7200,26 @@ onBeforeUnmount(() => {
   }
   .attachment-source-heading span {
     max-width: 100%;
+  }
+  .attachment-source-heading h4,
+  .attachment-source-heading > span {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+  .invoice-application-material-title {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .file-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .file-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .file-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
   }
   .seal-workspace-heading,
   .seal-archive-confirmation {

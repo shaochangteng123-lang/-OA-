@@ -23,6 +23,11 @@ interface RefreshResult {
   message: string
 }
 
+export interface HolidayDataCompleteness {
+  complete: boolean
+  missing: HolidayInfo[]
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000
 const GOV_SEARCH_API = 'https://sousuo.www.gov.cn/search-gov/data'
 const GOV_SEARCH_PAGE = 'https://sousuo.www.gov.cn/s.htm'
@@ -33,8 +38,9 @@ function convertTxPlaceholders(sql: string): string {
   return sql.replace(/\?/g, () => `$${++index}`)
 }
 
-async function txRun(client: PoolClient, sql: string, ...params: any[]): Promise<void> {
-  await client.query(convertTxPlaceholders(sql), params)
+async function txRun(client: PoolClient, sql: string, ...params: unknown[]): Promise<number> {
+  const result = await client.query(convertTxPlaceholders(sql), params)
+  return result.rowCount || 0
 }
 
 function normalizeText(text: string): string {
@@ -91,15 +97,28 @@ function upsertParsedHoliday(
   map.set(date, { date, name: normalizedName, type })
 }
 
-function parseHolidayNotice(text: string, year: number): HolidayInfo[] {
+function extractHolidaySections(text: string): Map<string, string> {
+  const headings = [...text.matchAll(new RegExp(`(${HOLIDAY_NAMES.join('|')})[:：]`, 'g'))]
+  const sections = new Map<string, string>()
+
+  for (const [index, heading] of headings.entries()) {
+    const name = heading[1]
+    const contentStart = (heading.index || 0) + heading[0].length
+    const contentEnd = headings[index + 1]?.index ?? text.length
+    sections.set(name, text.slice(contentStart, contentEnd))
+  }
+
+  return sections
+}
+
+export function parseHolidayNotice(text: string, year: number): HolidayInfo[] {
   const normalized = normalizeText(text)
   const holidayMap = new Map<string, HolidayInfo>()
+  const sections = extractHolidaySections(normalized)
 
   for (const name of HOLIDAY_NAMES) {
-    const sectionMatch = normalized.match(new RegExp(`${name}[:：]([^。]+(?:。[^一二三四五六七、]+)*)`))
-    if (!sectionMatch) continue
-
-    const section = sectionMatch[1]
+    const section = sections.get(name)
+    if (!section) continue
     const holidayPart = section.split(/放假/)[0]
     const rangeMatches = [...holidayPart.matchAll(/((?:\d{1,2}月)?\d{1,2}日)(?:[（(][^）)]*[）)])?至((?:\d{1,2}月)?\d{1,2}日)/g)]
 
@@ -122,16 +141,29 @@ function parseHolidayNotice(text: string, year: number): HolidayInfo[] {
       }
     }
 
-    const workdayPart = section.match(/(?:。|；|;)?([^。；;]*上班)/)?.[1] || ''
-    const workdayMatches = [...workdayPart.matchAll(/(\d{1,2}月\d{1,2}日)/g)]
-    for (const match of workdayMatches) {
-      const parsed = parseMonthDay(match[1])
-      if (!parsed) continue
-      upsertParsedHoliday(holidayMap, formatDate(year, parsed.month, parsed.day), name, 'workday')
+    const workdayClauses = [...section.matchAll(/(?:^|[。；;])([^。；;]*上班)/g)]
+    for (const clauseMatch of workdayClauses) {
+      let fallbackMonth: number | undefined
+      const workdayMatches = [...clauseMatch[1].matchAll(/((?:\d{1,2}月)?\d{1,2}日)/g)]
+      for (const match of workdayMatches) {
+        const parsed = parseMonthDay(match[1], fallbackMonth)
+        if (!parsed) continue
+        fallbackMonth = parsed.month
+        upsertParsedHoliday(holidayMap, formatDate(year, parsed.month, parsed.day), name, 'workday')
+      }
     }
   }
 
   return [...holidayMap.values()].sort((a, b) => a.date.localeCompare(b.date))
+}
+
+export function assessHolidayDataCompleteness(
+  existing: HolidayInfo[],
+  expected: HolidayInfo[],
+): HolidayDataCompleteness {
+  const existingDates = new Set(existing.map((holiday) => holiday.date))
+  const missing = expected.filter((holiday) => !existingDates.has(holiday.date))
+  return { complete: missing.length === 0, missing }
 }
 
 async function fetchText(url: string): Promise<string> {
@@ -206,28 +238,30 @@ async function discoverNoticeUrl(year: number): Promise<string | null> {
   return null
 }
 
-async function getExistingCount(year: number): Promise<number> {
-  const result = await db.get<{ count: number }>('SELECT COUNT(*) AS count FROM holidays WHERE year = ?', year)
-  return Number(result?.count || 0)
+async function getExistingHolidays(year: number): Promise<HolidayInfo[]> {
+  return db.all<HolidayInfo>('SELECT date, name, type FROM holidays WHERE year = ? ORDER BY date ASC', year)
 }
 
-async function upsertHolidays(holidays: HolidayInfo[], sourceUrl: string): Promise<number> {
+async function upsertHolidays(holidays: HolidayInfo[], sourceUrl: string, overwriteExisting: boolean): Promise<number> {
   const now = new Date().toISOString()
   let count = 0
-
-  await db.transaction(async (client) => {
-    for (const holiday of holidays) {
-      const year = Number(holiday.date.slice(0, 4))
-      await txRun(
-        client,
-        `INSERT INTO holidays (id, date, name, type, year, source_url, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(date) DO UPDATE SET
+  const conflictClause = overwriteExisting
+    ? `DO UPDATE SET
            name = excluded.name,
            type = excluded.type,
            year = excluded.year,
            source_url = excluded.source_url,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at`
+    : 'DO NOTHING'
+
+  await db.transaction(async (client) => {
+    for (const holiday of holidays) {
+      const year = Number(holiday.date.slice(0, 4))
+      count += await txRun(
+        client,
+        `INSERT INTO holidays (id, date, name, type, year, source_url, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(date) ${conflictClause}`,
         `holiday_${holiday.date}`,
         holiday.date,
         holiday.name,
@@ -237,7 +271,6 @@ async function upsertHolidays(holidays: HolidayInfo[], sourceUrl: string): Promi
         now,
         now,
       )
-      count++
     }
   })
 
@@ -245,16 +278,7 @@ async function upsertHolidays(holidays: HolidayInfo[], sourceUrl: string): Promi
 }
 
 export async function refreshHolidaysForYear(year: number, options: RefreshOptions = {}): Promise<RefreshResult> {
-  const existingCount = await getExistingCount(year)
-  if (!options.force && existingCount > 0) {
-    return {
-      year,
-      updated: false,
-      skipped: true,
-      count: existingCount,
-      message: `${year} 年节假日数据已存在，跳过自动更新`,
-    }
-  }
+  const existing = await getExistingHolidays(year)
 
   const sourceUrl = options.sourceUrl || process.env.HOLIDAY_SOURCE_URL || await discoverNoticeUrl(year)
   if (!sourceUrl) {
@@ -262,7 +286,7 @@ export async function refreshHolidaysForYear(year: number, options: RefreshOptio
       year,
       updated: false,
       skipped: false,
-      count: 0,
+      count: existing.length,
       message: `未发现 ${year} 年国务院节假日通知`,
     }
   }
@@ -274,14 +298,29 @@ export async function refreshHolidaysForYear(year: number, options: RefreshOptio
     throw new Error(`未能从 ${sourceUrl} 解析到 ${year} 年节假日数据`)
   }
 
-  const count = await upsertHolidays(holidays, sourceUrl)
+  const completeness = assessHolidayDataCompleteness(existing, holidays)
+  if (!options.force && completeness.complete) {
+    return {
+      year,
+      updated: false,
+      skipped: true,
+      count: existing.length,
+      sourceUrl,
+      message: `${year} 年节假日数据完整，无需自动修复`,
+    }
+  }
+
+  // 自动任务只补齐缺失日期，避免覆盖管理员对同日期做出的人工更正。
+  const holidaysToWrite = options.force ? holidays : completeness.missing
+  const count = await upsertHolidays(holidaysToWrite, sourceUrl, options.force === true)
+  const action = options.force ? '强制更新' : '自动补齐'
   return {
     year,
-    updated: true,
+    updated: count > 0,
     skipped: false,
     count,
     sourceUrl,
-    message: `已更新 ${year} 年节假日数据 ${count} 条`,
+    message: `已${action} ${year} 年节假日数据 ${count} 条`,
   }
 }
 

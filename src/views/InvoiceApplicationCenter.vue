@@ -635,7 +635,7 @@
               <strong>{{
                 selected.requiresTriplicate ? "盖章后三联单" : "盖章后材料"
               }}</strong>
-              <small>上传后将归档并显示在合同附件中</small>
+              <small>上传后将归档至合同详情的“开票申请材料”</small>
             </div>
             <el-upload
               :auto-upload="false"
@@ -1454,6 +1454,7 @@ async function deliverMaterials() {
         selected.value.contractId,
         sealedTriplicateFile.value,
         selected.value.requiresTriplicate ? "triplicate" : "other",
+        selected.value.id,
       );
       sealedTriplicateUploadedFileId.value = uploaded.fileId;
     }
@@ -1463,7 +1464,9 @@ async function deliverMaterials() {
       selected.value.version,
       sealedTriplicateUploadedFileId.value,
     );
-    ElMessage.success("盖章后材料已归档至合同附件，下一步由管理员开具发票");
+    ElMessage.success(
+      "盖章后材料已归档至合同详情的开票申请材料，下一步由管理员开具发票",
+    );
     detailVisible.value = false;
     requestContractDownloadBadgeRefresh();
     await loadApplications();

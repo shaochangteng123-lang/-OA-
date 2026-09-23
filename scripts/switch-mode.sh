@@ -5,7 +5,7 @@
 # ============================================
 # 使用方法：
 #   ./scripts/switch-mode.sh dev    # 启动或更新开发模式
-#   ./scripts/switch-mode.sh prod   # 启动或更新生产模式
+#   ./scripts/switch-mode.sh prod   # 启动或恢复当前固定生产版本
 # ============================================
 
 set -Eeuo pipefail
@@ -52,20 +52,13 @@ case "$MODE" in
         echo "🛑 停止服务: npm run docker:dev:stop"
         ;;
     prod)
-        echo "🔄 启动或更新生产模式..."
+        echo "🔄 启动或恢复当前固定生产版本..."
         echo "ℹ️  开发环境保持运行，数据库和上传目录继续隔离"
-        if ! command -v npm >/dev/null 2>&1; then
-            echo "❌ 未找到 npm（Node.js 包管理器），无法执行生产发布校验" >&2
-            exit 1
-        fi
-        echo "🧪 执行生产发布前类型和完整回归测试校验..."
-        (
-            cd "$PROJECT_ROOT"
-            npm run release:check
-        )
-        docker compose -f "$PROD_COMPOSE_FILE" up -d --build --wait --wait-timeout 180
+        echo "🔒 生产入口只使用配置中固定的已有镜像，不从当前工作区构建"
+        docker compose -f "$PROD_COMPOSE_FILE" up -d --no-build --wait --wait-timeout 180
         bash "$PROJECT_ROOT/scripts/reload-production-nginx.sh"
         echo "✅ 生产模式已启动！"
+        echo "🏗️  构建候选镜像: npm run docker:prod:build -- yulilog-prod-yulilog:<唯一标签>"
         echo "📝 查看日志: npm run docker:prod:logs"
         echo "🛑 停止服务: npm run docker:prod:stop"
         ;;

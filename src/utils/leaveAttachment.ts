@@ -4,6 +4,16 @@ export interface AttachmentRequiredLeaveType {
   requires_attachment: boolean
 }
 
+export const MAX_LEAVE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
+export function getLeaveAttachmentSizeError(
+  fileName: string,
+  fileSize: number | null | undefined
+): string | null {
+  if (typeof fileSize !== 'number' || fileSize <= MAX_LEAVE_ATTACHMENT_BYTES) return null
+  return `${fileName} 超过 5MB，单个请假附件不能超过 5MB`
+}
+
 export function getAttachmentRequiredLeaveTypes(
   selectedTypeCodes: string[],
   leaveTypes: AttachmentRequiredLeaveType[]

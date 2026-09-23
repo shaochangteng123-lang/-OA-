@@ -9,6 +9,14 @@ import { requireAuth, requireAdminOrGM } from '../middleware/auth.js'
 import { chat, isLLMConfigured } from '../services/llm.js'
 import { sendConvertedPdf, CONVERTIBLE_EXT } from '../utils/doc-preview.js'
 import { ensureDatedUploadDirectory } from '../utils/upload-date.js'
+import {
+  addDateOnlyDays,
+  getBusinessDate,
+  getDateOnlyDayOfWeek,
+  getMonthRangeFromMonth,
+  getWeekRangeFromDate,
+  toBusinessDateTime,
+} from '../utils/business-date.js'
 
 const router = Router()
 
@@ -22,12 +30,7 @@ export type EditPermission = 'free' | 'edit' | 'supplement' | 'locked'
  * - locked: 周报已形成，不可编辑
  */
 export async function getEditPermission(logDate: string, userId: string): Promise<EditPermission> {
-  // 计算 logDate 所属周的周一
-  const d = new Date(logDate + 'T00:00:00')
-  const dayOfWeek = d.getDay() || 7
-  const monday = new Date(d)
-  monday.setDate(d.getDate() - dayOfWeek + 1)
-  const weekStart = monday.toISOString().slice(0, 10)
+  const { weekStart, weekEnd } = getWeekRangeFromDate(logDate)
 
   // 检查该周周报是否已锁定
   const summary = await db.get<{ locked_at: string | null }>(
@@ -37,16 +40,12 @@ export async function getEditPermission(logDate: string, userId: string): Promis
   if (summary?.locked_at) return 'locked'
 
   // 该周周日 23:59:59 已过，视为锁定（即使定时任务未触发）
-  const sunday = new Date(monday)
-  sunday.setDate(monday.getDate() + 6)
-  sunday.setHours(23, 59, 59, 999)
+  const sunday = toBusinessDateTime(weekEnd, '23:59:59.999')
   if (new Date() > sunday) return 'locked'
 
   // 计算日历天数差
-  const today = new Date()
-  const todayStr = today.toISOString().slice(0, 10)
-  const todayDate = new Date(todayStr + 'T00:00:00')
-  const logDateObj = new Date(logDate + 'T00:00:00')
+  const todayDate = toBusinessDateTime(getBusinessDate(), '00:00:00')
+  const logDateObj = toBusinessDateTime(logDate, '00:00:00')
   const diffDays = Math.floor((todayDate.getTime() - logDateObj.getTime()) / (24 * 60 * 60 * 1000))
 
   if (diffDays <= 0) return 'free'
@@ -87,13 +86,13 @@ const uploadAttachment = multer({
 // 北京限号规则（每13周轮换一次）
 // 返回限行尾号字符串，不限行返回 '不限行'
 async function getTrafficRestriction(date: Date): Promise<string> {
-  const day = date.getDay()
+  const dateStr = getBusinessDate(date)
+  const day = getDateOnlyDayOfWeek(dateStr)
 
   // 周六日不限行
   if (day === 0 || day === 6) return '不限行'
 
   // 查询 holidays 表：当天是法定节假日则不限行，调休工作日则正常限行
-  const dateStr = date.toISOString().slice(0, 10)
   const holiday = await db.get<{ type: string }>('SELECT type FROM holidays WHERE date = ?', dateStr)
   if (holiday && holiday.type === 'holiday') return '不限行'
 
@@ -125,7 +124,7 @@ async function getTrafficRestriction(date: Date): Promise<string> {
 let weatherCache: { date: string; data: any } | null = null
 
 async function getWeatherInfo(): Promise<{ text: string; temp: string; icon: string } | null> {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getBusinessDate()
   if (weatherCache && weatherCache.date === today) return weatherCache.data
 
   try {
@@ -250,7 +249,7 @@ router.get('/info', requireAuth, async (_req, res) => {
 router.get('/today', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId!
-    const today = new Date().toISOString().slice(0, 10)
+    const today = getBusinessDate()
 
     let log = await db.get<any>(
       `SELECT * FROM daily_logs WHERE user_id = ? AND log_date = ?`,
@@ -308,7 +307,7 @@ router.post('/save', requireAuth, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { content, logDate } = req.body
-    const date = logDate || new Date().toISOString().slice(0, 10)
+    const date = logDate || getBusinessDate()
     const now = new Date().toISOString()
 
     const existing = await db.get<any>(
@@ -830,7 +829,7 @@ router.get('/comments/pending-tasks', requireAuth, async (req, res) => {
        ORDER BY c.due_date ASC, c.created_at ASC`,
       userId, ...managerIds,
     )
-    const today = new Date().toISOString().slice(0, 10)
+    const today = getBusinessDate()
     res.json({
       success: true,
       data: tasks.map(t => ({
@@ -1148,15 +1147,10 @@ router.get('/weekly-summary', requireAuth, async (req, res) => {
     const userId = req.session.userId!
     const { weekStart } = req.query as Record<string, string>
 
-    // 计算本周起止
-    const now = new Date()
-    const dayOfWeek = now.getDay() || 7
-    const monday = new Date(now)
-    monday.setDate(now.getDate() - dayOfWeek + 1)
-    const start = weekStart || `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`
-    const endDate = new Date(monday)
-    endDate.setDate(monday.getDate() + 6)
-    const end = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`
+    const requestedDate = weekStart || getBusinessDate()
+    const requestedWeek = getWeekRangeFromDate(requestedDate)
+    const start = requestedWeek.weekStart
+    const end = requestedWeek.weekEnd
 
     // 查找已有摘要
     const summary = await db.get<any>(
@@ -1206,12 +1200,8 @@ router.get('/weekly-summary', requireAuth, async (req, res) => {
 
     // 如果本周无周报（未指定 weekStart 参数），回退显示上周周报
     if (!weekStart && !summary) {
-      const lastMonday = new Date(monday)
-      lastMonday.setDate(monday.getDate() - 7)
-      const lastSunday = new Date(lastMonday)
-      lastSunday.setDate(lastMonday.getDate() + 6)
-      const lastStart = lastMonday.toISOString().slice(0, 10)
-      const lastEnd = lastSunday.toISOString().slice(0, 10)
+      const lastStart = addDateOnlyDays(start, -7)
+      const lastEnd = addDateOnlyDays(start, -1)
 
       const lastSummary = await db.get<any>(
         `SELECT * FROM weekly_summaries WHERE user_id = ? AND week_start = ?`,
@@ -1941,19 +1931,9 @@ router.get('/weekly-summary/:id/supplements', requireAuth, async (req, res) => {
 router.get('/team/weekly-summary', requireAdminOrGM, async (req, res) => {
   try {
     const { weekStart, weekEnd } = req.query as { weekStart?: string; weekEnd?: string }
-    const now = new Date()
-    const day = now.getDay() || 7
-    const monday = new Date(now)
-    monday.setDate(now.getDate() - day + 1)
-    const start = weekStart || `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`
-    let end: string
-    if (weekEnd) {
-      end = weekEnd
-    } else {
-      const sunday = new Date(monday)
-      sunday.setDate(monday.getDate() + 6)
-      end = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`
-    }
+    const defaultWeek = getWeekRangeFromDate(weekStart || getBusinessDate())
+    const start = weekStart || defaultWeek.weekStart
+    const end = weekEnd || defaultWeek.weekEnd
 
     const summaries = await db.all<any>(
       `SELECT ws.*, u.name AS user_name, u.position AS user_position
@@ -2083,35 +2063,38 @@ router.get('/team/attachments/:attachmentId/preview', requireAdminOrGM, async (r
 router.get('/team', requireAdminOrGM, async (req, res) => {
   try {
     const { date, month } = req.query as { date?: string; month?: string }
-    const today = new Date().toISOString().slice(0, 10)
+    const today = getBusinessDate()
     const targetDate = date || today
 
     // 计算月份范围
     const targetMonth = month || targetDate.slice(0, 7)
-    const monthStart = `${targetMonth}-01`
-    const monthEndDate = new Date(Number(targetMonth.slice(0, 4)), Number(targetMonth.slice(5, 7)), 0)
-    const monthEnd = monthEndDate.toISOString().slice(0, 10)
-    const daysInMonth = monthEndDate.getDate()
+    const { monthStart, monthEnd, daysInMonth } = getMonthRangeFromMonth(targetMonth)
+    const { weekStart, weekEnd } = getWeekRangeFromDate(targetDate)
+    const statsStart = monthStart < weekStart ? monthStart : weekStart
+    const statsEnd = monthEnd > weekEnd ? monthEnd : weekEnd
 
     // 获取所有活跃用户（排除访客、超级管理员和纯看板BOSS账号）
     const allUsers = await db.all<{ id: string; name: string; position: string | null; role: string }>(
-      `SELECT id, name, position, role
-       FROM users
-       WHERE role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
-       ORDER BY name`,
+      `SELECT u.id, u.name, u.position, u.role
+       FROM users u
+       LEFT JOIN employee_profiles ep ON ep.user_id = u.id
+       WHERE u.status = 'active'
+         AND u.role NOT IN ('guest', 'super_admin', 'chairman', 'boss')
+         AND COALESCE(ep.employment_status, 'active') <> 'resigned'
+       ORDER BY u.name`,
     )
+    const eligibleUserIds = new Set(allUsers.map(user => user.id))
 
-    // 查询该月的节假日/调休数据
+    // 同时覆盖日期面板月份与当前完整周，避免跨月周在边界处断裂。
     const holidays = await db.all<{ date: string; type: string; name: string }>(
       `SELECT date, type, name FROM holidays WHERE date >= ? AND date <= ?`,
-      monthStart, monthEnd,
+      statsStart, statsEnd,
     )
     const holidayMap = new Map(holidays.map(h => [h.date, { type: h.type, name: h.name }]))
 
     // 判断某天是否为工作日
     function isWorkingDay(dateStr: string): boolean {
-      const d = new Date(dateStr)
-      const dayOfWeek = d.getDay()
+      const dayOfWeek = getDateOnlyDayOfWeek(dateStr)
       const h = holidayMap.get(dateStr)
       // 调休工作日（周末但标记为 workday）
       if (h?.type === 'workday') return true
@@ -2122,18 +2105,29 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
       return true
     }
 
-    // 整月每天的提交人 user_id 集合
-    const monthSubmissions = await db.all<{ user_id: string; log_date: string }>(
-      `SELECT DISTINCT user_id, log_date FROM daily_log_submissions
-       WHERE log_date >= ? AND log_date <= ?`,
-      monthStart, monthEnd,
+    // “已填写”同时包括正式归档与非空草稿，按人员和日期去重。
+    const writtenLogs = await db.all<{ user_id: string; log_date: string }>(
+      `SELECT DISTINCT user_id, log_date
+       FROM (
+         SELECT user_id, log_date
+         FROM daily_log_submissions
+         WHERE log_date >= ? AND log_date <= ?
+         UNION
+         SELECT user_id, log_date
+         FROM daily_logs
+         WHERE log_date >= ? AND log_date <= ?
+           AND NULLIF(BTRIM(content), '') IS NOT NULL
+       ) written_logs`,
+      statsStart, statsEnd, statsStart, statsEnd,
     )
 
     // 构建整月每天的统计（非工作日 total 为 0，附带节假日/调休标签）
     const monthDays: { date: string; submitted: number; total: number; label: string | null }[] = []
     for (let i = 1; i <= daysInMonth; i++) {
       const ds = `${targetMonth}-${String(i).padStart(2, '0')}`
-      const daySubmitted = new Set(monthSubmissions.filter(s => s.log_date === ds).map(s => s.user_id))
+      const daySubmitted = new Set(
+        writtenLogs.filter(s => s.log_date === ds && eligibleUserIds.has(s.user_id)).map(s => s.user_id),
+      )
       const working = isWorkingDay(ds)
       const h = holidayMap.get(ds)
       let label: string | null = null
@@ -2142,13 +2136,27 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
       monthDays.push({ date: ds, submitted: daySubmitted.size, total: working ? allUsers.length : 0, label })
     }
 
+    const weekDays: { date: string; submitted: number; total: number; label: string | null }[] = []
+    for (let i = 0; i < 7; i++) {
+      const ds = addDateOnlyDays(weekStart, i)
+      const daySubmitted = new Set(
+        writtenLogs.filter(s => s.log_date === ds && eligibleUserIds.has(s.user_id)).map(s => s.user_id),
+      )
+      const working = isWorkingDay(ds)
+      const h = holidayMap.get(ds)
+      let label: string | null = null
+      if (h?.type === 'holiday') label = h.name
+      else if (h?.type === 'workday') label = '调休'
+      weekDays.push({ date: ds, submitted: daySubmitted.size, total: working ? allUsers.length : 0, label })
+    }
+
     // 查询整月有评论的日期和有未读回复的日期（管理员视角：别人回复了自己的评论）
     const currentUserId = req.session.userId!
     const commentDateRows = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
        WHERE s.log_date >= ? AND s.log_date <= ? AND c.withdrawn_at IS NULL`,
-      monthStart, monthEnd,
+      statsStart, statsEnd,
     )
     const unreadReplyDateRows = await db.all<{ log_date: string }>(
       `SELECT DISTINCT s.log_date FROM daily_log_comments c
@@ -2156,18 +2164,38 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
        INNER JOIN daily_log_submissions s ON c.submission_id = s.id
        WHERE parent.user_id = ? AND c.user_id != ? AND c.read_at IS NULL AND c.withdrawn_at IS NULL
        AND s.log_date >= ? AND s.log_date <= ?`,
-      currentUserId, currentUserId, monthStart, monthEnd,
+      currentUserId, currentUserId, statsStart, statsEnd,
     )
 
-    // 指定日期的提交详情
-    const submissions = await db.all<any>(
-      `SELECT s.id, s.user_id, s.content, s.submitted_at, u.name as user_name, u.position as user_position
-       FROM daily_log_submissions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.log_date = ?
-       ORDER BY s.submitted_at DESC`,
-      targetDate,
-    )
+    // 指定日期优先返回正式归档；尚未归档的非空草稿也实时展示。
+    const submissions = (await db.all<any>(
+      `WITH candidates AS (
+         SELECT s.id, s.user_id, s.content, s.submitted_at AS updated_at,
+                'archived'::text AS state, 0 AS source_priority
+         FROM daily_log_submissions s
+         WHERE s.log_date = ?
+         UNION ALL
+         SELECT d.id, d.user_id, d.content, d.updated_at,
+                'written'::text AS state, 1 AS source_priority
+         FROM daily_logs d
+         WHERE d.log_date = ?
+           AND NULLIF(BTRIM(d.content), '') IS NOT NULL
+       ), ranked AS (
+         SELECT candidates.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY user_id
+                  ORDER BY source_priority ASC, updated_at DESC
+                ) AS row_number
+         FROM candidates
+       )
+       SELECT ranked.id, ranked.user_id, ranked.content, ranked.updated_at,
+              ranked.state, u.name AS user_name, u.position AS user_position
+       FROM ranked
+       JOIN users u ON u.id = ranked.user_id
+       WHERE ranked.row_number = 1
+       ORDER BY ranked.updated_at DESC`,
+      targetDate, targetDate,
+    )).filter((submission: any) => eligibleUserIds.has(submission.user_id))
 
     // 非工作日不显示未提交人员
     const targetIsWorkingDay = isWorkingDay(targetDate)
@@ -2177,9 +2205,9 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
       : []
 
     // 获取评论数
-    const submissionIds = submissions.map((s: any) => s.id)
-    let commentCounts: Record<string, number> = {}
-    let unreadReplySubmissions: Set<string> = new Set()
+    const submissionIds = submissions.filter((s: any) => s.state === 'archived').map((s: any) => s.id)
+    const commentCounts: Record<string, number> = {}
+    const unreadReplySubmissions: Set<string> = new Set()
     if (submissionIds.length > 0) {
       const placeholders = submissionIds.map(() => '?').join(',')
       const counts = await db.all<{ submission_id: string; cnt: number }>(
@@ -2202,7 +2230,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
 
     // 获取当日提交用户的附件
     const submittedUserIdList = submissions.map((s: any) => s.user_id)
-    let attachmentsByUser: Record<string, any[]> = {}
+    const attachmentsByUser: Record<string, any[]> = {}
     if (submittedUserIdList.length > 0) {
       const userPlaceholders = submittedUserIdList.map(() => '?').join(',')
       const logs = await db.all<{ id: string; user_id: string }>(
@@ -2236,7 +2264,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
     }
 
     // 获取补充记录
-    let supplementsBySubmission: Record<string, any[]> = {}
+    const supplementsBySubmission: Record<string, any[]> = {}
     if (submissionIds.length > 0) {
       const placeholders2 = submissionIds.map(() => '?').join(',')
       const supplements = await db.all<any>(
@@ -2263,6 +2291,7 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
         monthStart,
         monthEnd,
         monthDays,
+        weekDays,
         commentDates: commentDateRows.map(r => r.log_date),
         unreadReplyDates: unreadReplyDateRows.map(r => r.log_date),
         submissions: submissions.map((s: any) => ({
@@ -2271,7 +2300,8 @@ router.get('/team', requireAdminOrGM, async (req, res) => {
           userName: s.user_name,
           userPosition: s.user_position,
           content: s.content,
-          submittedAt: s.submitted_at,
+          submittedAt: s.updated_at,
+          state: s.state,
           commentCount: commentCounts[s.id] || 0,
           hasUnreadReply: unreadReplySubmissions.has(s.id),
           attachments: attachmentsByUser[s.user_id] || [],

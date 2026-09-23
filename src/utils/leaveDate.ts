@@ -24,8 +24,22 @@ export function isPastLeaveDateDisabled(time: Date, today = new Date()): boolean
   return startOfLocalDay(time) < startOfLocalDay(today)
 }
 
+export function isFutureLeaveDateDisabled(time: Date, today = new Date()): boolean {
+  return startOfLocalDay(time) > startOfLocalDay(today)
+}
+
 export function isLeaveEndDateDisabled(time: Date, startDate: string, today = new Date()): boolean {
   const todayStart = startOfLocalDay(today)
   const startTimestamp = parseLocalDate(startDate)
   return startOfLocalDay(time) < Math.max(todayStart, startTimestamp ?? todayStart)
+}
+
+export function isReturnSupplementEndDateDisabled(
+  time: Date,
+  startDate: string,
+  today = new Date()
+): boolean {
+  const dayStart = startOfLocalDay(time)
+  const startTimestamp = parseLocalDate(startDate)
+  return dayStart > startOfLocalDay(today) || (startTimestamp !== null && dayStart < startTimestamp)
 }

@@ -98,11 +98,13 @@ docker exec -i yulilog-worklog-postgres pg_restore \
 6. 联网构建并启动生产与开发环境
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+PROD_RESTORE_IMAGE=yulilog-prod-yulilog:restore-<恢复日期>
+ALLOW_DIRTY_PRODUCTION_BUILD=1 npm run docker:prod:build -- "$PROD_RESTORE_IMAGE"
+YULILOG_PROD_IMAGE="$PROD_RESTORE_IMAGE" npm run docker:prod
 docker compose up -d --build
 ```
 
-首次构建会下载基础镜像、系统包、Node.js（服务端运行环境）依赖、Python（编程语言）依赖及 OCR（文字识别）模型，所需时间取决于网络速度。不同处理器架构的新电脑会自动下载并构建适合本机架构的依赖。
+换机备份可能包含尚未提交但已通过摘要校验的现场文件，因此恢复构建需要显式设置 `ALLOW_DIRTY_PRODUCTION_BUILD=1`；日常生产构建不得使用该开关。首次构建会下载基础镜像、系统包、Node.js（服务端运行环境）依赖、Python（编程语言）依赖及 OCR（文字识别）模型，所需时间取决于网络速度。不同处理器架构的新电脑会自动下载并构建适合本机架构的依赖。
 
 7. 检查恢复结果
 

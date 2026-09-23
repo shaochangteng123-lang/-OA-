@@ -383,9 +383,14 @@ describe("开票申请前端流程", () => {
     expect(centerSource).toContain("sealedTriplicateFile");
     expect(centerSource).toContain("uploadContractFile(");
     expect(centerSource).toContain('"triplicate"');
+    expect(centerSource).toContain("selected.value.id");
     expect(centerSource).toContain("uploaded.fileId");
     expect(centerSource).toContain(':disabled="!sealedTriplicateFile"');
+    expect(centerSource).toContain("上传后将归档至合同详情的“开票申请材料”");
     expect(centerSource).toContain(
+      "盖章后材料已归档至合同详情的开票申请材料，下一步由管理员开具发票",
+    );
+    expect(centerSource).not.toContain(
       "盖章后材料已归档至合同附件，下一步由管理员开具发票",
     );
     expect(centerSource).toContain("确认已开具并上传正式发票");

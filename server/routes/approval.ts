@@ -13,6 +13,7 @@ import { validateFilePath } from '../utils/file-validation.js'
 import type { ApprovalInstance, ApprovalRecord } from '../types/database.js'
 import type { PoolClient } from 'pg'
 import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
+import { getUnreadLeaveCcCount } from '../services/leaveCcNotice.js'
 
 const router = Router()
 
@@ -2599,11 +2600,22 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       FROM probation_confirmations pc
       JOIN employee_profiles ep ON ep.id = pc.employee_id
       LEFT JOIN users employee_user ON employee_user.id = ep.user_id
+      LEFT JOIN users supervisor ON supervisor.id = pc.supervisor_id
       WHERE pc.status = 'submitted'
         AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
         AND COALESCE(ep.user_id, '') <> ?
         AND (
-          (pc.review_stage = 'supervisor' AND pc.supervisor_id = ?)
+          (
+            pc.review_stage = 'supervisor'
+            AND (
+              pc.supervisor_id = ?
+              OR (
+                ? = 'super_admin'
+                AND supervisor.role = 'general_manager'
+                AND supervisor.status = 'active'
+              )
+            )
+          )
           OR (
             pc.review_stage = 'hr'
             AND (
@@ -2624,7 +2636,15 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         )
     `,
       )
-      .get(userId, userId, userId, user.role, userId, user.role)) as {
+      .get(
+        userId,
+        userId,
+        user.role,
+        userId,
+        user.role,
+        userId,
+        user.role,
+      )) as {
       count: number
     }
     data.probationSignaturePending = Number(probationSignaturePending.count)
@@ -2656,7 +2676,7 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
         .get()) as { count: number }
       data.approvalPending = approvalPending.count
 
-      // 管理员只处理人事部意见。
+      // 普通管理员只处理人事部意见；超级管理员合并活动总经理名下的主管任务与本人原人事部任务。
       data.probationPending = data.probationSignaturePending
 
       const probationDueSoon = (await db
@@ -2747,18 +2767,48 @@ router.get('/pending-counts', requireAuth, async (req, res) => {
       data.probationPending = data.probationSignaturePending
     }
 
-    // 请假待办只属于申请单指定的总经理或董事长，管理员仅接收抄送记录。
+    // 总经理和董事长只统计分配给本人的申请；超级管理员接管活动总经理名下的非总经理申请。
+    // 普通管理员仍仅接收抄送记录，任何角色均不统计本人申请。
     data.leaveApprovalPending = 0
     if (user.role === 'general_manager' || user.role === 'chairman') {
       const leavePending = (await db
         .prepare(
           `
         SELECT COUNT(*) as count FROM leave_requests
-        WHERE status = 'pending' AND approver_id = ?
+        WHERE status = 'pending'
+          AND approver_id = ?
+          AND user_id <> ?
+      `,
+        )
+        .get(userId, userId)) as { count: number }
+      data.leaveApprovalPending = Number(leavePending.count)
+    } else if (user.role === 'super_admin') {
+      const leavePending = (await db
+        .prepare(
+          `
+        SELECT COUNT(*) as count
+        FROM leave_requests lr
+        INNER JOIN users applicant ON applicant.id = lr.user_id
+        WHERE lr.status = 'pending'
+          AND lr.user_id <> ?
+          AND applicant.role <> 'general_manager'
+          AND EXISTS (
+            SELECT 1
+            FROM users assigned_manager
+            WHERE assigned_manager.id = lr.approver_id
+              AND assigned_manager.role = 'general_manager'
+              AND assigned_manager.status = 'active'
+          )
       `,
         )
         .get(userId)) as { count: number }
-      data.leaveApprovalPending = leavePending.count
+      data.leaveApprovalPending = Number(leavePending.count)
+    }
+
+    // 抄送提醒按接收人独立统计，不属于审批待办，也不向其他管理角色继承开放。
+    data.leaveCcUnread = 0
+    if (user.role === 'admin' || user.role === 'super_admin') {
+      data.leaveCcUnread = await getUnreadLeaveCcCount(userId!)
     }
 
     // 所有用户：本人尚未查看的最新请假驳回记录。

@@ -1,10 +1,17 @@
 import { Router } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import multer from 'multer'
 import fs from 'fs'
 import path from 'path'
 import type { PoolClient } from 'pg'
 import { db } from '../db/index.js'
-import { requireAuth, requireAdmin, requireLeaveApprover } from '../middleware/auth.js'
+import {
+  requireAuth,
+  requireAdmin,
+  requireLeaveOperator,
+  requireLeaveStatisticsViewer,
+  requireExactRole,
+} from '../middleware/auth.js'
 import { nanoid } from 'nanoid'
 import {
   calculateLeaveDays,
@@ -19,15 +26,41 @@ import {
 } from '../services/leaveCalculator.js'
 import { ensureDatedUploadDirectory, toStoredUploadPath } from '../utils/upload-date.js'
 import { parsePagination } from '../utils/pagination.js'
-import { validateLeavePeriod } from '../utils/leave.js'
-import { addLeaveCalendarDays } from '../utils/leave-period.js'
+import {
+  parseRemovedLeaveAttachmentIds,
+  resolveStandaloneLeaveApplicationKind,
+  validateLeavePeriod,
+  validateReturnSupplementPeriod,
+} from '../utils/leave.js'
+import {
+  addLeaveCalendarDays,
+  type LeaveScheduleDay,
+} from '../utils/leave-period.js'
+import { resolveLeaveTypeBalancePolicy } from '../utils/leave-type-policy.js'
 import {
   hardDeleteLeaveDraftChain,
   LeaveDraftDeleteError,
 } from '../services/leaveDraftCleanup.js'
 import { enrichLeaveRequestsWithSchedule } from '../services/leaveSchedule.js'
+import {
+  getLeaveCcNotices,
+  isLeaveCcRecipientRole,
+  LEAVE_CC_RECIPIENT_ROLES,
+  markLeaveCcNoticeRead,
+  notifyLeaveCcRecipients,
+} from '../services/leaveCcNotice.js'
+import {
+  buildLeaveEmployeeStatistics,
+  expandLeaveEmployeeStatisticsMonthlyRequestRows,
+  expandLeaveEmployeeStatisticsRequestRows,
+  type LeaveEmployeeStatisticsBalanceRow,
+  type LeaveEmployeeStatisticsEmployeeRow,
+  type LeaveEmployeeStatisticsSourceRow,
+} from '../services/leaveEmployeeStatistics.js'
 import { isSystemAdminEquivalentRole } from '../utils/boss-role.js'
 import {
+  canAccessGeneralManagerLeaveWorkspace,
+  canOperateLeaveRequest,
   getLeaveApproverUnavailableMessage,
   getRequiredLeaveApproverRole,
   isLeaveApproverRole,
@@ -49,17 +82,6 @@ const NO_REASON_LEAVE_TYPES = [
   'maternity',
   'paternity',
 ]
-const FIXED_BALANCE_LEAVE_TYPES = new Set([
-  'annual',
-  'personal',
-  'sick',
-  'bereavement',
-  'compensatory',
-  'marriage',
-  'maternity',
-  'paternity',
-])
-
 type LeaveApplicationKind = 'normal' | 'combined' | 'extension' | 'supplement'
 
 interface LeaveTypeConfigRow {
@@ -118,6 +140,46 @@ function removeUploadedFiles(files: Express.Multer.File[]) {
       if (fs.existsSync(file.path)) fs.unlinkSync(file.path)
     } catch {
       // 清理临时文件失败时不覆盖原始业务错误。
+    }
+  }
+}
+
+function resolveStoredLeaveAttachmentPath(storedPath: string): string | null {
+  const workspaceRoot = path.resolve(process.cwd())
+  const attachmentRoot = path.resolve(workspaceRoot, 'uploads', 'leave-attachments')
+  const normalizedPath = storedPath.replace(/^[/\\]+/, '')
+  const fullPath = path.resolve(workspaceRoot, normalizedPath)
+  return fullPath.startsWith(`${attachmentRoot}${path.sep}`) ? fullPath : null
+}
+
+async function removeUnreferencedLeaveAttachmentFiles(storedPaths: string[]) {
+  for (const storedPath of new Set(storedPaths)) {
+    try {
+      const normalizedStoredPath = storedPath.replace(/^[/\\]+/, '')
+      const reference = await db
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM leave_attachments
+           WHERE file_path IN (?, ?, ?)`
+        )
+        .get<{ count: number }>(storedPath, normalizedStoredPath, `/${normalizedStoredPath}`)
+      if (Number(reference?.count || 0) > 0) continue
+
+      const fullPath = resolveStoredLeaveAttachmentPath(storedPath)
+      if (!fullPath) {
+        console.error('请假附件物理删除已跳过：文件路径不在受控目录内')
+        continue
+      }
+      try {
+        await fs.promises.unlink(fullPath)
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          console.error('请假附件物理删除失败:', path.basename(fullPath))
+        }
+      }
+    } catch {
+      // 数据库引用检查失败时保留物理文件，避免误删仍被引用的历史附件。
+      console.error('请假附件引用检查失败，已保留物理文件')
     }
   }
 }
@@ -318,6 +380,9 @@ async function settleLeaveBalances(
 
 // ==================== 文件上传配置 ====================
 
+const MAX_LEAVE_ATTACHMENT_FILES = 5
+const MAX_LEAVE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+
 const uploadLeaveAttachment = multer({
   storage: multer.diskStorage({
     destination: (req, _file, cb) => {
@@ -330,16 +395,51 @@ const uploadLeaveAttachment = multer({
       cb(null, `${nanoid()}-${Date.now()}${ext}`)
     },
   }),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: {
+    files: MAX_LEAVE_ATTACHMENT_FILES,
+    fileSize: MAX_LEAVE_ATTACHMENT_BYTES,
+  },
   fileFilter: (_req, file, cb) => {
     const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf']
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true)
     } else {
-      cb(new Error('只支持 JPG、PNG、PDF 格式的文件'))
+      cb(new Error('只支持 JPG、PNG、WEBP、PDF 格式的文件'))
     }
   },
 })
+
+const leaveAttachmentUpload = uploadLeaveAttachment.array(
+  'attachments',
+  MAX_LEAVE_ATTACHMENT_FILES
+)
+
+function handleLeaveAttachmentUpload(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  leaveAttachmentUpload(req, res, error => {
+    if (!error) return next()
+    removeUploadedFiles((req.files as Express.Multer.File[]) || [])
+
+    if (error instanceof multer.MulterError) {
+      const isFileTooLarge = error.code === 'LIMIT_FILE_SIZE'
+      return res.status(isFileTooLarge ? 413 : 400).json({
+        success: false,
+        message: isFileTooLarge
+          ? '单个请假附件不能超过 5MB'
+          : '请假附件数量超过限制，最多上传 5 个文件',
+        code: error.code,
+      })
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: error instanceof Error ? error.message : '请假附件上传失败',
+    })
+  })
+}
 
 // ==================== 工具函数 ====================
 
@@ -513,6 +613,8 @@ async function createPendingLeaveRequest(
       input.now,
     ]
   )
+
+  await notifyLeaveCcRecipients(client, input.requestId, 'submit', input.userId, input.now)
 
   return { id: input.requestId, requestNo }
 }
@@ -1133,13 +1235,19 @@ router.get('/balances', requireAuth, async (req, res) => {
 
 // ==================== 申请管理 ====================
 
-// 提交请假申请（支持附件上传）
-router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments', 5), async (req, res) => {
+// 提交普通请假或单一返岗补假（支持附件上传）
+router.post('/requests', requireAuth, handleLeaveAttachmentUpload, async (req, res) => {
   const uploadedFiles = (req.files as Express.Multer.File[]) || []
   try {
     const userId = req.session.userId!
     const { leaveTypeCode, startDate, startHalf, endDate, endHalf, reason } = req.body
     const normalizedReason = String(reason || '').trim()
+    const applicationKind = resolveStandaloneLeaveApplicationKind(req.body.applicationKind, 'single')
+    if (!applicationKind) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: '申请类型无效' })
+    }
+    const isReturnSupplement = applicationKind === 'supplement'
 
     // 基础校验
     const requiresReason = !NO_REASON_LEAVE_TYPES.includes(leaveTypeCode)
@@ -1159,10 +1267,23 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
       return res.status(400).json({ success: false, message: '请假事由不能超过500个字符' })
     }
 
-    const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+    const periodError = validateLeavePeriod(
+      startDate,
+      startHalf,
+      endDate,
+      endHalf,
+      isReturnSupplement ? '0000-01-01' : undefined
+    )
     if (periodError) {
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: periodError })
+    }
+    const returnSupplementError = isReturnSupplement
+      ? validateReturnSupplementPeriod(startDate, endDate)
+      : null
+    if (returnSupplementError) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: returnSupplementError })
     }
 
     // 获取假期类型配置
@@ -1264,8 +1385,8 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
           id, request_no, user_id, applicant_name, applicant_department,
           leave_type_code, leave_type_name, start_date, start_half, end_date, end_half,
           total_days, balance_allocations_json, balance_reserved, reason, status, approver_id, approver_name,
-          submitted_at, created_at, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18,$19,$20)`,
+          submitted_at, application_kind, created_at, updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'pending',$16,$17,$18,$19,$20,$21)`,
         [
           requestId,
           requestNo,
@@ -1285,6 +1406,7 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
           approver.id,
           approver.name,
           now,
+          applicationKind,
           now,
           now,
         ]
@@ -1315,11 +1437,12 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
          VALUES ($1,$2,$3,$4,'submit',null,$5)`,
         [nanoid(), requestId, userId, userInfo.name, now]
       )
+      await notifyLeaveCcRecipients(client, requestId, 'submit', userId, now)
     })
 
     res.json({
       success: true,
-      message: '请假申请已提交，等待审批',
+      message: isReturnSupplement ? '返岗补假申请已提交，等待审批' : '请假申请已提交，等待审批',
       data: { id: requestId, requestNo },
     })
   } catch (error) {
@@ -1332,11 +1455,11 @@ router.post('/requests', requireAuth, uploadLeaveAttachment.array('attachments',
   }
 })
 
-// 提交组合请假：按时间顺序拆成多条独立申请并在同一事务中提交
+// 提交组合请假或组合返岗补假：按时间顺序拆成多条独立申请并在同一事务中提交
 router.post(
   '/requests/combined',
   requireAuth,
-  uploadLeaveAttachment.array('attachments', 5),
+  handleLeaveAttachmentUpload,
   async (req, res) => {
     const uploadedFiles = (req.files as Express.Multer.File[]) || []
     const createdPaths: string[] = []
@@ -1344,6 +1467,12 @@ router.post(
     try {
       const userId = req.session.userId!
       const { startDate, startHalf, endDate, endHalf } = req.body
+      const applicationKind = resolveStandaloneLeaveApplicationKind(req.body.applicationKind, 'combined')
+      if (!applicationKind) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: '申请类型无效' })
+      }
+      const isReturnSupplement = applicationKind === 'supplement'
       let rawSegments: unknown
       try {
         rawSegments = JSON.parse(String(req.body.segments || '[]'))
@@ -1364,10 +1493,23 @@ router.post(
         })
       }
 
-      const periodError = validateLeavePeriod(startDate, startHalf, endDate, endHalf)
+      const periodError = validateLeavePeriod(
+        startDate,
+        startHalf,
+        endDate,
+        endHalf,
+        isReturnSupplement ? '0000-01-01' : undefined
+      )
       if (periodError) {
         cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
         return res.status(400).json({ success: false, message: periodError })
+      }
+      const returnSupplementError = isReturnSupplement
+        ? validateReturnSupplementPeriod(startDate, endDate)
+        : null
+      if (returnSupplementError) {
+        cleanupLeaveUploadPaths(uploadedFiles, createdPaths)
+        return res.status(400).json({ success: false, message: returnSupplementError })
       }
 
       const segments = rawSegments.map((item: any) => ({
@@ -1501,9 +1643,9 @@ router.post(
             allocations: allocations[index],
             reason: segment.reason,
             approver,
-            applicationKind: 'combined',
+            applicationKind,
             combinationGroupId,
-            logComment: `组合请假第 ${index + 1}/${segments.length} 段`,
+            logComment: `${isReturnSupplement ? '组合返岗补假' : '组合请假'}第 ${index + 1}/${segments.length} 段`,
             now,
           })
           createdRequests.push(created)
@@ -1521,7 +1663,7 @@ router.post(
 
       res.json({
         success: true,
-        message: `组合请假已拆分为 ${createdRequests.length} 条申请`,
+        message: `${isReturnSupplement ? '组合返岗补假' : '组合请假'}已拆分为 ${createdRequests.length} 条申请`,
         data: { combinationGroupId, requests: createdRequests },
       })
     } catch (error) {
@@ -1746,7 +1888,7 @@ router.get('/requests/:id/related-context', requireAuth, async (req, res) => {
 router.post(
   '/requests/:id/related',
   requireAuth,
-  uploadLeaveAttachment.array('attachments', 5),
+  handleLeaveAttachmentUpload,
   async (req, res) => {
     const uploadedFiles = (req.files as Express.Multer.File[]) || []
     const createdPaths: string[] = []
@@ -2090,11 +2232,10 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
     const isAdmin =
       userInfo?.role === 'admin' ||
       isSystemAdminEquivalentRole(userInfo?.role)
-    const isCcRecipient =
-      userInfo?.role === 'admin' ||
-      userInfo?.role === 'super_admin'
+    const isCcRecipient = isLeaveCcRecipientRole(userInfo?.role)
     const canReviewAssigned = isLeaveApproverRole(userInfo?.role)
 
+    // 申请内容与通知版本必须同一查询读取，避免旧详情误清并发审批的新提醒。
     const requestChain = await db.prepare(`
       WITH RECURSIVE ancestors AS (
         SELECT * FROM leave_requests WHERE id = ?
@@ -2114,6 +2255,8 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
         INNER JOIN request_chain parent ON child.original_id = parent.id
       )
       SELECT rc.*, au.name as approver_real_name,
+             (cc_notice.revision IS NOT NULL AND cc_notice.read_at IS NULL) AS cc_notice_unread,
+             cc_notice.revision AS cc_notice_revision,
              CASE au.role
                WHEN 'chairman' THEN '董事长'
                WHEN 'general_manager' THEN '总经理'
@@ -2128,10 +2271,25 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
                )
              END as approver_position
       FROM request_chain rc
+      LEFT JOIN leave_cc_notifications cc_notice
+        ON cc_notice.request_id = rc.id
+       AND cc_notice.recipient_id = ?
+       AND rc.user_id <> cc_notice.recipient_id
+       AND rc.status <> 'draft'
+       AND EXISTS (
+         SELECT 1 FROM users cc_recipient
+         WHERE cc_recipient.id = cc_notice.recipient_id
+           AND cc_recipient.role IN ('admin', 'super_admin')
+           AND cc_recipient.status = 'active'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM leave_requests next_version
+         WHERE next_version.original_id = rc.id
+       )
       LEFT JOIN users au ON rc.approver_id = au.id
       LEFT JOIN employee_profiles aep ON aep.user_id = au.id
       ORDER BY rc.version ASC, rc.created_at ASC
-    `).all<Record<string, any>>(id)
+    `).all<Record<string, any>>(id, userId)
 
     if (requestChain.length === 0) {
       return res.status(404).json({ success: false, message: '申请不存在或无权查看' })
@@ -2197,7 +2355,7 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
           .prepare(
             `SELECT id, request_no, leave_type_name, start_date, start_half,
                     end_date, end_half, total_days, reason, status,
-                    application_kind, combination_group_id
+                    application_kind, combination_group_id, parent_request_id
              FROM leave_requests
              WHERE id = ?`
           )
@@ -2207,7 +2365,7 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
       .prepare(
         `SELECT lr.id, lr.request_no, lr.leave_type_name, lr.start_date, lr.start_half,
                 lr.end_date, lr.end_half, lr.total_days, lr.reason, lr.status,
-                lr.application_kind, lr.combination_group_id
+                lr.application_kind, lr.combination_group_id, lr.parent_request_id
          FROM leave_requests lr
          WHERE lr.parent_request_id = ?
            AND NOT EXISTS (
@@ -2224,7 +2382,7 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
           .prepare(
             `SELECT lr.id, lr.request_no, lr.leave_type_name, lr.start_date, lr.start_half,
                     lr.end_date, lr.end_half, lr.total_days, lr.reason, lr.status,
-                    lr.application_kind, lr.combination_group_id
+                    lr.application_kind, lr.combination_group_id, lr.parent_request_id
              FROM leave_requests lr
              WHERE lr.combination_group_id = ?
                AND NOT EXISTS (
@@ -2246,6 +2404,8 @@ router.get('/requests/:id', requireAuth, async (req, res) => {
         version_count: requestChain.length,
         cc_recipient_role: isCcRecipient && userInfo ? getRoleDisplayName(userInfo.role) : null,
         cc_recipient_name: isCcRecipient ? userInfo?.name || null : null,
+        cc_notice_unread: isCcRecipient && Boolean(request.cc_notice_unread),
+        cc_notice_revision: isCcRecipient ? request.cc_notice_revision ?? null : null,
         attachments,
         logs,
         parent_request: parentRequest,
@@ -2410,14 +2570,19 @@ router.delete('/requests/:id', requireAuth, async (req, res) => {
   }
 })
 
-// 草稿重新提交时沿用当前记录；驳回后重新提交时创建新版本
-router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('attachments', 5), async (req, res) => {
+// 草稿提交时沿用当前记录；驳回后重新提交时创建新版本
+router.post('/requests/:id/resubmit', requireAuth, handleLeaveAttachmentUpload, async (req, res) => {
   const uploadedFiles = (req.files as Express.Multer.File[]) || []
   try {
     const userId = req.session.userId!
     const { id } = req.params
     const { startDate, startHalf, endDate, endHalf, reason } = req.body
     const normalizedReason = String(reason || '').trim()
+    const removedAttachmentIds = parseRemovedLeaveAttachmentIds(req.body.removedAttachmentIds)
+    if (removedAttachmentIds === null) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: '待删除附件编号格式无效' })
+    }
 
     const originalRequest = await db
       .prepare(
@@ -2444,7 +2609,14 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
     }
     if (!['draft', 'rejected'].includes(originalRequest.status)) {
       removeUploadedFiles(uploadedFiles)
-      return res.status(400).json({ success: false, message: '只有草稿或被驳回的申请才可重新提交' })
+      return res.status(400).json({
+        success: false,
+        message: '只有草稿可提交申请，或被驳回的申请可重新提交',
+      })
+    }
+    if (removedAttachmentIds.length > 0 && originalRequest.status !== 'draft') {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(409).json({ success: false, message: '只有当前草稿附件可以删除' })
     }
 
     const periodError = validateLeavePeriod(
@@ -2457,6 +2629,16 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
     if (periodError) {
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({ success: false, message: periodError })
+    }
+    if (
+      originalRequest.application_kind === 'supplement' &&
+      !originalRequest.parent_request_id
+    ) {
+      const returnSupplementError = validateReturnSupplementPeriod(startDate, endDate)
+      if (returnSupplementError) {
+        removeUploadedFiles(uploadedFiles)
+        return res.status(400).json({ success: false, message: returnSupplementError })
+      }
     }
     if (
       (originalRequest.application_kind === 'extension' ||
@@ -2524,7 +2706,7 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
       })
     }
 
-    const existingAttachment = await db.prepare(
+    const existingAttachments = await db.prepare(
       `WITH RECURSIVE ancestors AS (
          SELECT id, original_id FROM leave_requests WHERE id = ?
          UNION ALL
@@ -2532,13 +2714,26 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
          FROM leave_requests parent
          INNER JOIN ancestors child ON child.original_id = parent.id
        )
-       SELECT EXISTS(
-         SELECT 1 FROM leave_attachments la
-         INNER JOIN ancestors a ON a.id = la.leave_request_id
-       ) AS has_attachment`
-    ).get<{ has_attachment: boolean }>(id)
+       SELECT la.id, la.leave_request_id
+       FROM leave_attachments la
+       INNER JOIN ancestors a ON a.id = la.leave_request_id`
+    ).all<{ id: string; leave_request_id: string }>(id)
 
-    if (typeConfig.requires_attachment && uploadedFiles.length === 0 && !existingAttachment?.has_attachment) {
+    const currentAttachmentIds = new Set(
+      existingAttachments
+        .filter(attachment => attachment.leave_request_id === id)
+        .map(attachment => attachment.id)
+    )
+    if (removedAttachmentIds.some(attachmentId => !currentAttachmentIds.has(attachmentId))) {
+      removeUploadedFiles(uploadedFiles)
+      return res.status(400).json({ success: false, message: '待删除附件不属于当前草稿' })
+    }
+    const removedAttachmentIdSet = new Set(removedAttachmentIds)
+    const hasRemainingAttachment = existingAttachments.some(
+      attachment => !removedAttachmentIdSet.has(attachment.id)
+    )
+
+    if (typeConfig.requires_attachment && uploadedFiles.length === 0 && !hasRemainingAttachment) {
       removeUploadedFiles(uploadedFiles)
       return res.status(400).json({
         success: false,
@@ -2568,6 +2763,7 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
 
     let resultRequestId = originalRequest.status === 'draft' ? id : nanoid()
     let resultRequestNo = originalRequest.status === 'draft' ? originalRequest.request_no : ''
+    let removedAttachmentPaths: string[] = []
     const now = new Date().toISOString()
 
     await db.transaction(async (client) => {
@@ -2600,6 +2796,32 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
         if (existingVersion.rows[0]) {
           throw new LeaveOperationError('该申请已重新提交，请勿重复操作', 409)
         }
+      }
+
+      if (removedAttachmentIds.length > 0) {
+        if (lockedRequest.status !== 'draft') {
+          throw new LeaveOperationError('只有当前草稿附件可以删除', 409)
+        }
+        const removalCandidates = await client.query<{ id: string; file_path: string }>(
+          `SELECT id, file_path
+           FROM leave_attachments
+           WHERE leave_request_id = $1
+             AND id = ANY($2::text[])
+           ORDER BY id
+           FOR UPDATE`,
+          [id, removedAttachmentIds]
+        )
+        if (removalCandidates.rows.length !== removedAttachmentIds.length) {
+          throw new LeaveOperationError('待删除附件状态已变化，请刷新后重试', 409)
+        }
+        const deletedAttachments = await client.query<{ file_path: string }>(
+          `DELETE FROM leave_attachments
+           WHERE leave_request_id = $1
+             AND id = ANY($2::text[])
+           RETURNING file_path`,
+          [id, removedAttachmentIds]
+        )
+        removedAttachmentPaths = deletedAttachments.rows.map(item => item.file_path)
       }
 
       if (leaveTypeCode === 'marriage') {
@@ -2706,14 +2928,35 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
 
       await client.query(
         `INSERT INTO leave_approval_logs (id, leave_request_id, operator_id, operator_name, action, comment, created_at)
-         VALUES ($1,$2,$3,$4,'resubmit','重新提交',$5)`,
-        [nanoid(), resultRequestId, userId, userInfo?.name || '', now]
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          nanoid(),
+          resultRequestId,
+          userId,
+          userInfo?.name || '',
+          lockedRequest.status === 'draft' ? 'submit' : 'resubmit',
+          removedAttachmentIds.length > 0
+            ? `删除当前草稿附件 ${removedAttachmentIds.length} 个`
+            : lockedRequest.status === 'draft'
+              ? null
+              : '重新提交',
+          now,
+        ]
+      )
+      await notifyLeaveCcRecipients(
+        client,
+        resultRequestId,
+        lockedRequest.status === 'draft' ? 'submit' : 'resubmit',
+        userId,
+        now
       )
     })
 
+    await removeUnreferencedLeaveAttachmentFiles(removedAttachmentPaths)
+
     res.json({
       success: true,
-      message: '已重新提交申请',
+      message: originalRequest.status === 'draft' ? '请假申请已提交' : '已重新提交申请',
       data: { id: resultRequestId, requestNo: resultRequestNo },
     })
   } catch (error) {
@@ -2729,9 +2972,21 @@ router.post('/requests/:id/resubmit', requireAuth, uploadLeaveAttachment.array('
 // ==================== 审批端接口 ====================
 
 // 待我审批的申请列表
-router.get('/pending', requireLeaveApprover, async (req, res) => {
+router.get('/pending', requireLeaveOperator, async (req, res) => {
   try {
     const userId = req.session.userId!
+    const operatorRole = req.session.user?.role
+    const pendingScopeSql = operatorRole === 'super_admin'
+      ? `EXISTS (
+           SELECT 1
+           FROM users assigned_manager
+           WHERE assigned_manager.id = lr.approver_id
+             AND assigned_manager.role = 'general_manager'
+             AND assigned_manager.status = 'active'
+         )
+         AND u.role <> 'general_manager'`
+      : 'lr.approver_id = ?'
+    const pendingScopeParams = operatorRole === 'super_admin' ? [] : [userId]
     const list = await db
       .prepare(
         `
@@ -2747,11 +3002,16 @@ router.get('/pending', requireLeaveApprover, async (req, res) => {
       FROM leave_requests lr
       LEFT JOIN users u ON lr.user_id = u.id
       LEFT JOIN leave_requests parent_request ON parent_request.id = lr.parent_request_id
-      WHERE lr.approver_id = ? AND lr.status = 'pending' AND lr.user_id <> ?
+      WHERE lr.status = 'pending'
+        AND lr.user_id <> ?
+        AND ${pendingScopeSql}
       ORDER BY lr.submitted_at ASC
     `
       )
-      .all<BalanceRequestData & { status: string } & Record<string, any>>(userId, userId)
+      .all<BalanceRequestData & { status: string } & Record<string, any>>(
+        userId,
+        ...pendingScopeParams,
+      )
     const listWithSchedule = await enrichLeaveRequestsWithSchedule(list)
     res.json({ success: true, data: listWithSchedule })
   } catch (error) {
@@ -2760,30 +3020,117 @@ router.get('/pending', requireLeaveApprover, async (req, res) => {
   }
 })
 
-// 当前审批人已处理的申请链，每条申请只展示当前最终版本。
-router.get('/reviewed', requireLeaveApprover, async (req, res) => {
+function buildLeaveReviewedActionScope(
+  operatorId: string,
+  operatorRole: string | undefined,
+): { sql: string; params: string[] } {
+  const terminalActionSql = `lal.action = CASE lr.status
+      WHEN 'approved' THEN 'approve'
+      WHEN 'rejected' THEN 'reject'
+    END`
+  if (operatorRole === 'super_admin') {
+    return {
+      sql: `(
+        (lal.operator_id = ? AND ${terminalActionSql})
+        OR (
+          EXISTS (
+            SELECT 1
+            FROM users assigned_manager
+            WHERE assigned_manager.id = lr.approver_id
+              AND assigned_manager.role = 'general_manager'
+              AND assigned_manager.status = 'active'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM users manager_applicant
+            WHERE manager_applicant.id = lr.user_id
+              AND manager_applicant.role = 'general_manager'
+          )
+          AND (
+            ${terminalActionSql}
+            OR (lr.status = 'approved' AND lal.action = 'historical_import')
+          )
+        )
+      )`,
+      params: [operatorId],
+    }
+  }
+
+  const delegatedActionSql = operatorRole === 'general_manager'
+    ? `OR (
+        lr.approver_id = ?
+        AND ${terminalActionSql}
+        AND EXISTS (
+          SELECT 1
+          FROM users delegated_operator
+          WHERE delegated_operator.id = lal.operator_id
+            AND delegated_operator.role = 'super_admin'
+        )
+      )`
+    : ''
+  return {
+    sql: `(
+      (lal.operator_id = ? AND ${terminalActionSql})
+      OR (
+        lr.status = 'approved'
+        AND lr.approver_id = ?
+        AND lal.action = 'historical_import'
+      )
+      ${delegatedActionSql}
+    )`,
+    params: operatorRole === 'general_manager'
+      ? [operatorId, operatorId, operatorId]
+      : [operatorId, operatorId],
+  }
+}
+
+// 当前审批人已处理或分配给本人的历史导入申请链，每条申请只展示当前最终版本。
+router.get('/reviewed', requireLeaveOperator, async (req, res) => {
   try {
     const userId = req.session.userId!
+    const reviewedScope = buildLeaveReviewedActionScope(
+      userId,
+      req.session.user?.role,
+    )
     const { page, pageSize, offset } = parsePagination(req.query.page, req.query.pageSize)
-    const countResult = await db.prepare(
-      `SELECT COUNT(*) as total
-       FROM leave_requests lr
-       WHERE lr.status IN ('approved', 'rejected')
-         AND EXISTS (
-           SELECT 1
-           FROM leave_approval_logs lal
-           WHERE lal.leave_request_id = lr.id
-             AND lal.operator_id = ?
-             AND lal.action = CASE lr.status
-               WHEN 'approved' THEN 'approve'
-               WHEN 'rejected' THEN 'reject'
-             END
-         )
+    const keyword = typeof req.query.keyword === 'string' ? req.query.keyword.trim() : ''
+    if (keyword.length > 200) {
+      return res.status(400).json({ success: false, message: '搜索关键词不能超过 200 个字符' })
+    }
+    const searchColumns = [
+      'lr.applicant_name',
+      'u.name',
+      'lr.applicant_department',
+      'u.department',
+      'lr.reason',
+      'lr.request_no',
+      'lr.leave_type_name',
+    ]
+    const keywordSql = keyword
+      ? `AND (${searchColumns.map(column => `STRPOS(LOWER(COALESCE(${column}, '')), LOWER(?)) > 0`).join(' OR ')})`
+      : ''
+    const queryParams = [
+      ...reviewedScope.params,
+      ...(keyword ? searchColumns.map(() => keyword) : []),
+    ]
+    const reviewedFilterSql = `lr.status IN ('approved', 'rejected')
          AND NOT EXISTS (
            SELECT 1 FROM leave_requests next_version
            WHERE next_version.original_id = lr.id
-         )`,
-    ).get<{ total: number }>(userId)
+         )
+         ${keywordSql}`
+    const countResult = await db.prepare(
+      `SELECT COUNT(*) as total
+       FROM leave_requests lr
+       LEFT JOIN users u ON lr.user_id = u.id
+       WHERE EXISTS (
+           SELECT 1
+           FROM leave_approval_logs lal
+           WHERE lal.leave_request_id = lr.id
+             AND ${reviewedScope.sql}
+         )
+         AND ${reviewedFilterSql}`,
+    ).get<{ total: number }>(...queryParams)
 
     const list = await db.prepare(
       `SELECT lr.*, u.name as user_name, u.department as user_department,
@@ -2799,27 +3146,24 @@ router.get('/reviewed', requireLeaveApprover, async (req, res) => {
               parent_request.reason as parent_reason
        FROM leave_requests lr
        INNER JOIN LATERAL (
-         SELECT action, comment, created_at
-         FROM leave_approval_logs
-         WHERE leave_request_id = lr.id
-           AND operator_id = ?
-           AND action = CASE lr.status
-             WHEN 'approved' THEN 'approve'
-             WHEN 'rejected' THEN 'reject'
-           END
-         ORDER BY created_at DESC
+         SELECT lal.action, lal.comment, lal.created_at
+         FROM leave_approval_logs lal
+         WHERE lal.leave_request_id = lr.id
+           AND ${reviewedScope.sql}
+         ORDER BY CASE WHEN lal.action IN ('approve', 'reject') THEN 0 ELSE 1 END,
+                  lal.created_at DESC, lal.id DESC
          LIMIT 1
        ) lal ON TRUE
        LEFT JOIN users u ON lr.user_id = u.id
        LEFT JOIN leave_requests parent_request ON parent_request.id = lr.parent_request_id
-       WHERE lr.status IN ('approved', 'rejected')
-         AND NOT EXISTS (
-           SELECT 1 FROM leave_requests next_version
-           WHERE next_version.original_id = lr.id
-         )
-       ORDER BY lal.created_at DESC
+       WHERE ${reviewedFilterSql}
+       ORDER BY lal.created_at DESC, lr.id DESC
        LIMIT ? OFFSET ?`,
-    ).all<BalanceRequestData & { status: string } & Record<string, any>>(userId, pageSize, offset)
+    ).all<BalanceRequestData & { status: string } & Record<string, any>>(
+      ...queryParams,
+      pageSize,
+      offset
+    )
     const listWithSchedule = await enrichLeaveRequestsWithSchedule(list)
 
     res.json({
@@ -2837,8 +3181,328 @@ router.get('/reviewed', requireLeaveApprover, async (req, res) => {
   }
 })
 
+// 总经理查看本人范围；超级管理员汇总全部活动总经理职责范围及总经理本人。
+router.get('/employee-statistics', requireLeaveStatisticsViewer, async (req, res) => {
+  try {
+    const userId = req.session.userId!
+    const viewerRole = req.session.user?.role
+    if (!canAccessGeneralManagerLeaveWorkspace(viewerRole)) {
+      return res.status(403).json({ success: false, message: '无权查看员工请假统计' })
+    }
+    const yearParam = typeof req.query.year === 'string' ? req.query.year.trim() : ''
+    const year = yearParam ? Number(yearParam) : new Date().getFullYear()
+    if (!Number.isInteger(year) || year < 2000 || year > 2200) {
+      return res.status(400).json({ success: false, message: '统计年份必须是 2000 至 2200 的整数' })
+    }
+
+    const comparisonYearCount = Math.min(5, year - 1999)
+    const comparisonYears = Array.from(
+      { length: comparisonYearCount },
+      (_, index) => year - comparisonYearCount + index + 1
+    )
+    const comparisonStartYear = comparisonYears[0]
+    const comparisonEndYear = comparisonYears[comparisonYears.length - 1]
+
+    // 查看人、活动总经理和主总经理判定均以本次请求时的数据库记录为准。
+    const statisticsViewer = await db
+      .prepare(
+        `SELECT id, name, department, role
+         FROM users
+         WHERE id = ?
+           AND role IN ('general_manager', 'super_admin')
+           AND status = 'active'
+         LIMIT 1`
+      )
+      .get<{
+        id: string
+        name: string
+        department: string | null
+        role: 'general_manager' | 'super_admin'
+      }>(userId)
+    if (!statisticsViewer || statisticsViewer.role !== viewerRole) {
+      return res.status(403).json({ success: false, message: '无权查看员工请假统计' })
+    }
+
+    const activeManagers = await db
+      .prepare(
+        `SELECT id AS user_id, name, department
+         FROM users
+         WHERE role = 'general_manager'
+           AND status = 'active'
+         ORDER BY created_at ASC, id ASC`
+      )
+      .all<LeaveEmployeeStatisticsEmployeeRow>()
+    const primaryManagerId = activeManagers[0]?.user_id || null
+    const managerIds = statisticsViewer.role === 'super_admin'
+      ? activeManagers.map(manager => manager.user_id)
+      : [statisticsViewer.id]
+    const statisticsScopeSql = statisticsViewer.role === 'super_admin'
+      ? `(
+           lr.user_id = ANY(?::text[])
+           OR (
+             lr.approver_id = ANY(?::text[])
+             AND NOT (lr.user_id = ANY(?::text[]))
+             AND u.role <> 'general_manager'
+           )
+         )`
+      : `(
+           lr.user_id = ?
+           OR (
+             lr.approver_id = ?
+             AND lr.user_id <> ?
+             AND u.role <> 'general_manager'
+           )
+         )`
+    const statisticsScopeParams = statisticsViewer.role === 'super_admin'
+      ? [managerIds, managerIds, managerIds]
+      : [userId, userId, userId]
+
+    const sourceRows = await db
+      .prepare(
+        `SELECT lr.id, lr.request_no, lr.user_id,
+                COALESCE(NULLIF(BTRIM(u.name), ''), lr.applicant_name) AS applicant_name,
+                COALESCE(NULLIF(BTRIM(u.department), ''), lr.applicant_department) AS applicant_department,
+                lr.leave_type_code, lr.leave_type_name,
+                lr.start_date, lr.start_half, lr.end_date, lr.end_half,
+                lr.total_days, lr.balance_allocations_json,
+                lr.reason, lr.status, lr.submitted_at, lr.approved_at,
+                lr.application_kind, lr.combination_group_id, lr.parent_request_id
+         FROM leave_requests lr
+         INNER JOIN users u ON u.id = lr.user_id
+         WHERE ${statisticsScopeSql}
+           AND lr.status = 'approved'
+           AND lr.start_date <= ?
+           AND lr.end_date >= ?
+           AND NOT EXISTS (
+             SELECT 1
+             FROM leave_requests next_version
+             WHERE next_version.original_id = lr.id
+           )
+         ORDER BY lr.user_id ASC, lr.start_date ASC,
+                  CASE lr.start_half WHEN 'morning' THEN 0 ELSE 1 END ASC,
+                  lr.request_no ASC`
+      )
+      .all<LeaveEmployeeStatisticsSourceRow>(
+        ...statisticsScopeParams,
+        `${comparisonEndYear}-12-31`,
+        `${comparisonStartYear}-01-01`
+      )
+
+    let leaveSchedule: LeaveScheduleDay[] = []
+    if (sourceRows.length > 0) {
+      const scheduleStartDate = sourceRows.reduce(
+        (earliest, row) => row.start_date < earliest ? row.start_date : earliest,
+        sourceRows[0].start_date
+      )
+      const scheduleEndDate = sourceRows.reduce(
+        (latest, row) => row.end_date > latest ? row.end_date : latest,
+        sourceRows[0].end_date
+      )
+      leaveSchedule = await db
+        .prepare(
+          `SELECT date, type
+           FROM holidays
+           WHERE date >= ? AND date <= ?
+           ORDER BY date ASC`
+        )
+        .all<LeaveScheduleDay>(scheduleStartDate, scheduleEndDate)
+    }
+
+    const requestRows = expandLeaveEmployeeStatisticsRequestRows(
+      sourceRows,
+      comparisonYears,
+      leaveSchedule
+    )
+    const monthlyRequestRows = expandLeaveEmployeeStatisticsMonthlyRequestRows(
+      sourceRows,
+      year,
+      leaveSchedule
+    )
+
+    // 总经理始终进入本人主集；超级管理员进入所有活动总经理主集。
+    // 最早创建的活动总经理额外读取当前在职普通员工和管理员全集；其他总经理
+    // 仍只看到本人及历史上明确分配给本人的非总经理申请人。
+    const scopedEmployees: LeaveEmployeeStatisticsEmployeeRow[] =
+      statisticsViewer.role === 'super_admin'
+        ? [...activeManagers]
+        : [
+            {
+              user_id: statisticsViewer.id,
+              name: statisticsViewer.name,
+              department: statisticsViewer.department,
+            },
+          ]
+    if (
+      statisticsViewer.role === 'super_admin' ||
+      primaryManagerId === userId
+    ) {
+      scopedEmployees.push(
+        ...await db
+          .prepare(
+            `SELECT id AS user_id, name, department
+             FROM users
+             WHERE status = 'active'
+               AND role IN ('user', 'admin')
+             ORDER BY name ASC, id ASC`
+          )
+          .all<LeaveEmployeeStatisticsEmployeeRow>()
+      )
+    }
+
+    const employeesByYear = new Map<number, Map<string, LeaveEmployeeStatisticsEmployeeRow>>()
+    for (const comparisonYear of comparisonYears) {
+      employeesByYear.set(
+        comparisonYear,
+        new Map(
+          scopedEmployees.map(employee => [
+            employee.user_id,
+            { ...employee, statistics_year: comparisonYear },
+          ])
+        )
+      )
+    }
+    for (const row of requestRows) {
+      const statisticsYear = row.target_year ?? year
+      const annualEmployees = employeesByYear.get(statisticsYear)
+      if (annualEmployees && !annualEmployees.has(row.user_id)) {
+        annualEmployees.set(row.user_id, {
+          user_id: row.user_id,
+          name: row.applicant_name,
+          department: row.applicant_department,
+          statistics_year: statisticsYear,
+        })
+      }
+    }
+    const employeeRows = [...employeesByYear.values()].flatMap(employees => [
+      ...employees.values(),
+    ])
+    const employeeIds = [...(employeesByYear.get(year)?.keys() || [])]
+    const balanceRows: LeaveEmployeeStatisticsBalanceRow[] = []
+
+    if (employeeIds.length > 0) {
+      const [leaveTypes, storedBalances, employeeProfiles] = await Promise.all([
+        db
+          .prepare(
+            `SELECT code, name, requires_balance_check,
+                    COALESCE(default_days, 0) AS default_days
+             FROM leave_type_configs
+             WHERE is_active = true
+             ORDER BY sort_order ASC, code ASC`
+          )
+          .all<{
+            code: string
+            name: string
+            requires_balance_check: boolean
+            default_days: number
+          }>(),
+        db
+          .prepare(
+            `SELECT user_id, leave_type_code, total_days, used_days, pending_days
+             FROM leave_balances
+             WHERE year = ? AND user_id = ANY(?::text[])`
+          )
+          .all<{
+            user_id: string
+            leave_type_code: string
+            total_days: number
+            used_days: number
+            pending_days: number
+          }>(year, employeeIds),
+        db
+          .prepare(
+            `SELECT u.id AS user_id, profile.gender, profile.hire_date
+             FROM users u
+             LEFT JOIN LATERAL (
+               SELECT gender, hire_date
+               FROM employee_profiles
+               WHERE user_id = u.id AND status = 'submitted'
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 1
+             ) profile ON TRUE
+             WHERE u.id = ANY(?::text[])`
+          )
+          .all<{ user_id: string; gender: string | null; hire_date: string | null }>(
+            employeeIds
+          ),
+      ])
+      const storedBalanceMap = new Map(
+        storedBalances.map(balance => [
+          `${balance.user_id}:${balance.leave_type_code}`,
+          balance,
+        ])
+      )
+      const profileMap = new Map(
+        employeeProfiles.map(profile => [profile.user_id, profile])
+      )
+
+      for (const employeeId of employeeIds) {
+        const profile = profileMap.get(employeeId)
+        const excludedCodes =
+          profile?.gender === 'male'
+            ? new Set(['maternity'])
+            : profile?.gender === 'female'
+              ? new Set(['paternity'])
+              : new Set<string>()
+
+        for (const type of leaveTypes) {
+          if (excludedCodes.has(type.code)) continue
+          if (!type.requires_balance_check) {
+            balanceRows.push({
+              user_id: employeeId,
+              leave_type_code: type.code,
+              leave_type_name: type.name,
+              requires_balance_check: false,
+              total_days: null,
+              used_days: null,
+              pending_days: null,
+            })
+            continue
+          }
+
+          const stored = storedBalanceMap.get(`${employeeId}:${type.code}`)
+          const calculatedAnnualTotal =
+            type.code === 'annual'
+              ? calculateAnnualLeaveEntitlement(profile?.hire_date, year, Number(type.default_days))
+              : Number(type.default_days)
+          const totalDays = stored
+            ? type.code === 'annual'
+              ? Math.max(Number(stored.total_days), calculatedAnnualTotal)
+              : Number(stored.total_days)
+            : calculatedAnnualTotal
+
+          balanceRows.push({
+            user_id: employeeId,
+            leave_type_code: type.code,
+            leave_type_name: type.name,
+            requires_balance_check: true,
+            total_days: totalDays,
+            used_days: Number(stored?.used_days || 0),
+            pending_days: Number(stored?.pending_days || 0),
+          })
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: buildLeaveEmployeeStatistics(year, employeeRows, requestRows, balanceRows, {
+        manager: {
+          id: statisticsViewer.id,
+          name: statisticsViewer.name,
+          roleLabel: getRoleDisplayName(statisticsViewer.role),
+        },
+        comparisonYears,
+        monthlyRequestRows,
+      }),
+    })
+  } catch (error) {
+    console.error('获取员工请假统计失败:', error)
+    res.status(500).json({ success: false, message: '获取员工请假统计失败' })
+  }
+})
+
 // 审批通过
-router.post('/requests/:id/approve', requireLeaveApprover, async (req, res) => {
+router.post('/requests/:id/approve', requireLeaveOperator, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { id } = req.params
@@ -2851,23 +3515,40 @@ router.post('/requests/:id/approve', requireLeaveApprover, async (req, res) => {
 
     await db.transaction(async (client) => {
       const requestResult = await client.query<
-        BalanceRequestData & { status: string; applicant_role: string }
+        BalanceRequestData & {
+          status: string
+          applicant_role: string
+          approver_id: string | null
+          assigned_approver_role: string | null
+          assigned_approver_status: string | null
+        }
       >(
         `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
                 lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status,
-                applicant.role AS applicant_role
+                lr.approver_id, applicant.role AS applicant_role,
+                assigned_approver.role AS assigned_approver_role,
+                assigned_approver.status AS assigned_approver_status
          FROM leave_requests lr
          INNER JOIN users applicant ON applicant.id = lr.user_id
-         WHERE lr.id = $1 AND lr.user_id <> $2 AND lr.approver_id = $2
+         LEFT JOIN users assigned_approver ON assigned_approver.id = lr.approver_id
+         WHERE lr.id = $1 AND lr.user_id <> $2
          FOR UPDATE OF lr`,
         [id, userId]
       )
       const request = requestResult.rows[0]
       if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
-      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
-      if (userInfo?.role !== getRequiredLeaveApproverRole(request.applicant_role)) {
-        throw new LeaveOperationError('当前角色不能审批该申请', 403)
+      if (!canOperateLeaveRequest({
+        operatorId: userId,
+        operatorRole: userInfo?.role,
+        applicantId: request.user_id,
+        applicantRole: request.applicant_role,
+        assignedApproverId: request.approver_id,
+        assignedApproverRole: request.assigned_approver_role,
+        assignedApproverStatus: request.assigned_approver_status,
+      })) {
+        throw new LeaveOperationError('申请不存在或无权操作', 404)
       }
+      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
 
       const allocations = await getStoredBalanceAllocations(request)
 
@@ -2885,6 +3566,7 @@ router.post('/requests/:id/approve', requireLeaveApprover, async (req, res) => {
          VALUES ($1,$2,$3,$4,'approve',$5,$6)`,
         [nanoid(), id, userId, userInfo?.name || '', comment || null, now]
       )
+      await notifyLeaveCcRecipients(client, id, 'approve', userId, now)
     })
 
     res.json({ success: true, message: '已审批通过' })
@@ -2898,7 +3580,7 @@ router.post('/requests/:id/approve', requireLeaveApprover, async (req, res) => {
 })
 
 // 驳回
-router.post('/requests/:id/reject', requireLeaveApprover, async (req, res) => {
+router.post('/requests/:id/reject', requireLeaveOperator, async (req, res) => {
   try {
     const userId = req.session.userId!
     const { id } = req.params
@@ -2915,23 +3597,40 @@ router.post('/requests/:id/reject', requireLeaveApprover, async (req, res) => {
 
     await db.transaction(async (client) => {
       const requestResult = await client.query<
-        BalanceRequestData & { status: string; applicant_role: string }
+        BalanceRequestData & {
+          status: string
+          applicant_role: string
+          approver_id: string | null
+          assigned_approver_role: string | null
+          assigned_approver_status: string | null
+        }
       >(
         `SELECT lr.user_id, lr.leave_type_code, lr.total_days, lr.balance_allocations_json, lr.balance_reserved,
                 lr.start_date, lr.start_half, lr.end_date, lr.end_half, lr.status,
-                applicant.role AS applicant_role
+                lr.approver_id, applicant.role AS applicant_role,
+                assigned_approver.role AS assigned_approver_role,
+                assigned_approver.status AS assigned_approver_status
          FROM leave_requests lr
          INNER JOIN users applicant ON applicant.id = lr.user_id
-         WHERE lr.id = $1 AND lr.user_id <> $2 AND lr.approver_id = $2
+         LEFT JOIN users assigned_approver ON assigned_approver.id = lr.approver_id
+         WHERE lr.id = $1 AND lr.user_id <> $2
          FOR UPDATE OF lr`,
         [id, userId]
       )
       const request = requestResult.rows[0]
       if (!request) throw new LeaveOperationError('申请不存在或无权操作', 404)
-      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
-      if (userInfo?.role !== getRequiredLeaveApproverRole(request.applicant_role)) {
-        throw new LeaveOperationError('当前角色不能审批该申请', 403)
+      if (!canOperateLeaveRequest({
+        operatorId: userId,
+        operatorRole: userInfo?.role,
+        applicantId: request.user_id,
+        applicantRole: request.applicant_role,
+        assignedApproverId: request.approver_id,
+        assignedApproverRole: request.assigned_approver_role,
+        assignedApproverStatus: request.assigned_approver_status,
+      })) {
+        throw new LeaveOperationError('申请不存在或无权操作', 404)
       }
+      if (request.status !== 'pending') throw new LeaveOperationError('该申请已经处理，请勿重复操作', 409)
 
       const allocations = await getStoredBalanceAllocations(request)
 
@@ -2950,6 +3649,7 @@ router.post('/requests/:id/reject', requireLeaveApprover, async (req, res) => {
          VALUES ($1,$2,$3,$4,'reject',$5,$6)`,
         [nanoid(), id, userId, userInfo?.name || '', rejectReason.trim(), now]
       )
+      await notifyLeaveCcRecipients(client, id, 'reject', userId, now)
     })
 
     res.json({ success: true, message: '已驳回申请' })
@@ -3038,16 +3738,21 @@ router.put('/admin/types/:code', requireAdmin, async (req, res) => {
     if (!name?.trim()) {
       return res.status(400).json({ success: false, message: '假期名称不能为空' })
     }
-    const nextDefaultDays = parseLeaveBalanceDays(default_days ?? 0)
-    if (nextDefaultDays === null) {
+    const parsedDefaultDays = parseLeaveBalanceDays(default_days ?? 0)
+    if (parsedDefaultDays === null) {
       return res.status(400).json({
         success: false,
         message: `默认天数必须是 0 到 ${MAX_LEAVE_BALANCE_DAYS} 之间的半天倍数`,
       })
     }
 
-    const nextRequiresBalanceCheck =
-      FIXED_BALANCE_LEAVE_TYPES.has(code) || requires_balance_check !== false
+    const balancePolicy = resolveLeaveTypeBalancePolicy(
+      code,
+      requires_balance_check !== false,
+      parsedDefaultDays
+    )
+    const nextDefaultDays = balancePolicy.defaultDays
+    const nextRequiresBalanceCheck = balancePolicy.requiresBalanceCheck
     const nextRequiresAttachment = requires_attachment ? true : false
     const nextDescription = description?.trim() || null
     const now = new Date().toISOString()
@@ -3143,7 +3848,7 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
       return res.status(401).json({ success: false, message: '登录状态已失效，请重新登录' })
     }
 
-    const { status, leaveTypeCode, userId, department, startDate, endDate } = req.query
+    const { status, leaveTypeCode, userId, department, startDate, endDate, unreadOnly } = req.query
     const pagination = parsePagination(req.query.page, req.query.pageSize)
 
     const conditions = [
@@ -3153,6 +3858,20 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
       )`,
     ]
     const params: any[] = []
+
+    if (unreadOnly === 'true') {
+      if (!isLeaveCcRecipientRole(currentUser.role)) {
+        conditions.push('FALSE')
+      } else {
+        conditions.push(`lr.status <> 'draft' AND lr.user_id <> ? AND EXISTS (
+          SELECT 1 FROM leave_cc_notifications notice
+          WHERE notice.request_id = lr.id
+            AND notice.recipient_id = ?
+            AND notice.read_at IS NULL
+        )`)
+        params.push(req.session.userId, req.session.userId)
+      }
+    }
 
     if (status) {
       conditions.push('lr.status = ?')
@@ -3213,6 +3932,9 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
       BalanceRequestData & { status: string } & Record<string, any>
     >(...params, pageSize, offset)
     const listWithSchedule = await enrichLeaveRequestsWithSchedule(list)
+    const ccNotices = isLeaveCcRecipientRole(currentUser.role)
+      ? await getLeaveCcNotices(req.session.userId!, list.map(item => item.id))
+      : new Map()
     const ccRecipientRole = getRoleDisplayName(currentUser.role)
     const ccRecipientName = currentUser.name
 
@@ -3223,6 +3945,8 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
           ...item,
           cc_recipient_role: ccRecipientRole,
           cc_recipient_name: ccRecipientName,
+          cc_notice_unread: ccNotices.get(item.id)?.cc_notice_unread ?? false,
+          cc_notice_revision: ccNotices.get(item.id)?.cc_notice_revision ?? null,
         })),
         total: Number(countResult?.total || 0),
         page,
@@ -3234,6 +3958,25 @@ router.get('/admin/requests', requireAdmin, async (req, res) => {
     res.status(500).json({ success: false, message: '获取申请列表失败' })
   }
 })
+
+// 仅确认当前登录接收人实际查看的版本，不影响其他人或后续新事件。
+router.post(
+  '/admin/requests/:id/cc/mark-read',
+  requireExactRole(LEAVE_CC_RECIPIENT_ROLES),
+  async (req, res) => {
+    try {
+      const revision = req.body?.revision
+      if (typeof revision !== 'string' || !revision.trim() || revision.length > 128) {
+        return res.status(400).json({ success: false, message: '请提供有效的抄送提醒版本' })
+      }
+      const unreadCount = await markLeaveCcNoticeRead(req.session.userId!, req.params.id, revision)
+      res.json({ success: true, data: { unreadCount } })
+    } catch (error) {
+      console.error('标记请假抄送已读失败:', error)
+      res.status(500).json({ success: false, message: '标记请假抄送已读失败' })
+    }
+  }
+)
 
 // 获取所有人余额总览
 router.get('/admin/balances', requireAdmin, async (req, res) => {

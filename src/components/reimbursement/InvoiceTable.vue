@@ -51,7 +51,7 @@
     </el-table>
 
     <!-- 总计行 -->
-    <div class="invoice-total" :class="{ 'amount-warning': showAmountWarning }">
+    <div class="invoice-total">
       <span class="total-label">总计</span>
       <span class="total-amount" :style="{ color: themeColor }">¥{{ totalAmount }}</span>
       <span v-if="showDeduction && (hasTransportFuelInvoices || deductionSubtotal > 0) && !approvalDeductionAmount" class="deducted-info">
@@ -59,9 +59,6 @@
       </span>
       <span v-if="approvalDeductionAmount > 0" class="deducted-info">
         （核减金额：¥{{ (totalDeductedAmountNumber + deductionSubtotal).toFixed(2) }}）
-      </span>
-      <span v-if="warningText" class="amount-tip">
-        {{ warningText }}
       </span>
     </div>
 
@@ -166,8 +163,6 @@ const props = withDefaults(defineProps<{
   invoiceList: InvoiceItem[]
   readonly?: boolean
   themeColor?: string
-  amountThreshold?: number
-  showThresholdWarning?: boolean
   showDeduction?: boolean
   monthlyUsedQuota?: number
   approvalDeductionAmount?: number
@@ -177,8 +172,6 @@ const props = withDefaults(defineProps<{
 }>(), {
   readonly: false,
   themeColor: '#409eff',
-  amountThreshold: 0,
-  showThresholdWarning: false,
   showDeduction: false,
   monthlyUsedQuota: 0,
   approvalDeductionAmount: 0,
@@ -269,18 +262,6 @@ const transportFuelActual = computed(() => {
   const totalCents = Math.round(totalAmountNumber.value * 100)
   const deductedCents = Math.round(totalDeductedAmountNumber.value * 100)
   return (totalCents - deductedCents) / 100
-})
-
-// 是否显示金额警告
-const showAmountWarning = computed(() => {
-  if (!props.showThresholdWarning || !props.amountThreshold) return false
-  return totalAmountNumber.value > 0 && totalAmountNumber.value <= props.amountThreshold
-})
-
-// 警告文本
-const warningText = computed(() => {
-  if (!showAmountWarning.value) return ''
-  return `(金额不足${props.amountThreshold}元，不属于大额报销)`
 })
 
 // 核减发票小计
@@ -565,11 +546,6 @@ function onDelete(invoice: any): void {
   border-radius: 0 0 4px 4px;
 }
 
-.invoice-total.amount-warning {
-  background: #fef0f0;
-  border-color: #fbc4c4;
-}
-
 .invoice-total .total-label {
   font-weight: 600;
   color: #303133;
@@ -579,12 +555,6 @@ function onDelete(invoice: any): void {
 .invoice-total .total-amount {
   font-weight: 600;
   font-size: 16px;
-}
-
-.invoice-total .amount-tip {
-  margin-left: 16px;
-  font-size: 13px;
-  color: #f56c6c;
 }
 
 .deducted-text {

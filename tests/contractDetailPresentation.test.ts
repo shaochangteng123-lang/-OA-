@@ -73,13 +73,11 @@ describe("合同详情页面展示", () => {
 
   it("子协议上传盖章版后才进入主合同附件且不提供补充附件入口", () => {
     const attachmentTabSource = detailSource.slice(
-      detailSource.indexOf(
-        ':label="`合同附件（${displayedContractFiles.length}）`"',
-      ),
+      detailSource.indexOf(':label="`合同附件（${contractAttachmentCount}）`"'),
       detailSource.indexOf('label="财务闭环"'),
     );
     expect(attachmentTabSource).toContain(
-      ':label="`合同附件（${displayedContractFiles.length}）`"',
+      ':label="`合同附件（${contractAttachmentCount}）`"',
     );
     expect(attachmentTabSource).toContain(
       "v-if=\"detail.contract.relationType === 'main'\"",
@@ -167,9 +165,7 @@ describe("合同详情页面展示", () => {
 
   it("附件发票组直接展示全部发票而合同和用印仍按来源分层", () => {
     const attachmentTabSource = detailSource.slice(
-      detailSource.indexOf(
-        ':label="`合同附件（${displayedContractFiles.length}）`"',
-      ),
+      detailSource.indexOf(':label="`合同附件（${contractAttachmentCount}）`"'),
       detailSource.indexOf('label="财务闭环"'),
     );
     expect(attachmentTabSource).toContain("v-if=\"group.key === 'invoice'\"");
@@ -186,6 +182,48 @@ describe("合同详情页面展示", () => {
     );
     expect(groupSource).toContain('definition.key === "invoice"');
     expect(groupSource).toContain("sources: []");
+  });
+
+  it("开票申请材料独立于主合同附件并按申请分组展示", () => {
+    const attachmentTabSource = detailSource.slice(
+      detailSource.indexOf(':label="`合同附件（${contractAttachmentCount}）`"'),
+      detailSource.indexOf('label="财务闭环"'),
+    );
+    expect(attachmentTabSource).toContain(
+      'class="attachment-group invoice-application-materials"',
+    );
+    expect(attachmentTabSource).toContain(
+      "开票申请材料（{{ invoiceApplicationMaterialFileCount }}）",
+    );
+    expect(attachmentTabSource).toContain(
+      'v-for="application in invoiceApplicationMaterialGroups"',
+    );
+    expect(attachmentTabSource).toContain('v-for="file in application.files"');
+    expect(attachmentTabSource).toContain(
+      "invoiceApplicationMaterialKindLabel(file)",
+    );
+    expect(detailSource).toContain(
+      'system_generated_triplicate: "系统生成三联单"',
+    );
+    expect(detailSource).toContain('uploaded_triplicate: "申请上传三联单"');
+    expect(detailSource).toContain('sealed_triplicate: "盖章后三联单"');
+    expect(detailSource).toContain('sealed_material: "盖章后申请材料"');
+    expect(detailSource).toContain(
+      "displayedContractFiles.value.length +\n    invoiceApplicationMaterialFileCount.value",
+    );
+    expect(detailSource).toContain("getContractInvoiceApplicationMaterialUrl(");
+    expect(detailSource).toContain("invoiceApplicationMaterialOpenLabel(file)");
+    expect(detailSource).toMatch(
+      /@media \(max-width: 768px\)[\s\S]*?\.file-grid\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/,
+    );
+    expect(detailSource).toContain("invoice-application-material-title");
+    expect(backendSource).toContain("AND file.invoice_application_id IS NULL");
+    expect(backendSource).toContain(
+      "application.status NOT IN ('draft', 'rejected')",
+    );
+    expect(backendSource).toContain(
+      'contract.relation_type === "main" && canReadInvoiceApplicationMaterials',
+    );
   });
 
   it("用印申请状态标签使用独立高对比样式", () => {

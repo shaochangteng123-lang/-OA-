@@ -3,18 +3,18 @@ export type MonthlyProbationReviewStage =
   | "hr"
   | "general_manager";
 
-const MONTHLY_REVIEW_STAGE_BY_ROLE: Record<
+const MONTHLY_REVIEW_STAGES_BY_ROLE: Record<
   string,
-  MonthlyProbationReviewStage
+  MonthlyProbationReviewStage[]
 > = {
-  general_manager: "supervisor",
-  admin: "hr",
-  super_admin: "hr",
-  chairman: "general_manager",
+  general_manager: ["supervisor"],
+  admin: ["hr"],
+  super_admin: ["supervisor", "hr"],
+  chairman: ["general_manager"],
 };
 
-export function getMonthlyProbationReviewStage(
+export function getMonthlyProbationReviewStages(
   role: string | null | undefined,
-): MonthlyProbationReviewStage | null {
-  return role ? MONTHLY_REVIEW_STAGE_BY_ROLE[role] || null : null;
+): MonthlyProbationReviewStage[] {
+  return role ? [...(MONTHLY_REVIEW_STAGES_BY_ROLE[role] || [])] : [];
 }

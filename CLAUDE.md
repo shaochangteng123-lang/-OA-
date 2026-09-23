@@ -122,9 +122,10 @@ docker compose down      # 停止服务
 docker compose restart   # 重启服务
 
 # 生产模式
-npm run docker:prod      # 启动生产环境
-npm run docker:stop:prod # 停止生产环境
-npm run docker:logs:prod # 查看生产环境日志
+npm run docker:prod # 启动或恢复当前固定生产镜像，不现场构建
+npm run docker:prod:build -- yulilog-prod-yulilog:release-YYYYMMDD-name # 构建唯一标签候选镜像，不部署
+npm run docker:prod:stop # 停止生产环境
+npm run docker:prod:logs # 查看生产环境日志
 
 # 仅数据库（可选）
 npm run docker:db        # 仅启动 PostgreSQL 容器

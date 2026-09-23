@@ -2,9 +2,11 @@
 # YuliLog 工作日志系统 - 生产模式 Docker Compose
 # ============================================
 # 使用方法：
-#   启动：docker compose -f docker-compose.prod.yml up -d --build
-#   日志：docker compose -f docker-compose.prod.yml logs -f
-#   停止：docker compose -f docker-compose.prod.yml down
+#   启动当前固定生产版本：npm run docker:prod
+#   构建新候选镜像：npm run docker:prod:build -- yulilog-prod-yulilog:<唯一标签>
+#   日志：npm run docker:prod:logs
+#   停止：npm run docker:prod:stop
+# 安全约束：本文件只部署已有镜像，不从当前工作区现场构建。
 # ============================================
 
 name: yulilog-prod
@@ -31,9 +33,8 @@ services:
 
   yulilog:
     container_name: yulilog-prod
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${YULILOG_PROD_IMAGE:-yulilog-prod-yulilog:large-reimbursement-no-limit-20260922-v1}
+    pull_policy: never
     expose:
       - "8899"
     env_file:

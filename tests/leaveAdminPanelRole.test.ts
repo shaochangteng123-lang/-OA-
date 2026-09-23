@@ -128,4 +128,75 @@ describe('员工数据请假管理角色入口', () => {
 
     wrapper.unmount()
   })
+
+  it('病假余额检查可以自由开关，其他固定额度类型保持原规则', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().user = createUser('admin')
+
+    const wrapper = shallowMount(LeaveAdminPanel, {
+      global: {
+        plugins: [pinia],
+        stubs: elementStubs,
+        directives: { loading: () => undefined },
+      },
+    })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      isFixedBalanceType: (code: string) => boolean
+      openEditTypeDialog: (row: {
+        id: string
+        code: string
+        name: string
+        requires_attachment: boolean
+        requires_balance_check: boolean
+        default_days: number
+        description: string
+        sort_order: number
+        is_active: boolean
+      }) => void
+      editTypeForm: {
+        default_days: number
+        requires_balance_check: boolean
+        requires_attachment: boolean
+      }
+    }
+
+    expect(vm.isFixedBalanceType('annual')).toBe(true)
+    expect(vm.isFixedBalanceType('sick')).toBe(false)
+
+    vm.openEditTypeDialog({
+      id: 'lt_sick',
+      code: 'sick',
+      name: '病假',
+      requires_attachment: true,
+      requires_balance_check: true,
+      default_days: 3,
+      description: '需提供证明材料',
+      sort_order: 3,
+      is_active: true,
+    })
+
+    expect(vm.editTypeForm).toMatchObject({
+      default_days: 3,
+      requires_balance_check: true,
+      requires_attachment: true,
+    })
+
+    vm.openEditTypeDialog({
+      id: 'lt_sick',
+      code: 'sick',
+      name: '病假',
+      requires_attachment: true,
+      requires_balance_check: false,
+      default_days: 3,
+      description: '需提供证明材料',
+      sort_order: 3,
+      is_active: true,
+    })
+    expect(vm.editTypeForm.requires_balance_check).toBe(false)
+
+    wrapper.unmount()
+  })
 })

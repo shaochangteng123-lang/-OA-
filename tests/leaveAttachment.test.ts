@@ -1,6 +1,8 @@
 import {
   formatAttachmentRequirementMessage,
+  getLeaveAttachmentSizeError,
   getAttachmentRequiredLeaveTypes,
+  MAX_LEAVE_ATTACHMENT_BYTES,
 } from '../src/utils/leaveAttachment'
 
 const leaveTypes = [
@@ -10,6 +12,13 @@ const leaveTypes = [
 ]
 
 describe('组合请假证明文件提示', () => {
+  it('单个请假附件最多允许 5MB', () => {
+    expect(getLeaveAttachmentSizeError('正好5MB.pdf', MAX_LEAVE_ATTACHMENT_BYTES)).toBeNull()
+    expect(getLeaveAttachmentSizeError('超限.png', MAX_LEAVE_ATTACHMENT_BYTES + 1)).toBe(
+      '超限.png 超过 5MB，单个请假附件不能超过 5MB'
+    )
+  })
+
   it('只列出已选且需要证明文件的假期类型', () => {
     expect(
       getAttachmentRequiredLeaveTypes(

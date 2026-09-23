@@ -40,6 +40,7 @@ import {
   emptyAccountAmounts,
   isNegativeFinancialAmount,
   isValidFinancialAnalysisMetadata,
+  mergeOpenMonthlyFinancialWelfareCatalogs,
   normalizeFinancialAmount,
   normalizeOpeningBalances,
   previousFinancialMonth,
@@ -2276,10 +2277,45 @@ async function loadMonthlyReport(
   if (!forceAutomatic && reportRow && !storedAutomatic) {
     throw dataIntegrity(`${month}自动数据快照不完整，请执行重新同步`);
   }
-  const baseAutomatic =
+  let baseAutomatic: MonthlyFinancialAutomaticSnapshot =
     !forceAutomatic && storedAutomatic
       ? storedAutomatic
       : await loadAutomaticSnapshot(month, client);
+  if (!forceAutomatic && reportRow && storedAutomatic) {
+    // 开放月报的金额仍冻结在已保存自动快照中，但分类名称、顺序和启停状态应立即反映主数据。
+    const [welfareOneCatalog, welfareTwoCatalog] = await Promise.all([
+      queryAll<{
+        id: string;
+        code: string;
+        name: string;
+        sort_order: number;
+        is_active: boolean;
+      }>(
+        `SELECT id, code, name, sort_order, is_active
+           FROM welfare_one_expense_categories ORDER BY sort_order, id`,
+        [],
+        client,
+      ),
+      queryAll<{
+        id: string;
+        code: string;
+        name: string;
+        sort_order: number;
+        is_active: boolean;
+      }>(
+        `SELECT id, code, name, sort_order, is_active
+           FROM welfare_two_expense_categories ORDER BY sort_order, id`,
+        [],
+        client,
+      ),
+    ]);
+    baseAutomatic = mergeOpenMonthlyFinancialWelfareCatalogs(
+      reportRow.status,
+      baseAutomatic,
+      welfareOneCatalog,
+      welfareTwoCatalog,
+    );
+  }
   const liveBankValidation = reportRow
     ? await loadMonthlyBankValidationState(month, client)
     : null;

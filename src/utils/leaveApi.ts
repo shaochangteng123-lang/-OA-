@@ -50,6 +50,8 @@ export interface LeaveRequest {
   approver_position?: string | null
   cc_recipient_role?: string | null
   cc_recipient_name?: string | null
+  cc_notice_unread?: boolean
+  cc_notice_revision?: string | null
   reject_reason: string | null
   approved_at: string | null
   approval_notice_unread?: boolean
@@ -92,6 +94,7 @@ export interface LeaveRelatedRequestSummary {
   status: LeaveRequest['status']
   application_kind: LeaveRequest['application_kind']
   combination_group_id?: string | null
+  parent_request_id?: string | null
 }
 
 export interface LeaveApprovalLog {
@@ -101,7 +104,7 @@ export interface LeaveApprovalLog {
   operator_name: string
   operator_real_name?: string | null
   operator_position?: string | null
-  action: 'submit' | 'approve' | 'reject' | 'cancel' | 'resubmit'
+  action: 'submit' | 'approve' | 'reject' | 'cancel' | 'resubmit' | 'historical_import'
   comment: string | null
   created_at: string
   version?: number
@@ -137,7 +140,7 @@ export interface LeaveRequestListResponse {
 }
 
 export interface LeaveReviewHistoryItem extends LeaveRequest {
-  review_action: 'approve' | 'reject'
+  review_action: 'approve' | 'reject' | 'historical_import'
   review_comment: string | null
   reviewed_at: string
 }
@@ -147,6 +150,111 @@ export interface LeaveReviewHistoryResponse {
   total: number
   page: number
   pageSize: number
+}
+
+export interface LeaveEmployeeStatisticsSegment {
+  id: string
+  requestNo: string
+  leaveTypeCode: string
+  leaveTypeName: string
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  endDate: string
+  endHalf: 'morning' | 'afternoon'
+  totalDays: number
+}
+
+export interface LeaveEmployeeStatisticsRequest {
+  id: string
+  requestNo: string
+  applicationKind: LeaveRequest['application_kind']
+  parentRequestId: string | null
+  status: LeaveRequest['status']
+  startDate: string
+  startHalf: 'morning' | 'afternoon'
+  endDate: string
+  endHalf: 'morning' | 'afternoon'
+  totalDays: number
+  reason: string
+  submittedAt: string
+  approvedAt: string | null
+  segments: LeaveEmployeeStatisticsSegment[]
+}
+
+export interface LeaveEmployeeTypeStatistics {
+  leaveTypeCode: string
+  leaveTypeName: string
+  requestCount: number
+  totalDays: number
+}
+
+export interface LeaveEmployeeAnnualTrend {
+  year: number
+  approvedRequestCount: number
+  approvedLeaveDays: number
+}
+
+export interface LeaveEmployeeMonthlyComparison {
+  month: string
+  approvedRequestCount: number
+  approvedLeaveDays: number
+}
+
+export interface LeaveEmployeeMonthlyTrend extends LeaveEmployeeMonthlyComparison {
+  typeSummaries: LeaveEmployeeTypeStatistics[]
+}
+
+export interface LeaveEmployeeStatisticsManager {
+  id: string
+  name: string
+  roleLabel: string
+}
+
+export interface LeaveEmployeeAnnualComparison extends LeaveEmployeeAnnualTrend {
+  employeeCount: number
+}
+
+export interface LeaveEmployeeBalanceSummary {
+  leaveTypeCode: string
+  leaveTypeName: string
+  requiresBalanceCheck: boolean
+  unlimited: boolean
+  totalDays: number | null
+  usedDays: number | null
+  pendingDays: number | null
+  remainingDays: number | null
+}
+
+export interface LeaveEmployeeStatisticsItem {
+  rank: number
+  userId: string
+  name: string
+  department: string | null
+  approvedRequestCount: number
+  approvedLeaveDays: number
+  paidLeaveTotalDays: number
+  paidLeaveUsedDays: number
+  paidLeavePendingDays: number
+  paidLeaveRemainingDays: number
+  annualTrend: LeaveEmployeeAnnualTrend[]
+  monthlyTrend: LeaveEmployeeMonthlyTrend[]
+  typeSummaries: LeaveEmployeeTypeStatistics[]
+  balanceSummaries: LeaveEmployeeBalanceSummary[]
+  requests: LeaveEmployeeStatisticsRequest[]
+}
+
+export interface LeaveEmployeeStatisticsResponse {
+  year: number
+  generatedAt: string
+  manager: LeaveEmployeeStatisticsManager
+  summary: {
+    employeeCount: number
+    approvedRequestCount: number
+    approvedLeaveDays: number
+  }
+  annualComparison: LeaveEmployeeAnnualComparison[]
+  monthlyComparison: LeaveEmployeeMonthlyComparison[]
+  employees: LeaveEmployeeStatisticsItem[]
 }
 
 // ==================== API 函数 ====================
@@ -210,7 +318,7 @@ export async function getMyBalances(): Promise<LeaveBalance[]> {
   return res.data.data
 }
 
-// 提交请假申请（支持附件）
+// 提交普通请假或单一返岗补假（支持附件）
 export async function submitLeaveRequest(formData: FormData): Promise<{ id: string; requestNo: string }> {
   const res = await api.post('/api/leave/requests', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
@@ -218,7 +326,7 @@ export async function submitLeaveRequest(formData: FormData): Promise<{ id: stri
   return res.data.data
 }
 
-// 提交组合请假
+// 提交组合请假或组合返岗补假
 export async function submitCombinedLeaveRequests(formData: FormData): Promise<{
   combinationGroupId: string
   requests: Array<{ id: string; requestNo: string }>
@@ -257,6 +365,12 @@ export async function markApprovedLeaveNoticesRead(): Promise<void> {
 export async function markRejectedLeaveNoticeRead(id: string): Promise<number> {
   const res = await api.post(`/api/leave/requests/${id}/rejected/mark-read`)
   return Number(res.data.data?.remainingUnread || 0)
+}
+
+// 只确认实际打开的抄送版本，避免清除查看期间新产生的提醒
+export async function markLeaveCcNoticeRead(id: string, revision: string): Promise<number> {
+  const res = await api.post(`/api/leave/admin/requests/${id}/cc/mark-read`, { revision })
+  return Number(res.data.data?.unreadCount || 0)
 }
 
 export interface RelatedLeaveContext {
@@ -325,8 +439,17 @@ export async function getPendingRequests(): Promise<LeaveRequest[]> {
 export async function getReviewedRequests(params?: {
   page?: number
   pageSize?: number
+  keyword?: string
 }): Promise<LeaveReviewHistoryResponse> {
   const res = await api.get('/api/leave/reviewed', { params })
+  return res.data.data
+}
+
+// 获取当前总经理审批范围内的员工请假年度统计
+export async function getLeaveEmployeeStatistics(year: number): Promise<LeaveEmployeeStatisticsResponse> {
+  const res = await api.get('/api/leave/employee-statistics', {
+    params: { year }
+  })
   return res.data.data
 }
 
@@ -360,13 +483,16 @@ export async function adminCreateType(data: {
 }
 
 // 修改假期类型
-export async function adminUpdateType(code: string, data: {
-  name: string
-  default_days: number
-  requires_balance_check: boolean
-  requires_attachment: boolean
-  description?: string
-}): Promise<void> {
+export async function adminUpdateType(
+  code: string,
+  data: {
+    name: string
+    default_days: number
+    requires_balance_check: boolean
+    requires_attachment: boolean
+    description?: string
+  }
+): Promise<void> {
   await api.put(`/api/leave/admin/types/${code}`, data)
 }
 
@@ -377,6 +503,7 @@ export async function adminDeleteType(code: string): Promise<void> {
 
 // 获取所有申请
 export async function adminGetRequests(params?: {
+  unreadOnly?: boolean
   status?: string
   leaveTypeCode?: string
   userId?: string
@@ -391,10 +518,7 @@ export async function adminGetRequests(params?: {
 }
 
 // 获取所有人余额总览
-export async function adminGetBalances(params?: {
-  department?: string
-  year?: number
-}): Promise<{
+export async function adminGetBalances(params?: { department?: string; year?: number }): Promise<{
   users: Array<Record<string, any>>
   types: Array<{ code: string; name: string; requires_balance_check: boolean }>
   year: number

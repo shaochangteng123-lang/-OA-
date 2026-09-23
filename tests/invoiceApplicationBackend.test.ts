@@ -1231,7 +1231,7 @@ describe("开票申请服务端主流程", () => {
       });
       expect(query).toHaveBeenCalledWith(
         expect.stringContaining("file_type = $4"),
-        ["file-1", "contract-1", "admin-1", fileType],
+        ["file-1", "contract-1", "admin-1", fileType, "application-1"],
       );
       expect(
         query.mock.calls.some(([sql]) =>
@@ -1247,6 +1247,7 @@ describe("开票申请服务端主流程", () => {
     const routes = repositoryFile("server/routes/invoice-applications.ts");
     const service = repositoryFile("server/services/invoiceApplication.ts");
     const contractRoutes = repositoryFile("server/routes/contracts.ts");
+    const schema = repositoryFile("server/db/index.ts");
     expect(routes).toContain("req.body?.sealedTriplicateFileId");
     expect(service).toContain("INVOICE_APPLICATION_SEALED_TRIPLICATE_REQUIRED");
     expect(service).toContain(
@@ -1259,12 +1260,80 @@ describe("开票申请服务端主流程", () => {
     expect(service).toContain(
       'applicationRequiresTriplicate(application) ? "triplicate" : "other"',
     );
+    expect(service).toContain(
+      "AND (invoice_application_id = $5 OR invoice_application_id IS NULL)",
+    );
+    expect(service).toContain(
+      "UPDATE contract_files SET invoice_application_id = $2",
+    );
     expect(service).toContain("sealedTriplicateFileId");
+    expect(contractRoutes).toContain("req.body.invoiceApplicationId");
+    expect(contractRoutes).toContain(
+      'fileType === "triplicate" && !invoiceApplicationId',
+    );
+    expect(contractRoutes).toContain("INVOICE_APPLICATION_ID_REQUIRED");
+    expect(contractRoutes).toMatch(
+      /const allowedKinds:[\s\S]*?invoiceApplicationId[\s\S]*?\? \["pdf"\]/,
+    );
+    expect(contractRoutes).toContain("开票申请不存在或不属于当前合同");
+    expect(contractRoutes).toContain(
+      'targetApplication.status !== "pending_seal"',
+    );
+    expect(contractRoutes).toContain(
+      "insertContractFile(\n        client,\n        req.params.id,\n        fileType,\n        file,\n        currentActor.id,\n        nanoid(),\n        invoiceApplicationId,",
+    );
+    expect(schema).toContain(
+      "FOREIGN KEY(invoice_application_id)\n      REFERENCES invoice_applications(id) ON DELETE SET NULL",
+    );
+    expect(schema).toContain("audit.metadata_json->>'sealedTriplicateFileId'");
+    expect(schema).toContain("WHERE audit.action = 'deliver'");
+    expect(schema).toContain("file.contract_id = application.contract_id");
+    expect(schema).toContain("file.file_type IN ('triplicate', 'other')");
+    expect(schema).toContain("AND file.invoice_application_id IS NULL");
+    expect(schema).toContain("idx_contract_files_invoice_application");
+    expect(schema).toContain(
+      "idx_contract_files_one_current_invoice_application",
+    );
+    expect(schema).toContain(
+      "HAVING COUNT(DISTINCT candidate.application_id) = 1",
+    );
     const versionedTypes = contractRoutes.slice(
       contractRoutes.indexOf("const versionedSingleCurrentFileTypes"),
       contractRoutes.indexOf("const CONTRACT_CATEGORIES"),
     );
     expect(versionedTypes).not.toContain('"triplicate"');
+  });
+
+  test("合同归档将开票申请材料与普通合同附件严格隔离", () => {
+    const contractRoutes = repositoryFile("server/routes/contracts.ts");
+    const materialArchive = contractRoutes.slice(
+      contractRoutes.indexOf("const filesPromise ="),
+      contractRoutes.indexOf(
+        "const [",
+        contractRoutes.indexOf("const filesPromise ="),
+      ),
+    );
+    expect(materialArchive).toContain(
+      "AND file.invoice_application_id IS NULL",
+    );
+    expect(materialArchive).toContain(
+      "const invoiceApplicationMaterialGroupsPromise =",
+    );
+    expect(materialArchive).toContain(
+      "FROM invoice_application_materials material",
+    );
+    expect(materialArchive).toContain("JOIN invoice_applications application");
+    expect(materialArchive).toContain(
+      "file.invoice_application_id AS application_id",
+    );
+    expect(materialArchive).toContain(
+      "application.status NOT IN ('draft', 'rejected')",
+    );
+    expect(materialArchive).toContain("application.delivered_at IS NOT NULL");
+    expect(materialArchive).toContain('"system_generated_triplicate"');
+    expect(materialArchive).toContain('"uploaded_triplicate"');
+    expect(materialArchive).toContain('"sealed_triplicate"');
+    expect(materialArchive).toContain('"sealed_material"');
   });
 
   test("申请字段精简后服务端只接受专票和普票且开票内容固定为空", () => {

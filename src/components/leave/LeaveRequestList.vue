@@ -79,7 +79,7 @@
             link type="primary" size="small"
             @click="handleResubmit(row)"
           >
-            {{ row.status === 'draft' ? '重新提交' : '修改重提' }}
+            {{ row.status === 'draft' ? '提交申请' : '修改重提' }}
           </el-button>
           <el-button
             v-if="row.status === 'draft'"
@@ -89,7 +89,7 @@
             删除
           </el-button>
           <el-button
-            v-if="row.status === 'approved'"
+            v-if="canCreateRelatedRequest(row)"
             link
             type="primary"
             size="small"
@@ -98,13 +98,13 @@
             续假
           </el-button>
           <el-button
-            v-if="row.status === 'approved'"
+            v-if="canCreateRelatedRequest(row)"
             link
             type="warning"
             size="small"
             @click="openRelatedRequest(row, 'supplement')"
           >
-            补假
+            追加补假
           </el-button>
         </template>
       </el-table-column>
@@ -161,9 +161,10 @@
     <!-- 修改重提对话框 -->
     <el-dialog
       v-model="resubmitVisible"
-      :title="resubmitRequest?.status === 'draft' ? '编辑草稿并重新提交' : '修改并重新提交'"
+      :title="resubmitRequest?.status === 'draft' ? '编辑草稿并提交申请' : '修改并重新提交'"
       width="600px"
       :close-on-click-modal="false"
+      destroy-on-close
     >
       <LeaveResubmitForm
         v-if="resubmitRequest"
@@ -175,7 +176,7 @@
 
     <el-dialog
       v-model="relatedVisible"
-      :title="relatedType === 'extension' ? '申请续假' : '申请补假'"
+      :title="relatedType === 'extension' ? '申请续假' : '申请追加补假'"
       width="min(780px, 94vw)"
       :close-on-click-modal="false"
       destroy-on-close
@@ -198,6 +199,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import LeaveApprovalTimeline from './LeaveApprovalTimeline.vue'
 import LeaveRelatedRequestForm from './LeaveRelatedRequestForm.vue'
 import LeaveResubmitForm from './LeaveResubmitForm.vue'
+import { getLeaveApplicationKindLabel as applicationKindLabel } from '@/utils/leaveApplication'
 import {
   getMyRequests,
   getRequestDetail,
@@ -239,29 +241,17 @@ function statusLabel(status: string): string {
   return map[status] || status
 }
 
+function canCreateRelatedRequest(request: LeaveRequest): boolean {
+  return request.status === 'approved' && !(
+    request.application_kind === 'supplement' && !request.parent_request_id
+  )
+}
+
 function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' | undefined {
   const map: Record<string, 'primary' | 'success' | 'warning' | 'danger' | 'info'> = {
     draft: 'info', pending: 'warning', approved: 'success', rejected: 'danger', cancelled: 'info'
   }
   return map[status] || undefined
-}
-
-function applicationKindLabel(
-  request: Pick<LeaveRequest, 'application_kind' | 'combination_group_id'>
-): string {
-  if (request.combination_group_id && request.application_kind === 'extension') {
-    return '组合续假'
-  }
-  if (request.combination_group_id && request.application_kind === 'supplement') {
-    return '组合补假'
-  }
-  const labels: Record<LeaveRequest['application_kind'], string> = {
-    normal: '普通请假',
-    combined: '组合请假',
-    extension: '续假',
-    supplement: '补假',
-  }
-  return labels[request.application_kind] || '普通请假'
 }
 
 function applicationKindTagType(

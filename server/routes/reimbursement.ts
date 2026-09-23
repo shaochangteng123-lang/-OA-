@@ -2642,13 +2642,6 @@ router.post('/create', requireAuth, async (req, res) => {
 
     // 如果状态是 pending（提交审批），提前进行业务规则校验
     if (status === 'pending') {
-      // 大额报销金额验证：总金额必须超过1000元
-      if (type === 'large' && totalAmount < 1000) {
-        return res.status(400).json({
-          success: false,
-          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
-        })
-      }
       if (approvalSkipped && totalAmount <= 0) {
         return res.status(400).json({
           success: false,
@@ -2947,12 +2940,6 @@ router.get('/list', requireAuth, async (req, res) => {
     if (type) {
       whereClause += ' AND type = ?'
       params.push(type)
-
-      // 大额报销只显示金额 >= 1000 的记录，但草稿和已驳回状态除外（允许用户继续编辑）
-      if (type === 'large') {
-        whereClause +=
-          " AND (total_amount >= 1000 OR status IN ('draft', 'rejected'))"
-      }
     }
 
     if (status) {
@@ -4515,13 +4502,6 @@ router.put('/:id', requireAuth, async (req, res) => {
 
     // 如果是提交审批（status 变为 pending），提前进行业务规则校验
     if (status === 'pending') {
-      // 大额报销金额验证：总金额必须超过1000元
-      if (existingReimbursement.type === 'large' && totalAmount < 1000) {
-        return res.status(400).json({
-          success: false,
-          message: '大额报销适用于发票总金额超过 1000 元的报销申请',
-        })
-      }
       if (approvalSkipped && totalAmount <= 0) {
         return res.status(400).json({
           success: false,

@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1280" viewBox="0 0 1400 1280">
+  <defs>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#475569"/>
+    </marker>
+    <style>
+      .title { font:700 44px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#0F172A; }
+      .lane { font:700 31px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#334155; }
+      .node { font:700 28px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#0F172A; }
+      .meta { font:400 24px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#475569; }
+      .small { font:400 23px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#475569; }
+      .arrow { stroke:#475569; stroke-width:3.5; fill:none; marker-end:url(#arrow); }
+      .dash { stroke:#7C3AED; stroke-width:3; stroke-dasharray:10 8; fill:none; marker-end:url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1400" height="1280" fill="#FFFFFF"/>
+  <text x="700" y="62" text-anchor="middle" class="title">建设工程规划许可证前置成果来源及放行逻辑</text>
+
+  <rect x="65" y="100" width="420" height="790" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="490" y="100" width="420" height="790" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="2"/>
+  <rect x="915" y="100" width="420" height="790" rx="18" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="275" y="145" text-anchor="middle" class="lane">规划线</text>
+  <text x="700" y="145" text-anchor="middle" class="lane">核准线</text>
+  <text x="1125" y="145" text-anchor="middle" class="lane">土地线</text>
+
+  <rect x="105" y="180" width="340" height="92" rx="14" fill="#EDE9FE" stroke="#7C3AED" stroke-width="2"/>
+  <text x="275" y="217" text-anchor="middle" class="node">多规合一初审意见函</text>
+  <text x="275" y="250" text-anchor="middle" class="meta">我方历史办理  已核验</text>
+  <path d="M275 272 L275 312" class="arrow"/>
+  <rect x="105" y="316" width="340" height="92" rx="14" fill="#EDE9FE" stroke="#7C3AED" stroke-width="2"/>
+  <text x="275" y="353" text-anchor="middle" class="node">多规合一会商意见函</text>
+  <text x="275" y="386" text-anchor="middle" class="meta">我方历史办理  已核验</text>
+  <path d="M275 408 L275 448" class="arrow"/>
+  <rect x="105" y="452" width="340" height="92" rx="14" fill="#E0F2FE" stroke="#0369A1" stroke-width="2"/>
+  <text x="275" y="489" text-anchor="middle" class="node">钉桩报告</text>
+  <text x="275" y="522" text-anchor="middle" class="meta">甲方提供  已核验</text>
+  <path d="M275 544 L275 584" class="arrow"/>
+  <rect x="105" y="588" width="340" height="122" rx="14" fill="#E0F2FE" stroke="#0369A1" stroke-width="2"/>
+  <text x="275" y="626" text-anchor="middle" class="node">建设项目用地预审</text>
+  <text x="275" y="661" text-anchor="middle" class="node">与选址意见书</text>
+  <text x="275" y="694" text-anchor="middle" class="meta">甲方已办  已核验</text>
+
+  <path d="M445 362 C540 362 548 220 575 220" class="dash"/>
+  <rect x="535" y="180" width="330" height="104" rx="14" fill="#E0F2FE" stroke="#0369A1" stroke-width="2"/>
+  <text x="700" y="222" text-anchor="middle" class="node">项目核准</text>
+  <text x="700" y="260" text-anchor="middle" class="meta">甲方已办  已核验</text>
+
+  <rect x="955" y="180" width="340" height="86" rx="14" fill="#EDE9FE" stroke="#7C3AED" stroke-width="2"/>
+  <text x="1125" y="216" text-anchor="middle" class="node">征地批复</text>
+  <text x="1125" y="246" text-anchor="middle" class="meta">我方历史办理</text>
+  <path d="M1125 266 L1125 296" class="arrow"/>
+  <rect x="955" y="300" width="340" height="86" rx="14" fill="#EDE9FE" stroke="#7C3AED" stroke-width="2"/>
+  <text x="1125" y="336" text-anchor="middle" class="node">征地结案</text>
+  <text x="1125" y="366" text-anchor="middle" class="meta">我方历史办理</text>
+  <path d="M1125 386 L1125 416" class="arrow"/>
+  <rect x="955" y="420" width="340" height="86" rx="14" fill="#E0F2FE" stroke="#0369A1" stroke-width="2"/>
+  <text x="1125" y="456" text-anchor="middle" class="node">划拨批复</text>
+  <text x="1125" y="486" text-anchor="middle" class="meta">甲方提供  已核验</text>
+  <path d="M1125 506 L1125 536" class="arrow"/>
+  <rect x="955" y="540" width="340" height="104" rx="14" fill="#FEF3C7" stroke="#B45309" stroke-width="3"/>
+  <text x="1125" y="582" text-anchor="middle" class="node">划拨决定书</text>
+  <text x="1125" y="620" text-anchor="middle" class="meta">甲方提供  待核验</text>
+
+  <path d="M275 710 L275 760 C275 805 560 820 620 870" class="arrow"/>
+  <path d="M700 284 L700 870" class="arrow"/>
+  <path d="M1125 644 L1125 760 C1125 805 840 820 780 870" class="arrow"/>
+
+  <polygon points="700,842 880,924 700,1006 520,924" fill="#FFFFFF" stroke="#475569" stroke-width="3"/>
+  <text x="700" y="915" text-anchor="middle" class="node">三项直接前置成果</text>
+  <text x="700" y="952" text-anchor="middle" class="node">是否全部有效</text>
+
+  <path d="M700 1006 L700 1060" class="arrow"/>
+  <rect x="470" y="1064" width="460" height="124" rx="16" fill="#DBEAFE" stroke="#2563EB" stroke-width="4"/>
+  <text x="700" y="1114" text-anchor="middle" class="node">建设工程规划许可证</text>
+  <text x="700" y="1154" text-anchor="middle" class="meta">本合同办理  当前前置受限</text>
+
+  <rect x="80" y="1050" width="320" height="164" rx="14" fill="#FEE2E2" stroke="#B91C1C" stroke-width="2" stroke-dasharray="10 8"/>
+  <text x="240" y="1094" text-anchor="middle" class="node">放行规则</text>
+  <text x="240" y="1132" text-anchor="middle" class="small">缺失  过期  撤销</text>
+  <text x="240" y="1164" text-anchor="middle" class="small">未经核验或分项不匹配</text>
+  <text x="240" y="1196" text-anchor="middle" class="small">均不得放行</text>
+
+  <rect x="990" y="1050" width="330" height="164" rx="14" fill="#F1F5F9" stroke="#64748B" stroke-width="2"/>
+  <text x="1155" y="1094" text-anchor="middle" class="node">核验记录</text>
+  <text x="1155" y="1132" text-anchor="middle" class="small">来源  文件  提供方</text>
+  <text x="1155" y="1164" text-anchor="middle" class="small">核验人  核验时间</text>
+  <text x="1155" y="1196" text-anchor="middle" class="small">适用分项  风险说明</text>
+</svg>

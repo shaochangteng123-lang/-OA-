@@ -35,6 +35,14 @@ export interface ProbationApprovalStageView {
   record: ProbationApprovalRecord | null;
 }
 
+const probationApproverRoleLabels: Record<string, string> = {
+  user: "员工本人",
+  general_manager: "总经理",
+  admin: "管理员",
+  super_admin: "超级管理员",
+  chairman: "董事长",
+};
+
 export const probationApprovalStageDefinitions = [
   {
     key: "employee",
@@ -86,12 +94,15 @@ export function buildProbationApprovalStages(
     }
     const approverName =
       record?.signer_name?.trim() || approverNames[stage.key]?.trim();
+    const handlerRole =
+      (record &&
+        stage.key !== "employee" &&
+        probationApproverRoleLabels[record.signer_role || ""]) ||
+      stage.handler;
 
     return {
       ...stage,
-      handler: approverName
-        ? `${stage.handler} ${approverName}`
-        : stage.handler,
+      handler: approverName ? `${handlerRole} ${approverName}` : handlerRole,
       state,
       record,
     };
@@ -140,13 +151,6 @@ export function probationApprovalTimelineRoleNameLabel(record: {
   approver_role?: string | null;
 }): string {
   const actorName = probationApprovalTimelineActorLabel(record);
-  const roleLabels: Record<string, string> = {
-    user: "员工本人",
-    general_manager: "总经理",
-    admin: "管理员",
-    super_admin: "管理员",
-    chairman: "董事长",
-  };
-  const roleLabel = roleLabels[record.approver_role || ""];
+  const roleLabel = probationApproverRoleLabels[record.approver_role || ""];
   return roleLabel ? `${roleLabel} ${actorName}` : actorName;
 }

@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1050" viewBox="0 0 1400 1050">
+  <defs>
+    <style>
+      .h1 { font:700 38px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#111827; }
+      .h2 { font:700 28px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#1F2937; }
+      .body { font:400 23px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#374151; }
+      .small { font:400 20px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#64748B; }
+      .metric { font:700 35px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#0F172A; }
+      .tab { font:700 23px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#475569; }
+      .table-h { font:700 21px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#FFFFFF; }
+      .table { font:400 20px 'Arial Unicode MS','FangSong_GB2312',sans-serif; fill:#1F2937; }
+      .tag { font:700 18px 'Arial Unicode MS','FangSong_GB2312',sans-serif; }
+    </style>
+  </defs>
+  <rect width="1400" height="1050" fill="#F3F4F6"/>
+  <rect x="35" y="26" width="1330" height="998" rx="16" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="2"/>
+
+  <text x="75" y="80" class="h1">工体110千伏输变电工程</text>
+  <rect x="600" y="48" width="96" height="38" rx="18" fill="#DCFCE7"/><text x="648" y="74" text-anchor="middle" class="tag" fill="#166534">办理中</text>
+  <rect x="710" y="48" width="150" height="38" rx="18" fill="#DBEAFE"/><text x="785" y="74" text-anchor="middle" class="tag" fill="#1D4ED8">合同已关联</text>
+  <text x="1080" y="66" class="small">范围版本  第1版</text>
+  <text x="1080" y="92" class="small">最近同步  2026-09-20</text>
+
+  <g class="tab">
+    <text x="76" y="142">概览</text><text x="174" y="142" fill="#1D4ED8">手续范围</text><text x="302" y="142">流程</text><text x="394" y="142">成果证照</text><text x="530" y="142">合同</text><text x="620" y="142">日志动态</text><text x="752" y="142">结题报告</text>
+  </g>
+  <rect x="168" y="156" width="96" height="4" fill="#2563EB"/>
+
+  <rect x="75" y="180" width="1250" height="60" rx="10" fill="#EFF6FF" stroke="#93C5FD"/>
+  <text x="100" y="218" class="body" fill="#1E40AF">流程模板仅提供候选事项；本页范围以已确认合同交付清单和前置成果来源为准</text>
+
+  <g>
+    <rect x="75" y="266" width="280" height="118" rx="12" fill="#DBEAFE" stroke="#93C5FD"/>
+    <text x="100" y="304" class="small">合同交付</text><text x="100" y="350" class="metric">4类  7件</text>
+    <rect x="380" y="266" width="280" height="118" rx="12" fill="#CCFBF1" stroke="#5EEAD4"/>
+    <text x="405" y="304" class="small">本项目办理</text><text x="405" y="350" class="metric">6项</text>
+    <rect x="685" y="266" width="280" height="118" rx="12" fill="#EDE9FE" stroke="#C4B5FD"/>
+    <text x="710" y="304" class="small">复用前置成果</text><text x="710" y="350" class="metric">8项</text>
+    <rect x="990" y="266" width="335" height="118" rx="12" fill="#FEF3C7" stroke="#FCD34D"/>
+    <text x="1015" y="304" class="small">待补证</text><text x="1015" y="350" class="metric" fill="#B45309">1项</text>
+  </g>
+
+  <rect x="75" y="408" width="1250" height="58" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="98" y="444" class="small">工程分项  全部</text>
+  <text x="300" y="444" class="small">范围角色  全部</text>
+  <text x="520" y="444" class="small">来源  全部</text>
+  <rect x="770" y="419" width="170" height="36" rx="8" fill="#FFFFFF" stroke="#94A3B8"/><text x="855" y="444" text-anchor="middle" class="small">只看合同交付</text>
+  <rect x="955" y="419" width="170" height="36" rx="8" fill="#FFFFFF" stroke="#94A3B8"/><text x="1040" y="444" text-anchor="middle" class="small">显示前置依赖</text>
+  <rect x="1140" y="419" width="160" height="36" rx="8" fill="#2563EB"/><text x="1220" y="444" text-anchor="middle" class="small" fill="#FFFFFF">确认手续范围</text>
+
+  <rect x="75" y="492" width="1250" height="52" fill="#1F4E78"/>
+  <text x="96" y="525" class="table-h">手续事项</text><text x="430" y="525" class="table-h">工程分项</text><text x="580" y="525" class="table-h">范围角色</text><text x="770" y="525" class="table-h">来源或责任</text><text x="980" y="525" class="table-h">前置与成果</text><text x="1195" y="525" class="table-h">状态</text>
+
+  <g stroke="#D1D5DB" stroke-width="1">
+    <rect x="75" y="544" width="1250" height="76" fill="#EFF6FF"/>
+    <rect x="75" y="620" width="1250" height="76" fill="#FFFFFF"/>
+    <rect x="75" y="696" width="1250" height="76" fill="#F8FAFC"/>
+    <rect x="75" y="772" width="1250" height="76" fill="#FFFFFF"/>
+    <rect x="75" y="848" width="1250" height="76" fill="#F8FAFC"/>
+  </g>
+  <g class="table">
+    <text x="96" y="574">建设工程规划许可证</text><text x="96" y="602" class="small">送电工程</text><text x="430" y="586">送电工程</text><text x="580" y="586" fill="#1D4ED8">合同交付  1个</text><text x="770" y="586">本项目办理</text><text x="980" y="586">直接前置3项</text><text x="1195" y="586" fill="#B45309">前置受限</text>
+    <text x="96" y="650">用地预审与选址意见书</text><text x="430" y="662">送电工程</text><text x="580" y="662">前置条件</text><text x="770" y="662" fill="#0369A1">甲方已办</text><text x="980" y="662">成果1份  已核验</text><text x="1195" y="662" fill="#166534">已满足</text>
+    <text x="96" y="726">项目核准</text><text x="430" y="738">送电工程</text><text x="580" y="738">前置条件</text><text x="770" y="738" fill="#7C3AED">我方历史办理</text><text x="980" y="738">引用历史成果</text><text x="1195" y="738" fill="#166534">已满足</text>
+    <text x="96" y="802">划拨决定书</text><text x="430" y="814">送电工程</text><text x="580" y="814">前置条件</text><text x="770" y="814" fill="#B45309">待确认</text><text x="980" y="814">缺少有效证明</text><text x="1195" y="814" fill="#B45309">待补证</text>
+    <text x="96" y="878">建筑工程施工许可证</text><text x="96" y="906" class="small">送电工程  共4个</text><text x="430" y="890">送电工程</text><text x="580" y="890" fill="#1D4ED8">合同交付  4个</text><text x="770" y="890">本项目办理</text><text x="980" y="890">规划许可证未完成</text><text x="1195" y="890" fill="#B45309">前置受限</text>
+  </g>
+
+  <rect x="75" y="948" width="1250" height="52" rx="8" fill="#F8FAFC" stroke="#CBD5E1"/>
+  <text x="96" y="981" class="small">选中项详情  来源类型  来源项目或单位  关联文件  核验人和时间  是否纳入合同交付  变更记录</text>
+</svg>

@@ -136,6 +136,7 @@ const reports = ref<WeeklyReport[]>([])
 const timeChoice = ref<'thisWeek' | 'lastWeek' | 'custom'>('thisWeek')
 const customDate = ref('')
 const dateRange = ref<string[]>([])
+let reportsRequestSequence = 0
 
 const weekLabel = computed(() => {
   if (dateRange.value.length === 2) {
@@ -185,7 +186,7 @@ function handleTimeChange(choice: string | number | boolean | undefined) {
   if (choice === 'custom') {
     dateRange.value = []
     customDate.value = ''
-    reports.value = []
+    loadReports()
     return
   }
   dateRange.value = getWeekRange(choice)
@@ -194,26 +195,40 @@ function handleTimeChange(choice: string | number | boolean | undefined) {
 
 function handleCustomDateChange(val: any) {
   dateRange.value = val ? getWeekRangeFromPicker(val) : []
-  if (dateRange.value.length === 2) {
-    loadReports()
-  }
+  loadReports()
 }
 
 async function loadReports() {
-  if (!dateRange.value || dateRange.value.length < 2) return
+  const requestSequence = ++reportsRequestSequence
+  const [weekStart, weekEnd] = dateRange.value.length === 2 ? [...dateRange.value] : []
+
+  // 切换周次时立即移除旧内容，避免日期标题与旧周报短暂错配。
+  reports.value = []
+  if (!weekStart || !weekEnd) {
+    loading.value = false
+    return
+  }
+
   loading.value = true
   try {
-    const [weekStart, weekEnd] = dateRange.value
     const { data } = await api.get('/api/daily-logs/team/weekly-summary', {
       params: { weekStart, weekEnd },
     })
-    if (data.success) {
+
+    const isLatestRequest = requestSequence === reportsRequestSequence
+    const responseMatchesRequest = data?.data?.weekStart === weekStart
+      && data?.data?.weekEnd === weekEnd
+    if (isLatestRequest && responseMatchesRequest && data.success) {
       reports.value = data.data.reports || []
     }
   } catch {
+    if (requestSequence !== reportsRequestSequence) return
+    reports.value = []
     ElMessage.error('加载团队周报失败')
   } finally {
-    loading.value = false
+    if (requestSequence === reportsRequestSequence) {
+      loading.value = false
+    }
   }
 }
 

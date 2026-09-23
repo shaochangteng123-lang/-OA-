@@ -8,10 +8,26 @@
     label-width="90px"
     class="leave-request-form"
   >
+    <el-form-item label="申请场景">
+      <div class="scene-selector">
+        <el-radio-group v-model="applicationScene" @change="handleApplicationSceneChange">
+          <el-radio-button value="normal">正常请假</el-radio-button>
+          <el-radio-button value="return_supplement">返岗补假</el-radio-button>
+        </el-radio-group>
+        <div v-if="isReturnSupplement" class="field-tip">
+          用于返岗后补录今天或过去的请假，提交后仍按正常流程审批
+        </div>
+      </div>
+    </el-form-item>
+
     <el-form-item label="申请方式">
       <el-radio-group v-model="requestMode" @change="handleModeChange">
-        <el-radio-button value="single">单一请假</el-radio-button>
-        <el-radio-button value="combined">组合请假</el-radio-button>
+        <el-radio-button value="single">
+          {{ isReturnSupplement ? '单一返岗补假' : '单一请假' }}
+        </el-radio-button>
+        <el-radio-button value="combined">
+          {{ isReturnSupplement ? '组合返岗补假' : '组合请假' }}
+        </el-radio-button>
       </el-radio-group>
     </el-form-item>
 
@@ -30,7 +46,10 @@
             :disabled="type.is_available === false"
           >
             <span>{{ type.name }}</span>
-            <span v-if="type.requires_balance_check && getBalance(type.code)" class="option-balance">
+            <span
+              v-if="!isReturnSupplement && type.requires_balance_check && getBalance(type.code)"
+              class="option-balance"
+            >
               可用 {{ getBalance(type.code)?.available_days }} 天
             </span>
             <span
@@ -50,6 +69,7 @@
           </el-option>
         </el-select>
         <el-button
+          v-if="!isReturnSupplement"
           type="primary"
           plain
           :icon="CircleCheck"
@@ -67,7 +87,7 @@
         <LeaveDatePicker
           v-model="form.startDate"
           placeholder="选择开始日期"
-          :disabled-date="isPastLeaveDateDisabled"
+          :disabled-date="disableStartDate"
           @change="onDateChange"
         />
         <el-radio-group v-model="form.startHalf" class="half-radio" @change="onDateChange">
@@ -81,7 +101,7 @@
       <div class="date-half-row">
         <LeaveDatePicker
           v-model="form.endDate"
-          :placeholder="requestMode === 'combined' ? '自动计算，可调整' : '选择结束日期'"
+          :placeholder="isReturnSupplement ? '选择实际结束日期' : requestMode === 'combined' ? '自动计算，可调整' : '选择结束日期'"
           :disabled-date="disableEndDate"
           @change="onEndDateChange"
         />
@@ -104,7 +124,7 @@
           <span class="duration-unit">个工作日</span>
         </template>
         <span v-else class="duration-placeholder">
-          {{ requestMode === 'combined' ? '选择假期分配后自动计算' : '选择日期后自动计算' }}
+          {{ isReturnSupplement ? '选择实际起止日期后自动计算' : requestMode === 'combined' ? '选择假期分配后自动计算' : '选择日期后自动计算' }}
         </span>
       </div>
     </el-form-item>
@@ -145,6 +165,7 @@
             </span>
           </div>
           <el-tooltip
+            v-if="!isReturnSupplement"
             content="将固定额度假期恢复为当前全部可用天数"
             placement="top"
           >
@@ -182,7 +203,10 @@
                 :disabled="isTypeOptionDisabled(type, segment.key)"
               >
                 <span>{{ type.name }}</span>
-                <span v-if="type.requires_balance_check && getBalance(type.code)" class="option-balance">
+                <span
+                  v-if="!isReturnSupplement && type.requires_balance_check && getBalance(type.code)"
+                  class="option-balance"
+                >
                   可用 {{ getBalance(type.code)?.available_days }} 天
                 </span>
                 <span
@@ -221,7 +245,7 @@
             />
             <span class="days-label">天</span>
             <el-tooltip
-              v-if="getType(segment.leaveTypeCode)?.requires_balance_check"
+            v-if="getType(segment.leaveTypeCode)?.requires_balance_check && !isReturnSupplement"
               content="恢复为当前全部可用余额"
               placement="top"
             >
@@ -290,8 +314,9 @@
           :show-file-list="false"
           :limit="5"
           multiple
-          :accept="'.jpg,.jpeg,.png,.pdf'"
+          :accept="'.jpg,.jpeg,.png,.webp,.pdf'"
           list-type="text"
+          :on-change="handleAttachmentFileChange"
           :on-exceed="handleExceed"
         >
           <el-button type="primary" plain size="small">
@@ -304,7 +329,7 @@
           <el-icon><WarningFilled /></el-icon>
           {{ attachmentRequirementText }}
         </div>
-        <div class="upload-tip">支持 JPG / PNG / PDF，每个不超过 5MB</div>
+        <div class="upload-tip">支持 JPG / PNG / WEBP / PDF，每个不超过 5MB</div>
       </div>
     </el-form-item>
 
@@ -315,7 +340,7 @@
         :disabled="calculating || calculatedDays === null || calculatedDays <= 0"
         @click="handleSubmit"
       >
-        {{ requestMode === 'combined' ? '提交组合请假' : '提交申请' }}
+        {{ submitButtonText }}
       </el-button>
       <el-button @click="handleReset">重置</el-button>
     </el-form-item>
@@ -351,15 +376,22 @@ import {
 import { getAutomaticCombinedLeaveDays } from '@/utils/leaveCombination'
 import {
   formatAttachmentRequirementMessage,
+  getLeaveAttachmentSizeError,
   getAttachmentRequiredLeaveTypes,
 } from '@/utils/leaveAttachment'
-import { isLeaveEndDateDisabled, isPastLeaveDateDisabled } from '@/utils/leaveDate'
+import {
+  isFutureLeaveDateDisabled,
+  isLeaveEndDateDisabled,
+  isPastLeaveDateDisabled,
+  isReturnSupplementEndDateDisabled,
+} from '@/utils/leaveDate'
 
 const emit = defineEmits<{
   (event: 'submitted'): void
 }>()
 
 type RequestMode = 'single' | 'combined'
+type ApplicationScene = 'normal' | 'return_supplement'
 
 interface CombinationSegment {
   key: number
@@ -389,6 +421,7 @@ const NO_REASON_TYPES = [
 const formRef = ref<FormInstance>()
 const uploadRef = ref()
 const formResetKey = ref(0)
+const applicationScene = ref<ApplicationScene>('normal')
 const requestMode = ref<RequestMode>('single')
 const leaveTypes = ref<LeaveTypeConfig[]>([])
 const balances = ref<LeaveBalance[]>([])
@@ -428,12 +461,20 @@ function createSegment(key: number): CombinationSegment {
 
 const form = ref(createInitialForm())
 const endTimeManuallySelected = ref(false)
+const isReturnSupplement = computed(() => applicationScene.value === 'return_supplement')
 
 const isCombinedPeriodFixed = computed(() => (
   requestMode.value === 'combined' &&
-  endTimeManuallySelected.value &&
+  (endTimeManuallySelected.value || isReturnSupplement.value) &&
   Boolean(form.value.startDate && form.value.endDate)
 ))
+
+const submitButtonText = computed(() => {
+  if (isReturnSupplement.value) {
+    return requestMode.value === 'combined' ? '提交组合返岗补假' : '提交返岗补假'
+  }
+  return requestMode.value === 'combined' ? '提交组合请假' : '提交申请'
+})
 
 const selectedType = computed(() => {
   return leaveTypes.value.find(type => type.code === form.value.leaveTypeCode) || null
@@ -496,6 +537,7 @@ const allocationStatusText = computed(() => {
 
 const canFillFullLeave = computed(() => {
   return Boolean(
+    !isReturnSupplement.value &&
     selectedType.value?.requires_balance_check &&
     selectedType.value.is_available !== false &&
     form.value.startDate &&
@@ -505,6 +547,7 @@ const canFillFullLeave = computed(() => {
 
 const canFillCombinedLeave = computed(() => {
   return Boolean(
+    !isReturnSupplement.value &&
     form.value.startDate &&
     segments.value.some(segment => segment.leaveTypeCode) &&
     !calculating.value
@@ -538,8 +581,39 @@ function getBalance(code: string): LeaveBalance | null {
   return balances.value.find(balance => balance.leave_type_code === code) || null
 }
 
+function disableStartDate(time: Date): boolean {
+  return isReturnSupplement.value
+    ? isFutureLeaveDateDisabled(time)
+    : isPastLeaveDateDisabled(time)
+}
+
 function disableEndDate(time: Date): boolean {
-  return isLeaveEndDateDisabled(time, form.value.startDate)
+  return isReturnSupplement.value
+    ? isReturnSupplementEndDateDisabled(time, form.value.startDate)
+    : isLeaveEndDateDisabled(time, form.value.startDate)
+}
+
+function resetApplicationFields() {
+  if (calcTimer) {
+    clearTimeout(calcTimer)
+    calcTimer = null
+  }
+  combinedPeriodSequence += 1
+  Object.assign(form.value, createInitialForm())
+  endTimeManuallySelected.value = false
+  segmentSequence.value = 2
+  segments.value = [createSegment(1), createSegment(2)]
+  fileList.value = []
+  uploadRef.value?.clearFiles()
+  calculatedDays.value = null
+  calculating.value = false
+  formResetKey.value += 1
+}
+
+async function handleApplicationSceneChange() {
+  resetApplicationFields()
+  await nextTick()
+  formRef.value?.clearValidate()
 }
 
 function handleModeChange() {
@@ -582,6 +656,10 @@ function handleSegmentTypeChange(segment: CombinationSegment) {
     ElMessage.warning(type.unavailable_reason || '该假期类型当前不可申请')
     return
   }
+  if (isReturnSupplement.value) {
+    segment.days = null
+    return
+  }
   const days = getAutomaticCombinedLeaveDays({
     requiresBalanceCheck: Boolean(type?.requires_balance_check),
     availableDays: getBalance(segment.leaveTypeCode)?.available_days ?? 0,
@@ -604,8 +682,11 @@ function onDateChange() {
     scheduleCombinedPeriodCalculation()
     return
   }
+  combinedPeriodSequence += 1
+  const sequence = combinedPeriodSequence
   if (!form.value.startDate || !form.value.endDate) {
     calculatedDays.value = null
+    calculating.value = false
     return
   }
   if (calcTimer) clearTimeout(calcTimer)
@@ -617,12 +698,15 @@ function onDateChange() {
         startHalf: form.value.startHalf,
         endDate: form.value.endDate,
         endHalf: form.value.endHalf,
+        allowPast: isReturnSupplement.value,
       })
+      if (sequence !== combinedPeriodSequence || requestMode.value !== 'single') return
       calculatedDays.value = result.days
     } catch {
+      if (sequence !== combinedPeriodSequence || requestMode.value !== 'single') return
       calculatedDays.value = null
     } finally {
-      calculating.value = false
+      if (sequence === combinedPeriodSequence) calculating.value = false
     }
   }, 400)
 }
@@ -657,6 +741,7 @@ function onEndDateChange() {
         startHalf: form.value.startHalf,
         endDate: form.value.endDate,
         endHalf: form.value.endHalf,
+        allowPast: isReturnSupplement.value,
       })
       if (sequence !== combinedPeriodSequence || requestMode.value !== 'combined') return
       calculatedDays.value = result.days
@@ -670,6 +755,11 @@ function onEndDateChange() {
 }
 
 function scheduleCombinedPeriodCalculation() {
+  if (isReturnSupplement.value) {
+    if (!form.value.startDate || !form.value.endDate) calculatedDays.value = null
+    calculating.value = false
+    return
+  }
   if (isCombinedPeriodFixed.value) {
     return
   }
@@ -701,6 +791,7 @@ async function updateCombinedPeriod(sequence: number) {
       startDate: form.value.startDate,
       startHalf: form.value.startHalf,
       days: allocatedDays.value,
+      allowPast: isReturnSupplement.value,
     })
     if (
       sequence !== combinedPeriodSequence ||
@@ -725,6 +816,10 @@ async function updateCombinedPeriod(sequence: number) {
 }
 
 async function handleFillFullLeave() {
+  if (isReturnSupplement.value) {
+    ElMessage.warning('返岗补假请按实际补录时间选择起止日期')
+    return
+  }
   if (!form.value.leaveTypeCode || !form.value.startDate) {
     ElMessage.warning('请先选择假期类型和开始时间')
     return
@@ -760,17 +855,20 @@ function isTypeUsedByOtherSegment(typeCode: string, segmentKey: number): boolean
 function isTypeOptionDisabled(type: LeaveTypeConfig, segmentKey: number): boolean {
   if (type.is_available === false) return true
   if (isTypeUsedByOtherSegment(type.code, segmentKey)) return true
+  if (isReturnSupplement.value) return false
   if (!type.requires_balance_check) return false
   return (getBalance(type.code)?.available_days ?? 0) <= 0
 }
 
 function getSegmentMaxDays(segment: CombinationSegment): number {
+  if (isReturnSupplement.value) return 999.5
   const type = getType(segment.leaveTypeCode)
   if (!type?.requires_balance_check) return 999.5
   return Math.max(0.5, getBalance(segment.leaveTypeCode)?.available_days ?? 0.5)
 }
 
 function fillSegment(segment: CombinationSegment) {
+  if (isReturnSupplement.value) return
   if (!segment.leaveTypeCode) return
   const type = getType(segment.leaveTypeCode)
   const available = getBalance(segment.leaveTypeCode)?.available_days ?? 0
@@ -783,6 +881,7 @@ function fillSegment(segment: CombinationSegment) {
 }
 
 function fillCombinedLeave() {
+  if (isReturnSupplement.value) return
   if (!form.value.startDate) {
     ElMessage.warning('请先选择开始时间')
     return
@@ -832,6 +931,13 @@ function removeSegment(key: number) {
 
 function handleExceed() {
   ElMessage.warning('最多上传5个文件')
+}
+
+function handleAttachmentFileChange(file: UploadUserFile) {
+  const error = getLeaveAttachmentSizeError(file.name, file.size ?? file.raw?.size)
+  if (!error) return
+  fileList.value = fileList.value.filter(item => item.uid !== file.uid)
+  ElMessage.error(error)
 }
 
 function getUploadFileKey(file: UploadUserFile, index: number): string {
@@ -906,13 +1012,21 @@ async function handleSubmit() {
     formData.append('startHalf', form.value.startHalf)
     formData.append('endDate', form.value.endDate)
     formData.append('endHalf', form.value.endHalf)
+    formData.append(
+      'applicationKind',
+      isReturnSupplement.value
+        ? 'supplement'
+        : requestMode.value === 'combined'
+          ? 'combined'
+          : 'normal'
+    )
 
     if (requestMode.value === 'single') {
       formData.append('leaveTypeCode', form.value.leaveTypeCode)
       formData.append('reason', form.value.reason)
       appendFiles(formData)
       await submitLeaveRequest(formData)
-      ElMessage.success('请假申请已提交，等待审批')
+      ElMessage.success(isReturnSupplement.value ? '返岗补假已提交，等待审批' : '请假申请已提交，等待审批')
     } else {
       formData.append('segments', JSON.stringify(segments.value.map(segment => ({
         leaveTypeCode: segment.leaveTypeCode,
@@ -921,7 +1035,9 @@ async function handleSubmit() {
       }))))
       appendFiles(formData)
       const result = await submitCombinedLeaveRequests(formData)
-      ElMessage.success(`组合请假已拆分为 ${result.requests.length} 条申请`)
+      ElMessage.success(
+        `${isReturnSupplement.value ? '组合返岗补假' : '组合请假'}已拆分为 ${result.requests.length} 条申请`
+      )
     }
 
     await handleReset()
@@ -934,21 +1050,9 @@ async function handleSubmit() {
 }
 
 async function handleReset() {
-  if (calcTimer) {
-    clearTimeout(calcTimer)
-    calcTimer = null
-  }
-  combinedPeriodSequence += 1
-  Object.assign(form.value, createInitialForm())
-  endTimeManuallySelected.value = false
+  applicationScene.value = 'normal'
   requestMode.value = 'single'
-  segmentSequence.value = 2
-  segments.value = [createSegment(1), createSegment(2)]
-  fileList.value = []
-  uploadRef.value?.clearFiles()
-  calculatedDays.value = null
-  calculating.value = false
-  formResetKey.value += 1
+  resetApplicationFields()
   await nextTick()
   formRef.value?.clearValidate()
   balances.value = await getMyBalances().catch(() => balances.value)
@@ -973,6 +1077,9 @@ void loadData()
 <style scoped>
 .leave-request-form {
   max-width: 720px;
+}
+.scene-selector {
+  width: 100%;
 }
 .type-action-row,
 .date-half-row,

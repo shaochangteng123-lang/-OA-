@@ -2155,6 +2155,64 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
       createdAt: (file.createdAt ?? file.created_at ?? null) as string | null,
     };
   });
+  const rawInvoiceApplicationMaterialGroups =
+    raw.invoiceApplicationMaterialGroups ??
+    raw.invoice_application_material_groups;
+  const invoiceApplicationMaterialGroups = (
+    Array.isArray(rawInvoiceApplicationMaterialGroups)
+      ? rawInvoiceApplicationMaterialGroups
+      : []
+  ).map((item) => {
+    const group = item as Record<string, unknown>;
+    const rawFiles = Array.isArray(group.files) ? group.files : [];
+    return {
+      applicationId: String(group.applicationId ?? group.application_id ?? ""),
+      applicationNo: String(group.applicationNo ?? group.application_no ?? ""),
+      status: String(group.status || "pending_approval") as
+        | "pending_approval"
+        | "pending_seal"
+        | "pending_invoice"
+        | "completed",
+      amount: (group.amount ?? 0) as string | number,
+      applicantName: String(group.applicantName ?? group.applicant_name ?? ""),
+      submittedAt: (group.submittedAt ?? group.submitted_at ?? null) as
+        | string
+        | null,
+      createdAt: String(group.createdAt ?? group.created_at ?? ""),
+      files: rawFiles.map((rawFile) => {
+        const file = rawFile as Record<string, unknown>;
+        return {
+          id: String(file.id || ""),
+          fileId: String(file.fileId ?? file.file_id ?? ""),
+          sourceType: String(
+            file.sourceType ?? file.source_type ?? "application_material",
+          ) as "application_material" | "contract_file",
+          materialKind: String(
+            file.materialKind ?? file.material_kind ?? "application_material",
+          ) as
+            | "system_generated_triplicate"
+            | "uploaded_triplicate"
+            | "application_material"
+            | "sealed_triplicate"
+            | "sealed_material",
+          fileName: String(file.fileName ?? file.file_name ?? "未命名材料"),
+          fileSize: Number(file.fileSize ?? file.file_size ?? 0),
+          mimeType: String(
+            file.mimeType ?? file.mime_type ?? "application/octet-stream",
+          ),
+          requiresSeal: Boolean(
+            file.requiresSeal ?? file.requires_seal ?? false,
+          ),
+          isSystemGeneratedTriplicate: Boolean(
+            file.isSystemGeneratedTriplicate ??
+            file.is_system_generated_triplicate ??
+            false,
+          ),
+          createdAt: String(file.createdAt ?? file.created_at ?? ""),
+        };
+      }),
+    };
+  }) as ContractDetailResponse["invoiceApplicationMaterialGroups"];
   const rawJobs = Array.isArray(raw.ocrJobs) ? raw.ocrJobs : [];
   let ocrJob = raw.ocrJob
     ? normalizeOcrJob(raw.ocrJob as Record<string, unknown>)
@@ -2432,6 +2490,7 @@ export async function getContract(id: string): Promise<ContractDetailResponse> {
   return {
     contract,
     files,
+    invoiceApplicationMaterialGroups,
     ocrJob,
     ocrFields: normalizeOcrFields(raw.ocrFields || ocrJob?.fields),
     approvals: approvals as ContractDetailResponse["approvals"],
@@ -2973,10 +3032,14 @@ export async function uploadContractFile(
   id: string,
   file: File,
   fileType: string,
+  invoiceApplicationId?: string,
 ): Promise<{ fileId: string }> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("fileType", fileType);
+  if (invoiceApplicationId) {
+    formData.append("invoiceApplicationId", invoiceApplicationId);
+  }
   return unwrap(
     await api.post<ApiEnvelope<{ fileId: string }>>(
       `/api/contracts/${id}/files`,
@@ -3833,6 +3896,15 @@ export async function reverseContractRecord(
 export function getContractFileUrl(fileId: string, download = false): string {
   const url = `/api/contracts/files/${encodeURIComponent(fileId)}`;
   return download ? `${url}?download=1` : url;
+}
+
+export function getContractInvoiceApplicationMaterialUrl(
+  contractId: string,
+  materialId: string,
+  download = false,
+): string {
+  const base = `/api/contracts/${encodeURIComponent(contractId)}/invoice-application-materials/${encodeURIComponent(materialId)}`;
+  return download ? `${base}?download=1` : base;
 }
 
 export function getContractErrorMessage(

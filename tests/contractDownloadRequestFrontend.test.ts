@@ -83,6 +83,15 @@ describe("合同下载申请前端权限与流程", () => {
     expect(createSource).toContain("管理员 吴静雯");
   });
 
+  it("员工申请页原样展示服务端过滤后的普通附件候选", () => {
+    expect(createSource).toContain(
+      "const eligibleFiles = computed(() => detail.value?.files || []);",
+    );
+    expect(createSource).toContain('v-for="file in eligibleFiles"');
+    expect(createSource).not.toContain("invoice_application_id");
+    expect(createSource).not.toContain("invoiceApplicationId");
+  });
+
   it("总经理审批、管理员执行及员工结果查询共用完整流程展示", () => {
     expect(centerSource).toContain("待我审批");
     expect(centerSource).toContain("审批记录");

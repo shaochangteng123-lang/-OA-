@@ -156,7 +156,7 @@
       <div class="section-title">审批进度</div>
       <el-timeline>
         <el-timeline-item
-          v-for="log in request.logs"
+          v-for="log in visibleLogs"
           :key="log.id"
           :timestamp="formatTime(log.created_at)"
           :type="logItemType(log.action)"
@@ -207,10 +207,10 @@
       </el-timeline>
     </div>
 
-    <!-- 底部操作（草稿或驳回时显示重新提交按钮） -->
+    <!-- 底部操作（草稿显示提交按钮，驳回显示重新提交按钮） -->
     <div v-if="showResubmit" class="bottom-actions">
       <el-button type="primary" @click="emit('resubmit', request.id)">
-        {{ request.status === 'draft' ? '编辑草稿并重新提交' : '修改并重新提交' }}
+        {{ request.status === 'draft' ? '提交申请' : '修改并重新提交' }}
       </el-button>
     </div>
   </div>
@@ -222,6 +222,7 @@ import { View } from '@element-plus/icons-vue'
 import LeaveFileCards from './LeaveFileCards.vue'
 import { getAttachmentUrl } from '@/utils/leaveApi'
 import { formatBeijingDateTime } from '@/utils/date'
+import { getLeaveApplicationKindLabel as applicationKindLabel } from '@/utils/leaveApplication'
 import type { LeaveApprovalLog, LeaveRequestDetail } from '@/utils/leaveApi'
 
 const props = defineProps<{
@@ -240,6 +241,29 @@ const showResubmit = computed(() => {
 
 const otherRelatedRequests = computed(() => {
   return (props.request.related_requests || []).filter(item => item.id !== props.request.id)
+})
+
+const visibleLogs = computed(() => {
+  if (props.request.status !== 'pending') return props.request.logs
+
+  let hasLaterSubmission = false
+  let latestCompletedCancelIndex = -1
+  for (let index = props.request.logs.length - 1; index >= 0; index -= 1) {
+    const log = props.request.logs[index]
+    if (log.leave_request_id !== props.request.id) continue
+    if (log.action === 'submit' || log.action === 'resubmit') {
+      hasLaterSubmission = true
+      continue
+    }
+    if (log.action === 'cancel' && hasLaterSubmission) {
+      latestCompletedCancelIndex = index
+      break
+    }
+  }
+  if (latestCompletedCancelIndex < 0) return props.request.logs
+  return props.request.logs.filter((log, index) => (
+    log.leave_request_id !== props.request.id || index > latestCompletedCancelIndex
+  ))
 })
 
 const attachmentCardsByRequest = computed(() => {
@@ -266,6 +290,20 @@ const attachmentCardsByRequest = computed(() => {
   return groups
 })
 
+function isAttachmentLogAction(action: LeaveApprovalLog['action']): boolean {
+  return action === 'submit' || action === 'resubmit' || action === 'historical_import'
+}
+
+const latestAttachmentLogIdByRequest = computed(() => {
+  const result = new Map<string, string>()
+  for (const log of visibleLogs.value) {
+    if (isAttachmentLogAction(log.action)) {
+      result.set(log.leave_request_id, log.id)
+    }
+  }
+  return result
+})
+
 function statusLabel(status: string): string {
   const map: Record<string, string> = {
     draft: '草稿',
@@ -288,27 +326,6 @@ function statusTagType(status: string): 'primary' | 'success' | 'warning' | 'dan
   return map[status] || undefined
 }
 
-function applicationKindLabel(
-  request: {
-    application_kind: LeaveRequestDetail['application_kind']
-    combination_group_id?: string | null
-  }
-): string {
-  if (request.combination_group_id && request.application_kind === 'extension') {
-    return '组合续假'
-  }
-  if (request.combination_group_id && request.application_kind === 'supplement') {
-    return '组合补假'
-  }
-  const map: Record<LeaveRequestDetail['application_kind'], string> = {
-    normal: '普通请假',
-    combined: '组合请假',
-    extension: '续假',
-    supplement: '补假',
-  }
-  return map[request.application_kind] || '普通请假'
-}
-
 function applicationKindTagType(
   kind: LeaveRequestDetail['application_kind']
 ): 'primary' | 'success' | 'warning' | 'info' {
@@ -328,6 +345,7 @@ function actionLabel(action: string): string {
     reject: '驳回',
     cancel: '撤回为草稿',
     resubmit: '重新提交',
+    historical_import: '历史导入',
   }
   return map[action] || action
 }
@@ -339,6 +357,7 @@ function logTagType(action: string): 'primary' | 'success' | 'warning' | 'danger
     reject: 'danger',
     cancel: 'info',
     resubmit: 'warning',
+    historical_import: 'info',
   }
   return map[action] || undefined
 }
@@ -350,6 +369,7 @@ function logItemType(action: string): 'primary' | 'success' | 'warning' | 'dange
     reject: 'danger',
     cancel: 'info',
     resubmit: 'warning',
+    historical_import: 'info',
   }
   return map[action]
 }
@@ -381,6 +401,7 @@ function formatCcRecipient(request: LeaveRequestDetail): string {
 }
 
 function formatLogPerson(log: LeaveApprovalLog): string {
+  if (log.action === 'historical_import') return '系统导入'
   const name = log.operator_real_name || log.operator_name
   if (log.operator_id === props.request.user_id) return name
   return formatPerson(log.operator_position, name)
@@ -393,7 +414,8 @@ function getLogComment(log: LeaveApprovalLog): string {
 }
 
 function getLogAttachmentCards(log: LeaveApprovalLog) {
-  if (log.action !== 'submit' && log.action !== 'resubmit') return []
+  if (!isAttachmentLogAction(log.action)) return []
+  if (latestAttachmentLogIdByRequest.value.get(log.leave_request_id) !== log.id) return []
   return attachmentCardsByRequest.value.get(log.leave_request_id) || []
 }
 

@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, RouteRecordRaw } from "vue-router";
 import { useAuthStore } from "@/stores/auth";
 import { ElMessage } from "element-plus";
 import { isRouteRoleAllowed } from "@/utils/routeRoleAccess";
+import { HR_APPROVAL_CENTER_ROLES } from "@/utils/hrApprovalPermissions";
 
 const routes: RouteRecordRaw[] = [
   {
@@ -454,7 +455,8 @@ const routes: RouteRecordRaw[] = [
         component: () => import("@/views/HRApprovalCenter.vue"),
         meta: {
           title: "审批中心",
-          requiresRole: ["general_manager"],
+          requiresRole: HR_APPROVAL_CENTER_ROLES,
+          requiresExactRole: true,
         },
       },
       {

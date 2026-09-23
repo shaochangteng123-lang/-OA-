@@ -239,4 +239,33 @@ describe("转正审批流程与历史记录", () => {
       handler: "董事长",
     });
   });
+
+  it("超级管理员签主管意见后显示真实角色，不标作总经理", () => {
+    const stages = buildProbationApprovalStages(
+      [
+        createRecord({
+          stage: "supervisor",
+          signer_name: "系统管理员",
+          signer_role: "super_admin",
+          decision: "approve",
+        }),
+      ],
+      1,
+      "hr",
+      "submitted",
+      { supervisor: "公司总经理", hr: "人事管理员" },
+    );
+
+    expect(stages[1].handler).toBe("超级管理员 系统管理员");
+    expect(stages[1].label).toBe("主管领导意见");
+    expect(stages[2].handler).toBe("管理员 人事管理员");
+    expect(stages[3].handler).toBe("董事长");
+    expect(
+      probationApprovalTimelineRoleNameLabel({
+        action: "approve",
+        approver_role: "super_admin",
+        approver_name: "系统管理员",
+      }),
+    ).toBe("超级管理员 系统管理员");
+  });
 });

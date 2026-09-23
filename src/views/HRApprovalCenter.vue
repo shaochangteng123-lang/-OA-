@@ -60,7 +60,7 @@
         </el-tooltip>
       </div>
 
-      <div class="module-panel">
+      <div ref="modulePanelRef" class="module-panel">
         <GMProbationApproval
           v-show="activeModule === 'probation'"
           ref="probationRef"
@@ -76,7 +76,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 import { Calendar, Refresh, Stamp, UserFilled } from "@element-plus/icons-vue";
 import GMProbationApproval from "@/views/GMProbationApproval.vue";
 import LeavePendingList from "@/components/leave/LeavePendingList.vue";
@@ -86,6 +86,7 @@ const activeModule = ref("probation");
 const refreshing = ref(false);
 const probationRef = ref<InstanceType<typeof GMProbationApproval>>();
 const leaveRef = ref<InstanceType<typeof LeavePendingList>>();
+const modulePanelRef = ref<HTMLElement>();
 const pendingStore = usePendingStore();
 
 const totalPending = computed(
@@ -111,6 +112,9 @@ const moduleOptions = computed(() => [
 
 function switchModule(moduleName: string) {
   activeModule.value = moduleName;
+  void nextTick(() => {
+    if (modulePanelRef.value) modulePanelRef.value.scrollTop = 0;
+  });
 }
 
 async function handleModuleUpdated() {
@@ -312,12 +316,16 @@ onMounted(async () => {
 }
 
 .module-panel {
-  flex: 1;
+  flex: 1 1 auto;
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 360px;
+  min-height: 0;
   padding: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 900px) {

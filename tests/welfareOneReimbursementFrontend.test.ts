@@ -24,9 +24,7 @@ describe("福利1报销前端接入", () => {
     expect(configSource).toContain(
       'scopeListEndpoint: "/api/reimbursement-scope/welfare-one/list"',
     );
-    expect(configSource).not.toMatch(
-      /welfare_one:[\s\S]*?minimumAmount:\s*1000/,
-    );
+    expect(configSource).not.toContain("minimumAmount");
   });
 
   it("仅向董事长展示入口，并允许管理员从审批中心打开详情", () => {
@@ -56,7 +54,7 @@ describe("福利1报销前端接入", () => {
     );
     expect(listSource).toContain("typeConfig.value.type");
     expect(createSource).toContain("welfareCategoryId: selectedScope");
-    expect(detailSource).toContain("!isWelfareReimbursement");
+    expect(detailSource).not.toContain("show-threshold-warning");
     expect(detailSource).toContain("welfareCategoryId");
   });
 

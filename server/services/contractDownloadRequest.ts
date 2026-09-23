@@ -1055,6 +1055,7 @@ async function loadSelectedFiles(
        AND owner.area <> '全部'
        AND file.id = ANY($2::text[])
        AND file.is_current = TRUE
+       AND file.invoice_application_id IS NULL
      ORDER BY CASE owner.relation_type
           WHEN 'main' THEN 0
           WHEN 'supplement' THEN 1
@@ -1185,6 +1186,7 @@ export async function getAvailableContractDownloadFiles(
        AND ${downloadableContractOwnerPredicate("owner")}
        AND owner.area <> '全部'
        AND file.is_current = TRUE
+       AND file.invoice_application_id IS NULL
      ORDER BY CASE owner.relation_type
           WHEN 'main' THEN 0
           WHEN 'supplement' THEN 1

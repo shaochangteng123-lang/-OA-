@@ -133,6 +133,123 @@ describe("请假审批流程附件与时间", () => {
     expect(timelineItems[2].text()).not.toContain("首次提交附件.pdf");
   });
 
+  it("撤回草稿再次提交显示提交申请且附件只出现在最新提交节点", () => {
+    const request = buildRequest();
+    request.id = "request-draft";
+    request.request_no = "QJ-2026-00005";
+    request.root_request_no = request.request_no;
+    request.original_id = null;
+    request.version = 1;
+    request.version_count = 1;
+    request.status = "pending";
+    request.approved_at = null;
+    request.attachments = [
+      {
+        id: "attachment-current",
+        leave_request_id: request.id,
+        file_name: "当前草稿附件.pdf",
+        file_size: 1024,
+        mime_type: "application/pdf",
+        created_at: "2026-07-17T08:34:38.431Z",
+      },
+    ];
+    request.logs = [
+      {
+        id: "log-submit-first",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "submit",
+        comment: null,
+        created_at: "2026-07-17T07:38:32.944Z",
+      },
+      {
+        id: "log-cancel",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "cancel",
+        comment: "撤回申请",
+        created_at: "2026-07-17T08:00:00.000Z",
+      },
+      {
+        id: "log-submit-second",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "submit",
+        comment: null,
+        created_at: "2026-07-17T08:10:00.000Z",
+      },
+      {
+        id: "log-cancel-second",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "cancel",
+        comment: "撤回申请",
+        created_at: "2026-07-17T08:20:00.000Z",
+      },
+      {
+        id: "log-submit-again",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "submit",
+        comment: "删除当前草稿附件 1 个",
+        created_at: "2026-07-17T08:34:38.431Z",
+      },
+    ];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: true },
+      global: { stubs: globalStubs },
+    });
+    const timelineItems = wrapper.findAll(".timeline-item");
+    expect(timelineItems).toHaveLength(2);
+    expect(timelineItems[0].text()).toContain("提交申请");
+    expect(timelineItems[0].text()).toContain("当前草稿附件.pdf");
+    expect(timelineItems[1].text()).toContain("待审批");
+    expect(wrapper.text()).not.toContain("撤回为草稿");
+    expect(wrapper.text()).not.toContain("重新提交");
+  });
+
+  it("当前仍为草稿时保留提交和撤回事实", () => {
+    const request = buildRequest();
+    request.id = "request-draft";
+    request.status = "draft";
+    request.logs = [
+      {
+        id: "log-submit",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "submit",
+        comment: null,
+        created_at: "2026-07-17T07:38:32.944Z",
+      },
+      {
+        id: "log-cancel",
+        leave_request_id: request.id,
+        operator_id: "applicant-1",
+        operator_name: "申请人",
+        action: "cancel",
+        comment: "撤回申请",
+        created_at: "2026-07-17T08:00:00.000Z",
+      },
+    ];
+    request.attachments = [];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: true },
+      global: { stubs: globalStubs },
+    });
+    const timelineItems = wrapper.findAll(".timeline-item");
+    expect(timelineItems).toHaveLength(2);
+    expect(timelineItems[0].text()).toContain("提交申请");
+    expect(timelineItems[1].text()).toContain("撤回为草稿");
+  });
+
   it("审批时间转换为北京时间并精确到秒", () => {
     const wrapper = mount(LeaveApprovalTimeline, {
       props: { request: buildRequest(), isOwner: true },
@@ -167,6 +284,57 @@ describe("请假审批流程附件与时间", () => {
 
     expect(wrapper.text()).toContain("总经理 刘行");
     expect(wrapper.text()).not.toContain("项目经理 刘行");
+  });
+
+  it("历史导入的返岗补假显示导入节点和对应证明附件", () => {
+    const request = buildRequest();
+    request.id = "historical-sick-leave";
+    request.request_no = "QJ-2026-00002";
+    request.root_request_no = request.request_no;
+    request.version = 1;
+    request.version_count = 1;
+    request.original_id = null;
+    request.application_kind = "supplement";
+    request.parent_request_id = null;
+    request.combination_group_id = null;
+    request.leave_type_code = "sick";
+    request.leave_type_name = "病假";
+    request.attachments = [
+      {
+        id: "historical-sick-proof",
+        leave_request_id: request.id,
+        file_name: "吴静雯病假证明单.jpg",
+        file_size: 2048,
+        mime_type: "image/jpeg",
+        created_at: "2026-09-18T09:00:00.000Z",
+      },
+    ];
+    request.logs = [
+      {
+        id: "historical-import-log",
+        leave_request_id: request.id,
+        operator_id: "system-admin",
+        operator_name: "系统管理员",
+        operator_real_name: "系统管理员",
+        operator_position: "超级管理员",
+        action: "historical_import",
+        comment: "依据历史请假台账导入",
+        created_at: "2026-09-18T09:00:00.000Z",
+      },
+    ];
+
+    const wrapper = mount(LeaveApprovalTimeline, {
+      props: { request, isOwner: false },
+      global: { stubs: globalStubs },
+    });
+
+    expect(wrapper.text()).toContain("返岗补假");
+    expect(wrapper.text()).toContain("系统导入");
+    expect(wrapper.text()).toContain("历史导入");
+    expect(wrapper.text()).toContain("吴静雯病假证明单.jpg");
+    expect(wrapper.text()).toContain("依据历史请假台账导入");
+    expect(wrapper.text()).not.toContain("超级管理员 系统管理员");
+    expect(wrapper.text()).not.toContain("historical_import");
   });
 
   it("续假审批直接展示原请假类型、时间、天数和事由", () => {

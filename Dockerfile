@@ -2,7 +2,7 @@
 # YuliLog 工作日志系统 - 统一 Dockerfile
 # ============================================
 # 开发：docker compose up -d --build
-# 生产：docker compose -f docker-compose.prod.yml up -d --build
+# 生产候选：npm run docker:prod:build -- yulilog-prod-yulilog:<唯一标签>
 # ============================================
 
 ARG NODE_IMAGE=node:20-slim

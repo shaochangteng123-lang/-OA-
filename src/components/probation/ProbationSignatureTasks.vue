@@ -348,6 +348,8 @@ async function submitReview(decision: "approve" | "reject") {
       decision,
       opinion: trimmedOpinion,
       signatureType: signatureType.value,
+      expectedStage: task.review_stage,
+      expectedFormVersion: task.form_version,
     });
     if (!response.data.success) {
       ElMessage.error(response.data.message || "签署失败");

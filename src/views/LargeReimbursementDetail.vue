@@ -99,8 +99,6 @@
                 :invoice-list="invoice.invoiceList.value"
                 :readonly="isReadonly"
                 :theme-color="typeConfig.accentColor"
-                :amount-threshold="typeConfig.minimumAmount || 0"
-                :show-threshold-warning="!isWelfareReimbursement"
                 :approval-deduction-amount="approvalDeductionAmount"
                 @delete="handleDeleteInvoice"
               />
@@ -453,19 +451,9 @@ function handleBack(): void {
 }
 
 // 校验表单
-async function validateForm(checkAmount: boolean = false): Promise<boolean> {
+async function validateForm(): Promise<boolean> {
   if (invoice.invoiceList.value.length === 0) {
     ElMessage.warning('请至少上传一张发票')
-    return false
-  }
-
-  // 提交时校验金额是否达到大额报销标准
-  if (
-    checkAmount &&
-    typeConfig.value.minimumAmount &&
-    invoice.totalAmount.value < typeConfig.value.minimumAmount
-  ) {
-    ElMessage.warning(`发票总金额 ¥${invoice.totalAmount.value} 不足 ${typeConfig.value.minimumAmount} 元，不属于${typeConfig.value.label}范围，请使用基础报销`)
     return false
   }
 
@@ -495,7 +483,7 @@ function buildSubmitData() {
 
 // 保存草稿
 async function handleSaveDraft(): Promise<void> {
-  const valid = await validateForm(false)
+  const valid = await validateForm()
   if (!valid) return
 
   await reimbursement.saveDraft(buildSubmitData())
@@ -503,7 +491,7 @@ async function handleSaveDraft(): Promise<void> {
 
 // 提交审批
 async function handleSubmit(): Promise<void> {
-  const valid = await validateForm(true)
+  const valid = await validateForm()
   if (!valid) return
 
   await reimbursement.submitForApproval(buildSubmitData())

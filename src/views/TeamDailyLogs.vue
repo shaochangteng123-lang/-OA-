@@ -79,11 +79,11 @@
       <div class="logs-panel" v-loading="loading">
         <div class="panel-header">
           <h3>{{ formatDateTitle(selectedDate) }} 员工日志</h3>
-          <el-tag type="success" size="small">已提交 {{ submissions.length }} 人</el-tag>
+          <el-tag type="success" size="small">已填写 {{ submissions.length }} 人</el-tag>
         </div>
 
         <div v-if="submissions.length === 0" class="empty-state">
-          当日暂无日志提交
+          当日暂无日志填写
         </div>
 
         <div v-for="sub in submissions" :key="sub.id" class="log-card">
@@ -91,7 +91,8 @@
             <div class="user-info">
               <span class="user-name">{{ sub.userName }}</span>
               <span v-if="sub.userPosition" class="user-position">{{ sub.userPosition }}</span>
-              <span v-if="sub.commentCount > 0" class="user-comment-icon" :class="{ 'has-unread': sub.hasUnreadReply }">
+              <span v-if="sub.state === 'written'" class="draft-state-tag">已保存，待归档</span>
+              <span v-if="sub.state === 'archived' && sub.commentCount > 0" class="user-comment-icon" :class="{ 'has-unread': sub.hasUnreadReply }">
                 <span class="comment-count">{{ sub.commentCount }}</span>
               </span>
             </div>
@@ -124,8 +125,8 @@
                 <el-image
                   v-for="att in getImages(sub.attachments)"
                   :key="att.id"
-                  :src="`/${att.filePath}`"
-                  :preview-src-list="getImages(sub.attachments).map(a => `/${a.filePath}`)"
+                  :src="getAttachmentPreviewUrl(att)"
+                  :preview-src-list="getImages(sub.attachments).map(getAttachmentPreviewUrl)"
                   :initial-index="getImages(sub.attachments).indexOf(att)"
                   fit="cover"
                   class="attach-image-thumb"
@@ -152,7 +153,8 @@
           </div>
 
           <!-- 评论区 -->
-          <div class="comment-section">
+          <div v-if="sub.state === 'written'" class="comment-unavailable">日志归档后可评论</div>
+          <div v-else class="comment-section">
             <div v-if="sub.comments && sub.comments.length > 0" class="comment-list">
               <template v-for="c in getTopComments(sub.comments)" :key="c.id">
                 <div :class="['comment-item', { 'comment-item-unread': c.isUnread }]">
@@ -160,7 +162,7 @@
                   <span class="comment-text">{{ c.content }}</span>
                   <!-- 完成期限标签 -->
                   <span v-if="c.dueDate"
-                    :class="['comment-due-tag', !c.completedAt && c.dueDate < new Date().toISOString().slice(0,10) ? 'overdue' : '']"
+                    :class="['comment-due-tag', !c.completedAt && c.dueDate < today ? 'overdue' : '']"
                   >⏰ {{ c.dueDate }} 前完成</span>
                   <span v-if="c.completedAt" class="comment-done-tag">✅ 已完成</span>
                   <span class="comment-time">{{ formatTime(c.createdAt) }}</span>
@@ -239,10 +241,10 @@
         </div>
       </div>
 
-      <!-- 右侧：未提交人员 + 统计 -->
+      <!-- 右侧：未填写人员 + 统计 -->
       <div class="stats-panel">
         <div class="stat-card">
-          <div class="stat-title">提交率</div>
+          <div class="stat-title">填写率</div>
           <template v-if="isWorkingDay">
             <div class="stat-value">
               {{ totalUsers > 0 ? Math.round(submissions.length / totalUsers * 100) : 0 }}%
@@ -257,11 +259,11 @@
 
         <div class="not-submitted-card">
           <div class="card-title">
-            未提交人员
+            未填写人员
             <el-tag type="danger" size="small" v-if="notSubmitted.length > 0">{{ notSubmitted.length }}</el-tag>
           </div>
-          <div v-if="!isWorkingDay" class="rest-day-text">休息日，无需提交</div>
-          <div v-else-if="notSubmitted.length === 0" class="all-done-text">全员已提交</div>
+          <div v-if="!isWorkingDay" class="rest-day-text">休息日，无需填写</div>
+          <div v-else-if="notSubmitted.length === 0" class="all-done-text">全员已填写</div>
           <div v-else class="not-submitted-list">
             <div v-for="u in notSubmitted" :key="u.id" class="not-submitted-item">
               <span class="ns-name">{{ u.name }}</span>
@@ -282,6 +284,7 @@ import { useAuthStore } from '@/stores/auth'
 import { usePendingStore } from '@/stores/pending'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, Document } from '@element-plus/icons-vue'
+import { mergeHolidaysWithFallback, type HolidayInfo } from '@/utils/holidayData'
 
 interface Attachment {
   id: string
@@ -302,6 +305,7 @@ interface Supplement {
 
 interface Submission {
   id: string
+  state: 'written' | 'archived'
   userId: string
   userName: string
   userPosition: string | null
@@ -337,15 +341,42 @@ interface MonthDay {
 
 const authStore = useAuthStore()
 const pendingStore = usePendingStore()
+
+function parseLocalDate(dateText: string): Date {
+  const [year, month, day] = dateText.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  const result = new Date(date)
+  result.setDate(result.getDate() + days)
+  return result
+}
+
+function startOfLocalWeek(date: Date): Date {
+  const result = new Date(date)
+  const dayOfWeek = result.getDay() || 7
+  result.setDate(result.getDate() - dayOfWeek + 1)
+  return result
+}
+
 const datePickerKey = ref(0)
 const showReplyHint = ref(false)
 const unreadReplyCount = ref(0)
 const isNavigatingToUnread = ref(false)
 const expandedCards = ref<Set<string>>(new Set())
-const today = new Date().toISOString().slice(0, 10)
-const selectedDate = ref(today)
+const today = ref(formatLocalDate(new Date()))
+const selectedDate = ref(today.value)
 const loading = ref(false)
 const monthDays = ref<MonthDay[]>([])
+const weekDaysData = ref<MonthDay[]>([])
 const commentDates = ref<string[]>([])
 const unreadReplyDates = ref<string[]>([])
 const submissions = ref<Submission[]>([])
@@ -402,6 +433,7 @@ async function scrollToUnreadReply() {
       })
       if (res.data.success) {
         monthDays.value = res.data.data.monthDays
+        weekDaysData.value = Array.isArray(res.data.data.weekDays) ? res.data.data.weekDays : []
         commentDates.value = res.data.data.commentDates || []
         unreadReplyDates.value = res.data.data.unreadReplyDates || []
         submissions.value = res.data.data.submissions
@@ -411,7 +443,7 @@ async function scrollToUnreadReply() {
 
         // 等待所有有评论的 submission 加载评论
         const commentPromises = submissions.value
-          .filter(s => s.commentCount > 0)
+          .filter(s => s.state === 'archived' && s.commentCount > 0)
           .map(sub => {
             sub.comments = []
             return loadComments(sub, true)
@@ -452,7 +484,7 @@ function toggleCard(subId: string) {
     expandedCards.value.add(subId)
     // 展开时标记已读
     const sub = submissions.value.find(s => s.id === subId)
-    if (sub && sub.commentCount > 0) loadComments(sub, true)
+    if (sub?.state === 'archived' && sub.commentCount > 0) loadComments(sub, true)
   }
   expandedCards.value = new Set(expandedCards.value)
 }
@@ -467,21 +499,17 @@ const isWorkingDay = computed(() => {
 
 // 当前选中日期所在周的周一
 const currentMonday = computed(() => {
-  const d = new Date(selectedDate.value)
-  const day = d.getDay() || 7
-  d.setDate(d.getDate() - day + 1)
-  return d.toISOString().slice(0, 10)
+  return formatLocalDate(startOfLocalWeek(parseLocalDate(selectedDate.value)))
 })
 
-// 从 monthDays 中提取当前周的 7 天数据
+// 优先使用后端返回的完整周数据，兼容尚未提供 weekDays 的旧接口
 const weekDays = computed(() => {
-  const monday = new Date(currentMonday.value)
+  const monday = parseLocalDate(currentMonday.value)
+  const sourceDays = weekDaysData.value.length > 0 ? weekDaysData.value : monthDays.value
   const days: { date: string; submitted: number; total: number; label: string | null; hasComment: boolean; hasUnreadReply: boolean }[] = []
   for (let i = 0; i < 7; i++) {
-    const d = new Date(monday)
-    d.setDate(monday.getDate() + i)
-    const ds = d.toISOString().slice(0, 10)
-    const found = monthDays.value.find(md => md.date === ds)
+    const ds = formatLocalDate(addLocalDays(monday, i))
+    const found = sourceDays.find(md => md.date === ds)
     days.push({
       date: ds,
       submitted: found?.submitted || 0,
@@ -495,8 +523,22 @@ const weekDays = computed(() => {
 })
 
 let commentPollTimer: number | null = null
+let todayRefreshTimer: number | null = null
+
+function refreshToday() {
+  const previousToday = today.value
+  const currentToday = formatLocalDate(new Date())
+  if (currentToday === previousToday) return
+
+  today.value = currentToday
+  if (selectedDate.value === previousToday) {
+    selectedDate.value = currentToday
+    loadTeamData()
+  }
+}
 
 onMounted(() => {
+  refreshToday()
   loadHolidays()
   loadTeamData()
   // 检查未读回复
@@ -508,17 +550,22 @@ onMounted(() => {
   // 轮询刷新评论列表（撤回后接收方即时感知）
   commentPollTimer = window.setInterval(() => {
     for (const sub of submissions.value) {
-      if (sub.comments && sub.comments.length > 0) {
+      if (sub.state === 'archived' && sub.comments && sub.comments.length > 0) {
         loadComments(sub)
       }
     }
   }, 5000)
+  todayRefreshTimer = window.setInterval(refreshToday, 60 * 1000)
 })
 
 onBeforeUnmount(() => {
   if (commentPollTimer) {
     clearInterval(commentPollTimer)
     commentPollTimer = null
+  }
+  if (todayRefreshTimer) {
+    clearInterval(todayRefreshTimer)
+    todayRefreshTimer = null
   }
 })
 
@@ -544,17 +591,23 @@ async function loadHolidays() {
 
 // 按年加载假日数据，已加载过则跳过（支持多年合并）
 const loadedHolidayYears = new Set<string>()
+function applyHolidays(holidays: readonly HolidayInfo[]) {
+  for (const holiday of mergeHolidaysWithFallback(holidays)) {
+    holidayMap.value.set(holiday.date, { name: holiday.name, type: holiday.type })
+  }
+}
+
 async function loadHolidaysByYear(year: string) {
   if (loadedHolidayYears.has(year)) return
   try {
     const { data } = await api.get('/api/holidays', { params: { year } })
     if (data.success) {
-      for (const h of data.data) {
-        holidayMap.value.set(h.date, { name: h.name, type: h.type })
-      }
+      applyHolidays(Array.isArray(data.data) ? data.data : [])
       loadedHolidayYears.add(year)
+      return
     }
-  } catch { /* ignore */ }
+  } catch { /* 使用本地兜底数据 */ }
+  applyHolidays([])
 }
 
 function getDateTag(date: Date): string | null {
@@ -579,7 +632,7 @@ function getDateSubmitStatus(date: Date): 'full' | 'partial' | null {
   const found = monthDays.value.find(md => md.date === dateStr)
   if (!found || found.total === 0) return null
   // 未来日期不标注
-  if (dateStr > today) return null
+  if (dateStr > today.value) return null
   return found.submitted >= found.total ? 'full' : 'partial'
 }
 
@@ -593,15 +646,21 @@ function getDateCommentStatus(date: Date): 'unread' | 'has' | null {
   return null
 }
 
+let teamDataRequestSequence = 0
+
 async function loadTeamData() {
+  const requestSequence = ++teamDataRequestSequence
+  const requestDate = selectedDate.value
   loading.value = true
   try {
-    const month = selectedDate.value.slice(0, 7)
+    const month = requestDate.slice(0, 7)
     const { data } = await api.get('/api/daily-logs/team', {
-      params: { date: selectedDate.value, month },
+      params: { date: requestDate, month },
     })
+    if (requestSequence !== teamDataRequestSequence) return
     if (data.success) {
       monthDays.value = data.data.monthDays
+      weekDaysData.value = Array.isArray(data.data.weekDays) ? data.data.weekDays : []
       commentDates.value = data.data.commentDates || []
       unreadReplyDates.value = data.data.unreadReplyDates || []
       submissions.value = data.data.submissions
@@ -611,15 +670,19 @@ async function loadTeamData() {
 
       for (const sub of submissions.value) {
         sub.comments = []
-        if (sub.commentCount > 0) {
+        if (sub.state === 'archived' && sub.commentCount > 0) {
           loadComments(sub)
         }
       }
     }
   } catch {
-    ElMessage.error('加载团队日志失败')
+    if (requestSequence === teamDataRequestSequence) {
+      ElMessage.error('加载团队日志失败')
+    }
   } finally {
-    loading.value = false
+    if (requestSequence === teamDataRequestSequence) {
+      loading.value = false
+    }
   }
 }
 
@@ -670,6 +733,7 @@ async function onPanelChange(date: Date) {
     })
     if (data.success) {
       monthDays.value = data.data.monthDays
+      weekDaysData.value = Array.isArray(data.data.weekDays) ? data.data.weekDays : []
       commentDates.value = data.data.commentDates || []
       unreadReplyDates.value = data.data.unreadReplyDates || []
     }
@@ -682,7 +746,8 @@ async function onDueDatePanelChange(date: Date) {
 }
 
 function goToday() {
-  selectedDate.value = today
+  today.value = formatLocalDate(new Date())
+  selectedDate.value = today.value
   loadTeamData()
 }
 
@@ -737,7 +802,7 @@ async function withdrawComment(submissionId: string, commentId: string) {
 }
 
 function formatWeekday(dateStr: string): string {
-  const d = new Date(dateStr)
+  const d = parseLocalDate(dateStr)
   const days = ['日', '一', '二', '三', '四', '五', '六']
   return '周' + days[d.getDay()]
 }
@@ -748,6 +813,10 @@ function getImages(attachments: Attachment[]): Attachment[] {
 
 function getDocs(attachments: Attachment[]): Attachment[] {
   return attachments.filter(a => a.fileKind === 'document')
+}
+
+function getAttachmentPreviewUrl(att: { id: string }): string {
+  return `/api/daily-logs/team/attachments/${att.id}/preview`
 }
 
 function getFileExt(fileName: string): string {
@@ -769,7 +838,7 @@ function getExtClass(fileName: string): string {
 }
 
 function formatDateTitle(dateStr: string): string {
-  const d = new Date(dateStr)
+  const d = parseLocalDate(dateStr)
   return `${d.getMonth() + 1}月${d.getDate()}日`
 }
 
@@ -1008,6 +1077,15 @@ function formatTime(iso: string): string {
   border-radius: 4px;
 }
 
+.draft-state-tag {
+  font-size: 12px;
+  color: #e6a23c;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 .user-comment-icon {
   display: inline-flex;
   align-items: center;
@@ -1089,6 +1167,16 @@ function formatTime(iso: string): string {
 
 .comment-section {
   margin-top: 10px;
+}
+
+.comment-unavailable {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #f5f7fa;
+  color: #909399;
+  font-size: 12px;
+  text-align: center;
 }
 
 .comment-list {

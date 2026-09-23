@@ -45,6 +45,8 @@ export interface PendingCounts {
   myLeaveRejected: number
   // 用户: 尚未查看的请假审批通过结果
   myLeaveApproved: number
+  // 管理员、超级管理员：本人尚未查看的请假抄送
+  leaveCcUnread: number
   // 用户: 未读日志评论
   unreadLogComments: number
   // GM/Admin: 未读团队日志回复
@@ -79,6 +81,7 @@ export const usePendingStore = defineStore('pending', () => {
     leaveApprovalPending: 0,
     myLeaveRejected: 0,
     myLeaveApproved: 0,
+    leaveCcUnread: 0,
     unreadLogComments: 0,
     unreadTeamLogReplies: 0
   })

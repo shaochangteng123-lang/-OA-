@@ -2501,16 +2501,19 @@ export async function deliverInvoiceApplicationMaterials(
     const sealedTriplicate = await client.query<{
       id: string;
       mime_type: string;
+      invoice_application_id: string | null;
     }>(
-      `SELECT id, mime_type FROM contract_files
+      `SELECT id, mime_type, invoice_application_id FROM contract_files
        WHERE id = $1 AND contract_id = $2 AND file_type = $4
          AND uploaded_by = $3 AND is_current = TRUE
+         AND (invoice_application_id = $5 OR invoice_application_id IS NULL)
        FOR UPDATE`,
       [
         sealedTriplicateFileId,
         application.contract_id,
         actor.id,
         applicationRequiresTriplicate(application) ? "triplicate" : "other",
+        application.id,
       ],
     );
     if (!sealedTriplicate.rows[0]) {
@@ -2525,6 +2528,13 @@ export async function deliverInvoiceApplicationMaterials(
         "盖章后材料只允许上传 PDF（便携式文档）文件",
         409,
         "INVOICE_APPLICATION_SEALED_TRIPLICATE_PDF_REQUIRED",
+      );
+    }
+    if (!sealedTriplicate.rows[0].invoice_application_id) {
+      await client.query(
+        `UPDATE contract_files SET invoice_application_id = $2
+         WHERE id = $1 AND invoice_application_id IS NULL`,
+        [sealedTriplicateFileId, application.id],
       );
     }
     const administrator = await actorSnapshot(client, actor.id);

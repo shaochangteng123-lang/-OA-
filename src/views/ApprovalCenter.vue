@@ -730,17 +730,6 @@
                   </el-option>
                 </el-select>
               </el-form-item>
-              <el-form-item label="状态">
-                <el-select
-                  v-model="paidFilterForm.status"
-                  placeholder="全部"
-                  clearable
-                  style="width: 130px"
-                >
-                  <el-option label="待确认收款" value="payment_uploaded" />
-                  <el-option label="已确认收款" value="completed" />
-                </el-select>
-              </el-form-item>
               <el-form-item label="日期">
                 <el-date-picker
                   v-model="paidFilterForm.dateRange"
@@ -761,7 +750,13 @@
             </el-form>
           </div>
 
-          <el-table :data="paidList" border stripe empty-text="暂无已付款记录" v-loading="paidListLoading">
+          <el-table
+            v-loading="paidListLoading"
+            :data="paidList"
+            border
+            stripe
+            empty-text="暂无待确认收款记录"
+          >
             <el-table-column label="序号" width="60" align="center">
               <template #default="{ $index }">
                 {{ $index + 1 }}
@@ -1925,11 +1920,10 @@ const unpaidFilterForm = reactive({
   dateRange: null as [string, string] | null,
 })
 
-// 已付款筛选表单
+// 待确认收款筛选表单
 const paidFilterForm = reactive({
   userId: '',
   type: [] as string[],
-  status: '',
   dateRange: null as [string, string] | null,
 })
 
@@ -2933,14 +2927,13 @@ async function loadUnpaidList() {
   }
 }
 
-// 加载已付款列表
+// 加载待确认收款列表
 async function loadPaidList() {
   paidListLoading.value = true
   try {
-    const params: Record<string, string> = {}
+    const params: Record<string, string> = { status: 'payment_uploaded' }
     if (paidFilterForm.userId) params.userId = paidFilterForm.userId
     if (paidFilterForm.type.length > 0) params.type = paidFilterForm.type.join(',')
-    if (paidFilterForm.status) params.status = paidFilterForm.status
     if (paidFilterForm.dateRange) {
       params.startDate = paidFilterForm.dateRange[0]
       params.endDate = paidFilterForm.dateRange[1]
@@ -2950,7 +2943,7 @@ async function loadPaidList() {
       paidList.value = res.data.data
     }
   } catch {
-    console.error('加载已付款列表失败')
+    console.error('加载待确认收款列表失败')
   } finally {
     paidListLoading.value = false
   }
@@ -2970,16 +2963,15 @@ function handleResetUnpaidFilter() {
   loadUnpaidList()
 }
 
-// 已付款查询
+// 待确认收款查询
 function handleQueryPaidList() {
   loadPaidList()
 }
 
-// 已付款重置
+// 待确认收款重置
 function handleResetPaidFilter() {
   paidFilterForm.userId = ''
   paidFilterForm.type = []
-  paidFilterForm.status = ''
   paidFilterForm.dateRange = null
   loadPaidList()
 }

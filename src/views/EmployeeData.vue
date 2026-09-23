@@ -807,8 +807,14 @@
 
           <!-- 请假管理 Tab -->
           <el-tab-pane label="请假管理" name="leave">
+            <template #label>
+              <span class="tab-label-with-badge">
+                请假管理
+                <el-badge v-if="leaveCcUnreadCount > 0" :value="leaveCcUnreadCount" :max="99" />
+              </span>
+            </template>
             <div class="tab-content">
-              <LeaveAdminPanel />
+              <LeaveAdminPanel :active="activeTab === 'leave'" :cc-notice-key="leaveCcNoticeKey" />
             </div>
           </el-tab-pane>
 
@@ -1824,6 +1830,7 @@ import {
   type ResignationType,
 } from "@/stores/resignation";
 import { usePendingStore } from "@/stores/pending";
+import { useAuthStore } from "@/stores/auth";
 import { useEmployeeDocumentRecognitionStore } from "@/stores/employeeDocumentRecognition";
 import { api } from "@/utils/api";
 import {
@@ -1887,6 +1894,7 @@ const onboardingStore = useOnboardingStore();
 const probationStore = useProbationStore();
 const resignationStore = useResignationStore();
 const pendingStore = usePendingStore();
+const authStore = useAuthStore();
 const employeeDocumentRecognitionStore = useEmployeeDocumentRecognitionStore();
 const route = useRoute();
 const router = useRouter();
@@ -1907,6 +1915,14 @@ const probationPendingCount = computed(() => {
 });
 const resignationPendingCount = computed(
   () => pendingStore.counts.resignationPending || 0,
+);
+const leaveCcUnreadCount = computed(() =>
+  authStore.user?.role === "admin" || authStore.user?.role === "super_admin"
+    ? pendingStore.counts.leaveCcUnread || 0
+    : 0,
+);
+const leaveCcNoticeKey = computed(() =>
+  typeof route.query.ccNotice === "string" ? route.query.ccNotice : undefined,
 );
 // 转正管理相关
 const probationManagementVersion = ref(0);
@@ -2429,6 +2445,11 @@ const requestedTab = typeof route.query.tab === "string" ? route.query.tab : "";
 const activeTab = ref(
   employeeDataTabs.has(requestedTab) ? requestedTab : "data",
 );
+
+// 在员工数据页面停留时，点击抄送通知也能切换到请假管理。
+watch([() => route.query.tab, leaveCcNoticeKey], ([tab]) => {
+  if (typeof tab === "string" && employeeDataTabs.has(tab)) activeTab.value = tab;
+});
 
 // 详情对话框 Tab
 const detailActiveTab = ref("info");

@@ -1307,6 +1307,71 @@ export async function initDatabase() {
     )
   `);
 
+    // 只记录启用后的业务事件，不为已有申请或历史导入回填提醒。
+    await ddlClient.query(`
+    CREATE TABLE IF NOT EXISTS leave_cc_notifications (
+      request_id TEXT NOT NULL REFERENCES leave_requests(id) ON DELETE CASCADE,
+      recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      revision TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('submit', 'resubmit', 'approve', 'reject')),
+      created_at TEXT NOT NULL,
+      read_at TEXT,
+      PRIMARY KEY (request_id, recipient_id)
+    )
+  `);
+
+    const draftSubmitLogMigration = await ddlClient.query(`
+      WITH stamped AS (
+        SELECT log.*,
+               BOOL_AND(log.created_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T') OVER (
+                 PARTITION BY log.leave_request_id
+               ) AS all_times_valid,
+               COUNT(*) OVER (
+                 PARTITION BY log.leave_request_id, log.created_at
+               ) AS same_time_count
+        FROM leave_approval_logs log
+      ),
+      ordered AS (
+        SELECT stamped.*,
+               LAG(stamped.action) OVER log_order AS previous_action,
+               LAG(stamped.created_at) OVER log_order AS previous_created_at,
+               LAG(stamped.same_time_count) OVER log_order AS previous_same_time_count
+        FROM stamped
+        WINDOW log_order AS (
+          PARTITION BY stamped.leave_request_id
+          ORDER BY stamped.created_at, stamped.id
+        )
+      ),
+      candidates AS (
+        SELECT id
+        FROM ordered
+        WHERE action = 'resubmit'
+          AND previous_action = 'cancel'
+          AND all_times_valid
+          AND previous_created_at < created_at
+          AND same_time_count = 1
+          AND previous_same_time_count = 1
+      )
+      UPDATE leave_approval_logs target
+      SET action = 'submit',
+          comment = CASE
+            WHEN BTRIM(COALESCE(target.comment, '')) = '重新提交' THEN NULL
+            WHEN target.comment LIKE '重新提交，删除当前草稿附件 %'
+              THEN REPLACE(target.comment, '重新提交，', '')
+            WHEN target.comment LIKE '提交申请，删除当前草稿附件 %'
+              THEN REPLACE(target.comment, '提交申请，', '')
+            ELSE target.comment
+          END
+      FROM candidates
+      WHERE target.id = candidates.id
+        AND target.action = 'resubmit'
+    `);
+    if ((draftSubmitLogMigration.rowCount ?? 0) > 0) {
+      console.log(
+        `✅ 数据库迁移：${draftSubmitLogMigration.rowCount} 条撤回草稿日志已修正为提交申请`,
+      );
+    }
+
     await ddlClient.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE UNIQUE INDEX IF NOT EXISTS uq_users_employee_no
@@ -1417,6 +1482,8 @@ export async function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_leave_requests_parent_request ON leave_requests(parent_request_id);
     CREATE INDEX IF NOT EXISTS idx_leave_balances_user_year ON leave_balances(user_id, year);
     CREATE INDEX IF NOT EXISTS idx_leave_approval_logs_req_id ON leave_approval_logs(leave_request_id);
+    CREATE INDEX IF NOT EXISTS idx_leave_cc_notifications_unread
+      ON leave_cc_notifications(recipient_id, request_id) WHERE read_at IS NULL;
   `);
 
     // ==================== 项目日志模块相关表（v2） ====================
@@ -3198,7 +3265,7 @@ export async function initDatabase() {
     `UPDATE leave_type_configs
      SET requires_balance_check = true
      WHERE code IN (
-       'annual', 'personal', 'sick', 'bereavement', 'compensatory',
+       'annual', 'personal', 'bereavement', 'compensatory',
        'marriage', 'maternity', 'paternity'
      )
        AND requires_balance_check = false`,
@@ -5350,6 +5417,62 @@ async function initContractDomainSchema(): Promise<void> {
       ON invoice_application_generated_files(application_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_invoice_application_audit_application
       ON invoice_application_audit_logs(application_id, created_at);
+
+    ALTER TABLE contract_files
+      ADD COLUMN IF NOT EXISTS invoice_application_id TEXT;
+    WITH delivered_material_candidates AS (
+      SELECT audit.application_id, file.id AS file_id
+      FROM invoice_application_audit_logs audit
+      JOIN invoice_applications application
+        ON application.id = audit.application_id
+      JOIN contract_files file
+        ON file.id = audit.metadata_json->>'sealedTriplicateFileId'
+       AND file.contract_id = application.contract_id
+       AND file.file_type IN ('triplicate', 'other')
+      WHERE audit.action = 'deliver'
+        AND COALESCE(audit.metadata_json->>'sealedTriplicateFileId', '') <> ''
+    ), delivered_material_files AS (
+      SELECT candidate.file_id,
+        MIN(candidate.application_id) AS application_id
+      FROM delivered_material_candidates candidate
+      GROUP BY candidate.file_id
+      HAVING COUNT(DISTINCT candidate.application_id) = 1
+    )
+    UPDATE contract_files file
+       SET invoice_application_id = delivered.application_id
+      FROM delivered_material_files delivered
+     WHERE file.id = delivered.file_id
+       AND file.invoice_application_id IS NULL;
+    ALTER TABLE contract_files
+      DROP CONSTRAINT IF EXISTS contract_files_invoice_application_id_fkey;
+    ALTER TABLE contract_files
+      ADD CONSTRAINT contract_files_invoice_application_id_fkey
+      FOREIGN KEY(invoice_application_id)
+      REFERENCES invoice_applications(id) ON DELETE SET NULL
+      DEFERRABLE INITIALLY DEFERRED NOT VALID;
+    ALTER TABLE contract_files
+      VALIDATE CONSTRAINT contract_files_invoice_application_id_fkey;
+    CREATE INDEX IF NOT EXISTS idx_contract_files_invoice_application
+      ON contract_files(invoice_application_id, created_at, id)
+      WHERE invoice_application_id IS NOT NULL;
+    DROP INDEX IF EXISTS idx_contract_files_one_current_approval_material;
+    WITH ranked_invoice_application_files AS (
+      SELECT id,
+        ROW_NUMBER() OVER (
+          PARTITION BY invoice_application_id
+          ORDER BY created_at DESC, id DESC
+        ) AS current_rank
+      FROM contract_files
+      WHERE invoice_application_id IS NOT NULL
+    )
+    UPDATE contract_files AS target
+       SET is_current = (ranked.current_rank = 1)
+      FROM ranked_invoice_application_files ranked
+     WHERE target.id = ranked.id
+       AND target.is_current IS DISTINCT FROM (ranked.current_rank = 1);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_files_one_current_invoice_application
+      ON contract_files(invoice_application_id)
+      WHERE invoice_application_id IS NOT NULL AND is_current = TRUE;
 
     CREATE TABLE IF NOT EXISTS contract_auxiliary_packages (
       id TEXT PRIMARY KEY,
@@ -7661,17 +7784,18 @@ async function initContractDomainSchema(): Promise<void> {
         ) AS current_rank
       FROM contract_files
       WHERE is_current = TRUE
-        AND file_type IN ('draft_contract', 'seal_application', 'triplicate', 'payment_request')
+        AND file_type IN ('draft_contract', 'seal_application', 'payment_request')
     )
     UPDATE contract_files AS target
     SET is_current = FALSE
     FROM ranked_current_approval_files AS ranked
     WHERE target.id = ranked.id AND ranked.current_rank > 1;
 
+    DROP INDEX IF EXISTS idx_contract_files_one_current_approval_material;
     CREATE UNIQUE INDEX IF NOT EXISTS idx_contract_files_one_current_approval_material
       ON contract_files(contract_id, file_type)
       WHERE is_current = TRUE
-        AND file_type IN ('draft_contract', 'seal_application', 'triplicate', 'payment_request');
+        AND file_type IN ('draft_contract', 'seal_application', 'payment_request');
 
     WITH ranked_current_sealed_files AS (
       SELECT id,

@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import multer from "multer";
 import cors from "cors";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
@@ -201,6 +202,17 @@ app.use(
     res: express.Response,
     _next: express.NextFunction,
   ) => {
+    if (err instanceof multer.MulterError) {
+      const isFileTooLarge = err.code === "LIMIT_FILE_SIZE";
+      console.warn("文件上传被拒绝:", err.code);
+      return res.status(isFileTooLarge ? 413 : 400).json({
+        success: false,
+        message: isFileTooLarge
+          ? "上传文件大小超过该功能限制"
+          : "上传文件数量或字段超过限制",
+        code: err.code,
+      });
+    }
     console.error("Global error handler:", err);
     res.status(500).json({
       success: false,

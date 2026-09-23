@@ -4,7 +4,11 @@ import {
   isBossRequestAllowed,
   isRoleAllowed,
 } from '../utils/boss-role.js'
-import { LEAVE_APPROVER_ROLES } from '../utils/leave-approval.js'
+import {
+  LEAVE_APPROVER_ROLES,
+  LEAVE_GENERAL_MANAGER_WORKSPACE_ROLES,
+  LEAVE_OPERATION_ROLES,
+} from '../utils/leave-approval.js'
 
 interface AuthenticatedUser {
   id: string
@@ -199,6 +203,14 @@ export const requireGeneralManager = requireRole(['general_manager'])
 
 // 快捷中间件：请假审批人（总经理或董事长）
 export const requireLeaveApprover = requireRole([...LEAVE_APPROVER_ROLES])
+
+// 请假审批专用精确门禁：原审批人或代总经理处理普通员工申请的超级管理员。
+export const requireLeaveOperator = requireExactRole(LEAVE_OPERATION_ROLES)
+
+// 请假统计专用精确门禁：总经理或超级管理员。
+export const requireLeaveStatisticsViewer = requireExactRole(
+  LEAVE_GENERAL_MANAGER_WORKSPACE_ROLES,
+)
 
 // 快捷中间件：总经理或超级管理员
 export const requireGMOrSuperAdmin = requireRole(['super_admin', 'general_manager'])

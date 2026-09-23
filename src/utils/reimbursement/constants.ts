@@ -94,9 +94,6 @@ export const BUSINESS_TYPE_COLOR_MAP: Record<string, string> = {
   meeting: 'info',
 }
 
-// 大额报销金额阈值
-export const LARGE_AMOUNT_THRESHOLD = 1000
-
 // 基础报销每月 1500 元交通额度匹配关键字
 export const TRANSPORT_FUEL_CATEGORY_KEYWORDS = [
   '运输',

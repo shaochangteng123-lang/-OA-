@@ -111,7 +111,7 @@
               class="inline-upload"
               :show-file-list="false"
               accept=".pdf,application/pdf"
-              :before-upload="file => handleSingleUpload(row.type, file)"
+              :before-upload="handleSingleUpload.bind(null, row.type)"
             >
               <el-button link type="primary">
                 {{ row.document ? '替换' : '上传' }}

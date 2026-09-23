@@ -30,7 +30,7 @@ import {
   generateProbationApplicationPdf,
   type ProbationPdfSignature,
 } from "../services/probationApplicationPdf.js";
-import { getMonthlyProbationReviewStage } from "../utils/probation-review.js";
+import { getMonthlyProbationReviewStages } from "../utils/probation-review.js";
 import { requiresEmployeeProfile } from "../utils/boss-role.js";
 
 const router = Router();
@@ -183,10 +183,15 @@ function canSignStage(
   confirmation: Pick<
     ProbationConfirmation,
     "supervisor_id" | "hr_approver_id" | "chairman_id"
-  >,
+  > & { supervisor_role: string | null; supervisor_status: string | null },
 ): boolean {
   if (stage === "supervisor") {
-    return signer.id === confirmation.supervisor_id;
+    return (
+      signer.id === confirmation.supervisor_id ||
+      (signer.role === "super_admin" &&
+        confirmation.supervisor_role === "general_manager" &&
+        confirmation.supervisor_status === "active")
+    );
   }
   if (stage === "hr") {
     return confirmation.hr_approver_id
@@ -763,8 +768,8 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
       const currentUser = (await db
         .prepare("SELECT role FROM users WHERE id = ? AND status = 'active'")
         .get(userId)) as { role: string } | undefined;
-      const reviewedStage = getMonthlyProbationReviewStage(currentUser?.role);
-      if (!currentUser || !reviewedStage) {
+      const reviewedStages = getMonthlyProbationReviewStages(currentUser?.role);
+      if (!currentUser || reviewedStages.length === 0) {
         return res
           .status(403)
           .json({ success: false, message: "当前角色不能查询本人审批记录" });
@@ -774,6 +779,9 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
       const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
       const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       const nextMonthStart = `${nextMonth.getFullYear()}-${String(nextMonth.getMonth() + 1).padStart(2, "0")}-01`;
+      const reviewedStagePlaceholders = reviewedStages
+        .map(() => "?")
+        .join(", ");
 
       sql = `
         SELECT pc.*, ep.name as employee_name, ep.department as employee_department,
@@ -787,14 +795,14 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
           SELECT confirmation_id, MAX(signed_at) AS reviewed_at
           FROM probation_signature_records
           WHERE signer_id = ?
-            AND stage = '${reviewedStage}'
+            AND stage IN (${reviewedStagePlaceholders})
             AND signed_at >= ?
             AND signed_at < ?
           GROUP BY confirmation_id
         ) reviewed ON reviewed.confirmation_id = pc.id
         WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
-      params.push(userId, monthStart, nextMonthStart);
+      params.push(userId, ...reviewedStages, monthStart, nextMonthStart);
 
       countSql = `
         SELECT COUNT(*) as total
@@ -805,13 +813,13 @@ router.get("/list", requireAdminOrGM, async (req, res) => {
           SELECT DISTINCT confirmation_id
           FROM probation_signature_records
           WHERE signer_id = ?
-            AND stage = '${reviewedStage}'
+            AND stage IN (${reviewedStagePlaceholders})
             AND signed_at >= ?
             AND signed_at < ?
         ) reviewed ON reviewed.confirmation_id = pc.id
         WHERE COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
       `;
-      countParams.push(userId, monthStart, nextMonthStart);
+      countParams.push(userId, ...reviewedStages, monthStart, nextMonthStart);
     } else if (includeNonApplied) {
       // UNION ALL：已有转正记录的员工 + 没有转正记录的实习期员工
       const part1StatusFilter =
@@ -1512,7 +1520,17 @@ router.get("/signature-tasks", requireAuth, async (req, res) => {
         AND COALESCE(employee_user.role, 'user') NOT IN ('super_admin', 'boss', 'chairman')
         AND COALESCE(ep.user_id, '') <> ?
         AND (
-          (pc.review_stage = 'supervisor' AND pc.supervisor_id = ?)
+          (
+            pc.review_stage = 'supervisor'
+            AND (
+              pc.supervisor_id = ?
+              OR (
+                ? = 'super_admin'
+                AND supervisor.role = 'general_manager'
+                AND supervisor.status = 'active'
+              )
+            )
+          )
           OR (
             pc.review_stage = 'hr'
             AND (
@@ -1534,7 +1552,15 @@ router.get("/signature-tasks", requireAuth, async (req, res) => {
       ORDER BY pc.submit_time ASC, pc.created_at ASC
     `,
       )
-      .all(userId, userId, userId, user.role, userId, user.role)) as Array<
+      .all(
+        userId,
+        userId,
+        user.role,
+        userId,
+        user.role,
+        userId,
+        user.role,
+      )) as Array<
       ProbationConfirmationWithEmployee & {
         employee_user_id: string | null;
         supervisor_name: string | null;
@@ -1898,7 +1924,7 @@ router.post("/online-submit", requireAuth, async (req, res) => {
   }
 });
 
-// 总经理签主管意见，管理员签人事部意见，董事长完成最终审批。
+// 总经理或超级管理员签主管意见，指定管理员签人事部意见，董事长完成最终审批。
 router.post("/:id/sign-review", requireAuth, async (req, res) => {
   let signatureFilePath = "";
   let generatedFilePath = "";
@@ -1937,6 +1963,8 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
           employee_name: string;
           employee_department: string | null;
           employee_position: string | null;
+          supervisor_role: string | null;
+          supervisor_status: string | null;
         }
       >(
         `SELECT
@@ -1945,9 +1973,12 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
            ep.employee_no,
            ep.name AS employee_name,
            ep.department AS employee_department,
-           ep.position AS employee_position
+           ep.position AS employee_position,
+           supervisor.role AS supervisor_role,
+           supervisor.status AS supervisor_status
          FROM probation_confirmations pc
          JOIN employee_profiles ep ON ep.id = pc.employee_id
+         LEFT JOIN users supervisor ON supervisor.id = pc.supervisor_id
          WHERE pc.id = $1
          FOR UPDATE OF pc, ep`,
         [id],
@@ -1969,6 +2000,23 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
         throw new ProbationOperationError("当前环节不允许审批签名", 409);
       }
       const stage = confirmation.review_stage as ActiveReviewStage;
+      const expectedStage = req.body?.expectedStage;
+      const expectedFormVersion = req.body?.expectedFormVersion;
+      const mustMatchDisplayedRevision =
+        signer.role === "super_admin" ||
+        expectedStage !== undefined ||
+        expectedFormVersion !== undefined;
+      if (
+        mustMatchDisplayedRevision &&
+        (expectedStage !== stage ||
+          !Number.isSafeInteger(expectedFormVersion) ||
+          expectedFormVersion !== confirmation.form_version)
+      ) {
+        throw new ProbationOperationError(
+          "申请环节或版本已变化，请刷新待签列表后重新确认签署",
+          409,
+        );
+      }
       if (!canSignStage(stage, signer, confirmation)) {
         throw new ProbationOperationError(
           `当前账号不是${REVIEW_STAGE_LABELS[stage]}的签署人`,
@@ -2091,7 +2139,7 @@ router.post("/:id/sign-review", requireAuth, async (req, res) => {
           `UPDATE approval_instances SET current_step = 2, updated_at = $1 WHERE id = $2`,
           [now, instanceId],
         );
-        responseMessage = "总经理已签署主管领导意见，等待管理员签署人事部意见";
+        responseMessage = "已签署主管领导意见，等待管理员签署人事部意见";
         return;
       }
 

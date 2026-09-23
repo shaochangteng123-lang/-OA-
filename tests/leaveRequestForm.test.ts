@@ -33,6 +33,18 @@ jest.mock('../src/utils/leaveApi', () => ({
       is_active: true,
       is_available: true,
     },
+    {
+      id: 'sick',
+      code: 'sick',
+      name: '病假',
+      requires_attachment: true,
+      requires_balance_check: false,
+      default_days: 0,
+      description: '因病请假，需提供三甲医院病历或假条',
+      sort_order: 3,
+      is_active: true,
+      is_available: true,
+    },
   ]),
   getMyBalances: jest.fn().mockResolvedValue([
     {
@@ -47,8 +59,14 @@ jest.mock('../src/utils/leaveApi', () => ({
       is_available: true,
     },
   ]),
-  submitCombinedLeaveRequests: jest.fn(),
-  submitLeaveRequest: jest.fn(),
+  submitCombinedLeaveRequests: jest.fn().mockResolvedValue({
+    combinationGroupId: 'group-1',
+    requests: [
+      { id: 'request-1', requestNo: 'QJ-2026-00001' },
+      { id: 'request-2', requestNo: 'QJ-2026-00002' },
+    ],
+  }),
+  submitLeaveRequest: jest.fn().mockResolvedValue({ id: 'request-1', requestNo: 'QJ-2026-00001' }),
 }))
 
 jest.mock('../src/components/leave/LeaveDatePicker.vue', () => ({
@@ -69,7 +87,12 @@ jest.mock('../src/components/leave/LeaveFileCards.vue', () => ({
 
 import { nextTick } from 'vue'
 import LeaveRequestForm from '../src/components/leave/LeaveRequestForm.vue'
-import { calculatePeriodByDays } from '../src/utils/leaveApi'
+import {
+  calculateDays,
+  calculatePeriodByDays,
+  submitCombinedLeaveRequests,
+  submitLeaveRequest,
+} from '../src/utils/leaveApi'
 
 const { mount, flushPromises } =
   require('../node_modules/@vue/test-utils/dist/vue-test-utils.cjs.js') as typeof import('@vue/test-utils')
@@ -183,6 +206,135 @@ describe('组合请假时间段', () => {
     expect(automaticPeriodCalculation).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('组合总计 10 天')
     expect(wrapper.text()).toContain('分配已完成')
+
+    wrapper.unmount()
+  })
+
+  it('关闭病假余额检查后仍要求上传三甲医院证明材料', async () => {
+    const wrapper = mount(LeaveRequestForm, {
+      global: { stubs: globalStubs },
+    })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      form: { leaveTypeCode: string }
+      canFillFullLeave: boolean
+      requiresAttachments: boolean
+      attachmentRequirementText: string
+    }
+    vm.form.leaveTypeCode = 'sick'
+    await nextTick()
+
+    expect(vm.canFillFullLeave).toBe(false)
+    expect(vm.requiresAttachments).toBe(true)
+    expect(vm.attachmentRequirementText).toBe(
+      '病假需要上传证明文件（三甲医院病历或假条），否则无法提交'
+    )
+
+    wrapper.unmount()
+  })
+
+  it('单一返岗补假提交独立补假标识', async () => {
+    const wrapper = mount(LeaveRequestForm, {
+      global: { stubs: globalStubs },
+    })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      applicationScene: 'normal' | 'return_supplement'
+      handleApplicationSceneChange: () => Promise<void>
+      form: {
+        leaveTypeCode: string
+        startDate: string
+        startHalf: 'morning' | 'afternoon'
+        endDate: string
+        endHalf: 'morning' | 'afternoon'
+        reason: string
+      }
+      calculatedDays: number | null
+      onDateChange: () => void
+      handleSubmit: () => Promise<void>
+    }
+    vm.applicationScene = 'return_supplement'
+    await vm.handleApplicationSceneChange()
+    Object.assign(vm.form, {
+      leaveTypeCode: 'personal',
+      startDate: '2026-08-03',
+      startHalf: 'morning',
+      endDate: '2026-08-03',
+      endHalf: 'afternoon',
+      reason: '返岗后补录',
+    })
+    vm.onDateChange()
+    jest.advanceTimersByTime(400)
+    await flushPromises()
+    expect(calculateDays).toHaveBeenCalledWith(expect.objectContaining({ allowPast: true }))
+    vm.calculatedDays = 1
+
+    await vm.handleSubmit()
+
+    const submitMock = submitLeaveRequest as jest.Mock
+    expect(submitMock).toHaveBeenCalledTimes(1)
+    const formData = submitMock.mock.calls[0][0] as FormData
+    expect(formData.get('applicationKind')).toBe('supplement')
+    expect(formData.get('startDate')).toBe('2026-08-03')
+
+    wrapper.unmount()
+  })
+
+  it('组合返岗补假提交共享的独立补假标识和分段', async () => {
+    const wrapper = mount(LeaveRequestForm, {
+      global: { stubs: globalStubs },
+    })
+    await flushPromises()
+
+    const vm = wrapper.vm as unknown as {
+      applicationScene: 'normal' | 'return_supplement'
+      requestMode: 'single' | 'combined'
+      handleApplicationSceneChange: () => Promise<void>
+      form: {
+        startDate: string
+        startHalf: 'morning' | 'afternoon'
+        endDate: string
+        endHalf: 'morning' | 'afternoon'
+      }
+      segments: Array<{
+        key: number
+        leaveTypeCode: string
+        days: number | null
+        reason: string
+      }>
+      calculatedDays: number | null
+      handleSubmit: () => Promise<void>
+    }
+    vm.applicationScene = 'return_supplement'
+    await vm.handleApplicationSceneChange()
+    vm.requestMode = 'combined'
+    Object.assign(vm.form, {
+      startDate: '2026-08-03',
+      startHalf: 'morning',
+      endDate: '2026-08-04',
+      endHalf: 'afternoon',
+    })
+    Object.assign(vm.segments[0], {
+      leaveTypeCode: 'personal',
+      days: 1,
+      reason: '带薪事假补录',
+    })
+    Object.assign(vm.segments[1], {
+      leaveTypeCode: 'other',
+      days: 1,
+      reason: '其他请假补录',
+    })
+    vm.calculatedDays = 2
+
+    await vm.handleSubmit()
+
+    const submitMock = submitCombinedLeaveRequests as jest.Mock
+    expect(submitMock).toHaveBeenCalledTimes(1)
+    const formData = submitMock.mock.calls[0][0] as FormData
+    expect(formData.get('applicationKind')).toBe('supplement')
+    expect(JSON.parse(String(formData.get('segments')))).toHaveLength(2)
 
     wrapper.unmount()
   })

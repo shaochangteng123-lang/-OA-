@@ -33,7 +33,7 @@
             size="small"
             :disabled="disabled"
             aria-label="文字方向"
-            @change="(value) => updateSelectedAlign(String(value))"
+            @change="handleSelectedAlignChange"
           >
             <el-radio-button value="left">左</el-radio-button>
             <el-radio-button value="center">中</el-radio-button>
@@ -644,6 +644,10 @@ function updateSelectedAlign(value: string) {
   updateCustomItem(selectedCustomItem.value.id, {
     align: value as ResignationTemplateCustomItem["align"],
   });
+}
+
+function handleSelectedAlignChange(value: string | number | boolean | undefined) {
+  updateSelectedAlign(String(value ?? "left"));
 }
 
 function updateSelectedColor(color: ResignationTemplateCustomItem["color"]) {

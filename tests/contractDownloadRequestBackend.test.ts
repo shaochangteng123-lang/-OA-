@@ -200,6 +200,7 @@ describe("员工合同文件下载申请后端", () => {
             mime_type: "application/pdf",
             file_hash: "a".repeat(64),
             created_at: "2026-08-20T00:00:00.000Z",
+            invoice_application_id: null,
           },
         ],
       });
@@ -220,6 +221,9 @@ describe("员工合同文件下载申请后端", () => {
     );
     expect(String(fileQuery[0])).toContain("owner.is_deleted = FALSE");
     expect(String(fileQuery[0])).toContain("file.is_current = TRUE");
+    expect(String(fileQuery[0])).toContain(
+      "file.invoice_application_id IS NULL",
+    );
     expect(String(fileQuery[0])).toContain(
       "sealed_file.file_type = 'sealed_contract'",
     );
@@ -264,6 +268,7 @@ describe("员工合同文件下载申请后端", () => {
         );
         expect(sql).toContain("owner.relation_type = 'main'");
         expect(sql).toContain("sealed_file.file_type = 'sealed_contract'");
+        expect(sql).toContain("file.invoice_application_id IS NULL");
         expect(params).toEqual(["contract-1", ["other-root-file"]]);
         return { rows: [] };
       }

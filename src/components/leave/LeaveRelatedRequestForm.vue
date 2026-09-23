@@ -304,7 +304,8 @@
             :show-file-list="false"
             :limit="5"
             multiple
-            :accept="'.jpg,.jpeg,.png,.pdf'"
+            :accept="'.jpg,.jpeg,.png,.webp,.pdf'"
+            :on-change="handleAttachmentFileChange"
             :on-exceed="handleExceed"
           >
             <el-button type="primary" plain size="small">
@@ -317,7 +318,7 @@
             <el-icon><WarningFilled /></el-icon>
             {{ attachmentRequirementText }}
           </div>
-          <div class="upload-tip">支持 JPG / PNG / PDF，每个不超过 5MB</div>
+          <div class="upload-tip">支持 JPG / PNG / WEBP / PDF，每个不超过 5MB</div>
         </div>
       </el-form-item>
 
@@ -365,6 +366,7 @@ import {
 import { getAutomaticCombinedLeaveDays } from '@/utils/leaveCombination'
 import {
   formatAttachmentRequirementMessage,
+  getLeaveAttachmentSizeError,
   getAttachmentRequiredLeaveTypes,
 } from '@/utils/leaveAttachment'
 import { isPastLeaveDateDisabled } from '@/utils/leaveDate'
@@ -870,6 +872,13 @@ function removeSegment(key: number) {
 
 function handleExceed() {
   ElMessage.warning('最多上传5个文件')
+}
+
+function handleAttachmentFileChange(file: UploadUserFile) {
+  const error = getLeaveAttachmentSizeError(file.name, file.size ?? file.raw?.size)
+  if (!error) return
+  fileList.value = fileList.value.filter(item => item.uid !== file.uid)
+  ElMessage.error(error)
 }
 
 function getUploadFileKey(file: UploadUserFile, index: number): string {

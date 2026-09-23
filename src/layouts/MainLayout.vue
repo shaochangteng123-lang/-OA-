@@ -297,7 +297,7 @@
               badge-type="danger"
             />
             <SidebarMenuItem
-              v-if="isGeneralManager"
+              v-if="canAccessHRApproval"
               path="/gm-probation-approval"
               label="审批中心"
               :icon="Stamp"
@@ -577,6 +577,7 @@ import {
 } from "@/utils/contractDownloadApi";
 import { getInvoiceApplicationPendingCounts } from "@/utils/invoiceApplicationApi";
 import { canViewMonthlyFinancialReport as canViewMonthlyFinancialReportForRole } from "@/utils/monthlyFinancialReportPermissions";
+import { canAccessHRApprovalCenter } from "@/utils/hrApprovalPermissions";
 import {
   Calendar,
   FolderOpened,
@@ -758,7 +759,16 @@ const isGeneralManager = computed(() => {
   return authStore.user?.role === "general_manager";
 });
 
+const canAccessHRApproval = computed(() =>
+  canAccessHRApprovalCenter(authStore.user?.role),
+);
+
 const isChairman = computed(() => authStore.user?.role === "chairman");
+const leaveCcUnreadCount = computed(() =>
+  authStore.user?.role === "admin" || authStore.user?.role === "super_admin"
+    ? pendingStore.counts.leaveCcUnread || 0
+    : 0,
+);
 
 // 月度财务报表允许超级管理员、普通管理员和总经理查看。
 const canViewMonthlyFinancialReport = computed(() => {
@@ -786,7 +796,7 @@ const myContractApplicationPendingCount = computed(
 // 是否具有人力资源请假审批职责
 const isLeaveApprover = computed(() => {
   return (
-    authStore.user?.role === "general_manager" ||
+    canAccessHRApproval.value ||
     authStore.user?.role === "chairman"
   );
 });
@@ -871,7 +881,7 @@ const hrGroupHasBadge = computed(() => {
       (counts.probationSignaturePending || 0) +
       (counts.probationArchivePending || 0)
     : 0;
-  const generalManagerProbation = isGeneralManager.value
+  const generalManagerProbation = canAccessHRApproval.value
     ? counts.probationPending || 0
     : 0;
   const leaveApproval = isLeaveApprover.value
@@ -882,6 +892,7 @@ const hrGroupHasBadge = computed(() => {
     userProbation ||
     userLeaveRejected > 0 ||
     userLeaveApproved > 0 ||
+    leaveCcUnreadCount.value > 0 ||
     contractExpiry ||
     adminProbation > 0 ||
     generalManagerProbation > 0 ||
@@ -963,10 +974,30 @@ const employeeDataBadge = computed(() => {
       (pendingStore.counts.probationSignaturePending || 0) +
       (pendingStore.counts.probationArchivePending || 0) +
       (pendingStore.counts.resignationPending || 0) +
+      leaveCcUnreadCount.value +
       chairmanLeavePending
     : 0;
   return count > 0 ? count : undefined;
 });
+
+watch(
+  leaveCcUnreadCount,
+  (count, previousCount) => {
+    if (count <= 0 || count <= (previousCount || 0)) return;
+    ElNotification({
+      title: "请假抄送提醒",
+      message: `您有 ${count} 条未读请假抄送，点击查看`,
+      type: "info",
+      duration: 6000,
+      onClick: () => {
+        void router.push({
+          path: "/employee-data",
+          query: { tab: "leave", ccNotice: String(Date.now()) },
+        });
+      },
+    });
+  },
+);
 
 // 页面标题
 const pageTitle = computed(() => {

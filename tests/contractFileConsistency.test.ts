@@ -28,6 +28,7 @@ describe("合同草稿文件一致性", () => {
     expect(routeSource).toContain('currentSealedContractFileExists("source")');
     expect(routeSource).toContain("sealed_file.file_type = 'sealed_contract'");
     expect(routeSource).toContain("sealed_file.is_current = TRUE");
+    expect(routeSource).toContain("AND file.invoice_application_id IS NULL");
     expect(routeSource).toContain("Promise.resolve<Record<string, any>[]>([])");
     const aggregateQuery = routeSource.slice(
       routeSource.indexOf("const filesPromise ="),
@@ -81,6 +82,45 @@ describe("合同草稿文件一致性", () => {
     );
     expect(fileReadRoute).toContain("CONTRACT_DIRECT_DOWNLOAD_FORBIDDEN");
     expect(fileReadRoute).toContain("validateFilePath(file.file_path)");
+    expect(fileReadRoute).toContain("file.invoice_application_id");
+    expect(fileReadRoute).toContain("INVOICE_APPLICATION_MATERIAL_FORBIDDEN");
+    expect(fileReadRoute).toContain("f.file_hash");
+    expect(fileReadRoute).toContain(
+      "开票申请盖章材料内容发生变化，已阻止预览和下载",
+    );
+  });
+
+  it("开票申请原始材料使用管理员合同范围预览并校验归属和摘要", () => {
+    const materialRoute = routeSource.slice(
+      routeSource.indexOf('"/:id/invoice-application-materials/:materialId"'),
+      routeSource.indexOf(
+        '"/:id/supplement-upload-context"',
+        routeSource.indexOf('"/:id/invoice-application-materials/:materialId"'),
+      ),
+    );
+    expect(materialRoute).toContain("requireFinance");
+    expect(materialRoute).toContain(
+      "await assertContractReadScope(req, req.params.id)",
+    );
+    expect(materialRoute).toContain("JOIN requested_contract requested");
+    expect(materialRoute).toContain(
+      "requested.root_id = application.contract_id",
+    );
+    expect(materialRoute).toContain(
+      "application.status NOT IN ('draft', 'rejected')",
+    );
+    expect(materialRoute).toContain("validateFilePath(material.file_path)");
+    expect(materialRoute).toContain(
+      "INVOICE_APPLICATION_MATERIAL_HASH_MISMATCH",
+    );
+    expect(materialRoute).toContain("!forceDownload &&");
+    expect(materialRoute).toContain("const printable =");
+    expect(materialRoute.indexOf("const printable =")).toBeLessThan(
+      materialRoute.indexOf("await db.run("),
+    );
+    expect(materialRoute).toContain(
+      'archiveGroup: "invoice_application_material"',
+    );
   });
 
   it("文件哈希只在同一合同内去重", () => {

@@ -174,7 +174,9 @@ import {
   lockInvoiceApplicationRoot,
   lockInvoiceApplicationRootByFinancialSource,
   reconcileInvoiceApplicationAllocations,
+  requiresInvoiceTriplicate,
 } from "../services/invoiceApplication.js";
+import { exportOtherExpensesPrintableFileFromPath } from "../services/invoiceApplicationMaterial.js";
 
 const router = Router();
 
@@ -1483,6 +1485,7 @@ async function insertContractFile(
   file: ValidatedUpload,
   uploadedBy: string,
   fileId = nanoid(),
+  invoiceApplicationId: string | null = null,
 ): Promise<string> {
   await assertUniqueFileHash(client, contractId, file.fileHash);
   let version = 1;
@@ -1500,11 +1503,19 @@ async function insertContractFile(
       [contractId, fileType],
     );
   }
+  if (invoiceApplicationId) {
+    await client.query(
+      `UPDATE contract_files SET is_current = FALSE
+       WHERE invoice_application_id = $1 AND is_current = TRUE`,
+      [invoiceApplicationId],
+    );
+  }
   await client.query(
     `INSERT INTO contract_files (
        id, contract_id, file_type, file_name, file_path, file_size,
-       mime_type, file_hash, version, is_current, uploaded_by, created_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11)`,
+       mime_type, file_hash, version, is_current, uploaded_by, created_at,
+       invoice_application_id
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,TRUE,$10,$11,$12)`,
     [
       fileId,
       contractId,
@@ -1517,6 +1528,7 @@ async function insertContractFile(
       version,
       uploadedBy,
       new Date().toISOString(),
+      invoiceApplicationId,
     ],
   );
   return fileId;
@@ -6438,15 +6450,27 @@ router.get("/files/:fileId", requireAuth, async (req, res) => {
       file_name: string;
       mime_type: string;
       is_deleted: boolean;
+      invoice_application_id: string | null;
+      file_hash: string;
     }>(
       `SELECT f.contract_id, f.file_path, f.file_name, f.mime_type,
-         c.is_deleted
+         c.is_deleted, f.invoice_application_id, f.file_hash
        FROM contract_files f
        JOIN contracts c ON c.id = f.contract_id
        WHERE f.id = ?`,
       req.params.fileId,
     );
     if (!file) throw new ContractDomainError(404, "合同文件不存在");
+    if (
+      file.invoice_application_id &&
+      !(FINANCE_ROLES as readonly string[]).includes(currentActor.role)
+    ) {
+      throw new ContractDomainError(
+        403,
+        "开票申请材料仅管理员可在合同归档中查看",
+        "INVOICE_APPLICATION_MATERIAL_FORBIDDEN",
+      );
+    }
     if (file.is_deleted) {
       if (
         !FINANCE_ROLES.includes(
@@ -6464,6 +6488,19 @@ router.get("/files/:fileId", requireAuth, async (req, res) => {
     const absolutePath = path.resolve(process.cwd(), file.file_path);
     if (!fs.existsSync(absolutePath)) {
       throw new ContractDomainError(404, "合同文件已丢失");
+    }
+    if (file.invoice_application_id) {
+      const actualHash = crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(absolutePath))
+        .digest("hex");
+      if (actualHash !== file.file_hash) {
+        throw new ContractDomainError(
+          409,
+          "开票申请盖章材料内容发生变化，已阻止预览和下载",
+          "INVOICE_APPLICATION_MATERIAL_HASH_MISMATCH",
+        );
+      }
     }
     await db.run(
       `INSERT INTO contract_audit_logs (
@@ -6496,6 +6533,135 @@ router.get("/files/:fileId", requireAuth, async (req, res) => {
     if (!res.headersSent) sendError(res, error, "读取合同文件失败");
   }
 });
+
+router.get(
+  "/:id/invoice-application-materials/:materialId",
+  requireFinance,
+  async (req, res) => {
+    try {
+      const currentActor = actor(req);
+      await assertContractReadScope(req, req.params.id);
+      const forceDownload = req.query.download === "1";
+      if (forceDownload && !canDirectDownloadContractFile(currentActor.role)) {
+        throw new ContractDomainError(
+          403,
+          "当前账号不能直接下载开票申请材料",
+          "CONTRACT_DIRECT_DOWNLOAD_FORBIDDEN",
+        );
+      }
+      const material = await db.get<{
+        contract_id: string;
+        application_id: string;
+        application_no: string;
+        contract_category_snapshot: string;
+        party_a_snapshot: string;
+        file_name: string;
+        file_path: string;
+        file_size: number;
+        mime_type: string;
+        file_hash: string;
+      }>(
+        `WITH requested_contract AS (
+           SELECT COALESCE(root_contract_id, id) AS root_id
+             FROM contracts
+            WHERE id = ? AND is_deleted = FALSE
+         )
+         SELECT application.contract_id, application.id AS application_id,
+           application.application_no,
+           application.contract_category_snapshot,
+           application.party_a_snapshot,
+           material.file_name, material.file_path, material.file_size,
+           material.mime_type, material.file_hash
+         FROM invoice_application_materials material
+         JOIN invoice_applications application
+           ON application.id = material.application_id
+         JOIN requested_contract requested
+           ON requested.root_id = application.contract_id
+         WHERE material.id = ?
+           AND application.status NOT IN ('draft', 'rejected')`,
+        req.params.id,
+        req.params.materialId,
+      );
+      if (!material) {
+        throw new ContractDomainError(404, "开票申请材料不存在");
+      }
+      if (!validateFilePath(material.file_path)) {
+        throw new ContractDomainError(403, "开票申请材料路径不安全");
+      }
+      const absolutePath = path.resolve(process.cwd(), material.file_path);
+      if (!fs.existsSync(absolutePath)) {
+        throw new ContractDomainError(404, "开票申请材料文件已丢失");
+      }
+      const actualHash = crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(absolutePath))
+        .digest("hex");
+      if (actualHash !== material.file_hash) {
+        throw new ContractDomainError(
+          409,
+          "开票申请材料内容发生变化，已阻止预览和下载",
+          "INVOICE_APPLICATION_MATERIAL_HASH_MISMATCH",
+        );
+      }
+      const requiresTriplicate = requiresInvoiceTriplicate(
+        material.contract_category_snapshot,
+        material.party_a_snapshot,
+      );
+      const printable =
+        !forceDownload &&
+        requiresTriplicate &&
+        material.mime_type !== "application/pdf"
+          ? await exportOtherExpensesPrintableFileFromPath(
+              absolutePath,
+              material.file_name,
+            )
+          : null;
+      const now = new Date().toISOString();
+      await db.run(
+        `INSERT INTO contract_audit_logs (
+           id, contract_id, action, actor_id, actor_role, from_status,
+           to_status, changes_json, created_at
+         ) SELECT ?, contract.id,
+             CASE WHEN ?::boolean THEN 'file_downloaded' ELSE 'file_previewed' END,
+             ?, ?, contract.status, contract.status, ?::jsonb, ?
+           FROM contracts contract WHERE contract.id = ?`,
+        nanoid(),
+        forceDownload,
+        currentActor.id,
+        currentActor.role,
+        JSON.stringify({
+          invoiceApplicationId: material.application_id,
+          applicationNo: material.application_no,
+          materialId: req.params.materialId,
+          fileName: material.file_name,
+          archiveGroup: "invoice_application_material",
+          result: "success",
+        }),
+        now,
+        material.contract_id,
+      );
+      if (printable) {
+        res.setHeader("Content-Type", printable.mimeType);
+        res.setHeader(
+          "Content-Disposition",
+          `inline; filename*=UTF-8''${encodeURIComponent(printable.fileName)}`,
+        );
+        res.send(printable.buffer);
+        return;
+      }
+      res.setHeader("Content-Type", material.mime_type);
+      res.setHeader(
+        "Content-Disposition",
+        `${forceDownload ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(material.file_name)}`,
+      );
+      res.sendFile(absolutePath);
+    } catch (error) {
+      if (!res.headersSent) {
+        sendError(res, error, "读取合同开票申请材料失败");
+      }
+    }
+  },
+);
 
 router.get(
   "/:id/supplement-upload-context",
@@ -7909,6 +8075,9 @@ router.get("/:id", requireAuth, async (req, res) => {
     const financialRootId = canReadRootFinancials
       ? rootId
       : "__financial_detail_forbidden__";
+    const canReadInvoiceApplicationMaterials = (
+      FINANCE_ROLES as readonly string[]
+    ).includes(currentActor.role);
     const filesPromise =
       contract.relation_type === "main"
         ? db.all<Record<string, any>>(
@@ -7927,6 +8096,7 @@ router.get("/:id", requireAuth, async (req, res) => {
                JOIN contracts source ON source.id = file.contract_id
               WHERE source.is_deleted = FALSE
                 AND COALESCE(source.root_contract_id, source.id) = ?
+                AND file.invoice_application_id IS NULL
                 AND (
                   source.relation_type = 'main'
                   OR ${currentSealedContractFileExists("source")}
@@ -7942,8 +8112,113 @@ router.get("/:id", requireAuth, async (req, res) => {
             rootId,
           )
         : Promise.resolve<Record<string, any>[]>([]);
+    const invoiceApplicationMaterialGroupsPromise =
+      contract.relation_type === "main" && canReadInvoiceApplicationMaterials
+        ? Promise.all([
+            db.all<Record<string, any>>(
+              `SELECT application.id, application.application_no,
+                   application.status, application.amount,
+                   application.applicant_name_snapshot,
+                   application.submitted_at, application.created_at,
+                   application.contract_category_snapshot,
+                   application.party_a_snapshot
+                 FROM invoice_applications application
+                WHERE application.contract_id = ?
+                  AND application.status NOT IN ('draft', 'rejected')
+                ORDER BY COALESCE(application.submitted_at, application.created_at) DESC,
+                  application.created_at DESC, application.id DESC`,
+              rootId,
+            ),
+            db.all<Record<string, any>>(
+              `SELECT material.application_id,
+                   material.id AS file_id,
+                   'application_material'::text AS source_type,
+                   NULL::text AS file_type,
+                   material.file_name, material.file_size,
+                   material.mime_type, material.created_at,
+                   material.requires_seal,
+                   material.is_system_generated_triplicate
+                 FROM invoice_application_materials material
+                 JOIN invoice_applications application
+                   ON application.id = material.application_id
+                WHERE application.contract_id = ?
+                  AND application.status NOT IN ('draft', 'rejected')
+                UNION ALL
+               SELECT file.invoice_application_id AS application_id,
+                   file.id AS file_id,
+                   'contract_file'::text AS source_type,
+                   file.file_type, file.file_name, file.file_size,
+                   file.mime_type, file.created_at,
+                   TRUE AS requires_seal,
+                   FALSE AS is_system_generated_triplicate
+                 FROM contract_files file
+                 JOIN invoice_applications application
+                   ON application.id = file.invoice_application_id
+                WHERE application.contract_id = ?
+                  AND application.status NOT IN ('draft', 'rejected')
+                  AND application.delivered_at IS NOT NULL
+                  AND file.file_type IN ('triplicate', 'other')
+                  AND file.is_current = TRUE
+                ORDER BY created_at, file_id`,
+              rootId,
+              rootId,
+            ),
+          ]).then(([applications, materialFiles]) => {
+            const filesByApplication = new Map<string, Record<string, any>[]>();
+            for (const file of materialFiles) {
+              const applicationFiles =
+                filesByApplication.get(String(file.application_id)) || [];
+              applicationFiles.push(file);
+              filesByApplication.set(
+                String(file.application_id),
+                applicationFiles,
+              );
+            }
+            return applications.map((application) => {
+              const requiresTriplicate = requiresInvoiceTriplicate(
+                application.contract_category_snapshot,
+                application.party_a_snapshot,
+              );
+              return {
+                applicationId: application.id,
+                applicationNo: application.application_no,
+                status: application.status,
+                amount: Number(application.amount || 0),
+                applicantName: application.applicant_name_snapshot || "",
+                submittedAt: application.submitted_at,
+                createdAt: application.created_at,
+                files: (
+                  filesByApplication.get(String(application.id)) || []
+                ).map((file) => ({
+                  id: `${file.source_type}:${file.file_id}`,
+                  fileId: file.file_id,
+                  sourceType: file.source_type,
+                  materialKind:
+                    file.source_type === "contract_file"
+                      ? requiresTriplicate
+                        ? "sealed_triplicate"
+                        : "sealed_material"
+                      : file.is_system_generated_triplicate
+                        ? "system_generated_triplicate"
+                        : requiresTriplicate
+                          ? "uploaded_triplicate"
+                          : "application_material",
+                  fileName: file.file_name,
+                  fileSize: Number(file.file_size || 0),
+                  mimeType: file.mime_type,
+                  requiresSeal: Boolean(file.requires_seal),
+                  isSystemGeneratedTriplicate: Boolean(
+                    file.is_system_generated_triplicate,
+                  ),
+                  createdAt: file.created_at,
+                })),
+              };
+            });
+          })
+        : Promise.resolve([]);
     const [
       files,
+      invoiceApplicationMaterialGroups,
       jobs,
       approvals,
       invoices,
@@ -7957,6 +8232,7 @@ router.get("/:id", requireAuth, async (req, res) => {
       accountingRow,
     ] = await Promise.all([
       filesPromise,
+      invoiceApplicationMaterialGroupsPromise,
       db.all<Record<string, any>>(
         `SELECT id, file_id, status, method, retry_count, warnings_json,
              error_message, engine_version, parser_version,
@@ -8692,6 +8968,7 @@ router.get("/:id", requireAuth, async (req, res) => {
           sourceSupplementSequence: file.source_supplement_sequence,
           sourceContractName: file.source_contract_name,
         })),
+        invoiceApplicationMaterialGroups,
         ocrJob: latestJob
           ? {
               ...latestJob,
@@ -9440,6 +9717,9 @@ router.post("/:id/files", requireFinance, uploadSingle, async (req, res) => {
     const fileType = String(
       req.body.fileType || "other",
     ) as (typeof FILE_TYPES)[number];
+    const invoiceApplicationId = normalizeNullableText(
+      req.body.invoiceApplicationId,
+    );
     if (!(FILE_TYPES as readonly string[]).includes(fileType)) {
       throw new ContractDomainError(400, "合同文件类型不正确");
     }
@@ -9451,14 +9731,35 @@ router.post("/:id/files", requireFinance, uploadSingle, async (req, res) => {
       );
     }
     if (
+      invoiceApplicationId &&
+      !(["triplicate", "other"] as const).includes(
+        fileType as "triplicate" | "other",
+      )
+    ) {
+      throw new ContractDomainError(
+        400,
+        "开票申请盖章材料类型不正确",
+        "INVOICE_APPLICATION_MATERIAL_FILE_TYPE_INVALID",
+      );
+    }
+    if (fileType === "triplicate" && !invoiceApplicationId) {
+      throw new ContractDomainError(
+        400,
+        "三联单必须通过具体开票申请上传",
+        "INVOICE_APPLICATION_ID_REQUIRED",
+      );
+    }
+    if (
       ["invoice", "receipt", "payment", "sealed_contract"].includes(fileType)
     ) {
       throw new ContractDomainError(400, "该文件类型必须通过对应业务接口上传");
     }
     const allowedKinds: readonly ("pdf" | "doc" | "docx" | "jpeg" | "png")[] =
-      fileType === "draft_contract"
-        ? ["pdf", "doc", "docx"]
-        : ["pdf", "doc", "docx", "jpeg", "png"];
+      invoiceApplicationId
+        ? ["pdf"]
+        : fileType === "draft_contract"
+          ? ["pdf", "doc", "docx"]
+          : ["pdf", "doc", "docx", "jpeg", "png"];
     const file = await validateUploadedFile(req.file, allowedKinds);
     const result = await db.transaction(async (client) => {
       const contract = await client.query<ContractRow>(
@@ -9469,6 +9770,50 @@ router.post("/:id/files", requireFinance, uploadSingle, async (req, res) => {
       if (!currentContract) throw new ContractDomainError(404, "合同不存在");
       if (["rejected", "terminated"].includes(currentContract.status)) {
         throw new ContractDomainError(409, "已结束合同不能继续上传业务文件");
+      }
+      if (invoiceApplicationId) {
+        const application = await client.query<{
+          id: string;
+          status: string;
+          contract_category_snapshot: string;
+          party_a_snapshot: string;
+        }>(
+          `SELECT id, status, contract_category_snapshot, party_a_snapshot
+           FROM invoice_applications
+           WHERE id = $1 AND contract_id = $2
+           FOR UPDATE`,
+          [invoiceApplicationId, req.params.id],
+        );
+        const targetApplication = application.rows[0];
+        if (!targetApplication) {
+          throw new ContractDomainError(
+            404,
+            "开票申请不存在或不属于当前合同",
+            "INVOICE_APPLICATION_NOT_FOUND",
+          );
+        }
+        if (targetApplication.status !== "pending_seal") {
+          throw new ContractDomainError(
+            409,
+            "当前开票申请不在待盖章状态，不能上传盖章材料",
+            "INVOICE_APPLICATION_MATERIAL_STATUS_INVALID",
+          );
+        }
+        const expectedFileType = requiresInvoiceTriplicate(
+          targetApplication.contract_category_snapshot,
+          targetApplication.party_a_snapshot,
+        )
+          ? "triplicate"
+          : "other";
+        if (fileType !== expectedFileType) {
+          throw new ContractDomainError(
+            409,
+            expectedFileType === "triplicate"
+              ? "当前开票申请必须上传盖章后三联单"
+              : "当前开票申请必须上传盖章后申请材料",
+            "INVOICE_APPLICATION_MATERIAL_FILE_TYPE_MISMATCH",
+          );
+        }
       }
       if (fileType === "draft_contract") {
         assertStoredContractUploadContext(currentContract);
@@ -9489,6 +9834,8 @@ router.post("/:id/files", requireFinance, uploadSingle, async (req, res) => {
         fileType,
         file,
         currentActor.id,
+        nanoid(),
+        invoiceApplicationId,
       );
       const now = new Date().toISOString();
       let jobId: string | null = null;
@@ -9523,7 +9870,12 @@ router.post("/:id/files", requireFinance, uploadSingle, async (req, res) => {
           currentActor.id,
           currentActor.role,
           currentContract.status,
-          JSON.stringify({ fileId: id, fileType, jobId }),
+          JSON.stringify({
+            fileId: id,
+            fileType,
+            jobId,
+            invoiceApplicationId,
+          }),
           now,
         ],
       );

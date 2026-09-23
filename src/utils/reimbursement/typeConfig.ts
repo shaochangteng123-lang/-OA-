@@ -21,7 +21,6 @@ export interface ReimbursementTypeConfig {
   tagType: "primary" | "success" | "warning" | "danger" | "info";
   scopeListEndpoint?: string;
   scopeManagementBase?: string;
-  minimumAmount?: number;
   description: string;
 }
 
@@ -55,8 +54,7 @@ export const REIMBURSEMENT_TYPE_CONFIG: Record<
     tagType: "warning",
     scopeListEndpoint: "/api/reimbursement-scope/list",
     scopeManagementBase: "/api/reimbursement-scope",
-    minimumAmount: 1000,
-    description: "大额报销适用于发票总金额超过 1000 元的报销申请。",
+    description: "大额报销不设最低金额门槛，可按实际费用正常提交。",
   },
   business: {
     type: "business",
